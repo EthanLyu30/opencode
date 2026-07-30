@@ -21,4 +21,4 @@ export const noopLayer = Layer.succeed(
   }),
 )
 
-export const node = makeGlobalNode({ name: "workflow-execution", service: Service, layer: noopLayer, deps: [] })
+export const node = makeGlobalNode({ service: Service, layer: noopLayer, deps: [] })

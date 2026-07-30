@@ -17,9 +17,7 @@ describe("WorkflowSecretGuard", () => {
   })
 
   test("rejects sensitive query params in url fields", () => {
-    expect(() =>
-      WorkflowSecretGuard.assertSafe({ endpoint: "https://api.test/v1?key=abc&signature=xyz" }),
-    ).toThrow()
+    expect(() => WorkflowSecretGuard.assertSafe({ endpoint: "https://api.test/v1?key=abc&signature=xyz" })).toThrow()
   })
 
   test("allows safe values", () => {
@@ -35,5 +33,28 @@ describe("WorkflowSecretGuard", () => {
 
   test("sanitizes api key in text", () => {
     expect(WorkflowSecretGuard.sanitizeText("key: sk-abc123def456")).toBe("key: [REDACTED]")
+  })
+
+  test("rejects every repeated direct secret without regular expression state leaking", () => {
+    expect(() => WorkflowSecretGuard.assertSafe("Bearer repeated-secret")).toThrow()
+    expect(() => WorkflowSecretGuard.assertSafe("Bearer repeated-secret")).toThrow()
+  })
+
+  test("rejects cycles with a typed persistence error at the repeated path", () => {
+    const value: Record<string, unknown> = {}
+    value.self = value
+
+    try {
+      WorkflowSecretGuard.assertSafe(value)
+      throw new Error("expected unsafe persistence error")
+    } catch (error) {
+      expect(error).toBeInstanceOf(WorkflowSecretGuard.UnsafePersistenceError)
+      if (!(error instanceof WorkflowSecretGuard.UnsafePersistenceError)) throw error
+      expect(error.path).toBe("$.self")
+    }
+  })
+
+  test.each([undefined, 1n, () => "not json"])("rejects non-json persisted input %#", (value) => {
+    expect(() => WorkflowSecretGuard.assertSafe(value)).toThrow(WorkflowSecretGuard.UnsafePersistenceError)
   })
 })

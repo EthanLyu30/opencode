@@ -78,12 +78,18 @@ async function check() {
 
     await fs.mkdir(full)
     await drizzle(temporary, full, "schema")
-    if ((await Bun.file(schema).text()) !== (await formatTypescript(renderSchema(await generatedSql(full))))) {
+    if (
+      normalizeNewlines(await Bun.file(schema).text()) !==
+      normalizeNewlines(await formatTypescript(renderSchema(await generatedSql(full))))
+    ) {
       throw new Error("Current database schema is stale. Run `bun script/migration.ts` from packages/core.")
     }
 
     const migrations = await typescriptMigrations()
-    if ((await Bun.file(registry).text()) !== (await formatTypescript(renderRegistry(migrations)))) {
+    if (
+      normalizeNewlines(await Bun.file(registry).text()) !==
+      normalizeNewlines(await formatTypescript(renderRegistry(migrations)))
+    ) {
       throw new Error("Database migration registry is stale. Run `bun script/migration.ts` from packages/core.")
     }
   } finally {
@@ -115,7 +121,7 @@ async function generatedMigrations(directory: string) {
 async function generatedSql(directory: string) {
   const generated = await generatedMigrations(directory)
   if (generated.length !== 1) throw new Error(`Expected one full schema migration, found ${generated.length}.`)
-  return Bun.file(path.join(directory, generated[0]!, "migration.sql")).text()
+  return Bun.file(path.join(directory, generated[0], "migration.sql")).text()
 }
 
 async function typescriptMigrations() {
@@ -170,6 +176,10 @@ function renderRun(statement: string) {
 
 function escapeTemplate(line: string) {
   return line.replaceAll("\\", "\\\\").replaceAll("`", "\\`").replaceAll("${", "\\${")
+}
+
+function normalizeNewlines(input: string) {
+  return input.replaceAll("\r\n", "\n")
 }
 
 async function formatTypescript(input: string) {
