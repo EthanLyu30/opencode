@@ -81,6 +81,19 @@ describe("DatabaseMigration", () => {
           ),
         ).toBeUndefined()
         expect(yield* db.get(sql`SELECT count(*) as count FROM migration`)).toEqual({ count: migrations.length })
+        // Workflow tables
+        expect(
+          yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'workflow_run'`),
+        ).toEqual({ name: "workflow_run" })
+        expect(
+          yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'workflow_stage'`),
+        ).toEqual({ name: "workflow_stage" })
+        expect(
+          yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'workflow_artifact'`),
+        ).toEqual({ name: "workflow_artifact" })
+        expect(
+          yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'workflow_stage_claim_idx'`),
+        ).toEqual({ name: "workflow_stage_claim_idx" })
         expect(
           yield* db.all(
             sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('event_aggregate_seq_idx', 'event_aggregate_type_seq_idx', 'session_input_session_pending_seq_idx', 'session_input_session_pending_delivery_seq_idx', 'session_input_session_admitted_seq_idx', 'session_input_session_promoted_seq_idx', 'session_message_session_idx', 'session_message_session_type_idx', 'session_message_session_seq_idx', 'session_message_session_type_seq_idx', 'session_message_session_time_created_id_idx') ORDER BY name`,
