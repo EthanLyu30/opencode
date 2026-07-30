@@ -28,6 +28,7 @@ import { SessionTodo } from "./session-todo"
 import { SessionV1 } from "./session-v1"
 import { TuiEvent } from "./tui-event"
 import { VcsEvent } from "./vcs-event"
+import { WorkflowEvent } from "./workflow-event"
 import { WorkspaceEvent } from "./workspace-event"
 import { WorktreeEvent } from "./worktree-event"
 
@@ -41,6 +42,7 @@ const foundationDefinitions = Event.inventory(
   ...Integration.Event.Definitions,
   ...Catalog.Event.Definitions,
   ...coreDefinitions,
+  ...WorkflowEvent.Definitions,
 )
 
 const featureDefinitions = Event.inventory(
