@@ -51,6 +51,14 @@ function requireRun(db: DB, workflowID: Workflow.ID) {
   })
 }
 
+function requireNotCancelled(db: DB, workflowID: Workflow.ID, stageID?: Workflow.StageID) {
+  return Effect.gen(function* () {
+    const row = yield* requireRun(db, workflowID)
+    if (row.cancel_requested_at !== null) throw new LifecycleConflict(workflowID, stageID)
+    return row
+  })
+}
+
 function guardTransition(db: DB, workflowID: Workflow.ID, stageID: Workflow.StageID, to: Workflow.StageStatus) {
   return Effect.gen(function* () {
     const row = yield* requireStage(db, workflowID, stageID)
@@ -186,7 +194,7 @@ const layer = Layer.effectDiscard(
     // workflow.started
     yield* events.project(WorkflowEvent.Started, (event) =>
       Effect.gen(function* () {
-        yield* requireRun(db, event.data.workflowID)
+        yield* requireNotCancelled(db, event.data.workflowID)
         yield* db
           .update(WorkflowRunTable)
           .set({ status: "running", time_updated: DateTime.toEpochMillis(event.data.timestamp) })
@@ -200,6 +208,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Stage.Leased, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "leased")
         const leaseOwner = requireLeaseOwner(data.workflowID, data.stageID, data.leaseOwner)
         if (data.attempt !== row.attempt + 1) {
@@ -249,6 +258,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Stage.Started, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "running")
         const leaseOwner = requireLiveLease(row, data)
         const updated = yield* db
@@ -287,6 +297,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Stage.RetryScheduled, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "retry_wait")
         const leaseOwner = requireFencing(row, data)
         const updated = yield* db
@@ -320,6 +331,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Stage.Succeeded, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "succeeded")
         const leaseOwner = requireLiveLease(row, data)
         const updated = yield* db
@@ -354,6 +366,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Stage.Failed, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "failed")
         const leaseOwner = data.source === "execution" ? requireLiveLease(row, data) : undefined
         if (data.source === "execution") {
@@ -397,6 +410,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Artifact.Created, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
         yield* db
           .insert(WorkflowArtifactTable)
           .values({
@@ -468,16 +482,24 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.CancelRequested, (event) =>
       Effect.gen(function* () {
         const data = event.data
-        yield* db
+        const updated = yield* db
           .update(WorkflowRunTable)
           .set({
             cancel_requested_at: DateTime.toEpochMillis(data.timestamp),
             version: sql`${WorkflowRunTable.version} + 1`,
             time_updated: DateTime.toEpochMillis(data.timestamp),
           })
-          .where(eq(WorkflowRunTable.id, data.workflowID))
-          .run()
+          .where(
+            and(
+              eq(WorkflowRunTable.id, data.workflowID),
+              isNull(WorkflowRunTable.cancel_requested_at),
+              inArray(WorkflowRunTable.status, ["queued", "running", "waiting_approval"]),
+            ),
+          )
+          .returning({ id: WorkflowRunTable.id })
+          .get()
           .pipe(Effect.orDie)
+        if (!updated) throw new LifecycleConflict(data.workflowID)
       }),
     )
 
@@ -485,6 +507,8 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Stage.Cancelled, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        const run = yield* requireRun(db, data.workflowID)
+        if (run.cancel_requested_at === null) throw new LifecycleConflict(data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "cancelled")
         if (data.source === "execution") {
           if (data.attempt !== row.attempt || data.leaseOwner !== row.lease_owner) {

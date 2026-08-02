@@ -1,6 +1,6 @@
 export * as WorkflowV2 from "./workflow"
 
-import { Context, Effect, Layer, Schema, Stream } from "effect"
+import { Cause, Context, Effect, Layer, Schema, Stream } from "effect"
 import { isDeepStrictEqual } from "node:util"
 import { Database } from "./database/database"
 import { EventV2 } from "./event"
@@ -247,10 +247,27 @@ const layer = Layer.effect(
         }
 
         const now = yield* DateTime.now
-        yield* events.publish(WorkflowEvent.CancelRequested, {
-          workflowID,
-          timestamp: now,
-        })
+        yield* events
+          .publish(WorkflowEvent.CancelRequested, {
+            workflowID,
+            timestamp: now,
+          })
+          .pipe(
+            Effect.catchCause((cause) => {
+              if (!(Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict)) {
+                return Effect.failCause(cause)
+              }
+              return store.get(workflowID).pipe(
+                Effect.flatMap((latest) => {
+                  if (latest?.run.cancelRequestedAt !== undefined) return Effect.void
+                  if (latest?.run.status === "succeeded" || latest?.run.status === "failed") {
+                    return Effect.fail(new ConflictError({ workflowID, operation: "cancel" }))
+                  }
+                  return Effect.failCause(cause)
+                }),
+              )
+            }),
+          )
         yield* execution.interrupt(workflowID)
         return yield* Effect.void
       }),

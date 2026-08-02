@@ -466,6 +466,42 @@ describe("Workflow local execution", () => {
   )
 
   interruptIt.live(
+    "settles interrupted execution as cancelled before results can commit",
+    () =>
+      Effect.gen(function* () {
+        const workflow = yield* WorkflowV2.Service
+        const input = createInput("worker_cancel")
+        yield* workflow.create(input)
+        yield* workflow.events({ workflowID: input.id! }).pipe(
+          Stream.filter((event) => event.type === "workflow.stage.started"),
+          Stream.runHead,
+          Effect.timeout("2 seconds"),
+        )
+
+        yield* Effect.all([workflow.cancel(input.id!), workflow.cancel(input.id!)], {
+          concurrency: "unbounded",
+          discard: true,
+        })
+        yield* workflow.cancel(input.id!)
+
+        const detail = yield* workflow.get(input.id!)
+        expect(detail.run.status).toBe("cancelled")
+        expect(detail.stages[0].status).toBe("cancelled")
+        expect(detail.artifacts).toEqual([])
+
+        const history = yield* workflow.history({ workflowID: input.id!, limit: 50 })
+        const types = history.events.map((event) => event.type)
+        expect(history.events.filter((event) => event.type === "workflow.cancel.requested")).toHaveLength(1)
+        expect(history.events.filter((event) => event.type === "workflow.stage.cancelled")).toHaveLength(1)
+        expect(history.events.filter((event) => event.type === "workflow.cancelled")).toHaveLength(1)
+        expect(types.indexOf("workflow.cancel.requested")).toBeLessThan(types.indexOf("workflow.stage.cancelled"))
+        expect(types).not.toContain("workflow.stage.succeeded")
+        expect(types).not.toContain("workflow.succeeded")
+      }),
+    5_000,
+  )
+
+  interruptIt.live(
     "returns copied active snapshots and treats idle interruption as a no-op",
     () =>
       Effect.gen(function* () {
