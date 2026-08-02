@@ -204,4 +204,120 @@ describe("WorkflowProjector", () => {
       ).toEqual({ status: "queued" })
     }),
   )
+
+  it.effect("pauses only the run for budget approval and resumes it after an increase", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Approval.Requested, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(2_000),
+        reason: "budget_exhausted",
+      })
+
+      expect(
+        yield* db
+          .select({ status: WorkflowRunTable.status })
+          .from(WorkflowRunTable)
+          .where(eq(WorkflowRunTable.id, workflowID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "waiting_approval" })
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status })
+          .from(WorkflowStageTable)
+          .orderBy(WorkflowStageTable.ordinal)
+          .all()
+          .pipe(Effect.orDie),
+      ).toEqual([{ status: "pending" }, { status: "pending" }])
+
+      yield* events.publish(WorkflowEvent.Budget.Updated, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(3_000),
+        budget: { maxAttempts: 4 },
+      })
+      expect(
+        yield* db
+          .select({ status: WorkflowRunTable.status })
+          .from(WorkflowRunTable)
+          .where(eq(WorkflowRunTable.id, workflowID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "queued" })
+    }),
+  )
+
+  it.effect("keeps ambiguous execution approval paused across a budget increase", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Approval.Requested, {
+        workflowID,
+        stageID: designStageID,
+        timestamp: DateTime.makeUnsafe(4_000),
+        reason: "ambiguous_execution",
+        failure: { category: "ambiguous", code: "lost", message: "unknown result" },
+      })
+      yield* events.publish(WorkflowEvent.Budget.Updated, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(5_000),
+        budget: { maxAttempts: 4 },
+      })
+
+      expect(
+        yield* db
+          .select({ status: WorkflowRunTable.status })
+          .from(WorkflowRunTable)
+          .where(eq(WorkflowRunTable.id, workflowID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "waiting_approval" })
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status, leaseOwner: WorkflowStageTable.lease_owner })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "waiting_approval", leaseOwner: null })
+    }),
+  )
+
+  it.effect("rejects a stale budget event that would reduce a concurrently increased limit", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, {
+        ...createdData,
+        budget: { maxTokens: 100, maxAttempts: 3 },
+      })
+      yield* events.publish(WorkflowEvent.Budget.Updated, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(2_000),
+        budget: { maxTokens: 200, maxAttempts: 3 },
+      })
+      const stale = yield* events
+        .publish(WorkflowEvent.Budget.Updated, {
+          workflowID,
+          timestamp: DateTime.makeUnsafe(2_001),
+          budget: { maxTokens: 150, maxAttempts: 3 },
+        })
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(stale)).toBe(true)
+      expect(
+        yield* db
+          .select({ budget: WorkflowRunTable.budget })
+          .from(WorkflowRunTable)
+          .where(eq(WorkflowRunTable.id, workflowID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ budget: { maxTokens: 200, maxAttempts: 3 } })
+    }),
+  )
 })

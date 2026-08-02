@@ -7,6 +7,7 @@ import { makeGlobalNode } from "../effect/app-node"
 export interface ExecutionInput {
   readonly workflow: Workflow.Info
   readonly stage: Workflow.Stage
+  readonly remainingDurationMs?: number
   readonly lease: {
     readonly owner: string
     readonly attempt: number

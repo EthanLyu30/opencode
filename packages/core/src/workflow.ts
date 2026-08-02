@@ -9,6 +9,7 @@ import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { WorkflowDurable } from "@opencode-ai/schema/durable-event-manifest"
 import { WorkflowStore } from "./workflow/store"
+import { WorkflowBudget } from "./workflow/budget"
 import { WorkflowSecretGuard } from "./workflow/secret-guard"
 import { WorkflowExecution } from "./workflow/execution"
 import { WorkflowProjector } from "./workflow/projector"
@@ -278,17 +279,22 @@ const layer = Layer.effect(
         const detail = yield* store.get(input.workflowID)
         if (!detail) return yield* new NotFoundError({ workflowID: input.workflowID })
 
-        // Validate monotonic: no existing limit removed or decreased
-        const current = detail.run.budget
-        for (const key of ["maxTokens", "maxTurns", "maxToolCalls", "maxAttempts", "maxDurationMs"] as const) {
-          const nextVal = input.budget[key]
-          const curVal = current[key]
-          if (curVal !== undefined && (nextVal === undefined || nextVal < curVal)) {
-            return yield* new ConflictError({ workflowID: input.workflowID, operation: "updateBudget" })
-          }
+        if (detail.run.status === "succeeded" || detail.run.status === "failed" || detail.run.status === "cancelled") {
+          return yield* new ConflictError({ workflowID: input.workflowID, operation: "updateBudget" })
         }
 
         const now = yield* DateTime.now
+        if (
+          !WorkflowBudget.validateIncrease({
+            current: detail.run.budget,
+            next: input.budget,
+            usage: detail.run.usage,
+            elapsedMs: DateTime.toEpochMillis(now) - DateTime.toEpochMillis(detail.run.time.created),
+          })
+        ) {
+          return yield* new ConflictError({ workflowID: input.workflowID, operation: "updateBudget" })
+        }
+
         yield* events.publish(WorkflowEvent.Budget.Updated, {
           workflowID: input.workflowID,
           timestamp: now,

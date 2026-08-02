@@ -7,6 +7,7 @@ import { EventV2 } from "../event"
 import { makeGlobalNode } from "../effect/app-node"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { WorkflowBudget } from "./budget"
 import { WorkflowState } from "./state"
 import { WorkflowRunTable, WorkflowStageTable, WorkflowArtifactTable } from "./sql"
 
@@ -126,17 +127,10 @@ function applyUsage(db: DB, workflowID: Workflow.ID, usage: Workflow.Usage, time
   })
 }
 
-function budgetMask(usage: Workflow.Usage, budget: Workflow.Budget) {
-  const ratios = [
-    budget.maxTokens === undefined ? undefined : usage.tokens / budget.maxTokens,
-    budget.maxTurns === undefined ? undefined : usage.turns / budget.maxTurns,
-    budget.maxToolCalls === undefined ? undefined : usage.toolCalls / budget.maxToolCalls,
-    budget.maxAttempts === undefined ? undefined : usage.attempts / budget.maxAttempts,
-  ].filter((ratio): ratio is number => ratio !== undefined)
-  return (
-    (ratios.some((ratio) => ratio >= 0.5) ? 1 : 0) |
-    (ratios.some((ratio) => ratio >= 0.8) ? 2 : 0) |
-    (ratios.some((ratio) => ratio >= 1) ? 4 : 0)
+function budgetMask(usage: Workflow.Usage, budget: Workflow.Budget, elapsedMs: number) {
+  return WorkflowBudget.evaluate({ budget, usage, notified: 0, elapsedMs }).thresholds.reduce(
+    (mask, threshold) => mask | (threshold.percent === 50 ? 1 : threshold.percent === 80 ? 2 : 4),
+    0,
   )
 }
 
@@ -450,6 +444,47 @@ const layer = Layer.effectDiscard(
       }),
     )
 
+    yield* events.project(WorkflowEvent.Approval.Requested, (event) =>
+      Effect.gen(function* () {
+        const data = event.data
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
+        if (data.reason === "ambiguous_execution") {
+          if (data.stageID === undefined || data.failure === undefined) throw new LifecycleConflict(data.workflowID)
+          const row = yield* guardTransition(db, data.workflowID, data.stageID, "waiting_approval")
+          const stage = yield* db
+            .update(WorkflowStageTable)
+            .set({
+              status: "waiting_approval",
+              lease_owner: null,
+              lease_expires_at: null,
+              error: data.failure,
+              time_updated: DateTime.toEpochMillis(data.timestamp),
+            })
+            .where(
+              and(
+                eq(WorkflowStageTable.id, data.stageID),
+                eq(WorkflowStageTable.workflow_id, data.workflowID),
+                eq(WorkflowStageTable.status, row.status),
+              ),
+            )
+            .returning({ id: WorkflowStageTable.id })
+            .get()
+            .pipe(Effect.orDie)
+          if (!stage) throw new LifecycleConflict(data.workflowID, data.stageID)
+          if (data.usage !== undefined) yield* applyUsage(db, data.workflowID, data.usage, data.timestamp)
+        }
+
+        const run = yield* db
+          .update(WorkflowRunTable)
+          .set({ status: "waiting_approval", time_updated: DateTime.toEpochMillis(data.timestamp) })
+          .where(and(eq(WorkflowRunTable.id, data.workflowID), inArray(WorkflowRunTable.status, ["queued", "running"])))
+          .returning({ id: WorkflowRunTable.id })
+          .get()
+          .pipe(Effect.orDie)
+        if (!run) throw new LifecycleConflict(data.workflowID, data.stageID)
+      }),
+    )
+
     yield* events.project(WorkflowEvent.Budget.Updated, (event) =>
       Effect.gen(function* () {
         const data = event.data
@@ -457,11 +492,39 @@ const layer = Layer.effectDiscard(
         if (row.status === "succeeded" || row.status === "failed" || row.status === "cancelled") {
           throw new LifecycleConflict(data.workflowID)
         }
+        if (
+          !WorkflowBudget.validateIncrease({
+            current: row.budget,
+            next: data.budget,
+            usage: row.usage,
+            elapsedMs: DateTime.toEpochMillis(data.timestamp) - row.time_created,
+          })
+        ) {
+          throw new LifecycleConflict(data.workflowID)
+        }
+        const waitingStage = yield* db
+          .select({ id: WorkflowStageTable.id })
+          .from(WorkflowStageTable)
+          .where(
+            and(eq(WorkflowStageTable.workflow_id, data.workflowID), eq(WorkflowStageTable.status, "waiting_approval")),
+          )
+          .get()
+          .pipe(Effect.orDie)
         const updated = yield* db
           .update(WorkflowRunTable)
           .set({
             budget: data.budget,
-            budget_notified: budgetMask(row.usage, data.budget),
+            budget_notified: budgetMask(
+              row.usage,
+              data.budget,
+              DateTime.toEpochMillis(data.timestamp) - row.time_created,
+            ),
+            status:
+              row.status !== "waiting_approval" || waitingStage
+                ? row.status
+                : row.current_stage_id === null
+                  ? "queued"
+                  : "running",
             version: sql`${WorkflowRunTable.version} + 1`,
             time_updated: DateTime.toEpochMillis(data.timestamp),
           })

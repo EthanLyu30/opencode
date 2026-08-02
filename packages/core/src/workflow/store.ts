@@ -7,6 +7,7 @@ import { EventV2 } from "../event"
 import { makeGlobalNode } from "../effect/app-node"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { WorkflowBudget } from "./budget"
 import { WorkflowProjector } from "./projector"
 import { WorkflowState } from "./state"
 import { WorkflowRunTable, WorkflowStageTable, WorkflowArtifactTable } from "./sql"
@@ -19,6 +20,7 @@ export interface Interface {
   readonly get: (workflowID: Workflow.ID) => Effect.Effect<Workflow.Detail | undefined>
   readonly stage: (stageID: Workflow.StageID) => Effect.Effect<Workflow.Stage | undefined>
   readonly artifacts: (workflowID: Workflow.ID) => Effect.Effect<Workflow.Artifact[]>
+  readonly gateBudget: (input: { readonly workflowID: Workflow.ID; readonly now: number }) => Effect.Effect<boolean>
   readonly claimCandidates: (input: { readonly now: number; readonly limit: number }) => Effect.Effect<Workflow.Stage[]>
   readonly claim: (input: {
     readonly owner: string
@@ -108,6 +110,62 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const { db } = yield* Database.Service
     const events = yield* EventV2.Service
+    const gateBudget = Effect.fn("WorkflowStore.gateBudget")(function* (input: {
+      readonly workflowID: Workflow.ID
+      readonly now: number
+    }) {
+      const run = yield* db
+        .select()
+        .from(WorkflowRunTable)
+        .where(eq(WorkflowRunTable.id, input.workflowID))
+        .get()
+        .pipe(Effect.orDie)
+      if (
+        !run ||
+        run.cancel_requested_at !== null ||
+        run.status === "succeeded" ||
+        run.status === "failed" ||
+        run.status === "cancelled"
+      ) {
+        return false
+      }
+
+      const budget = WorkflowBudget.evaluate({
+        budget: run.budget,
+        usage: run.usage,
+        notified: run.budget_notified,
+        elapsedMs: Math.max(0, input.now - run.time_created),
+      })
+      for (const threshold of budget.thresholds) {
+        yield* events.publish(WorkflowEvent.Budget.ThresholdReached, {
+          workflowID: input.workflowID,
+          timestamp: DateTime.makeUnsafe(input.now),
+          percent: threshold.percent,
+          dimension: threshold.dimension,
+          usage: run.usage,
+          budget: run.budget,
+        })
+      }
+      if (run.status === "waiting_approval") return true
+      if (!budget.exhausted) return false
+
+      const stages = yield* db
+        .select({ status: WorkflowStageTable.status })
+        .from(WorkflowStageTable)
+        .where(eq(WorkflowStageTable.workflow_id, input.workflowID))
+        .all()
+        .pipe(Effect.orDie)
+      if (stages.some((stage) => stage.status === "failed")) return false
+      if (stages.every((stage) => WorkflowState.isTerminal(stage.status))) return false
+      if (stages.some((stage) => stage.status === "waiting_approval")) return true
+
+      yield* events.publish(WorkflowEvent.Approval.Requested, {
+        workflowID: input.workflowID,
+        timestamp: DateTime.makeUnsafe(input.now),
+        reason: "budget_exhausted",
+      })
+      return true
+    })
     const service = Service.of({
       list: Effect.fn("WorkflowStore.list")(function* (input) {
         const status = input?.status
@@ -176,6 +234,8 @@ const layer = Layer.effect(
         return rows.map(artifactRow)
       }),
 
+      gateBudget,
+
       claimCandidates: Effect.fn("WorkflowStore.claimCandidates")(function* (input) {
         // Select stages whose status is pending or retry_wait with not_before in the past,
         // and whose workflow is queued or running and not cancelled
@@ -230,6 +290,8 @@ const layer = Layer.effect(
         if (!input.owner.trim() || input.leaseDurationMs <= 0) return Option.none()
         const candidates = yield* service.claimCandidates({ now: input.now, limit: 20 })
         for (const candidate of candidates) {
+          if (yield* gateBudget({ workflowID: candidate.workflowID, now: input.now })) continue
+
           const committed = yield* events
             .publish(WorkflowEvent.Stage.Leased, {
               workflowID: candidate.workflowID,

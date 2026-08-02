@@ -164,6 +164,7 @@ export namespace Approval {
       stageID: Workflow.StageID.pipe(optional),
       reason: Schema.Literals(["ambiguous_execution", "budget_exhausted"]),
       failure: Workflow.Failure.pipe(optional),
+      usage: Workflow.Usage.pipe(optional),
     },
   })
   export type Requested = typeof Requested.Type

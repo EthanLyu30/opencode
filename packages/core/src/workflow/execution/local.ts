@@ -10,6 +10,7 @@ import { EventV2 } from "../../event"
 import { WorkflowExecution } from "../execution"
 import { WorkflowExecutor } from "../executor"
 import { WorkflowProjector } from "../projector"
+import { WorkflowRetry } from "../retry"
 import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowRunTable } from "../sql"
 import { WorkflowState } from "../state"
@@ -227,24 +228,131 @@ export const layerWith = (options: Options) =>
 
         yield* ensureNotCancelled(stage.workflowID)
 
+        const executionStartedAt = DateTime.toEpochMillis(yield* DateTime.now)
+        const remainingDurationMs =
+          initial.run.budget.maxDurationMs === undefined
+            ? undefined
+            : Math.max(
+                0,
+                initial.run.budget.maxDurationMs -
+                  (executionStartedAt - DateTime.toEpochMillis(initial.run.time.created)),
+              )
+        const execution = executor.execute({
+          workflow: initial.run,
+          stage,
+          remainingDurationMs,
+          lease: {
+            owner: options.ownerID,
+            attempt: stage.attempt,
+            expiresAt: stage.leaseExpiresAt,
+          },
+        })
+
         const outcome = yield* Effect.raceFirst(
-          executor
-            .execute({
-              workflow: initial.run,
-              stage,
-              lease: {
-                owner: options.ownerID,
-                attempt: stage.attempt,
-                expiresAt: stage.leaseExpiresAt,
-              },
-            })
-            .pipe(
-              Effect.exit,
-              Effect.map((exit) => ({ type: "execution" as const, exit })),
-            ),
+          (remainingDurationMs === undefined
+            ? execution
+            : execution.pipe(
+                Effect.timeoutOrElse({
+                  duration: remainingDurationMs,
+                  orElse: () =>
+                    Effect.fail({
+                      failure: {
+                        category: "transient" as const,
+                        code: "workflow_deadline",
+                        message: "Workflow duration budget elapsed",
+                      },
+                      usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+                    }),
+                }),
+              )
+          ).pipe(
+            Effect.exit,
+            Effect.map((exit) => ({ type: "execution" as const, exit })),
+          ),
           heartbeat(stage).pipe(Effect.as({ type: "lease_lost" as const })),
         )
-        if (outcome.type === "lease_lost" || Exit.isFailure(outcome.exit)) return
+        if (outcome.type === "lease_lost") return
+        if (Exit.isFailure(outcome.exit)) {
+          const error = Option.getOrUndefined(Cause.findErrorOption(outcome.exit.cause))
+          if (!error) {
+            yield* Effect.failCause(outcome.exit.cause)
+            return
+          }
+
+          const completedAt = yield* DateTime.now
+          yield* ensureNotCancelled(stage.workflowID)
+          if (!(yield* currentLease(stage, DateTime.toEpochMillis(completedAt)))) return
+          const failure = WorkflowSecretGuard.sanitizeFailure(error.failure)
+          const decision = WorkflowRetry.decide({
+            failure,
+            attempt: stage.attempt,
+            maxAttempts: stage.maxAttempts,
+            now: DateTime.toEpochMillis(completedAt),
+            randomUnit: Math.random(),
+          })
+
+          if (decision.type === "retry") {
+            yield* events.publish(WorkflowEvent.Stage.RetryScheduled, {
+              workflowID: stage.workflowID,
+              stageID: stage.id,
+              timestamp: completedAt,
+              attempt: stage.attempt,
+              leaseOwner: options.ownerID,
+              failure,
+              usage: error.usage,
+              notBefore: DateTime.makeUnsafe(decision.notBefore),
+            })
+            if (
+              !(yield* store.gateBudget({
+                workflowID: stage.workflowID,
+                now: DateTime.toEpochMillis(completedAt),
+              }))
+            ) {
+              yield* PubSub.publish(wake, undefined)
+            }
+            return
+          }
+
+          if (decision.type === "approval") {
+            yield* events.publish(WorkflowEvent.Approval.Requested, {
+              workflowID: stage.workflowID,
+              stageID: stage.id,
+              timestamp: completedAt,
+              reason: "ambiguous_execution",
+              failure,
+              usage: error.usage,
+            })
+            yield* store.gateBudget({
+              workflowID: stage.workflowID,
+              now: DateTime.toEpochMillis(completedAt),
+            })
+            return
+          }
+
+          yield* events.publish(WorkflowEvent.Stage.Failed, {
+            workflowID: stage.workflowID,
+            stageID: stage.id,
+            timestamp: completedAt,
+            attempt: stage.attempt,
+            leaseOwner: options.ownerID,
+            failure,
+            usage: error.usage,
+            source: "execution",
+          })
+          yield* store.gateBudget({
+            workflowID: stage.workflowID,
+            now: DateTime.toEpochMillis(completedAt),
+          })
+          const settled = yield* store.get(stage.workflowID)
+          if (!settled) return
+          yield* events.publish(WorkflowEvent.Failed, {
+            workflowID: stage.workflowID,
+            timestamp: yield* DateTime.now,
+            failure,
+            usage: settled.run.usage,
+          })
+          return
+        }
 
         for (const commit of outcome.exit.value.artifacts ?? []) {
           yield* ensureNotCancelled(stage.workflowID)
@@ -285,6 +393,10 @@ export const layerWith = (options: Options) =>
         const settled = yield* store.get(stage.workflowID)
         if (!settled) return
         yield* ensureNotCancelled(stage.workflowID)
+        const paused = yield* store.gateBudget({
+          workflowID: stage.workflowID,
+          now: DateTime.toEpochMillis(completedAt),
+        })
         if (settled.stages.every((item) => item.status === "succeeded" || item.status === "skipped")) {
           yield* events.publish(WorkflowEvent.Succeeded, {
             workflowID: stage.workflowID,
@@ -293,6 +405,7 @@ export const layerWith = (options: Options) =>
           })
           return
         }
+        if (paused) return
         if (settled.stages.some((item) => !WorkflowState.isTerminal(item.status))) {
           yield* PubSub.publish(wake, undefined)
         }

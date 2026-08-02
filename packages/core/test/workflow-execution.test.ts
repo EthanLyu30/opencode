@@ -98,6 +98,70 @@ const duplicateArtifactExecutor = Layer.succeed(
 
 const duplicateArtifactIt = makeWorkerIt(duplicateArtifactExecutor)
 
+const classifiedFailureExecutor = Layer.succeed(
+  WorkflowExecutor.Service,
+  WorkflowExecutor.Service.of({
+    execute: ({ stage }) => {
+      if (stage.attempt > 1) {
+        return Effect.succeed({ usage: { tokens: 20, turns: 1, toolCalls: 0, attempts: 0 } })
+      }
+      return Effect.fail({
+        failure: {
+          category: "transient" as const,
+          code: "rate_limit",
+          message: "Bearer live-secret-token must wait",
+          retryAfterMs: 0,
+        },
+        usage: { tokens: 10, turns: 1, toolCalls: 0, attempts: 0 },
+      })
+    },
+  }),
+)
+
+const classifiedFailureIt = makeWorkerIt(classifiedFailureExecutor)
+
+const permanentFailureExecutor = Layer.succeed(
+  WorkflowExecutor.Service,
+  WorkflowExecutor.Service.of({
+    execute: () =>
+      Effect.fail({
+        failure: { category: "authentication" as const, code: "invalid_key", message: "bad key" },
+        usage: { tokens: 7, turns: 1, toolCalls: 0, attempts: 0 },
+      }),
+  }),
+)
+
+const permanentFailureIt = makeWorkerIt(permanentFailureExecutor)
+
+const ambiguousFailureExecutor = Layer.succeed(
+  WorkflowExecutor.Service,
+  WorkflowExecutor.Service.of({
+    execute: () =>
+      Effect.fail({
+        failure: { category: "ambiguous" as const, code: "lost", message: "unknown result" },
+        usage: { tokens: 5, turns: 1, toolCalls: 1, attempts: 0 },
+      }),
+  }),
+)
+
+const ambiguousFailureIt = makeWorkerIt(ambiguousFailureExecutor)
+
+const deadlineProbe: { remainingDurationMs?: number } = {}
+const deadlineExecutor = Layer.succeed(
+  WorkflowExecutor.Service,
+  WorkflowExecutor.Service.of({
+    execute: (input) =>
+      Effect.sync(() => {
+        deadlineProbe.remainingDurationMs = input.remainingDurationMs
+      }).pipe(
+        Effect.andThen(Effect.sleep(200)),
+        Effect.as({ usage: { tokens: 1, turns: 1, toolCalls: 0, attempts: 0 } }),
+      ),
+  }),
+)
+
+const deadlineIt = makeWorkerIt(deadlineExecutor)
+
 const slowExecutor = Layer.succeed(
   WorkflowExecutor.Service,
   WorkflowExecutor.Service.of({
@@ -303,6 +367,121 @@ describe("Workflow executor", () => {
 })
 
 describe("Workflow local execution", () => {
+  deadlineIt.live(
+    "times out at the workflow deadline before the duration gate requests approval",
+    () =>
+      Effect.gen(function* () {
+        deadlineProbe.remainingDurationMs = undefined
+        const workflow = yield* WorkflowV2.Service
+        const input = {
+          ...createInput("worker_deadline"),
+          budget: { maxAttempts: 3, maxDurationMs: 100 },
+        }
+        yield* workflow.create(input)
+        yield* workflow.events({ workflowID: input.id! }).pipe(
+          Stream.filter(
+            (event) => event.type === "workflow.approval.requested" && event.data.reason === "budget_exhausted",
+          ),
+          Stream.runHead,
+          Effect.timeout("2 seconds"),
+        )
+
+        const detail = yield* workflow.get(input.id!)
+        const history = yield* workflow.history({ workflowID: input.id!, limit: 50 })
+        expect(deadlineProbe.remainingDurationMs).toBeGreaterThan(0)
+        expect(deadlineProbe.remainingDurationMs).toBeLessThanOrEqual(100)
+        expect(detail.run.status).toBe("waiting_approval")
+        expect(detail.stages[0].status).toBe("retry_wait")
+        expect(
+          history.events.some(
+            (event) =>
+              event.type === "workflow.stage.retry_scheduled" && event.data.failure.code === "workflow_deadline",
+          ),
+        ).toBe(true)
+        const retry = history.events.find((event) => event.type === "workflow.stage.retry_scheduled")
+        const approval = history.events.find(
+          (event) => event.type === "workflow.approval.requested" && event.data.reason === "budget_exhausted",
+        )
+        if (!retry || !approval) throw new Error("deadline history is incomplete")
+        expect(
+          DateTime.toEpochMillis(approval.data.timestamp) - DateTime.toEpochMillis(retry.data.timestamp),
+        ).toBeLessThan(200)
+        expect(
+          history.events
+            .filter((event) => event.type === "workflow.budget.threshold_reached")
+            .map((event) => event.data.percent),
+        ).toEqual([50, 80, 100])
+      }),
+    5_000,
+  )
+
+  classifiedFailureIt.live(
+    "retries transient execution failures and persists sanitized history exactly once",
+    () =>
+      Effect.gen(function* () {
+        const workflow = yield* WorkflowV2.Service
+        const input = createInput("worker_retry")
+        yield* workflow.create(input)
+        yield* workflow.events({ workflowID: input.id! }).pipe(
+          Stream.filter((event) => event.type === "workflow.succeeded"),
+          Stream.runHead,
+          Effect.timeout("2 seconds"),
+        )
+
+        const detail = yield* workflow.get(input.id!)
+        const history = yield* workflow.history({ workflowID: input.id!, limit: 50 })
+        expect(detail.run.usage).toEqual({ tokens: 30, turns: 2, toolCalls: 0, attempts: 2 })
+        expect(history.events.filter((event) => event.type === "workflow.stage.retry_scheduled")).toHaveLength(1)
+        expect(history.events.filter((event) => event.type === "workflow.stage.leased")).toHaveLength(2)
+        expect(JSON.stringify(history.events)).not.toContain("live-secret")
+      }),
+    5_000,
+  )
+
+  permanentFailureIt.live(
+    "fails the stage and run for a non-retryable execution failure",
+    () =>
+      Effect.gen(function* () {
+        const workflow = yield* WorkflowV2.Service
+        const input = createInput("worker_permanent_failure")
+        yield* workflow.create(input)
+        yield* workflow.events({ workflowID: input.id! }).pipe(
+          Stream.filter((event) => event.type === "workflow.failed"),
+          Stream.runHead,
+          Effect.timeout("2 seconds"),
+        )
+
+        const detail = yield* workflow.get(input.id!)
+        const history = yield* workflow.history({ workflowID: input.id!, limit: 50 })
+        expect(detail.run.status).toBe("failed")
+        expect(detail.stages[0].status).toBe("failed")
+        expect(detail.run.usage).toEqual({ tokens: 7, turns: 1, toolCalls: 0, attempts: 1 })
+        expect(history.events.map((event) => event.type)).toContain("workflow.stage.failed")
+      }),
+    5_000,
+  )
+
+  ambiguousFailureIt.live(
+    "pauses an ambiguous execution for approval and accounts its usage",
+    () =>
+      Effect.gen(function* () {
+        const workflow = yield* WorkflowV2.Service
+        const input = createInput("worker_ambiguous_failure")
+        yield* workflow.create(input)
+        yield* workflow.events({ workflowID: input.id! }).pipe(
+          Stream.filter((event) => event.type === "workflow.approval.requested"),
+          Stream.runHead,
+          Effect.timeout("2 seconds"),
+        )
+
+        const detail = yield* workflow.get(input.id!)
+        expect(detail.run.status).toBe("waiting_approval")
+        expect(detail.stages[0].status).toBe("waiting_approval")
+        expect(detail.run.usage).toEqual({ tokens: 5, turns: 1, toolCalls: 1, attempts: 1 })
+      }),
+    5_000,
+  )
+
   workerIt.live(
     "advances a created workflow through artifact commit to success",
     () =>
