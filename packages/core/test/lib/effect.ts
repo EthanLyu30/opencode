@@ -19,24 +19,29 @@ const run = <A, E, R, E2>(value: Body<A, E, R | Scope.Scope>, layer: Layer.Layer
     return yield* exit
   }).pipe(Effect.runPromise)
 
+// Git-heavy integration effects can exceed Bun's five-second default on
+// Windows because each command is routed through an extra shell process.
+const options = (value?: number | TestOptions) =>
+  value ?? (process.platform === "win32" ? { timeout: 30_000 } : undefined)
+
 const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>) => {
   const effect = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test(name, () => run(value, testLayer), opts)
+    test(name, () => run(value, testLayer), options(opts))
 
   effect.only = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test.only(name, () => run(value, testLayer), opts)
+    test.only(name, () => run(value, testLayer), options(opts))
 
   effect.skip = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test.skip(name, () => run(value, testLayer), opts)
+    test.skip(name, () => run(value, testLayer), options(opts))
 
   const live = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test(name, () => run(value, liveLayer), opts)
+    test(name, () => run(value, liveLayer), options(opts))
 
   live.only = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test.only(name, () => run(value, liveLayer), opts)
+    test.only(name, () => run(value, liveLayer), options(opts))
 
   live.skip = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test.skip(name, () => run(value, liveLayer), opts)
+    test.skip(name, () => run(value, liveLayer), options(opts))
 
   return { effect, live }
 }
