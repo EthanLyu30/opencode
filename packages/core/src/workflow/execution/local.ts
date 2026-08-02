@@ -186,12 +186,14 @@ export const layerWith = (options: Options) =>
           ),
           Effect.onExit(() => cleanup),
         )
-        const fiber = yield* task.pipe(Effect.forkScoped)
-        entry.fiber = fiber
-        const set = fibers.get(stage.workflowID) ?? new Set<Fiber.Fiber<void>>()
-        set.add(fiber)
-        fibers.set(stage.workflowID, set)
-        yield* Deferred.succeed(ready, undefined)
+        const fiber = yield* task.pipe(Effect.forkScoped({ startImmediately: true }))
+        yield* Effect.sync(() => {
+          entry.fiber = fiber
+          const set = fibers.get(stage.workflowID) ?? new Set<Fiber.Fiber<void>>()
+          set.add(fiber)
+          fibers.set(stage.workflowID, set)
+          Deferred.doneUnsafe(ready, Effect.void)
+        })
       })
 
       const fill = Effect.forEach(

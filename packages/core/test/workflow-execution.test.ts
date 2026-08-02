@@ -144,6 +144,16 @@ const interruptIt = makeWorkerIt(slowExecutor, {
   ownerID: "worker-interrupt",
 })
 
+const waitForActive = Effect.fnUntraced(function* (
+  execution: WorkflowExecution.Interface,
+  workflowID: Workflow.ID,
+  expected: boolean,
+) {
+  while ((yield* execution.active).has(workflowID) !== expected) {
+    yield* Effect.sleep(10)
+  }
+})
+
 const createInput = (suffix: string): Workflow.CreateInput => ({
   id: Workflow.ID.make(`wfl_${suffix}`),
   type: "development",
@@ -413,7 +423,7 @@ describe("Workflow local execution", () => {
           .where(eq(WorkflowStageTable.id, input.stages[0].id!))
           .run()
           .pipe(Effect.orDie)
-        yield* Effect.sleep(80)
+        yield* waitForActive(execution, input.id!, false).pipe(Effect.timeout("2 seconds"))
 
         const detail = yield* workflow.get(input.id!)
         const history = yield* workflow.history({ workflowID: input.id!, limit: 50 })
@@ -466,13 +476,14 @@ describe("Workflow local execution", () => {
 
         const input = createInput("worker_interrupt")
         yield* workflow.create(input)
-        yield* Effect.sleep(30)
+        yield* waitForActive(execution, input.id!, true).pipe(Effect.timeout("2 seconds"))
         const first = yield* execution.active
         const second = yield* execution.active
         expect(first).not.toBe(second)
         expect(first.has(input.id!)).toBe(true)
 
         yield* execution.interrupt(input.id!)
+        yield* waitForActive(execution, input.id!, false).pipe(Effect.timeout("2 seconds"))
         expect((yield* execution.active).has(input.id!)).toBe(false)
       }),
     5_000,
