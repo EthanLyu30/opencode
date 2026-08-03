@@ -15,8 +15,23 @@ export interface ExecutionInput {
   }
 }
 
+/**
+ * Opaque, secret-validated JSON a stage may persist to support a future
+ * recovery attempt. Stage A stores this value but does not interpret Git or
+ * workspace state. Executors may use these conventional fields when useful:
+ *
+ * - `workspaceRevision`: a stable revision identifier for the workspace.
+ * - `dirtyPaths`: paths changed while the stage ran.
+ * - `manifestArtifactID`: an artifact containing a durable output manifest.
+ */
+export type Checkpoint = Readonly<Record<string, unknown>> & {
+  readonly workspaceRevision?: string
+  readonly dirtyPaths?: readonly string[]
+  readonly manifestArtifactID?: Workflow.ArtifactID
+}
+
 export interface Result {
-  readonly checkpoint?: Readonly<Record<string, unknown>>
+  readonly checkpoint?: Checkpoint
   readonly artifacts?: ReadonlyArray<Workflow.ArtifactCommit>
   readonly usage: Workflow.Usage
 }

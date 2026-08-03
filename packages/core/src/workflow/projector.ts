@@ -293,7 +293,14 @@ const layer = Layer.effectDiscard(
         const data = event.data
         yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "retry_wait")
-        const leaseOwner = requireFencing(row, data)
+        const recoveryResolution = row.recovery_action === "retry"
+        if (
+          recoveryResolution &&
+          (data.attempt !== row.attempt || data.leaseOwner !== undefined || row.lease_owner !== null)
+        ) {
+          throw new LifecycleConflict(data.workflowID, data.stageID)
+        }
+        const leaseOwner = recoveryResolution ? undefined : requireFencing(row, data)
         const updated = yield* db
           .update(WorkflowStageTable)
           .set({
@@ -310,7 +317,9 @@ const layer = Layer.effectDiscard(
               eq(WorkflowStageTable.workflow_id, data.workflowID),
               eq(WorkflowStageTable.status, row.status),
               eq(WorkflowStageTable.attempt, data.attempt),
-              eq(WorkflowStageTable.lease_owner, leaseOwner),
+              ...(leaseOwner === undefined
+                ? [isNull(WorkflowStageTable.lease_owner)]
+                : [eq(WorkflowStageTable.lease_owner, leaseOwner)]),
             ),
           )
           .returning({ id: WorkflowStageTable.id })
@@ -482,6 +491,51 @@ const layer = Layer.effectDiscard(
           .get()
           .pipe(Effect.orDie)
         if (!run) throw new LifecycleConflict(data.workflowID, data.stageID)
+      }),
+    )
+
+    yield* events.project(WorkflowEvent.Approval.Resolved, (event) =>
+      Effect.gen(function* () {
+        const data = event.data
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
+        const run = yield* requireRun(db, data.workflowID)
+        const stage = yield* requireStage(db, data.workflowID, data.stageID)
+        if (
+          run.status !== "waiting_approval" ||
+          stage.status !== "waiting_approval" ||
+          stage.recovery_action !== null
+        ) {
+          throw new LifecycleConflict(data.workflowID, data.stageID)
+        }
+
+        const resolved = yield* db
+          .update(WorkflowStageTable)
+          .set({ recovery_action: data.action, time_updated: DateTime.toEpochMillis(data.timestamp) })
+          .where(
+            and(
+              eq(WorkflowStageTable.id, data.stageID),
+              eq(WorkflowStageTable.workflow_id, data.workflowID),
+              eq(WorkflowStageTable.status, "waiting_approval"),
+              isNull(WorkflowStageTable.recovery_action),
+            ),
+          )
+          .returning({ id: WorkflowStageTable.id })
+          .get()
+          .pipe(Effect.orDie)
+        if (!resolved) throw new LifecycleConflict(data.workflowID, data.stageID)
+
+        if (data.action !== "retry") return
+        const resumed = yield* db
+          .update(WorkflowRunTable)
+          .set({
+            status: run.current_stage_id === null ? "queued" : "running",
+            time_updated: DateTime.toEpochMillis(data.timestamp),
+          })
+          .where(and(eq(WorkflowRunTable.id, data.workflowID), eq(WorkflowRunTable.status, "waiting_approval")))
+          .returning({ id: WorkflowRunTable.id })
+          .get()
+          .pipe(Effect.orDie)
+        if (!resumed) throw new LifecycleConflict(data.workflowID, data.stageID)
       }),
     )
 

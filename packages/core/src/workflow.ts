@@ -313,12 +313,12 @@ const layer = Layer.effect(
         const stage = detail.stages.find((s) => s.id === input.stageID)
         if (!stage) return yield* new StageNotFoundError({ workflowID: input.workflowID, stageID: input.stageID })
 
+        // Idempotent: same action already applied
+        if (stage.recoveryAction === input.action) return yield* Effect.void
+
         if (stage.status !== "waiting_approval") {
           return yield* new ConflictError({ workflowID: input.workflowID, operation: "resolveRecovery" })
         }
-
-        // Idempotent: same action already applied
-        if (stage.recoveryAction === input.action) return yield* Effect.void
 
         const now = yield* DateTime.now
         yield* events.publish(WorkflowEvent.Approval.Resolved, {

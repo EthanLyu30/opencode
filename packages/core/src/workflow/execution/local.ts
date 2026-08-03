@@ -190,6 +190,70 @@ export const layerWith = (options: Options) =>
         })
       })
 
+      const settleExpiredLeases = Effect.gen(function* () {
+        const now = yield* DateTime.now
+        const expired = yield* store.expired(DateTime.toEpochMillis(now))
+        yield* Effect.forEach(
+          expired,
+          (stage) =>
+            Effect.gen(function* () {
+              const detail = yield* store.get(stage.workflowID)
+              const current = detail?.stages.find((item) => item.id === stage.id)
+              if (!detail || !current || detail.run.cancelRequestedAt !== undefined) {
+                if (detail?.run.cancelRequestedAt !== undefined) yield* settleCancellation(stage.workflowID)
+                return
+              }
+              if (
+                current.attempt !== stage.attempt ||
+                current.leaseOwner !== stage.leaseOwner ||
+                current.status !== stage.status ||
+                current.leaseExpiresAt === undefined ||
+                DateTime.toEpochMillis(current.leaseExpiresAt) >= DateTime.toEpochMillis(now)
+              ) {
+                return
+              }
+
+              if (current.recoveryPolicy === "restart_safe") {
+                yield* events.publish(WorkflowEvent.Stage.RetryScheduled, {
+                  workflowID: current.workflowID,
+                  stageID: current.id,
+                  timestamp: now,
+                  attempt: current.attempt,
+                  leaseOwner: current.leaseOwner,
+                  failure: {
+                    category: "transient",
+                    code: "lease_expired",
+                    message: "The previous worker lease expired before settlement.",
+                  },
+                  usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+                  notBefore: now,
+                })
+                return
+              }
+
+              yield* events.publish(WorkflowEvent.Approval.Requested, {
+                workflowID: current.workflowID,
+                stageID: current.id,
+                timestamp: now,
+                reason: "ambiguous_execution",
+                failure: {
+                  category: "ambiguous",
+                  code: "lease_expired",
+                  message: "Execution may have produced side effects before the worker lease expired.",
+                },
+                usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+              })
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict
+                  ? Effect.void
+                  : Effect.failCause(cause),
+              ),
+            ),
+          { concurrency: 1, discard: true },
+        )
+      })
+
       const heartbeat = Effect.fnUntraced(function* (stage: Workflow.Stage) {
         while (true) {
           yield* Effect.sleep(options.heartbeatIntervalMs)
@@ -467,6 +531,7 @@ export const layerWith = (options: Options) =>
       )
 
       yield* settlePersistedCancellations
+      yield* settleExpiredLeases
 
       yield* Stream.merge(Stream.fromPubSub(wake), Stream.tick(options.pollIntervalMs)).pipe(
         Stream.runForEach(() =>
