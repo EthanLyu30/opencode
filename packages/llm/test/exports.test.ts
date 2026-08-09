@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
+import * as LLMRoot from "@opencode-ai/llm"
 import { LLM, LLMClient, Provider } from "@opencode-ai/llm"
 import { Route, Protocol } from "@opencode-ai/llm/route"
 import { Provider as ProviderSubpath } from "@opencode-ai/llm/provider"
+import * as Providers from "@opencode-ai/llm/providers"
 import {
   CloudflareAIGateway,
   CloudflareWorkersAI,
@@ -21,6 +23,7 @@ describe("public exports", () => {
     expect(LLMClient.layer).toBeDefined()
     expect(Provider.make).toBeFunction()
     expect(ProviderSubpath.make).toBe(Provider.make)
+    expect(LLMRoot.Capabilities).toBeDefined()
   })
 
   test("route barrel exposes route-authoring APIs", () => {
@@ -29,6 +32,8 @@ describe("public exports", () => {
   })
 
   test("provider barrels expose user-facing facades", () => {
+    expect(Providers.DeepSeek).toBeDefined()
+    expect(Providers.Kimi).toBeDefined()
     expect(OpenAI.model).toBeFunction()
     expect(OpenAI.provider.model).toBe(OpenAI.model)
     expect(OpenAI.provider.responses).toBe(OpenAI.responses)
@@ -64,6 +69,18 @@ describe("public exports", () => {
         endpoint: "chat",
       }).model("gpt-5").route.id,
     ).toBe("openai-chat")
+  })
+
+  test("provider subpaths expose the dedicated Kimi and DeepSeek facades", async () => {
+    const [deepseek, kimi] = await Promise.all([
+      import("@opencode-ai/llm/providers/deepseek"),
+      import("@opencode-ai/llm/providers/kimi"),
+    ])
+
+    expect(deepseek.model).toBeFunction()
+    expect(deepseek.responses).toBeFunction()
+    expect(deepseek.chat).toBeFunction()
+    expect(kimi.model).toBeFunction()
   })
 
   test("protocol barrels expose supported low-level routes", () => {
