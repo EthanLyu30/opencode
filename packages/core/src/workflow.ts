@@ -1,4 +1,5 @@
 export * as WorkflowV2 from "./workflow"
+export * from "./workflow/schema"
 
 import { Cause, Context, Effect, Layer, Schema, Stream } from "effect"
 import { isDeepStrictEqual } from "node:util"

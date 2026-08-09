@@ -9,6 +9,7 @@ test("exposes every standard HTTP API group", () => {
     "location",
     "agents",
     "sessions",
+    "workflows",
     "messages",
     "models",
     "providers",
@@ -36,6 +37,59 @@ test("exposes every standard HTTP API group", () => {
   ])
   expect(Object.keys(client.files)).toEqual(["list", "find"])
   expect(Object.keys(client.ptys)).toEqual(["list", "create", "get", "update", "remove"])
+})
+
+test("workflow methods use the public HTTP contract", async () => {
+  const requests: Array<{ url: string; init?: RequestInit }> = []
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      requests.push({ url, init })
+      if (url.includes("/event")) {
+        return new Response(`data: ${JSON.stringify(workflowCreatedEvent)}\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        })
+      }
+      if (url.includes("/history")) return Response.json({ data: [workflowCreatedEvent], hasMore: false })
+      if (url.includes("/artifact")) return Response.json({ data: [] })
+      if (url.endsWith("/budget")) return Response.json(workflowInfo)
+      if (url.endsWith("/recovery") || url.endsWith("/cancel")) return new Response(null, { status: 204 })
+      if (url.endsWith("/wfl_test")) return Response.json(workflowDetail)
+      if (init?.method === "POST") return Response.json(workflowInfo)
+      return Response.json({ data: [workflowInfo.data] })
+    },
+  })
+
+  const created = await client.workflows.create(workflowCreateInput)
+  const list = await client.workflows.list({ limit: 10 })
+  const detail = await client.workflows.get({ workflowID: "wfl_test" })
+  const history = await client.workflows.history({ workflowID: "wfl_test", after: 0, limit: 10 })
+  const events = []
+  for await (const event of client.workflows.events({ workflowID: "wfl_test", after: 0 })) events.push(event)
+  const artifacts = await client.workflows.artifacts({ workflowID: "wfl_test" })
+  await client.workflows.cancel({ workflowID: "wfl_test" })
+  const updated = await client.workflows.updateBudget({ workflowID: "wfl_test", budget: { maxAttempts: 4 } })
+  await client.workflows.resolveRecovery({ workflowID: "wfl_test", stageID: "wfs_design", action: "retry" })
+
+  expect(created.id).toBe("wfl_test")
+  expect(list).toEqual([workflowInfo.data])
+  expect(detail.run.id).toBe("wfl_test")
+  expect(history).toEqual({ data: [workflowCreatedEvent], hasMore: false })
+  expect(events).toEqual([workflowCreatedEvent])
+  expect(artifacts).toEqual([])
+  expect(updated.budget).toEqual({ maxAttempts: 3 })
+  expect(requests.map((request) => [request.init?.method, request.url])).toEqual([
+    ["POST", "http://localhost:3000/api/workflow"],
+    ["GET", "http://localhost:3000/api/workflow?limit=10"],
+    ["GET", "http://localhost:3000/api/workflow/wfl_test"],
+    ["GET", "http://localhost:3000/api/workflow/wfl_test/history?limit=10&after=0"],
+    ["GET", "http://localhost:3000/api/workflow/wfl_test/event?after=0"],
+    ["GET", "http://localhost:3000/api/workflow/wfl_test/artifact"],
+    ["POST", "http://localhost:3000/api/workflow/wfl_test/cancel"],
+    ["POST", "http://localhost:3000/api/workflow/wfl_test/budget"],
+    ["POST", "http://localhost:3000/api/workflow/wfl_test/stage/wfs_design/recovery"],
+  ])
 })
 
 test("sessions.get returns the wire projection", async () => {
@@ -251,5 +305,71 @@ const modelSwitchedEvent = {
     sessionID: "ses_test",
     messageID: "msg_model",
     model: { id: "claude", providerID: "anthropic" },
+  },
+}
+
+const workflowCreateInput = {
+  type: "development",
+  input: { brief: "Build" },
+  budget: { maxAttempts: 3 },
+  stages: [
+    {
+      id: "wfs_design",
+      type: "design",
+      ordinal: 0,
+      maxAttempts: 3,
+      recoveryPolicy: "restart_safe" as const,
+      idempotencyKey: "design",
+      input: {},
+    },
+  ],
+}
+
+const workflowInfo = {
+  data: {
+    id: "wfl_test",
+    type: "development",
+    status: "queued" as const,
+    input: { brief: "Build" },
+    budget: { maxAttempts: 3 },
+    usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+    version: 1,
+    time: { created: 1_717_171_717_000, updated: 1_717_171_717_000 },
+  },
+}
+
+const workflowDetail = {
+  data: {
+    run: workflowInfo.data,
+    stages: [
+      {
+        id: "wfs_design",
+        workflowID: "wfl_test",
+        type: "design",
+        ordinal: 0,
+        status: "pending",
+        attempt: 0,
+        maxAttempts: 3,
+        recoveryPolicy: "restart_safe",
+        idempotencyKey: "design",
+        input: {},
+        time: { created: 1_717_171_717_000, updated: 1_717_171_717_000 },
+      },
+    ],
+    artifacts: [],
+  },
+}
+
+const workflowCreatedEvent = {
+  id: "evt_workflow",
+  type: "workflow.created",
+  durable: { aggregateID: "wfl_test", seq: 1, version: 1 },
+  data: {
+    workflowID: "wfl_test",
+    timestamp: 1_717_171_717_000,
+    type: "development",
+    input: { brief: "Build" },
+    budget: { maxAttempts: 3 },
+    stages: workflowCreateInput.stages,
   },
 }

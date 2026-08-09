@@ -66,6 +66,32 @@ export type UnknownError = {
 export const isUnknownError = (value: unknown): value is UnknownError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "UnknownError"
 
+export type WorkflowConflictError = {
+  readonly _tag: "WorkflowConflictError"
+  readonly workflowID: string
+  readonly operation: string
+  readonly message: string
+}
+export const isWorkflowConflictError = (value: unknown): value is WorkflowConflictError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "WorkflowConflictError"
+
+export type WorkflowNotFoundError = {
+  readonly _tag: "WorkflowNotFoundError"
+  readonly workflowID: string
+  readonly message: string
+}
+export const isWorkflowNotFoundError = (value: unknown): value is WorkflowNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "WorkflowNotFoundError"
+
+export type WorkflowStageNotFoundError = {
+  readonly _tag: "WorkflowStageNotFoundError"
+  readonly workflowID: string
+  readonly stageID: string
+  readonly message: string
+}
+export const isWorkflowStageNotFoundError = (value: unknown): value is WorkflowStageNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "WorkflowStageNotFoundError"
+
 export type ProviderNotFoundError = {
   readonly _tag: "ProviderNotFoundError"
   readonly providerID: string
@@ -1752,6 +1778,1174 @@ export type SessionsMessageOutput = {
         readonly time: { readonly created: number }
       }
 }["data"]
+
+export type WorkflowsCreateInput = {
+  readonly id?: {
+    readonly id?: string
+    readonly type: string
+    readonly input: { readonly [x: string]: JsonValue }
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly stages: readonly [
+      {
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      },
+      ...Array<{
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      }>,
+    ]
+  }["id"]
+  readonly type: {
+    readonly id?: string
+    readonly type: string
+    readonly input: { readonly [x: string]: JsonValue }
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly stages: readonly [
+      {
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      },
+      ...Array<{
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      }>,
+    ]
+  }["type"]
+  readonly input: {
+    readonly id?: string
+    readonly type: string
+    readonly input: { readonly [x: string]: JsonValue }
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly stages: readonly [
+      {
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      },
+      ...Array<{
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      }>,
+    ]
+  }["input"]
+  readonly budget: {
+    readonly id?: string
+    readonly type: string
+    readonly input: { readonly [x: string]: JsonValue }
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly stages: readonly [
+      {
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      },
+      ...Array<{
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      }>,
+    ]
+  }["budget"]
+  readonly stages: {
+    readonly id?: string
+    readonly type: string
+    readonly input: { readonly [x: string]: JsonValue }
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly stages: readonly [
+      {
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      },
+      ...Array<{
+        readonly id?: string
+        readonly type: string
+        readonly ordinal: number
+        readonly maxAttempts: number
+        readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+        readonly idempotencyKey: string
+        readonly input: { readonly [x: string]: JsonValue }
+      }>,
+    ]
+  }["stages"]
+}
+
+export type WorkflowsCreateOutput = {
+  readonly data: {
+    readonly id: string
+    readonly type: string
+    readonly status: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"
+    readonly currentStageID?: string
+    readonly input: { readonly [x: string]: JsonValue }
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly usage: {
+      readonly tokens: number
+      readonly turns: number
+      readonly toolCalls: number
+      readonly attempts: number
+    }
+    readonly cancelRequestedAt?: number
+    readonly version: number
+    readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+  }
+}["data"]
+
+export type WorkflowsListInput = {
+  readonly status?: {
+    readonly status?: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | undefined
+    readonly limit?: number | undefined
+  }["status"]
+  readonly limit?: {
+    readonly status?: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | undefined
+    readonly limit?: number | undefined
+  }["limit"]
+}
+
+export type WorkflowsListOutput = {
+  readonly data: ReadonlyArray<{
+    readonly id: string
+    readonly type: string
+    readonly status: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"
+    readonly currentStageID?: string
+    readonly input: { readonly [x: string]: JsonValue }
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly usage: {
+      readonly tokens: number
+      readonly turns: number
+      readonly toolCalls: number
+      readonly attempts: number
+    }
+    readonly cancelRequestedAt?: number
+    readonly version: number
+    readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+  }>
+}["data"]
+
+export type WorkflowsGetInput = { readonly workflowID: { readonly workflowID: string }["workflowID"] }
+
+export type WorkflowsGetOutput = {
+  readonly data: {
+    readonly run: {
+      readonly id: string
+      readonly type: string
+      readonly status: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"
+      readonly currentStageID?: string
+      readonly input: { readonly [x: string]: JsonValue }
+      readonly budget: {
+        readonly maxTokens?: number
+        readonly maxTurns?: number
+        readonly maxToolCalls?: number
+        readonly maxAttempts?: number
+        readonly maxDurationMs?: number
+      }
+      readonly usage: {
+        readonly tokens: number
+        readonly turns: number
+        readonly toolCalls: number
+        readonly attempts: number
+      }
+      readonly cancelRequestedAt?: number
+      readonly version: number
+      readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+    }
+    readonly stages: ReadonlyArray<{
+      readonly id: string
+      readonly workflowID: string
+      readonly type: string
+      readonly ordinal: number
+      readonly status:
+        | "pending"
+        | "leased"
+        | "running"
+        | "retry_wait"
+        | "waiting_input"
+        | "waiting_approval"
+        | "succeeded"
+        | "failed"
+        | "cancelled"
+        | "skipped"
+      readonly attempt: number
+      readonly maxAttempts: number
+      readonly notBefore?: number
+      readonly leaseOwner?: string
+      readonly leaseExpiresAt?: number
+      readonly sessionID?: string
+      readonly checkpoint?: { readonly [x: string]: JsonValue }
+      readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+      readonly recoveryAction?: "retry" | "fail"
+      readonly idempotencyKey: string
+      readonly input: { readonly [x: string]: JsonValue }
+      readonly error?: {
+        readonly category:
+          | "transient"
+          | "authentication"
+          | "quota"
+          | "invalid_request"
+          | "schema"
+          | "build"
+          | "visual"
+          | "cancelled"
+          | "ambiguous"
+          | "unknown"
+        readonly code: string
+        readonly message: string
+        readonly retryAfterMs?: number
+        readonly ref?: string
+      }
+      readonly time: {
+        readonly created: number
+        readonly updated: number
+        readonly started?: number
+        readonly completed?: number
+      }
+    }>
+    readonly artifacts: ReadonlyArray<{
+      readonly id: string
+      readonly workflowID: string
+      readonly stageID: string
+      readonly kind: string
+      readonly uri: string
+      readonly mime: string
+      readonly sha256: string
+      readonly size: number
+      readonly metadata: { readonly [x: string]: JsonValue }
+      readonly timeCreated: number
+    }>
+  }
+}["data"]
+
+export type WorkflowsHistoryInput = {
+  readonly workflowID: { readonly workflowID: string }["workflowID"]
+  readonly limit?: { readonly limit?: number | undefined; readonly after?: number | undefined }["limit"]
+  readonly after?: { readonly limit?: number | undefined; readonly after?: number | undefined }["after"]
+}
+
+export type WorkflowsHistoryOutput = {
+  readonly data: ReadonlyArray<
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.created"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly type: string
+          readonly input: { readonly [x: string]: JsonValue }
+          readonly budget: {
+            readonly maxTokens?: number
+            readonly maxTurns?: number
+            readonly maxToolCalls?: number
+            readonly maxAttempts?: number
+            readonly maxDurationMs?: number
+          }
+          readonly stages: readonly [
+            {
+              readonly id?: string
+              readonly type: string
+              readonly ordinal: number
+              readonly maxAttempts: number
+              readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+              readonly idempotencyKey: string
+              readonly input: { readonly [x: string]: JsonValue }
+            },
+            ...Array<{
+              readonly id?: string
+              readonly type: string
+              readonly ordinal: number
+              readonly maxAttempts: number
+              readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+              readonly idempotencyKey: string
+              readonly input: { readonly [x: string]: JsonValue }
+            }>,
+          ]
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.started"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: { readonly workflowID: string; readonly timestamp: number }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.stage.queued"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: { readonly workflowID: string; readonly timestamp: number; readonly stageID: string }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.stage.leased"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly attempt: number
+          readonly leaseOwner?: string
+          readonly leaseExpiresAt: number
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.stage.started"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly attempt: number
+          readonly leaseOwner?: string
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.artifact.created"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly artifact: {
+            readonly id: string
+            readonly workflowID: string
+            readonly stageID: string
+            readonly kind: string
+            readonly uri: string
+            readonly mime: string
+            readonly sha256: string
+            readonly size: number
+            readonly metadata: { readonly [x: string]: JsonValue }
+            readonly timeCreated: number
+          }
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.stage.retry_scheduled"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly attempt: number
+          readonly leaseOwner?: string
+          readonly failure: {
+            readonly category:
+              | "transient"
+              | "authentication"
+              | "quota"
+              | "invalid_request"
+              | "schema"
+              | "build"
+              | "visual"
+              | "cancelled"
+              | "ambiguous"
+              | "unknown"
+            readonly code: string
+            readonly message: string
+            readonly retryAfterMs?: number
+            readonly ref?: string
+          }
+          readonly usage: {
+            readonly tokens: number
+            readonly turns: number
+            readonly toolCalls: number
+            readonly attempts: number
+          }
+          readonly notBefore: number
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.stage.succeeded"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly attempt: number
+          readonly leaseOwner?: string
+          readonly usage: {
+            readonly tokens: number
+            readonly turns: number
+            readonly toolCalls: number
+            readonly attempts: number
+          }
+          readonly checkpoint?: { readonly [x: string]: JsonValue }
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.stage.failed"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly attempt: number
+          readonly leaseOwner?: string
+          readonly failure: {
+            readonly category:
+              | "transient"
+              | "authentication"
+              | "quota"
+              | "invalid_request"
+              | "schema"
+              | "build"
+              | "visual"
+              | "cancelled"
+              | "ambiguous"
+              | "unknown"
+            readonly code: string
+            readonly message: string
+            readonly retryAfterMs?: number
+            readonly ref?: string
+          }
+          readonly usage: {
+            readonly tokens: number
+            readonly turns: number
+            readonly toolCalls: number
+            readonly attempts: number
+          }
+          readonly source: "execution" | "recovery"
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.approval.requested"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID?: string
+          readonly reason: "ambiguous_execution" | "budget_exhausted"
+          readonly failure?: {
+            readonly category:
+              | "transient"
+              | "authentication"
+              | "quota"
+              | "invalid_request"
+              | "schema"
+              | "build"
+              | "visual"
+              | "cancelled"
+              | "ambiguous"
+              | "unknown"
+            readonly code: string
+            readonly message: string
+            readonly retryAfterMs?: number
+            readonly ref?: string
+          }
+          readonly usage?: {
+            readonly tokens: number
+            readonly turns: number
+            readonly toolCalls: number
+            readonly attempts: number
+          }
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.approval.resolved"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly action: "retry" | "fail"
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.budget.threshold_reached"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly percent: 50 | 80 | 100
+          readonly dimension: string
+          readonly usage: {
+            readonly tokens: number
+            readonly turns: number
+            readonly toolCalls: number
+            readonly attempts: number
+          }
+          readonly budget: {
+            readonly maxTokens?: number
+            readonly maxTurns?: number
+            readonly maxToolCalls?: number
+            readonly maxAttempts?: number
+            readonly maxDurationMs?: number
+          }
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.budget.updated"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly budget: {
+            readonly maxTokens?: number
+            readonly maxTurns?: number
+            readonly maxToolCalls?: number
+            readonly maxAttempts?: number
+            readonly maxDurationMs?: number
+          }
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.cancel.requested"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: { readonly workflowID: string; readonly timestamp: number }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.stage.cancelled"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly attempt: number
+          readonly leaseOwner?: string
+          readonly source: "execution" | "request"
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.cancelled"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: { readonly workflowID: string; readonly timestamp: number }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.succeeded"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly usage: {
+            readonly tokens: number
+            readonly turns: number
+            readonly toolCalls: number
+            readonly attempts: number
+          }
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.failed"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly failure: {
+            readonly category:
+              | "transient"
+              | "authentication"
+              | "quota"
+              | "invalid_request"
+              | "schema"
+              | "build"
+              | "visual"
+              | "cancelled"
+              | "ambiguous"
+              | "unknown"
+            readonly code: string
+            readonly message: string
+            readonly retryAfterMs?: number
+            readonly ref?: string
+          }
+          readonly usage: {
+            readonly tokens: number
+            readonly turns: number
+            readonly toolCalls: number
+            readonly attempts: number
+          }
+        }
+      }
+  >
+  readonly hasMore: boolean
+}
+
+export type WorkflowsEventsInput = {
+  readonly workflowID: { readonly workflowID: string }["workflowID"]
+  readonly after?: { readonly after?: number | undefined }["after"]
+}
+
+export type WorkflowsEventsOutput =
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.created"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly type: string
+        readonly input: { readonly [x: string]: unknown }
+        readonly budget: {
+          readonly maxTokens?: number
+          readonly maxTurns?: number
+          readonly maxToolCalls?: number
+          readonly maxAttempts?: number
+          readonly maxDurationMs?: number
+        }
+        readonly stages: readonly [
+          {
+            readonly id?: string
+            readonly type: string
+            readonly ordinal: number
+            readonly maxAttempts: number
+            readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+            readonly idempotencyKey: string
+            readonly input: { readonly [x: string]: unknown }
+          },
+          ...Array<{
+            readonly id?: string
+            readonly type: string
+            readonly ordinal: number
+            readonly maxAttempts: number
+            readonly recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+            readonly idempotencyKey: string
+            readonly input: { readonly [x: string]: unknown }
+          }>,
+        ]
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.started"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: { readonly workflowID: string; readonly timestamp: number }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.stage.queued"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: { readonly workflowID: string; readonly timestamp: number; readonly stageID: string }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.stage.leased"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly attempt: number
+        readonly leaseOwner?: string
+        readonly leaseExpiresAt: number
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.stage.started"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly attempt: number
+        readonly leaseOwner?: string
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.artifact.created"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly artifact: {
+          readonly id: string
+          readonly workflowID: string
+          readonly stageID: string
+          readonly kind: string
+          readonly uri: string
+          readonly mime: string
+          readonly sha256: string
+          readonly size: number
+          readonly metadata: { readonly [x: string]: unknown }
+          readonly timeCreated: number
+        }
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.stage.retry_scheduled"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly attempt: number
+        readonly leaseOwner?: string
+        readonly failure: {
+          readonly category:
+            | "transient"
+            | "authentication"
+            | "quota"
+            | "invalid_request"
+            | "schema"
+            | "build"
+            | "visual"
+            | "cancelled"
+            | "ambiguous"
+            | "unknown"
+          readonly code: string
+          readonly message: string
+          readonly retryAfterMs?: number
+          readonly ref?: string
+        }
+        readonly usage: {
+          readonly tokens: number
+          readonly turns: number
+          readonly toolCalls: number
+          readonly attempts: number
+        }
+        readonly notBefore: number
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.stage.succeeded"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly attempt: number
+        readonly leaseOwner?: string
+        readonly usage: {
+          readonly tokens: number
+          readonly turns: number
+          readonly toolCalls: number
+          readonly attempts: number
+        }
+        readonly checkpoint?: { readonly [x: string]: unknown }
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.stage.failed"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly attempt: number
+        readonly leaseOwner?: string
+        readonly failure: {
+          readonly category:
+            | "transient"
+            | "authentication"
+            | "quota"
+            | "invalid_request"
+            | "schema"
+            | "build"
+            | "visual"
+            | "cancelled"
+            | "ambiguous"
+            | "unknown"
+          readonly code: string
+          readonly message: string
+          readonly retryAfterMs?: number
+          readonly ref?: string
+        }
+        readonly usage: {
+          readonly tokens: number
+          readonly turns: number
+          readonly toolCalls: number
+          readonly attempts: number
+        }
+        readonly source: "execution" | "recovery"
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.approval.requested"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID?: string
+        readonly reason: "ambiguous_execution" | "budget_exhausted"
+        readonly failure?: {
+          readonly category:
+            | "transient"
+            | "authentication"
+            | "quota"
+            | "invalid_request"
+            | "schema"
+            | "build"
+            | "visual"
+            | "cancelled"
+            | "ambiguous"
+            | "unknown"
+          readonly code: string
+          readonly message: string
+          readonly retryAfterMs?: number
+          readonly ref?: string
+        }
+        readonly usage?: {
+          readonly tokens: number
+          readonly turns: number
+          readonly toolCalls: number
+          readonly attempts: number
+        }
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.approval.resolved"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly action: "retry" | "fail"
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.budget.threshold_reached"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly percent: 50 | 80 | 100
+        readonly dimension: string
+        readonly usage: {
+          readonly tokens: number
+          readonly turns: number
+          readonly toolCalls: number
+          readonly attempts: number
+        }
+        readonly budget: {
+          readonly maxTokens?: number
+          readonly maxTurns?: number
+          readonly maxToolCalls?: number
+          readonly maxAttempts?: number
+          readonly maxDurationMs?: number
+        }
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.budget.updated"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly budget: {
+          readonly maxTokens?: number
+          readonly maxTurns?: number
+          readonly maxToolCalls?: number
+          readonly maxAttempts?: number
+          readonly maxDurationMs?: number
+        }
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.cancel.requested"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: { readonly workflowID: string; readonly timestamp: number }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.stage.cancelled"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly attempt: number
+        readonly leaseOwner?: string
+        readonly source: "execution" | "request"
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.cancelled"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: { readonly workflowID: string; readonly timestamp: number }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.succeeded"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly usage: {
+          readonly tokens: number
+          readonly turns: number
+          readonly toolCalls: number
+          readonly attempts: number
+        }
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.failed"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly failure: {
+          readonly category:
+            | "transient"
+            | "authentication"
+            | "quota"
+            | "invalid_request"
+            | "schema"
+            | "build"
+            | "visual"
+            | "cancelled"
+            | "ambiguous"
+            | "unknown"
+          readonly code: string
+          readonly message: string
+          readonly retryAfterMs?: number
+          readonly ref?: string
+        }
+        readonly usage: {
+          readonly tokens: number
+          readonly turns: number
+          readonly toolCalls: number
+          readonly attempts: number
+        }
+      }
+    }
+
+export type WorkflowsArtifactsInput = { readonly workflowID: { readonly workflowID: string }["workflowID"] }
+
+export type WorkflowsArtifactsOutput = {
+  readonly data: ReadonlyArray<{
+    readonly id: string
+    readonly workflowID: string
+    readonly stageID: string
+    readonly kind: string
+    readonly uri: string
+    readonly mime: string
+    readonly sha256: string
+    readonly size: number
+    readonly metadata: { readonly [x: string]: JsonValue }
+    readonly timeCreated: number
+  }>
+}["data"]
+
+export type WorkflowsCancelInput = { readonly workflowID: { readonly workflowID: string }["workflowID"] }
+
+export type WorkflowsCancelOutput = void
+
+export type WorkflowsUpdateBudgetInput = {
+  readonly workflowID: { readonly workflowID: string }["workflowID"]
+  readonly budget: {
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+  }["budget"]
+}
+
+export type WorkflowsUpdateBudgetOutput = {
+  readonly data: {
+    readonly id: string
+    readonly type: string
+    readonly status: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"
+    readonly currentStageID?: string
+    readonly input: { readonly [x: string]: JsonValue }
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly usage: {
+      readonly tokens: number
+      readonly turns: number
+      readonly toolCalls: number
+      readonly attempts: number
+    }
+    readonly cancelRequestedAt?: number
+    readonly version: number
+    readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+  }
+}["data"]
+
+export type WorkflowsResolveRecoveryInput = {
+  readonly workflowID: { readonly workflowID: string; readonly stageID: string }["workflowID"]
+  readonly stageID: { readonly workflowID: string; readonly stageID: string }["stageID"]
+  readonly action: { readonly action: "retry" | "fail" }["action"]
+}
+
+export type WorkflowsResolveRecoveryOutput = void
 
 export type MessagesListInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]

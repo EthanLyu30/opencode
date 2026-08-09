@@ -195,6 +195,34 @@ test("sessions.history retains the typed SessionNotFoundError", async () => {
   expect(error._tag).toBe("SessionNotFoundError")
 })
 
+test("workflows create through the generated Effect contract", async () => {
+  const httpClient = HttpClient.make((request) =>
+    Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(workflowInfo))),
+  )
+  const created = await Effect.gen(function* () {
+    const client = yield* OpenCode.make({ baseUrl: "http://localhost:3000" })
+    return yield* client.workflows.create({
+      type: "development",
+      input: { brief: "Build" },
+      budget: { maxAttempts: 3 },
+      stages: [
+        {
+          id: "wfs_design",
+          type: "design",
+          ordinal: 0,
+          maxAttempts: 3,
+          recoveryPolicy: "restart_safe",
+          idempotencyKey: "design",
+          input: {},
+        },
+      ],
+    })
+  }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.runPromise)
+
+  expect(created.id).toBe("wfl_test")
+  expect(DateTime.toEpochMillis(created.time.created)).toBe(1_717_171_717_000)
+})
+
 const session = {
   data: {
     id: "ses_test",
@@ -242,5 +270,18 @@ const modelSwitchedEvent = {
     sessionID: "ses_test",
     messageID: "msg_model",
     model: { id: "claude", providerID: "anthropic" },
+  },
+}
+
+const workflowInfo = {
+  data: {
+    id: "wfl_test",
+    type: "development",
+    status: "queued",
+    input: { brief: "Build" },
+    budget: { maxAttempts: 3 },
+    usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+    version: 1,
+    time: { created: 1_717_171_717_000, updated: 1_717_171_717_000 },
   },
 }

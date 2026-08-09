@@ -37,6 +37,24 @@ import type {
   SessionsInterruptOutput,
   SessionsMessageInput,
   SessionsMessageOutput,
+  WorkflowsCreateInput,
+  WorkflowsCreateOutput,
+  WorkflowsListInput,
+  WorkflowsListOutput,
+  WorkflowsGetInput,
+  WorkflowsGetOutput,
+  WorkflowsHistoryInput,
+  WorkflowsHistoryOutput,
+  WorkflowsEventsInput,
+  WorkflowsEventsOutput,
+  WorkflowsArtifactsInput,
+  WorkflowsArtifactsOutput,
+  WorkflowsCancelInput,
+  WorkflowsCancelOutput,
+  WorkflowsUpdateBudgetInput,
+  WorkflowsUpdateBudgetOutput,
+  WorkflowsResolveRecoveryInput,
+  WorkflowsResolveRecoveryOutput,
   MessagesListInput,
   MessagesListOutput,
   ModelsListInput,
@@ -492,6 +510,119 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ).then((value) => value.data),
+    },
+    workflows: {
+      create: (input: WorkflowsCreateInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: WorkflowsCreateOutput }>(
+          {
+            method: "POST",
+            path: `/api/workflow`,
+            body: {
+              id: input["id"],
+              type: input["type"],
+              input: input["input"],
+              budget: input["budget"],
+              stages: input["stages"],
+            },
+            successStatus: 200,
+            declaredStatuses: [400, 409, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      list: (input?: WorkflowsListInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: WorkflowsListOutput }>(
+          {
+            method: "GET",
+            path: `/api/workflow`,
+            query: { status: input?.["status"], limit: input?.["limit"] },
+            successStatus: 200,
+            declaredStatuses: [401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      get: (input: WorkflowsGetInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: WorkflowsGetOutput }>(
+          {
+            method: "GET",
+            path: `/api/workflow/${encodeURIComponent(input.workflowID)}`,
+            successStatus: 200,
+            declaredStatuses: [404, 401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      history: (input: WorkflowsHistoryInput, requestOptions?: RequestOptions) =>
+        request<WorkflowsHistoryOutput>(
+          {
+            method: "GET",
+            path: `/api/workflow/${encodeURIComponent(input.workflowID)}/history`,
+            query: { limit: input["limit"], after: input["after"] },
+            successStatus: 200,
+            declaredStatuses: [404, 401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      events: (input: WorkflowsEventsInput, requestOptions?: RequestOptions): AsyncIterable<WorkflowsEventsOutput> =>
+        sse<WorkflowsEventsOutput>(
+          {
+            method: "GET",
+            path: `/api/workflow/${encodeURIComponent(input.workflowID)}/event`,
+            query: { after: input["after"] },
+            successStatus: 200,
+            declaredStatuses: [404, 401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      artifacts: (input: WorkflowsArtifactsInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: WorkflowsArtifactsOutput }>(
+          {
+            method: "GET",
+            path: `/api/workflow/${encodeURIComponent(input.workflowID)}/artifact`,
+            successStatus: 200,
+            declaredStatuses: [404, 401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      cancel: (input: WorkflowsCancelInput, requestOptions?: RequestOptions) =>
+        request<WorkflowsCancelOutput>(
+          {
+            method: "POST",
+            path: `/api/workflow/${encodeURIComponent(input.workflowID)}/cancel`,
+            successStatus: 204,
+            declaredStatuses: [404, 409, 401, 400],
+            empty: true,
+          },
+          requestOptions,
+        ),
+      updateBudget: (input: WorkflowsUpdateBudgetInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: WorkflowsUpdateBudgetOutput }>(
+          {
+            method: "POST",
+            path: `/api/workflow/${encodeURIComponent(input.workflowID)}/budget`,
+            body: { budget: input["budget"] },
+            successStatus: 200,
+            declaredStatuses: [404, 409, 400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      resolveRecovery: (input: WorkflowsResolveRecoveryInput, requestOptions?: RequestOptions) =>
+        request<WorkflowsResolveRecoveryOutput>(
+          {
+            method: "POST",
+            path: `/api/workflow/${encodeURIComponent(input.workflowID)}/stage/${encodeURIComponent(input.stageID)}/recovery`,
+            body: { action: input["action"] },
+            successStatus: 204,
+            declaredStatuses: [404, 409, 401, 400],
+            empty: true,
+          },
+          requestOptions,
+        ),
     },
     messages: {
       list: (input: MessagesListInput, requestOptions?: RequestOptions) =>
