@@ -170,6 +170,16 @@ export const ToolResult = Schema.Struct({
 }).annotate({ identifier: "LLM.Event.ToolResult" })
 export type ToolResult = Schema.Schema.Type<typeof ToolResult>
 
+export const ToolStatus = Schema.Struct({
+  type: Schema.tag("tool-status"),
+  id: ToolCallID,
+  name: Schema.String,
+  status: Schema.String,
+  providerExecuted: Schema.optional(Schema.Boolean),
+  providerMetadata: Schema.optional(ProviderMetadata),
+}).annotate({ identifier: "LLM.Event.ToolStatus" })
+export type ToolStatus = Schema.Schema.Type<typeof ToolStatus>
+
 export const ToolError = Schema.Struct({
   type: Schema.tag("tool-error"),
   id: ToolCallID,
@@ -219,6 +229,7 @@ const llmEventTagged = Schema.Union([
   ToolInputEnd,
   ToolCall,
   ToolResult,
+  ToolStatus,
   ToolError,
   StepFinish,
   Finish,
@@ -261,6 +272,8 @@ export const LLMEvent = Object.assign(llmEventTagged, {
       id: toolCallID(input.id),
       output: input.output === undefined ? undefined : ToolOutput.make(input.output.structured, input.output.content),
     }),
+  toolStatus: (input: WithID<ToolStatus, ToolCallID>) =>
+    ToolStatus.make({ ...input, id: toolCallID(input.id) }),
   toolError: (input: WithID<ToolError, ToolCallID>) => ToolError.make({ ...input, id: toolCallID(input.id) }),
   stepFinish: (input: WithUsage<StepFinish>) =>
     StepFinish.make({
@@ -286,6 +299,7 @@ export const LLMEvent = Object.assign(llmEventTagged, {
     toolInputEnd: llmEventTagged.guards["tool-input-end"],
     toolCall: llmEventTagged.guards["tool-call"],
     toolResult: llmEventTagged.guards["tool-result"],
+    toolStatus: llmEventTagged.guards["tool-status"],
     toolError: llmEventTagged.guards["tool-error"],
     stepFinish: llmEventTagged.guards["step-finish"],
     finish: llmEventTagged.guards.finish,

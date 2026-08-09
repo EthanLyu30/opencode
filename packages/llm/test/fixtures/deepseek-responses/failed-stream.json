@@ -1,0 +1,15 @@
+[
+  { "type": "response.created", "sequence_number": 0, "response": { "id": "resp_ds_failed" } },
+  {
+    "type": "response.failed",
+    "sequence_number": 1,
+    "response": {
+      "id": "resp_ds_failed",
+      "error": {
+        "code": "server_error",
+        "message": "DeepSeek upstream unavailable",
+        "param": null
+      }
+    }
+  }
+]

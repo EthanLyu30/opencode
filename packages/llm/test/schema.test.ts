@@ -52,6 +52,17 @@ describe("llm schema", () => {
     expect(LLMEvent.finish({ reason: "stop", usage: { outputTokens: 2 } }).usage).toBeInstanceOf(Usage)
   })
 
+  test("tool status events retain hosted-tool progress semantics", () => {
+    const event = LLMEvent.toolStatus({
+      id: "search_1",
+      name: "web_search",
+      status: "searching",
+      providerExecuted: true,
+    })
+    expect(LLMEvent.is.toolStatus(event)).toBe(true)
+    expect(decodeLLMEvent(event)).toEqual(event)
+  })
+
   test("content part tagged union exposes guards", () => {
     expect(ContentPart.guards.text({ type: "text", text: "hi" })).toBe(true)
     expect(ContentPart.guards.media({ type: "text", text: "hi" })).toBe(false)

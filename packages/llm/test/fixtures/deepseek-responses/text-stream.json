@@ -1,0 +1,60 @@
+[
+  { "type": "response.created", "sequence_number": 0, "response": { "id": "resp_ds_text" } },
+  { "type": "response.in_progress", "sequence_number": 1, "response": { "id": "resp_ds_text" } },
+  {
+    "type": "response.output_item.added",
+    "sequence_number": 2,
+    "item": { "type": "reasoning", "id": "reasoning_1", "encrypted_content": null }
+  },
+  {
+    "type": "response.reasoning_text.delta",
+    "sequence_number": 3,
+    "item_id": "reasoning_1",
+    "delta": "先检查约束。"
+  },
+  { "type": "response.reasoning_text.done", "sequence_number": 4, "item_id": "reasoning_1" },
+  {
+    "type": "response.output_item.done",
+    "sequence_number": 5,
+    "item": { "type": "reasoning", "id": "reasoning_1", "encrypted_content": null }
+  },
+  {
+    "type": "response.output_item.added",
+    "sequence_number": 6,
+    "item": { "type": "message", "id": "message_1", "status": "in_progress" }
+  },
+  { "type": "response.content_part.added", "sequence_number": 7, "item_id": "message_1" },
+  {
+    "type": "response.output_text.delta",
+    "sequence_number": 8,
+    "item_id": "message_1",
+    "delta": "你好"
+  },
+  {
+    "type": "response.output_text.delta",
+    "sequence_number": 9,
+    "item_id": "message_1",
+    "delta": "！"
+  },
+  { "type": "response.output_text.done", "sequence_number": 10, "item_id": "message_1" },
+  { "type": "response.content_part.done", "sequence_number": 11, "item_id": "message_1" },
+  {
+    "type": "response.output_item.done",
+    "sequence_number": 12,
+    "item": { "type": "message", "id": "message_1", "status": "completed" }
+  },
+  {
+    "type": "response.completed",
+    "sequence_number": 13,
+    "response": {
+      "id": "resp_ds_text",
+      "usage": {
+        "input_tokens": 120,
+        "input_tokens_details": { "cached_tokens": 80 },
+        "output_tokens": 15,
+        "output_tokens_details": { "reasoning_tokens": 9 },
+        "total_tokens": 135
+      }
+    }
+  }
+]

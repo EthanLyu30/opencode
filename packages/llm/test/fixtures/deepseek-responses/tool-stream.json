@@ -1,0 +1,117 @@
+[
+  { "type": "response.created", "sequence_number": 0, "response": { "id": "resp_ds_tools" } },
+  {
+    "type": "response.output_item.added",
+    "sequence_number": 1,
+    "item": {
+      "type": "function_call",
+      "id": "function_item_1",
+      "call_id": "call_read_1",
+      "name": "read_file",
+      "arguments": ""
+    }
+  },
+  {
+    "type": "response.function_call_arguments.delta",
+    "sequence_number": 2,
+    "item_id": "function_item_1",
+    "delta": "{\"path\":\""
+  },
+  {
+    "type": "response.function_call_arguments.delta",
+    "sequence_number": 3,
+    "item_id": "function_item_1",
+    "delta": "README.md\"}"
+  },
+  {
+    "type": "response.function_call_arguments.done",
+    "sequence_number": 4,
+    "item_id": "function_item_1",
+    "arguments": "{\"path\":\"README.md\"}"
+  },
+  {
+    "type": "response.output_item.done",
+    "sequence_number": 5,
+    "item": {
+      "type": "function_call",
+      "id": "function_item_1",
+      "call_id": "call_read_1",
+      "name": "read_file"
+    }
+  },
+  {
+    "type": "response.output_item.added",
+    "sequence_number": 6,
+    "item": {
+      "type": "custom_tool_call",
+      "id": "custom_item_1",
+      "call_id": "call_patch_1",
+      "name": "apply_patch",
+      "input": ""
+    }
+  },
+  {
+    "type": "response.custom_tool_call_input.delta",
+    "sequence_number": 7,
+    "item_id": "custom_item_1",
+    "delta": "*** Begin Patch\n"
+  },
+  {
+    "type": "response.custom_tool_call_input.delta",
+    "sequence_number": 8,
+    "item_id": "custom_item_1",
+    "delta": "*** End Patch"
+  },
+  {
+    "type": "response.custom_tool_call_input.done",
+    "sequence_number": 9,
+    "item_id": "custom_item_1",
+    "input": "*** Begin Patch\n*** End Patch"
+  },
+  {
+    "type": "response.output_item.done",
+    "sequence_number": 10,
+    "item": {
+      "type": "custom_tool_call",
+      "id": "custom_item_1",
+      "call_id": "call_patch_1",
+      "name": "apply_patch"
+    }
+  },
+  {
+    "type": "response.output_item.added",
+    "sequence_number": 11,
+    "item": { "type": "web_search_call", "id": "search_1", "status": "in_progress" }
+  },
+  {
+    "type": "response.web_search_call.in_progress",
+    "sequence_number": 12,
+    "item_id": "search_1"
+  },
+  { "type": "response.web_search_call.searching", "sequence_number": 13, "item_id": "search_1" },
+  { "type": "response.web_search_call.completed", "sequence_number": 14, "item_id": "search_1" },
+  {
+    "type": "response.output_item.done",
+    "sequence_number": 15,
+    "item": {
+      "type": "web_search_call",
+      "id": "search_1",
+      "status": "completed",
+      "action": { "type": "search", "query": "OpenCode" }
+    }
+  },
+  {
+    "type": "response.completed",
+    "sequence_number": 16,
+    "response": {
+      "id": "resp_ds_tools",
+      "usage": {
+        "input_tokens": 30,
+        "input_tokens_details": { "cached_tokens": 10 },
+        "output_tokens": 12,
+        "output_tokens_details": { "reasoning_tokens": 2 },
+        "total_tokens": 42
+      }
+    }
+  }
+]

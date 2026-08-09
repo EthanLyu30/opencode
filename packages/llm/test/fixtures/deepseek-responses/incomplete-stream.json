@@ -1,0 +1,24 @@
+[
+  { "type": "response.created", "sequence_number": 0, "response": { "id": "resp_ds_incomplete" } },
+  {
+    "type": "response.output_text.delta",
+    "sequence_number": 1,
+    "item_id": "message_1",
+    "delta": "未完成"
+  },
+  {
+    "type": "response.incomplete",
+    "sequence_number": 2,
+    "response": {
+      "id": "resp_ds_incomplete",
+      "incomplete_details": { "reason": "max_output_tokens" },
+      "usage": {
+        "input_tokens": 20,
+        "input_tokens_details": { "cached_tokens": 4 },
+        "output_tokens": 8,
+        "output_tokens_details": { "reasoning_tokens": 3 },
+        "total_tokens": 28
+      }
+    }
+  }
+]
