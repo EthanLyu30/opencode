@@ -82,10 +82,10 @@ export function sanitizeText(text: string): string {
 export function sanitizeFailure(failure: Workflow.Failure): Workflow.Failure {
   return {
     category: failure.category,
-    code: failure.code,
+    code: sanitizeText(failure.code),
     message: sanitizeText(failure.message),
     ...(failure.retryAfterMs === undefined ? {} : { retryAfterMs: failure.retryAfterMs }),
-    ...(failure.ref === undefined ? {} : { ref: failure.ref }),
+    ...(failure.ref === undefined ? {} : { ref: sanitizeText(failure.ref) }),
   }
 }
 

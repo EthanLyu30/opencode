@@ -13,5 +13,6 @@ export {
   Session,
   SessionInput,
   SessionMessage,
+  Workflow,
 } from "@opencode-ai/client/effect"
 export type { OpenCodeEvent } from "@opencode-ai/client/effect"

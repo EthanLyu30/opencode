@@ -6,6 +6,19 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { Deferred, Effect, Latch, Option, Schema, Stream } from "effect"
 import type { OpenCodeEvent } from "../src"
 
+async function removeTestDirectory(directory: string, retries = 30): Promise<void> {
+  try {
+    await rm(directory, { recursive: true, force: true })
+  } catch (error) {
+    if (retries === 0 || !error || typeof error !== "object" || !("code" in error) || error.code !== "EBUSY") {
+      throw error
+    }
+    Bun.gc(true)
+    await Bun.sleep(100)
+    await removeTestDirectory(directory, retries - 1)
+  }
+}
+
 test("embedded client uses the real router and handlers", async () => {
   const directory = await mkdtemp(join(tmpdir(), "opencode-embedded-"))
   const database = Flag.OPENCODE_DB
@@ -100,9 +113,9 @@ test("embedded client uses the real router and handlers", async () => {
     await Effect.runPromise(Effect.scoped(program))
   } finally {
     Flag.OPENCODE_DB = database
-    await rm(directory, { recursive: true, force: true })
+    await removeTestDirectory(directory)
   }
-})
+}, 10_000)
 
 test("Location-owned runner events reach the ready global client", async () => {
   const directory = await mkdtemp(join(tmpdir(), "opencode-embedded-events-"))
@@ -139,7 +152,7 @@ test("Location-owned runner events reach the ready global client", async () => {
     await Effect.runPromise(Effect.scoped(program))
   } finally {
     Flag.OPENCODE_DB = database
-    await rm(directory, { recursive: true, force: true })
+    await removeTestDirectory(directory)
   }
 }, 10_000)
 
@@ -182,7 +195,7 @@ test("independent embedded hosts do not share live notifications", async () => {
     await Effect.runPromise(Effect.scoped(program))
   } finally {
     Flag.OPENCODE_DB = database
-    await rm(directory, { recursive: true, force: true })
+    await removeTestDirectory(directory)
   }
 }, 10_000)
 
@@ -207,6 +220,53 @@ test("embedded client is available as a Layer service", async () => {
     expect(created.id).toBe(sessionID)
   } finally {
     Flag.OPENCODE_DB = database
-    await rm(directory, { recursive: true, force: true })
+    await removeTestDirectory(directory)
+  }
+})
+
+test("embedded client exposes the durable workflow router", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "opencode-embedded-workflow-"))
+  const database = Flag.OPENCODE_DB
+  Flag.OPENCODE_DB = join(directory, "opencode.sqlite")
+  const { OpenCode, Workflow } = await import("../src")
+  const workflowID = Workflow.ID.make(`wfl_embedded_${crypto.randomUUID()}`)
+  const stageID = Workflow.StageID.make(`wfs_embedded_${crypto.randomUUID()}`)
+
+  try {
+    const program = Effect.gen(function* () {
+      const opencode = yield* OpenCode.create()
+      const created = yield* opencode.workflows.create({
+        id: workflowID,
+        type: "development",
+        input: { brief: "Exercise the embedded workflow API" },
+        budget: { maxAttempts: 1 },
+        stages: [
+          {
+            id: stageID,
+            type: "admit-only",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "embedded/admit-only",
+            input: {},
+          },
+        ],
+      })
+      const detail = yield* opencode.workflows.get({ workflowID })
+      const history = yield* opencode.workflows.history({ workflowID, limit: 50 })
+      const event = yield* opencode.workflows
+        .events({ workflowID })
+        .pipe(Stream.take(1), Stream.runHead, Effect.map(Option.getOrThrow))
+      yield* opencode.workflows.cancel({ workflowID }).pipe(Effect.ignore)
+
+      expect(created.id).toBe(workflowID)
+      expect(detail.run.id).toBe(workflowID)
+      expect(history.data[0]?.type).toBe("workflow.created")
+      expect(event.durable?.aggregateID).toBe(workflowID)
+    })
+    await Effect.runPromise(Effect.scoped(program))
+  } finally {
+    Flag.OPENCODE_DB = database
+    await removeTestDirectory(directory)
   }
 })

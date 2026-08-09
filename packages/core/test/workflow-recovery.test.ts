@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import path from "node:path"
-import { DateTime, Effect, Exit, Layer, Option } from "effect"
+import { DateTime, Effect, Exit, Layer, Option, Stream } from "effect"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -318,6 +318,44 @@ describe("Workflow recovery", () => {
             "workflow.stage.failed",
             "workflow.failed",
           ])
+        }).pipe(Effect.provide(layer), Effect.scoped)
+      }),
+    5_000,
+  )
+
+  it.live(
+    "uses an exclusive durable sequence across history pages and SSE replay",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* Effect.acquireRelease(
+          Effect.promise(() => tmpdir()),
+          (directory) => Effect.promise(() => directory[Symbol.asyncDispose]()),
+        )
+        const database = Database.layerFromPath(path.join(tmp.path, "workflow-replay.sqlite"))
+        const layer = AppNodeBuilder.build(
+          LayerNode.group([Database.node, EventV2.node, WorkflowV2.node, WorkflowStore.node]),
+          [[Database.node, database]],
+        )
+        const input = createInput("restart_safe")
+
+        yield* Effect.gen(function* () {
+          const workflow = yield* WorkflowV2.Service
+          yield* workflow.create(input)
+
+          const first = yield* workflow.history({ workflowID: input.id!, limit: 1 })
+          const cursor = first.events.at(-1)?.durable?.seq
+          if (cursor === undefined) return yield* Effect.die("Expected a durable history cursor")
+          const second = yield* workflow.history({ workflowID: input.id!, after: cursor, limit: 10 })
+          const replayed = yield* workflow
+            .events({ workflowID: input.id!, after: cursor })
+            .pipe(Stream.take(second.events.length), Stream.runCollect)
+          const full = yield* workflow.history({ workflowID: input.id!, limit: 10 })
+          const paged = [...first.events, ...second.events]
+
+          expect(first.hasMore).toBe(true)
+          expect(new Set(paged.map((event) => event.id)).size).toBe(paged.length)
+          expect(paged.map((event) => event.id)).toEqual(full.events.map((event) => event.id))
+          expect(Array.from(replayed, (event) => event.id)).toEqual(second.events.map((event) => event.id))
         }).pipe(Effect.provide(layer), Effect.scoped)
       }),
     5_000,
