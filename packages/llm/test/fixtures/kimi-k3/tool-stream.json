@@ -1,0 +1,59 @@
+[
+  {
+    "id": "chatcmpl_kimi_tool",
+    "choices": [
+      {
+        "delta": { "reasoning_content": "需要先读取设计令牌。" },
+        "finish_reason": null
+      }
+    ],
+    "usage": null
+  },
+  {
+    "id": "chatcmpl_kimi_tool",
+    "choices": [
+      {
+        "delta": {
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": "call_read_1",
+              "function": { "name": "read_file", "arguments": "{\"path\":" }
+            }
+          ]
+        },
+        "finish_reason": null
+      }
+    ],
+    "usage": null
+  },
+  {
+    "id": "chatcmpl_kimi_tool",
+    "choices": [
+      {
+        "delta": {
+          "tool_calls": [
+            {
+              "index": 0,
+              "id": null,
+              "function": { "name": null, "arguments": "\"tokens.json\"}" }
+            }
+          ]
+        },
+        "finish_reason": null
+      }
+    ],
+    "usage": null
+  },
+  {
+    "id": "chatcmpl_kimi_tool",
+    "choices": [{ "delta": {}, "finish_reason": "tool_calls" }],
+    "usage": {
+      "prompt_tokens": 55,
+      "completion_tokens": 20,
+      "total_tokens": 75,
+      "prompt_tokens_details": { "cached_tokens": 20 },
+      "completion_tokens_details": { "reasoning_tokens": 9 }
+    }
+  }
+]

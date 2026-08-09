@@ -1,0 +1,22 @@
+{
+  "model": "kimi-k3",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "image_url",
+          "image_url": { "url": "data:image/png;base64,AAECAw==" }
+        },
+        {
+          "type": "image_url",
+          "image_url": { "url": "ms://file_reference_1" }
+        },
+        { "type": "text", "text": "对比参考图与实现图。" }
+      ]
+    }
+  ],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "reasoning_effort": "max"
+}

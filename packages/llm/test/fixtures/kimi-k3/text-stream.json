@@ -1,0 +1,38 @@
+[
+  {
+    "id": "chatcmpl_kimi_text",
+    "choices": [
+      {
+        "delta": { "reasoning_content": "先梳理页面层级。" },
+        "finish_reason": null
+      }
+    ],
+    "usage": null
+  },
+  {
+    "id": "chatcmpl_kimi_text",
+    "choices": [
+      {
+        "delta": { "content": "设计规范已完成。" },
+        "finish_reason": null
+      }
+    ],
+    "usage": null
+  },
+  {
+    "id": "chatcmpl_kimi_text",
+    "choices": [{ "delta": {}, "finish_reason": "stop" }],
+    "usage": null
+  },
+  {
+    "id": "chatcmpl_kimi_text",
+    "choices": [],
+    "usage": {
+      "prompt_tokens": 40,
+      "completion_tokens": 12,
+      "total_tokens": 52,
+      "prompt_tokens_details": { "cached_tokens": 16 },
+      "completion_tokens_details": { "reasoning_tokens": 7 }
+    }
+  }
+]

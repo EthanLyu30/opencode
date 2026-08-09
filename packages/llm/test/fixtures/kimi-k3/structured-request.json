@@ -1,0 +1,23 @@
+{
+  "model": "kimi-k3",
+  "messages": [{ "role": "user", "content": "复审页面。" }],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "reasoning_effort": "max",
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "response",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "approved": { "type": "boolean" },
+          "issues": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["approved", "issues"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

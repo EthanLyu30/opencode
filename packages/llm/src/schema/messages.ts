@@ -31,14 +31,27 @@ export const TextPart = Schema.Struct({
 }).annotate({ identifier: "LLM.Content.Text" })
 export type TextPart = Schema.Schema.Type<typeof TextPart>
 
-export const MediaPart = Schema.Struct({
+const mediaPartSchema = Schema.Struct({
   type: Schema.Literal("media"),
   mediaType: Schema.String,
   data: Schema.Union([Schema.String, Schema.Uint8Array]),
   filename: Schema.optional(Schema.String),
   metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 }).annotate({ identifier: "LLM.Content.Media" })
-export type MediaPart = Schema.Schema.Type<typeof MediaPart>
+export type MediaPart = Schema.Schema.Type<typeof mediaPartSchema>
+
+export const MediaPart = Object.assign(mediaPartSchema, {
+  make: (input: Omit<MediaPart, "type">): MediaPart => ({ type: "media", ...input }),
+  /**
+   * Represent a provider-owned media URI without pretending it is base64.
+   * The selected protocol remains responsible for accepting its own URI
+   * scheme and rejecting unsupported remote URLs before transport.
+   */
+  reference: (input: Omit<MediaPart, "type" | "data"> & { readonly uri: string }): MediaPart => {
+    const { uri, ...part } = input
+    return { type: "media", ...part, data: uri }
+  },
+})
 
 export { ToolContent, ToolFileContent, ToolTextContent }
 
