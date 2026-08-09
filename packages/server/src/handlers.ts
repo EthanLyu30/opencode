@@ -17,12 +17,14 @@ import { LocationHandler } from "./handlers/location"
 import { IntegrationHandler } from "./handlers/integration"
 import { CredentialHandler } from "./handlers/credential"
 import { ProjectCopyHandler } from "./handlers/project-copy"
+import { WorkflowHandler } from "./handlers/workflow"
 
 export const handlers = Layer.mergeAll(
   HealthHandler,
   LocationHandler,
   AgentHandler,
   SessionHandler,
+  WorkflowHandler,
   MessageHandler,
   ModelHandler,
   ProviderHandler,

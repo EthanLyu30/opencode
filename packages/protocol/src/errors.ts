@@ -61,6 +61,35 @@ export class SessionNotFoundError extends Schema.TaggedErrorClass<SessionNotFoun
   { httpApiStatus: 404 },
 ) {}
 
+export class WorkflowNotFoundError extends Schema.TaggedErrorClass<WorkflowNotFoundError>()(
+  "WorkflowNotFoundError",
+  {
+    workflowID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
+export class WorkflowStageNotFoundError extends Schema.TaggedErrorClass<WorkflowStageNotFoundError>()(
+  "WorkflowStageNotFoundError",
+  {
+    workflowID: Schema.String,
+    stageID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
+export class WorkflowConflictError extends Schema.TaggedErrorClass<WorkflowConflictError>()(
+  "WorkflowConflictError",
+  {
+    workflowID: Schema.String,
+    operation: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 409 },
+) {}
+
 export class MessageNotFoundError extends Schema.TaggedErrorClass<MessageNotFoundError>()(
   "MessageNotFoundError",
   {

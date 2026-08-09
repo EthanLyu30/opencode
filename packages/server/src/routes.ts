@@ -10,6 +10,9 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { LocationServiceMap } from "@opencode-ai/core/location-service-map"
 import { SessionExecutionLocal } from "@opencode-ai/core/session/execution/local"
+import { WorkflowV2 } from "@opencode-ai/core/workflow"
+import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
+import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { HttpRouter, HttpServer } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -29,6 +32,7 @@ const applicationServices = LayerNode.group([
   httpClient,
   ToolOutputStore.cleanupNode,
   SessionV2.node,
+  WorkflowV2.node,
   PermissionSaved.node,
   PtyTicket.node,
   Credential.node,
@@ -49,7 +53,10 @@ export function createEmbeddedRoutes() {
 }
 
 function makeRoutes<AuthError, AuthServices>(auth: Layer.Layer<ServerAuth.Config, AuthError, AuthServices>) {
-  const serviceLayer = AppNodeBuilder.build(applicationServices, [[SessionExecution.node, SessionExecutionLocal.node]])
+  const serviceLayer = AppNodeBuilder.build(applicationServices, [
+    [SessionExecution.node, SessionExecutionLocal.node],
+    [WorkflowExecution.node, WorkflowExecutionLocal.node],
+  ])
 
   return HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
     Layer.provide(handlers),
