@@ -1,5 +1,7 @@
 # OpenCode Workflow Stage A Implementation Plan
 
+> **2026-08-09 rebaseline:** Tasks 2–12 remain the accepted durable Workflow foundation and Tasks 10–12 are complete. The original Chat-first Task1 is superseded by the Kimi K3-only and DeepSeek native Responses plan in `docs/superpowers/plans/2026-08-09-opencode-kimi-k3-deepseek-responses-stage-b.md`; do not implement Task1 as originally written.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在已审计的 OpenCode V2 内核旁新增可靠的持久 Workflow 底座，并完成 Kimi/DeepSeek 的最薄 Provider 接线，使工作流具备可重放事件、SQLite 队列、租约、防双跑、持久取消、分类重试、有限恢复和 typed HTTP/SSE API。
