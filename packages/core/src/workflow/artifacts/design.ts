@@ -14,6 +14,11 @@ export const REFERENCE_APP_MIME = "application/vnd.opencode.reference-app+json"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 const Base64 = Schema.String.check(Schema.isPattern(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/))
+const SpecPayload = Schema.Struct({
+  workflowID: Workflow.ID,
+  artifactKind: Schema.Literal(SPEC_KIND),
+  spec: DesignArtifact.Spec,
+}).annotate({ identifier: "WorkflowDesignArtifact.SpecPayload", ...exact })
 const ReferenceSourcePayload = Schema.Struct({
   path: DesignArtifact.SourcePath,
   sha256: DesignArtifact.Sha256,
@@ -23,6 +28,8 @@ const ReferenceSourcePayload = Schema.Struct({
 })
 const ReferencePayload = Schema.Struct({
   schemaVersion: Schema.Literal(1),
+  workflowID: Workflow.ID,
+  artifactKind: Schema.Literal(REFERENCE_APP_KIND),
   entrypoint: DesignArtifact.SourcePath,
   readySelector: Schema.NonEmptyString,
   projectStack: Schema.NonEmptyArray(Schema.NonEmptyString),
@@ -43,21 +50,22 @@ export interface ReferenceApp {
 
 export function commitSpec(workflowID: Workflow.ID, input: unknown): Workflow.ArtifactCommit {
   WorkflowSecretGuard.assertSafe(input)
-  const payload = Schema.decodeUnknownSync(DesignArtifact.Spec)(input)
+  const spec = Schema.decodeUnknownSync(DesignArtifact.Spec)(input)
+  const payload = Schema.decodeUnknownSync(SpecPayload)({ workflowID, artifactKind: SPEC_KIND, spec })
   return commit({
     kind: SPEC_KIND,
     mime: SPEC_MIME,
-    uri: `workflow://${workflowID}/design-spec.json`,
+    uri: specURI(workflowID),
     payload,
   })
 }
 
-export function decodeSpec(artifact: Workflow.ArtifactCommit): DesignArtifact.Spec {
-  const payload = metadataPayload(artifact)
+export function decodeSpec(artifact: Workflow.ArtifactCommit, expectedWorkflowID: Workflow.ID): DesignArtifact.Spec {
+  const payload = Schema.decodeUnknownSync(SpecPayload)(metadataPayload(artifact))
   WorkflowSecretGuard.assertSafe(payload)
-  const spec = Schema.decodeUnknownSync(DesignArtifact.Spec)(payload)
-  validateCommit(artifact, encode(spec), SPEC_KIND, SPEC_MIME)
-  return spec
+  if (payload.workflowID !== expectedWorkflowID) throw new Error("Design specification belongs to a different workflow")
+  validateCommit(artifact, encode(payload), SPEC_KIND, SPEC_MIME, specURI(payload.workflowID))
+  return payload.spec
 }
 
 export function commitReferenceApp(
@@ -67,31 +75,36 @@ export function commitReferenceApp(
 ): Workflow.ArtifactCommit {
   WorkflowSecretGuard.assertSafe(inputSpec)
   const spec = Schema.decodeUnknownSync(DesignArtifact.Spec)(inputSpec)
+  const expected = new Map(
+    spec.referenceApp.files.map((file) => [DesignArtifact.sourceCollisionKey(file.path), file] as const),
+  )
+  const actualKeys = new Set<string>()
   const actual = files.map((file) => {
     WorkflowSecretGuard.assertSafe(file)
     const path = Schema.decodeUnknownSync(DesignArtifact.SourcePath)(file.path)
+    const key = DesignArtifact.sourceCollisionKey(path)
+    if (actualKeys.has(key)) throw new Error("Reference source paths must be unique")
+    actualKeys.add(key)
     const content = new TextEncoder().encode(file.content)
+    const declared = expected.get(key)
+    const sha256 = Hash.sha256(Buffer.from(content))
+    if (!declared || declared.sha256 !== sha256 || declared.size !== content.byteLength)
+      throw new Error("Reference app files do not match the hashed design manifest")
     return {
-      path,
-      sha256: Hash.sha256(Buffer.from(content)),
+      path: declared.path,
+      sha256,
       size: content.byteLength,
       encoding: "base64" as const,
       contentBase64: Buffer.from(content).toString("base64"),
     }
   })
-  const expected = new Map(spec.referenceApp.files.map((file) => [file.path, file]))
-  if (
-    new Set(actual.map((file) => file.path)).size !== actual.length ||
-    actual.length !== expected.size ||
-    actual.some((file) => {
-      const declared = expected.get(file.path)
-      return !declared || declared.sha256 !== file.sha256 || declared.size !== file.size
-    })
-  ) {
+  if (actual.length !== expected.size) {
     throw new Error("Reference app files do not match the hashed design manifest")
   }
   const payload = Schema.decodeUnknownSync(ReferencePayload)({
     schemaVersion: 1,
+    workflowID,
+    artifactKind: REFERENCE_APP_KIND,
     entrypoint: spec.referenceApp.entrypoint,
     readySelector: spec.referenceApp.readySelector,
     projectStack: spec.projectStack,
@@ -100,19 +113,21 @@ export function commitReferenceApp(
   return commit({
     kind: REFERENCE_APP_KIND,
     mime: REFERENCE_APP_MIME,
-    uri: `workflow://${workflowID}/reference-app/manifest.json`,
+    uri: referenceURI(workflowID),
     payload,
   })
 }
 
-export function decodeReferenceApp(artifact: Workflow.ArtifactCommit): ReferenceApp {
+export function decodeReferenceApp(artifact: Workflow.ArtifactCommit, expectedWorkflowID: Workflow.ID): ReferenceApp {
   const payload = Schema.decodeUnknownSync(ReferencePayload)(metadataPayload(artifact))
   WorkflowSecretGuard.assertSafe(payload)
-  validateCommit(artifact, encode(payload), REFERENCE_APP_KIND, REFERENCE_APP_MIME)
+  if (payload.workflowID !== expectedWorkflowID) throw new Error("Reference app belongs to a different workflow")
+  validateCommit(artifact, encode(payload), REFERENCE_APP_KIND, REFERENCE_APP_MIME, referenceURI(payload.workflowID))
   const seen = new Set<string>()
   const files = payload.files.map((file) => {
-    if (seen.has(file.path)) throw new Error("Reference source paths must be unique")
-    seen.add(file.path)
+    const key = DesignArtifact.sourceCollisionKey(file.path)
+    if (seen.has(key)) throw new Error("Reference source paths must be unique")
+    seen.add(key)
     const content = Buffer.from(file.contentBase64, "base64")
     if (
       content.toString("base64") !== file.contentBase64 ||
@@ -127,7 +142,8 @@ export function decodeReferenceApp(artifact: Workflow.ArtifactCommit): Reference
     WorkflowSecretGuard.assertSafe(value)
     return { path: file.path, content: value }
   })
-  if (!seen.has(payload.entrypoint)) throw new Error("Reference entrypoint is missing from the durable source files")
+  if (!seen.has(DesignArtifact.sourceCollisionKey(payload.entrypoint)))
+    throw new Error("Reference entrypoint is missing from the durable source files")
   return {
     entrypoint: payload.entrypoint,
     readySelector: payload.readySelector,
@@ -177,14 +193,29 @@ function metadataPayload(artifact: Workflow.ArtifactCommit): unknown {
   return artifact.metadata.payload
 }
 
-function validateCommit(artifact: Workflow.ArtifactCommit, body: string, kind: string, mime: string): void {
+function validateCommit(
+  artifact: Workflow.ArtifactCommit,
+  body: string,
+  kind: string,
+  mime: string,
+  uri: string,
+): void {
   const encoded = new TextEncoder().encode(body)
   if (
     artifact.kind !== kind ||
     artifact.mime !== mime ||
+    artifact.uri !== uri ||
     artifact.sha256 !== Hash.sha256(Buffer.from(encoded)) ||
     artifact.size !== encoded.byteLength
   ) {
     throw new Error("Durable artifact payload does not match its commit")
   }
+}
+
+function specURI(workflowID: Workflow.ID): string {
+  return `workflow://${workflowID}/design-spec.json`
+}
+
+function referenceURI(workflowID: Workflow.ID): string {
+  return `workflow://${workflowID}/reference-app/manifest.json`
 }

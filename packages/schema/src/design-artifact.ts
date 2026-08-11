@@ -9,12 +9,17 @@ export const SafeIdentifier = Schema.NonEmptyString.check(Schema.isPattern(/^[a-
   identifier: "DesignArtifact.SafeIdentifier",
 })
 
+export function sourceCollisionKey(value: string): string {
+  return value.normalize("NFC").toLowerCase()
+}
+
 export const SourcePath = Schema.NonEmptyString.check(
   Schema.makeFilter<string>((value) => {
     if (
       value.includes("\\") ||
       value.includes(":") ||
       value.includes("%") ||
+      value !== value.normalize("NFC") ||
       value.startsWith("/") ||
       /^[A-Za-z]:/.test(value) ||
       /[\u0000-\u001f\u007f]/.test(value)
@@ -26,7 +31,7 @@ export const SourcePath = Schema.NonEmptyString.check(
     for (const segment of segments) {
       if (/[. ]$/.test(segment)) return "Source path segments must not end in a dot or space"
       const basename = segment.split(".")[0].toUpperCase()
-      if (/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(basename))
+      if (/^(?:CON|PRN|AUX|NUL|COM(?:[1-9]|¹|²|³)|LPT(?:[1-9]|¹|²|³))$/.test(basename))
         return "Source path must not contain a Windows device name"
     }
     return undefined
@@ -52,7 +57,7 @@ export const SourceFile = Schema.Struct({
 export interface SourceFile extends Schema.Schema.Type<typeof SourceFile> {}
 
 export const ReferenceApp = Schema.Struct({
-  entrypoint: Schema.NonEmptyString,
+  entrypoint: SourcePath,
   readySelector: Schema.NonEmptyString,
   files: Schema.NonEmptyArray(SourceFile),
   viewports: Schema.NonEmptyArray(Viewport),
@@ -118,9 +123,9 @@ const safePersistence = Schema.makeFilter<Schema.Schema.Type<typeof SpecShape>>(
 const internallyConsistent = Schema.makeFilter<Schema.Schema.Type<typeof SpecShape>>((value) => {
   const viewports = new Set(value.referenceApp.viewports.map((viewport) => viewport.name))
   if (viewports.size !== value.referenceApp.viewports.length) return "Reference viewport names must be unique"
-  const files = new Set(value.referenceApp.files.map((file) => file.path))
+  const files = new Set(value.referenceApp.files.map((file) => sourceCollisionKey(file.path)))
   if (files.size !== value.referenceApp.files.length) return "Reference source paths must be unique"
-  if (!value.referenceApp.files.some((file) => file.path === value.referenceApp.entrypoint))
+  if (!files.has(sourceCollisionKey(value.referenceApp.entrypoint)))
     return "Reference entrypoint must name a hashed reference-app file"
   if (value.responsiveRules.some((rule) => !viewports.has(rule.viewport)))
     return "Every responsive rule must target a configured reference viewport"

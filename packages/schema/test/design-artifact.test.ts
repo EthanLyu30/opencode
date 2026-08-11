@@ -186,11 +186,15 @@ describe("design and visual artifact schemas", () => {
       "src\\app.js",
       "src//app.js",
       "CON.js",
+      "COM¹.txt",
+      "com².js",
+      "LPT³.css",
       "assets/NUL.txt",
       "index.html:secret",
       "safe/%2e%2e/escape.js",
       "trailing./app.js",
       "control\u0000.js",
+      "cafe\u0301.js",
     ]) {
       expect(() =>
         Schema.decodeUnknownSync(DesignArtifact.Spec)({
@@ -209,6 +213,15 @@ describe("design and visual artifact schemas", () => {
         referenceApp: {
           ...design.referenceApp,
           files: [design.referenceApp.files[0], design.referenceApp.files[0]],
+        },
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(DesignArtifact.Spec)({
+        ...design,
+        referenceApp: {
+          ...design.referenceApp,
+          files: [design.referenceApp.files[0], { ...design.referenceApp.files[0], path: "INDEX.HTML" }],
         },
       }),
     ).toThrow()

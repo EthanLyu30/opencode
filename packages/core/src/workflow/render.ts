@@ -126,16 +126,16 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
     maxToolCalls: limits.maxToolCalls,
   }
 
-  const designed = yield* input.design({ route: WorkflowRouting.resolve({ role: "design", budget }) })
-  yield* Effect.try({
-    try: () => validateDesignResult(designed),
+  const rawDesigned = yield* input.design({ route: WorkflowRouting.resolve({ role: "design", budget }) })
+  const designed = yield* Effect.try({
+    try: () => validateDesignResult(rawDesigned),
     catch: (error) => (error instanceof Error ? error : new Error("Design result is invalid")),
   })
   usage = addUsage(usage, designed.usage)
   const specCommit = WorkflowDesignArtifact.commitSpec(input.workflowID, designed.spec)
-  const spec = WorkflowDesignArtifact.decodeSpec(specCommit)
+  const spec = WorkflowDesignArtifact.decodeSpec(specCommit, input.workflowID)
   const referenceCommit = WorkflowDesignArtifact.commitReferenceApp(input.workflowID, spec, designed.referenceApp.files)
-  const durableReference = WorkflowDesignArtifact.decodeReferenceApp(referenceCommit)
+  const durableReference = WorkflowDesignArtifact.decodeReferenceApp(referenceCommit, input.workflowID)
   artifacts.push(specCommit, referenceCommit)
   if (exhausted(limits, usage)) return approval("budget_exhausted", 0, artifacts, usage)
   const referenceUrl = yield* input.prepareReference({ artifact: referenceCommit, app: durableReference })
@@ -153,10 +153,14 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   })
   artifacts.push(...reference.map(WorkflowVisualReviewArtifact.commitScreenshot))
 
-  let implementation = yield* input.implement({
+  const rawImplementation = yield* input.implement({
     route: WorkflowRouting.resolve({ role: "implement", budget }),
     spec,
     referenceApp: durableReference,
+  })
+  let implementation = yield* Effect.try({
+    try: () => validateImplementationResult(rawImplementation, "Implementation result"),
+    catch: (error) => (error instanceof Error ? error : new Error("Implementation result is invalid")),
   })
   usage = addUsage(usage, implementation.usage)
   if (exhausted(limits, usage)) return approval("budget_exhausted", 0, artifacts, usage)
@@ -175,12 +179,16 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
     artifacts.push(...candidate.map(WorkflowVisualReviewArtifact.commitScreenshot))
     const images = [...reference, ...candidate]
     const evidence = images.map(({ bytes: _, ...image }) => image)
-    const reviewed = yield* input.review({
+    const rawReviewed = yield* input.review({
       route: WorkflowRouting.resolve({ role: "visual_review", budget }),
       message: WorkflowVisualReviewArtifact.reviewMessage(spec, images),
       evidence,
       spec,
       revision,
+    })
+    const reviewed = yield* Effect.try({
+      try: () => validateReviewResult(rawReviewed),
+      catch: (error) => (error instanceof Error ? error : new Error("Visual review result is invalid")),
     })
     usage = addUsage(usage, reviewed.usage)
     WorkflowSecretGuard.assertSafe(reviewed.review)
@@ -201,11 +209,15 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
       usage,
     })
     if (decision.type === "approval") return approval(decision.reason, revision, artifacts, usage)
-    implementation = yield* input.repair({
+    const rawRepair = yield* input.repair({
       route: WorkflowRouting.resolve({ role: "repair", budget }),
       spec,
       review,
       revision: decision.revision,
+    })
+    implementation = yield* Effect.try({
+      try: () => validateImplementationResult(rawRepair, "Repair result"),
+      catch: (error) => (error instanceof Error ? error : new Error("Repair result is invalid")),
     })
     usage = addUsage(usage, implementation.usage)
     revision = decision.revision
@@ -289,11 +301,11 @@ function measuredReviewUsage(usage: Workflow.Usage): VisualReview.Usage {
   return { tokens: usage.tokens, turns: usage.turns, toolCalls: usage.toolCalls }
 }
 
-function validateDesignResult(result: DesignResult): void {
+function validateDesignResult(result: DesignResult): DesignResult {
   WorkflowSecretGuard.assertSafe(result)
+  assertPlainObject(result, "Design result")
   assertExactKeys(result, ["referenceApp", "spec", "usage"], "Design result")
-  if (result.referenceApp === null || typeof result.referenceApp !== "object" || Array.isArray(result.referenceApp))
-    throw new Error("Design referenceApp must be an object")
+  assertPlainObject(result.referenceApp, "Design referenceApp")
   assertExactKeys(result.referenceApp, ["files"], "Design referenceApp")
   if (!Array.isArray(result.referenceApp.files) || result.referenceApp.files.length === 0)
     throw new Error("Design referenceApp must contain source files")
@@ -304,6 +316,52 @@ function validateDesignResult(result: DesignResult): void {
     if (typeof file.path !== "string" || typeof file.content !== "string")
       throw new Error("Design reference source path and content must be strings")
   }
+  return { ...result, usage: decodeUsage(result.usage) }
+}
+
+function validateImplementationResult(result: ImplementationResult, name: string): ImplementationResult {
+  WorkflowSecretGuard.assertSafe(result)
+  assertPlainObject(result, name)
+  assertExactKeys(result, ["url", "usage"], name)
+  return { url: validateUrl(result.url, name), usage: decodeUsage(result.usage) }
+}
+
+function validateReviewResult(result: ReviewResult): ReviewResult {
+  WorkflowSecretGuard.assertSafe(result)
+  assertPlainObject(result, "Visual review result")
+  assertExactKeys(result, ["review", "usage"], "Visual review result")
+  if (result.review === null || typeof result.review !== "object" || Array.isArray(result.review))
+    throw new Error("Visual review model output must be an object")
+  return { review: result.review, usage: decodeUsage(result.usage) }
+}
+
+function decodeUsage(input: unknown): Workflow.Usage {
+  WorkflowSecretGuard.assertSafe(input)
+  return Schema.decodeUnknownSync(Workflow.Usage)(input, { onExcessProperty: "error" })
+}
+
+function validateUrl(input: unknown, name: string): string {
+  if (typeof input !== "string" || input.length === 0) throw new Error(`${name} URL must not be empty`)
+  WorkflowSecretGuard.assertSafe(input)
+  let parsed: URL
+  try {
+    parsed = new URL(input)
+  } catch {
+    throw new Error(`${name} URL must be absolute`)
+  }
+  if (!new Set(["http:", "https:", "file:"]).has(parsed.protocol) || parsed.username || parsed.password)
+    throw new Error(`${name} URL is unsafe`)
+  return input
+}
+
+function assertPlainObject(value: unknown, name: string): asserts value is Record<string, unknown> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  )
+    throw new Error(`${name} must be a plain object`)
 }
 
 function assertExactKeys(value: object, expected: ReadonlyArray<string>, name: string): void {

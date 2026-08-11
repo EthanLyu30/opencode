@@ -1,6 +1,7 @@
 export * as WorkflowVisualReviewArtifact from "./visual-review"
 
 import { Message } from "@opencode-ai/llm"
+import { NonNegativeInt } from "@opencode-ai/schema/schema"
 import { VisualReview } from "@opencode-ai/schema/visual-review"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { Schema } from "effect"
@@ -18,6 +19,12 @@ const ScreenshotPayload = Schema.Struct({
   image: VisualReview.EvidenceImage,
   dataBase64: Schema.String,
 }).annotate({ identifier: "WorkflowVisualReviewArtifact.ScreenshotPayload", ...exact })
+const ReviewPayload = Schema.Struct({
+  workflowID: Workflow.ID,
+  artifactKind: Schema.Literal(REVIEW_KIND),
+  revision: NonNegativeInt,
+  review: VisualReview.Artifact,
+}).annotate({ identifier: "WorkflowVisualReviewArtifact.ReviewPayload", ...exact })
 
 const pngSignature = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
@@ -50,6 +57,20 @@ export function assertPng(bytes: Uint8Array): void {
       const dimensions = new DataView(data.buffer, data.byteOffset, data.byteLength)
       if (dimensions.getUint32(0) === 0 || dimensions.getUint32(4) === 0)
         throw new Error("PNG dimensions must be positive")
+      const bitDepth = data[8]
+      const colorType = data[9]
+      const validBitDepths: Readonly<Record<number, ReadonlyArray<number>>> = {
+        0: [1, 2, 4, 8, 16],
+        2: [8, 16],
+        3: [1, 2, 4, 8],
+        4: [8, 16],
+        6: [8, 16],
+      }
+      if (!validBitDepths[colorType]?.includes(bitDepth))
+        throw new Error("PNG IHDR color type and bit depth are invalid")
+      if (data[10] !== 0) throw new Error("PNG IHDR compression method is invalid")
+      if (data[11] !== 0) throw new Error("PNG IHDR filter method is invalid")
+      if (data[12] !== 0 && data[12] !== 1) throw new Error("PNG IHDR interlace method is invalid")
     } else if (type === "IHDR") {
       throw new Error("PNG must contain exactly one leading IHDR chunk")
     }
@@ -195,12 +216,20 @@ export function reviewMessage(spec: unknown, images: ReadonlyArray<CapturedImage
 
 export function commitReview(workflowID: Workflow.ID, input: unknown): Workflow.ArtifactCommit {
   WorkflowSecretGuard.assertSafe(input)
-  const payload = Schema.decodeUnknownSync(VisualReview.Artifact)(input)
+  const review = Schema.decodeUnknownSync(VisualReview.Artifact)(input)
+  if (review.evidence.some((image) => image.workflowID !== workflowID))
+    throw new Error("Visual review evidence belongs to a different workflow")
+  const payload = Schema.decodeUnknownSync(ReviewPayload)({
+    workflowID,
+    artifactKind: REVIEW_KIND,
+    revision: review.revision,
+    review,
+  })
   const body = WorkflowDesignArtifact.encode(payload)
   const encoded = new TextEncoder().encode(body)
   return Workflow.ArtifactCommit.make({
     kind: REVIEW_KIND,
-    uri: `workflow://${workflowID}/visual-review-r${payload.revision}.json`,
+    uri: reviewURI(workflowID, review.revision),
     mime: REVIEW_MIME,
     sha256: Hash.sha256(Buffer.from(encoded)),
     size: encoded.byteLength,
@@ -208,20 +237,31 @@ export function commitReview(workflowID: Workflow.ID, input: unknown): Workflow.
   })
 }
 
-export function decodeReview(artifact: Workflow.ArtifactCommit): VisualReview.Artifact {
-  const payload = metadataPayload(artifact)
+export function decodeReview(
+  artifact: Workflow.ArtifactCommit,
+  expectedWorkflowID: Workflow.ID,
+): VisualReview.Artifact {
+  const payload = Schema.decodeUnknownSync(ReviewPayload)(metadataPayload(artifact))
   WorkflowSecretGuard.assertSafe(payload)
-  const review = Schema.decodeUnknownSync(VisualReview.Artifact)(payload)
-  const encoded = new TextEncoder().encode(WorkflowDesignArtifact.encode(review))
+  if (payload.workflowID !== expectedWorkflowID) throw new Error("Visual review belongs to a different workflow")
+  if (payload.revision !== payload.review.revision) throw new Error("Visual review revision is not canonical")
+  if (payload.review.evidence.some((image) => image.workflowID !== payload.workflowID))
+    throw new Error("Visual review evidence belongs to a different workflow")
+  const encoded = new TextEncoder().encode(WorkflowDesignArtifact.encode(payload))
   if (
     artifact.kind !== REVIEW_KIND ||
     artifact.mime !== REVIEW_MIME ||
+    artifact.uri !== reviewURI(payload.workflowID, payload.revision) ||
     artifact.sha256 !== Hash.sha256(Buffer.from(encoded)) ||
     artifact.size !== encoded.byteLength
   ) {
     throw new Error("Visual review payload does not match its durable commit")
   }
-  return review
+  return payload.review
+}
+
+function reviewURI(workflowID: Workflow.ID, revision: number): string {
+  return `workflow://${workflowID}/visual-review-r${revision}.json`
 }
 
 function metadataPayload(artifact: Workflow.ArtifactCommit): unknown {

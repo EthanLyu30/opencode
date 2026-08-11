@@ -29,6 +29,31 @@ const withoutPngChunk = (input: Uint8Array, removedType: string) => {
   return Uint8Array.from(output)
 }
 
+const pngCrc32 = (type: Uint8Array, data: Uint8Array) => {
+  let crc = 0xffffffff
+  for (const bytes of [type, data]) {
+    for (const value of bytes) {
+      crc ^= value
+      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0)
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+const withIhdr = (
+  input: Uint8Array,
+  field: "bitDepth" | "colorType" | "compression" | "filter" | "interlace",
+  value: number,
+) => {
+  const output = input.slice()
+  const offsets = { bitDepth: 24, colorType: 25, compression: 26, filter: 27, interlace: 28 } as const
+  output[offsets[field]] = value
+  const type = output.slice(12, 16)
+  const data = output.slice(16, 29)
+  new DataView(output.buffer, output.byteOffset + 29, 4).setUint32(0, pngCrc32(type, data))
+  return output
+}
+
 const spec = {
   schemaVersion: 1 as const,
   goals: ["Let users review a release"],
@@ -242,36 +267,71 @@ describe("Kimi design and visual review loop", () => {
 
   test("reconstructs every durable payload without caller-held bodies and detects tampering", () => {
     const workflowID = Workflow.ID.make("wfl_codec")
+    const otherWorkflowID = Workflow.ID.make("wfl_codec_other")
     const specCommit = WorkflowDesignArtifact.commitSpec(workflowID, spec)
-    expect(WorkflowDesignArtifact.encode(WorkflowDesignArtifact.decodeSpec(specCommit))).toBe(
+    expect(WorkflowDesignArtifact.commitSpec(otherWorkflowID, spec).sha256).not.toBe(specCommit.sha256)
+    expect(WorkflowDesignArtifact.encode(WorkflowDesignArtifact.decodeSpec(specCommit, workflowID))).toBe(
       WorkflowDesignArtifact.encode(spec),
     )
+    expect(() => WorkflowDesignArtifact.decodeSpec(specCommit, otherWorkflowID)).toThrow()
     expect(() =>
-      WorkflowDesignArtifact.decodeSpec({
-        ...specCommit,
-        metadata: { payload: { ...spec, goals: ["tampered"] } },
-      }),
+      WorkflowDesignArtifact.decodeSpec(
+        { ...specCommit, uri: "workflow://wfl_codec_other/design-spec.json" },
+        workflowID,
+      ),
+    ).toThrow()
+    expect(() =>
+      WorkflowDesignArtifact.decodeSpec(
+        {
+          ...specCommit,
+          metadata: {
+            payload: {
+              workflowID,
+              artifactKind: WorkflowDesignArtifact.SPEC_KIND,
+              spec: { ...spec, goals: ["tampered"] },
+            },
+          },
+        },
+        workflowID,
+      ),
     ).toThrow()
 
     const appCommit = WorkflowDesignArtifact.commitReferenceApp(workflowID, decodedSpec, [
       { path: "index.html", content: referenceSource },
     ])
-    expect(WorkflowDesignArtifact.decodeReferenceApp(appCommit).files).toEqual([
+    expect(
+      WorkflowDesignArtifact.commitReferenceApp(otherWorkflowID, decodedSpec, [
+        { path: "index.html", content: referenceSource },
+      ]).sha256,
+    ).not.toBe(appCommit.sha256)
+    expect(WorkflowDesignArtifact.decodeReferenceApp(appCommit, workflowID).files).toEqual([
       { path: "index.html", content: referenceSource },
     ])
+    expect(() => WorkflowDesignArtifact.decodeReferenceApp(appCommit, otherWorkflowID)).toThrow()
     expect(() =>
-      WorkflowDesignArtifact.decodeReferenceApp({
-        ...appCommit,
-        metadata: {
-          payload: {
-            schemaVersion: 1,
-            entrypoint: "index.html",
-            readySelector: "[data-render-ready]",
-            projectStack: ["html", "css", "javascript"],
-            files: [{ path: "index.html", sha256: hash, size: 1, encoding: "base64", contentBase64: "QQ==" }],
+      WorkflowDesignArtifact.decodeReferenceApp(
+        { ...appCommit, uri: "workflow://wfl_codec_other/reference-app/manifest.json" },
+        workflowID,
+      ),
+    ).toThrow()
+    expect(() =>
+      WorkflowDesignArtifact.decodeReferenceApp(
+        {
+          ...appCommit,
+          metadata: {
+            payload: {
+              schemaVersion: 1,
+              workflowID,
+              artifactKind: WorkflowDesignArtifact.REFERENCE_APP_KIND,
+              entrypoint: "index.html",
+              readySelector: "[data-render-ready]",
+              projectStack: ["html", "css", "javascript"],
+              files: [{ path: "index.html", sha256: hash, size: 1, encoding: "base64", contentBase64: "QQ==" }],
+            },
           },
         },
-      }),
+        workflowID,
+      ),
     ).toThrow()
 
     const captured = WorkflowVisualReviewArtifact.capturedImage({
@@ -321,10 +381,23 @@ describe("Kimi design and visual review loop", () => {
     ].map(({ bytes: _, ...image }) => image)
     const review = Schema.decodeUnknownSync(VisualReview.Artifact)({ ...finding(0, "wfl_codec"), evidence })
     const reviewCommit = WorkflowVisualReviewArtifact.commitReview(workflowID, review)
-    expect(WorkflowDesignArtifact.encode(WorkflowVisualReviewArtifact.decodeReview(reviewCommit))).toBe(
+    expect(WorkflowDesignArtifact.encode(WorkflowVisualReviewArtifact.decodeReview(reviewCommit, workflowID))).toBe(
       WorkflowDesignArtifact.encode(review),
     )
-    expect(() => WorkflowVisualReviewArtifact.decodeReview({ ...reviewCommit, size: reviewCommit.size + 1 })).toThrow()
+    expect(() => WorkflowVisualReviewArtifact.decodeReview(reviewCommit, otherWorkflowID)).toThrow()
+    expect(() =>
+      WorkflowVisualReviewArtifact.decodeReview(
+        { ...reviewCommit, uri: "workflow://wfl_codec_other/visual-review-r0.json" },
+        workflowID,
+      ),
+    ).toThrow()
+    expect(() =>
+      WorkflowVisualReviewArtifact.decodeReview({ ...reviewCommit, size: reviewCommit.size + 1 }, workflowID),
+    ).toThrow()
+
+    const otherEvidence = evidence.map((item) => ({ ...item, workflowID: otherWorkflowID }))
+    const otherReview = Schema.decodeUnknownSync(VisualReview.Artifact)({ ...review, evidence: otherEvidence })
+    expect(() => WorkflowVisualReviewArtifact.commitReview(workflowID, otherReview)).toThrow()
 
     expect(() => Schema.decodeUnknownSync(Workflow.ArtifactCommit)({ ...specCommit, sha256: "bad" })).toThrow()
   })
@@ -338,6 +411,11 @@ describe("Kimi design and visual review loop", () => {
       withoutPngChunk(png, "IDAT"),
       withoutPngChunk(png, "IEND"),
       Uint8Array.from([...png, 0]),
+      withIhdr(png, "compression", 1),
+      withIhdr(png, "filter", 1),
+      withIhdr(png, "interlace", 2),
+      withIhdr(png, "colorType", 1),
+      withIhdr(withIhdr(png, "colorType", 2), "bitDepth", 1),
     ]
     for (const bytes of malformed) {
       expect(() =>
@@ -413,7 +491,68 @@ describe("Kimi design and visual review loop", () => {
     expect(result).toMatchObject({ status: "approval", reason: "budget_exhausted", revision: 0 })
     const commit = result.artifacts.find((artifact) => artifact.kind === WorkflowVisualReviewArtifact.REVIEW_KIND)
     expect(commit).toBeDefined()
-    expect(WorkflowVisualReviewArtifact.decodeReview(commit!).usage).toEqual({ tokens: 1, turns: 1, toolCalls: 0 })
+    expect(WorkflowVisualReviewArtifact.decodeReview(commit!, Workflow.ID.make("wfl_review_budget")).usage).toEqual({
+      tokens: 1,
+      turns: 1,
+      toolCalls: 0,
+    })
+  })
+
+  test("rejects untrusted usage and non-exact implementation, repair, and review results", async () => {
+    const cases = [
+      { name: "design usage", phase: "design", badUsage: { ...usage(1), tokens: -1 } },
+      { name: "implementation usage", phase: "implement", badUsage: { ...usage(1), unexpected: 1 } },
+      { name: "review usage", phase: "review", badUsage: { ...usage(1), tokens: Number.NaN } },
+      { name: "repair usage", phase: "repair", badUsage: { ...usage(1), toolCalls: -1 } },
+      { name: "implementation result", phase: "implement-result", badUsage: usage(1) },
+      { name: "implementation URL", phase: "implement-url", badUsage: usage(1) },
+      { name: "review result", phase: "review-result", badUsage: usage(1) },
+      { name: "repair result", phase: "repair-result", badUsage: usage(1) },
+    ] as const
+
+    for (const item of cases) {
+      const workflowID = Workflow.ID.make(`wfl_invalid_${item.phase.replaceAll("-", "_")}`)
+      const mustRepair = item.phase === "repair" || item.phase === "repair-result"
+      const error = await WorkflowRender.run({
+        workflowID,
+        limits: { maxRevisions: 1, maxTokens: 20_000, maxTurns: 20, maxToolCalls: 20 },
+        design: () =>
+          Effect.succeed({
+            spec,
+            referenceApp: { files: [{ path: "index.html", content: referenceSource }] },
+            usage: item.phase === "design" ? item.badUsage : usage(1),
+          }),
+        prepareReference: () => Effect.succeed("http://host-preview.test/index.html"),
+        implement: () =>
+          Effect.succeed({
+            url: item.phase === "implement-url" ? "" : "http://implementation.test/index.html",
+            usage: item.phase === "implement" ? item.badUsage : usage(1),
+            ...(item.phase === "implement-result" ? { unexpected: true } : {}),
+          }),
+        repair: () =>
+          Effect.succeed({
+            url: "http://implementation.test/repaired.html",
+            usage: item.phase === "repair" ? item.badUsage : usage(1),
+            ...(item.phase === "repair-result" ? { unexpected: true } : {}),
+          }),
+        review: ({ evidence, revision }) =>
+          Effect.succeed({
+            review: mustRepair
+              ? { ...finding(revision, workflowID), evidence }
+              : {
+                  ...finding(revision, workflowID),
+                  verdict: "pass" as const,
+                  score: 100,
+                  evidence,
+                  findings: [],
+                },
+            usage: item.phase === "review" ? item.badUsage : usage(1),
+            ...(item.phase === "review-result" ? { unexpected: true } : {}),
+          }),
+        capture: () => Effect.succeed(png.slice()),
+      }).pipe(Effect.flip, Effect.runPromise)
+      expect(error, item.name).toBeInstanceOf(Error)
+    }
   })
 
   test("production capture rejects non-PNG browser output", async () => {
@@ -484,6 +623,8 @@ describe("Kimi design and visual review loop", () => {
     const invalidBytes = Buffer.from([0xff])
     const payload = {
       schemaVersion: 1,
+      workflowID,
+      artifactKind: WorkflowDesignArtifact.REFERENCE_APP_KIND,
       entrypoint: "index.html",
       readySelector: "[data-render-ready]",
       projectStack: ["html", "css", "javascript"],
@@ -499,12 +640,15 @@ describe("Kimi design and visual review loop", () => {
     }
     const body = WorkflowDesignArtifact.encode(payload)
     expect(() =>
-      WorkflowDesignArtifact.decodeReferenceApp({
-        ...commit,
-        sha256: createHash("sha256").update(body).digest("hex"),
-        size: new TextEncoder().encode(body).byteLength,
-        metadata: { payload },
-      }),
+      WorkflowDesignArtifact.decodeReferenceApp(
+        {
+          ...commit,
+          sha256: createHash("sha256").update(body).digest("hex"),
+          size: new TextEncoder().encode(body).byteLength,
+          metadata: { payload },
+        },
+        workflowID,
+      ),
     ).toThrow()
   })
 })
