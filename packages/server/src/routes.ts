@@ -11,6 +11,7 @@ import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { LocationServiceMap } from "@opencode-ai/core/location-service-map"
 import { SessionExecutionLocal } from "@opencode-ai/core/session/execution/local"
 import { WorkflowV2 } from "@opencode-ai/core/workflow"
+import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
@@ -33,6 +34,7 @@ const applicationServices = LayerNode.group([
   ToolOutputStore.cleanupNode,
   SessionV2.node,
   WorkflowV2.node,
+  ResponsesV2.node,
   PermissionSaved.node,
   PtyTicket.node,
   Credential.node,

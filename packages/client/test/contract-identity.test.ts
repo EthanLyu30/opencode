@@ -19,6 +19,7 @@ import { SessionInput } from "@opencode-ai/schema/session-input"
 import { SessionMessage } from "@opencode-ai/schema/session-message"
 import { Workspace } from "@opencode-ai/schema/workspace"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { Responses } from "@opencode-ai/schema/responses"
 import { Api } from "@opencode-ai/server/api"
 import { compile, emitPromise } from "@opencode-ai/httpapi-codegen"
 import { ClientApi, endpointNames, groupNames, omitEndpoints } from "../src/contract"
@@ -34,12 +35,16 @@ test("Core and Server reuse the authoritative Schema and Protocol values", () =>
   expect(CoreWorkflow.Info).toBe(Workflow.Info)
   expect(Api.groups["server.session"].identifier).toBe("server.session")
   expect(Api.groups["server.workflow"].identifier).toBe("server.workflow")
+  expect(Api.groups["server.responses"].identifier).toBe("server.responses")
+  expect(Api.groups["server.conversation"].identifier).toBe("server.conversation")
   expect(Object.keys(ClientApi.groups)).toEqual(Object.keys(Api.groups))
   expect(Session.ID.create()).toStartWith("ses_")
   expect(Project.ID.global).toBe("global")
   expect(Provider.ID.anthropic).toBe("anthropic")
   expect(Workspace.ID.create()).toStartWith("wrk_")
   expect(Workflow.ID.create()).toStartWith("wfl_")
+  expect(Responses.ID.create()).toStartWith("resp_")
+  expect(Responses.ConversationID.create()).toStartWith("conv_")
 })
 
 test("client and Server contracts generate identically", () => {

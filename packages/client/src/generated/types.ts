@@ -92,6 +92,52 @@ export type WorkflowStageNotFoundError = {
 export const isWorkflowStageNotFoundError = (value: unknown): value is WorkflowStageNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "WorkflowStageNotFoundError"
 
+export type UnsupportedCapabilityError = {
+  readonly _tag: "UnsupportedCapabilityError"
+  readonly capability: string
+  readonly message: string
+  readonly supportedAlternatives: ReadonlyArray<string>
+}
+export const isUnsupportedCapabilityError = (value: unknown): value is UnsupportedCapabilityError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "UnsupportedCapabilityError"
+
+export type UnsupportedModelCapabilityError = {
+  readonly _tag: "UnsupportedModelCapabilityError"
+  readonly provider: string
+  readonly model: string
+  readonly required: string
+  readonly supported: ReadonlyArray<string>
+  readonly planned: boolean
+  readonly message: string
+}
+export const isUnsupportedModelCapabilityError = (value: unknown): value is UnsupportedModelCapabilityError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "UnsupportedModelCapabilityError"
+
+export type ResponseConflictError = {
+  readonly _tag: "ResponseConflictError"
+  readonly resourceID: string
+  readonly operation: string
+  readonly message: string
+}
+export const isResponseConflictError = (value: unknown): value is ResponseConflictError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ResponseConflictError"
+
+export type ResponseNotFoundError = {
+  readonly _tag: "ResponseNotFoundError"
+  readonly responseID: string
+  readonly message: string
+}
+export const isResponseNotFoundError = (value: unknown): value is ResponseNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ResponseNotFoundError"
+
+export type ConversationNotFoundError = {
+  readonly _tag: "ConversationNotFoundError"
+  readonly conversationID: string
+  readonly message: string
+}
+export const isConversationNotFoundError = (value: unknown): value is ConversationNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ConversationNotFoundError"
+
 export type ProviderNotFoundError = {
   readonly _tag: "ProviderNotFoundError"
   readonly providerID: string
@@ -714,7 +760,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.agent.switched"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -727,7 +779,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.model.switched"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -740,7 +798,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.moved"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -753,7 +817,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.prompted"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -780,7 +850,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.prompt.admitted"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -807,7 +883,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.context.updated"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -820,7 +902,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.synthetic"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -833,7 +921,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.shell.started"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -847,7 +941,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.shell.ended"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -860,7 +960,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.step.started"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -875,7 +981,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.step.ended"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -897,7 +1009,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.step.failed"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -910,7 +1028,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.text.started"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -923,7 +1047,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.text.ended"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -937,7 +1067,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.tool.input.started"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -951,7 +1087,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.tool.input.ended"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -965,7 +1107,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.tool.called"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -984,7 +1132,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.tool.progress"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -1002,7 +1156,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.tool.success"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -1026,7 +1186,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.tool.failed"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -1045,7 +1211,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.reasoning.started"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -1059,7 +1231,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.reasoning.ended"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -1074,7 +1252,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.retried"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -1094,7 +1278,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.compaction.started"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -1107,7 +1297,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.compaction.ended"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -1122,7 +1318,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.revert.staged"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly timestamp: number
@@ -1146,7 +1348,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.revert.cleared"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: { readonly timestamp: number; readonly sessionID: string }
       }
@@ -1154,7 +1362,13 @@ export type SessionsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.revert.committed"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: { readonly timestamp: number; readonly sessionID: string; readonly messageID: string }
       }
@@ -1172,7 +1386,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.agent.switched"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1185,7 +1405,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.model.switched"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1198,7 +1424,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.moved"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1211,7 +1443,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.prompted"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1238,7 +1476,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.prompt.admitted"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1265,7 +1509,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.context.updated"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1278,7 +1528,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.synthetic"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1291,7 +1547,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.shell.started"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1305,7 +1567,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.shell.ended"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1318,7 +1586,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.step.started"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1333,7 +1607,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.step.ended"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1355,7 +1635,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.step.failed"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1368,7 +1654,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.text.started"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1381,7 +1673,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.text.ended"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1395,7 +1693,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.tool.input.started"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1409,7 +1713,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.tool.input.ended"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1423,7 +1733,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.tool.called"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1442,7 +1758,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.tool.progress"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1460,7 +1782,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.tool.success"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1484,7 +1812,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.tool.failed"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1503,7 +1837,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.reasoning.started"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1517,7 +1857,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.reasoning.ended"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1532,7 +1878,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.retried"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1552,7 +1904,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.compaction.started"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1565,7 +1923,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.compaction.ended"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1580,7 +1944,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.revert.staged"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly timestamp: number
@@ -1604,7 +1974,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.revert.cleared"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: { readonly timestamp: number; readonly sessionID: string }
     }
@@ -1612,7 +1988,13 @@ export type SessionsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.revert.committed"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: { readonly timestamp: number; readonly sessionID: string; readonly messageID: string }
     }
@@ -2110,7 +2492,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.created"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2150,7 +2538,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.started"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: { readonly workflowID: string; readonly timestamp: number }
       }
@@ -2158,7 +2552,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.stage.queued"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: { readonly workflowID: string; readonly timestamp: number; readonly stageID: string }
       }
@@ -2166,7 +2566,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.stage.leased"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2181,7 +2587,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.stage.started"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2195,7 +2607,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.artifact.created"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2219,7 +2637,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.stage.retry_scheduled"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2257,7 +2681,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.stage.succeeded"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2278,7 +2708,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.stage.failed"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2316,7 +2752,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.approval.requested"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2352,7 +2794,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.approval.resolved"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2365,7 +2813,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.budget.threshold_reached"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2391,7 +2845,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.budget.updated"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2409,7 +2869,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.cancel.requested"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: { readonly workflowID: string; readonly timestamp: number }
       }
@@ -2417,7 +2883,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.stage.cancelled"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2432,7 +2904,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.cancelled"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: { readonly workflowID: string; readonly timestamp: number }
       }
@@ -2440,7 +2918,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.succeeded"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2457,7 +2941,13 @@ export type WorkflowsHistoryOutput = {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.failed"
-        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: {
           readonly workflowID: string
@@ -2501,7 +2991,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.created"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2541,7 +3037,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.started"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: { readonly workflowID: string; readonly timestamp: number }
     }
@@ -2549,7 +3051,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.stage.queued"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: { readonly workflowID: string; readonly timestamp: number; readonly stageID: string }
     }
@@ -2557,7 +3065,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.stage.leased"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2572,7 +3086,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.stage.started"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2586,7 +3106,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.artifact.created"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2610,7 +3136,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.stage.retry_scheduled"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2648,7 +3180,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.stage.succeeded"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2669,7 +3207,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.stage.failed"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2707,7 +3251,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.approval.requested"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2743,7 +3293,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.approval.resolved"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2756,7 +3312,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.budget.threshold_reached"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2782,7 +3344,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.budget.updated"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2800,7 +3368,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.cancel.requested"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: { readonly workflowID: string; readonly timestamp: number }
     }
@@ -2808,7 +3382,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.stage.cancelled"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2823,7 +3403,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.cancelled"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: { readonly workflowID: string; readonly timestamp: number }
     }
@@ -2831,7 +3417,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.succeeded"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2848,7 +3440,13 @@ export type WorkflowsEventsOutput =
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.failed"
-      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: {
         readonly workflowID: string
@@ -2946,6 +3544,2765 @@ export type WorkflowsResolveRecoveryInput = {
 }
 
 export type WorkflowsResolveRecoveryOutput = void
+
+export type ResponsesCreateInput = {
+  readonly id?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["id"]
+  readonly workflowID: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["workflowID"]
+  readonly model: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["model"]
+  readonly background: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["background"]
+  readonly store: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["store"]
+  readonly previousResponseID?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["previousResponseID"]
+  readonly conversationID?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["conversationID"]
+  readonly requestHash: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["requestHash"]
+  readonly input: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["input"]
+  readonly tools?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["tools"]
+  readonly include?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["include"]
+  readonly prompt?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["prompt"]
+  readonly truncation?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["truncation"]
+  readonly stream?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["stream"]
+  readonly instructions?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["instructions"]
+  readonly temperature?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["temperature"]
+  readonly topP?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["topP"]
+  readonly top_p?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["top_p"]
+  readonly maxOutputTokens?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["maxOutputTokens"]
+  readonly max_output_tokens?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["max_output_tokens"]
+  readonly topLogprobs?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["topLogprobs"]
+  readonly top_logprobs?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["top_logprobs"]
+  readonly toolChoice?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["toolChoice"]
+  readonly tool_choice?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["tool_choice"]
+  readonly reasoning?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["reasoning"]
+  readonly text?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["text"]
+  readonly user?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["user"]
+  readonly parallelToolCalls?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["parallelToolCalls"]
+  readonly parallel_tool_calls?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["parallel_tool_calls"]
+  readonly maxToolCalls?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["maxToolCalls"]
+  readonly max_tool_calls?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["max_tool_calls"]
+  readonly metadata?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["metadata"]
+  readonly moderation?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["moderation"]
+  readonly serviceTier?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["serviceTier"]
+  readonly service_tier?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["service_tier"]
+  readonly safetyIdentifier?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["safetyIdentifier"]
+  readonly safety_identifier?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["safety_identifier"]
+  readonly promptCacheKey?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["promptCacheKey"]
+  readonly prompt_cache_key?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["prompt_cache_key"]
+  readonly promptCacheRetention?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["promptCacheRetention"]
+  readonly prompt_cache_retention?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["prompt_cache_retention"]
+  readonly promptCacheOptions?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["promptCacheOptions"]
+  readonly prompt_cache_options?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["prompt_cache_options"]
+  readonly contextManagement?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["contextManagement"]
+  readonly context_management?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["context_management"]
+  readonly streamOptions?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["streamOptions"]
+  readonly stream_options?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["stream_options"]
+  readonly previous_response_id?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["previous_response_id"]
+  readonly conversation?: {
+    readonly id?: string
+    readonly workflowID: string
+    readonly model: string
+    readonly background: boolean
+    readonly store: boolean
+    readonly previousResponseID?: string
+    readonly conversationID?: string
+    readonly requestHash: string
+    readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+    readonly tools?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly include?: ReadonlyArray<string> | null
+    readonly prompt?: { readonly [x: string]: JsonValue } | null
+    readonly truncation?: string | null
+    readonly stream?: boolean | null
+    readonly instructions?: string | null
+    readonly temperature?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly topP?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly top_p?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly maxOutputTokens?: number | null
+    readonly max_output_tokens?: number | null
+    readonly topLogprobs?: number | null
+    readonly top_logprobs?: number | null
+    readonly toolChoice?: string | { readonly [x: string]: JsonValue } | null
+    readonly tool_choice?: string | { readonly [x: string]: JsonValue } | null
+    readonly reasoning?: { readonly [x: string]: JsonValue } | null
+    readonly text?: { readonly [x: string]: JsonValue } | null
+    readonly user?: string | null
+    readonly parallelToolCalls?: boolean | null
+    readonly parallel_tool_calls?: boolean | null
+    readonly maxToolCalls?: number | null
+    readonly max_tool_calls?: number | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly moderation?: { readonly [x: string]: JsonValue } | null
+    readonly serviceTier?: string | null
+    readonly service_tier?: string | null
+    readonly safetyIdentifier?: string | null
+    readonly safety_identifier?: string | null
+    readonly promptCacheKey?: string | null
+    readonly prompt_cache_key?: string | null
+    readonly promptCacheRetention?: string | null
+    readonly prompt_cache_retention?: string | null
+    readonly promptCacheOptions?: { readonly [x: string]: JsonValue } | null
+    readonly prompt_cache_options?: { readonly [x: string]: JsonValue } | null
+    readonly contextManagement?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly context_management?: ReadonlyArray<{ readonly [x: string]: JsonValue }> | null
+    readonly streamOptions?: { readonly [x: string]: JsonValue } | null
+    readonly stream_options?: { readonly [x: string]: JsonValue } | null
+    readonly previous_response_id?: string | null
+    readonly conversation?: string | null
+  }["conversation"]
+}
+
+export type ResponsesCreateOutput = {
+  readonly id: string
+  readonly workflowID: string
+  readonly model: string
+  readonly status: "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled"
+  readonly background: boolean
+  readonly store: boolean
+  readonly previousResponseID?: string
+  readonly conversationID?: string
+  readonly requestHash: string
+  readonly output: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+  readonly error?: { readonly code: string; readonly message: string; readonly type?: string; readonly param?: string }
+  readonly usage?: {
+    readonly inputTokens: number
+    readonly outputTokens: number
+    readonly totalTokens: number
+    readonly inputTokensDetails?: { readonly cachedTokens: number }
+    readonly outputTokensDetails?: { readonly reasoningTokens: number }
+  }
+  readonly createdAt: number
+  readonly completedAt?: number
+  readonly deletedAt?: number
+}
+
+export type ResponsesGetInput = { readonly responseID: { readonly responseID: string }["responseID"] }
+
+export type ResponsesGetOutput = {
+  readonly id: string
+  readonly workflowID: string
+  readonly model: string
+  readonly status: "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled"
+  readonly background: boolean
+  readonly store: boolean
+  readonly previousResponseID?: string
+  readonly conversationID?: string
+  readonly requestHash: string
+  readonly output: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+  readonly error?: { readonly code: string; readonly message: string; readonly type?: string; readonly param?: string }
+  readonly usage?: {
+    readonly inputTokens: number
+    readonly outputTokens: number
+    readonly totalTokens: number
+    readonly inputTokensDetails?: { readonly cachedTokens: number }
+    readonly outputTokensDetails?: { readonly reasoningTokens: number }
+  }
+  readonly createdAt: number
+  readonly completedAt?: number
+  readonly deletedAt?: number
+}
+
+export type ResponsesDeleteInput = { readonly responseID: { readonly responseID: string }["responseID"] }
+
+export type ResponsesDeleteOutput = void
+
+export type ResponsesCancelInput = { readonly responseID: { readonly responseID: string }["responseID"] }
+
+export type ResponsesCancelOutput = {
+  readonly id: string
+  readonly workflowID: string
+  readonly model: string
+  readonly status: "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled"
+  readonly background: boolean
+  readonly store: boolean
+  readonly previousResponseID?: string
+  readonly conversationID?: string
+  readonly requestHash: string
+  readonly output: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+  readonly error?: { readonly code: string; readonly message: string; readonly type?: string; readonly param?: string }
+  readonly usage?: {
+    readonly inputTokens: number
+    readonly outputTokens: number
+    readonly totalTokens: number
+    readonly inputTokensDetails?: { readonly cachedTokens: number }
+    readonly outputTokensDetails?: { readonly reasoningTokens: number }
+  }
+  readonly createdAt: number
+  readonly completedAt?: number
+  readonly deletedAt?: number
+}
+
+export type ResponsesInputItemsInput = { readonly responseID: { readonly responseID: string }["responseID"] }
+
+export type ResponsesInputItemsOutput = {
+  readonly data: ReadonlyArray<{
+    readonly responseID: string
+    readonly ordinal: number
+    readonly kind: "context" | "input" | "output"
+    readonly payload: { readonly [x: string]: JsonValue }
+  }>
+}["data"]
+
+export type ResponsesEventsInput = {
+  readonly responseID: { readonly responseID: string }["responseID"]
+  readonly after?: { readonly after?: number | undefined }["after"]
+}
+
+export type ResponsesEventsOutput =
+  | {
+      readonly type: "response.created"
+      readonly sequence_number: number
+      readonly data: {
+        readonly responseID: string
+        readonly timestamp: number
+        readonly workflowID: string
+        readonly model: string
+        readonly background: boolean
+        readonly store: boolean
+        readonly previousResponseID?: string
+        readonly conversationID?: string
+        readonly requestHash: string
+        readonly context: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+        readonly input: readonly [{ readonly [x: string]: JsonValue }, ...Array<{ readonly [x: string]: JsonValue }>]
+      }
+    }
+  | {
+      readonly type: "response.in_progress"
+      readonly sequence_number: number
+      readonly data: { readonly responseID: string; readonly timestamp: number }
+    }
+  | {
+      readonly type: "response.completed"
+      readonly sequence_number: number
+      readonly data: {
+        readonly responseID: string
+        readonly timestamp: number
+        readonly output?: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+        readonly usage?: {
+          readonly inputTokens: number
+          readonly outputTokens: number
+          readonly totalTokens: number
+          readonly inputTokensDetails?: { readonly cachedTokens: number }
+          readonly outputTokensDetails?: { readonly reasoningTokens: number }
+        }
+      }
+    }
+  | {
+      readonly type: "response.incomplete"
+      readonly sequence_number: number
+      readonly data: {
+        readonly responseID: string
+        readonly timestamp: number
+        readonly output?: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+        readonly error?: {
+          readonly code: string
+          readonly message: string
+          readonly type?: string
+          readonly param?: string
+        }
+        readonly usage?: {
+          readonly inputTokens: number
+          readonly outputTokens: number
+          readonly totalTokens: number
+          readonly inputTokensDetails?: { readonly cachedTokens: number }
+          readonly outputTokensDetails?: { readonly reasoningTokens: number }
+        }
+      }
+    }
+  | {
+      readonly type: "response.failed"
+      readonly sequence_number: number
+      readonly data: {
+        readonly responseID: string
+        readonly timestamp: number
+        readonly error?: {
+          readonly code: string
+          readonly message: string
+          readonly type?: string
+          readonly param?: string
+        }
+        readonly usage?: {
+          readonly inputTokens: number
+          readonly outputTokens: number
+          readonly totalTokens: number
+          readonly inputTokensDetails?: { readonly cachedTokens: number }
+          readonly outputTokensDetails?: { readonly reasoningTokens: number }
+        }
+      }
+    }
+  | {
+      readonly type: "response.cancelled"
+      readonly sequence_number: number
+      readonly data: {
+        readonly responseID: string
+        readonly timestamp: number
+        readonly error?: {
+          readonly code: string
+          readonly message: string
+          readonly type?: string
+          readonly param?: string
+        }
+        readonly usage?: {
+          readonly inputTokens: number
+          readonly outputTokens: number
+          readonly totalTokens: number
+          readonly inputTokensDetails?: { readonly cachedTokens: number }
+          readonly outputTokensDetails?: { readonly reasoningTokens: number }
+        }
+      }
+    }
+
+export type ConversationsCreateInput = {
+  readonly id?: { readonly id?: string; readonly metadata: { readonly [x: string]: JsonValue } }["id"]
+  readonly metadata: { readonly id?: string; readonly metadata: { readonly [x: string]: JsonValue } }["metadata"]
+}
+
+export type ConversationsCreateOutput = {
+  readonly id: string
+  readonly metadata: { readonly [x: string]: JsonValue }
+  readonly createdAt: number
+  readonly deletedAt?: number
+}
+
+export type ConversationsGetInput = { readonly conversationID: { readonly conversationID: string }["conversationID"] }
+
+export type ConversationsGetOutput = {
+  readonly id: string
+  readonly metadata: { readonly [x: string]: JsonValue }
+  readonly createdAt: number
+  readonly deletedAt?: number
+}
+
+export type ConversationsDeleteInput = {
+  readonly conversationID: { readonly conversationID: string }["conversationID"]
+}
+
+export type ConversationsDeleteOutput = void
+
+export type ConversationsAppendItemInput = {
+  readonly conversationID: { readonly conversationID: string }["conversationID"]
+  readonly responseID?: {
+    readonly responseID?: string | undefined
+    readonly payload: { readonly [x: string]: JsonValue }
+  }["responseID"]
+  readonly payload: {
+    readonly responseID?: string | undefined
+    readonly payload: { readonly [x: string]: JsonValue }
+  }["payload"]
+}
+
+export type ConversationsAppendItemOutput = {
+  readonly id: string
+  readonly metadata: { readonly [x: string]: JsonValue }
+  readonly createdAt: number
+  readonly deletedAt?: number
+}
+
+export type ConversationsItemsInput = { readonly conversationID: { readonly conversationID: string }["conversationID"] }
+
+export type ConversationsItemsOutput = {
+  readonly data: ReadonlyArray<{
+    readonly conversationID: string
+    readonly ordinal: number
+    readonly responseID?: string
+    readonly payload: { readonly [x: string]: JsonValue }
+  }>
+}["data"]
 
 export type MessagesListInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]

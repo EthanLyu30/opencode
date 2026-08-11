@@ -10,6 +10,8 @@ test("exposes every standard HTTP API group", () => {
     "agents",
     "sessions",
     "workflows",
+    "responses",
+    "conversations",
     "messages",
     "models",
     "providers",
@@ -25,6 +27,8 @@ test("exposes every standard HTTP API group", () => {
     "references",
     "projectCopies",
   ])
+  expect(Object.keys(client.responses)).toEqual(["create", "get", "delete", "cancel", "inputItems", "events"])
+  expect(Object.keys(client.conversations)).toEqual(["create", "get", "delete", "appendItem", "items"])
   expect(Object.keys(client.messages)).toEqual(["list"])
   expect(Object.keys(client.integrations)).toEqual([
     "list",

@@ -90,6 +90,57 @@ export class WorkflowConflictError extends Schema.TaggedErrorClass<WorkflowConfl
   { httpApiStatus: 409 },
 ) {}
 
+export class ResponseNotFoundError extends Schema.TaggedErrorClass<ResponseNotFoundError>()(
+  "ResponseNotFoundError",
+  {
+    responseID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
+export class ConversationNotFoundError extends Schema.TaggedErrorClass<ConversationNotFoundError>()(
+  "ConversationNotFoundError",
+  {
+    conversationID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
+export class ResponseConflictError extends Schema.TaggedErrorClass<ResponseConflictError>()(
+  "ResponseConflictError",
+  {
+    resourceID: Schema.String,
+    operation: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 409 },
+) {}
+
+export class UnsupportedCapabilityError extends Schema.TaggedErrorClass<UnsupportedCapabilityError>()(
+  "UnsupportedCapabilityError",
+  {
+    capability: Schema.String,
+    message: Schema.String,
+    supportedAlternatives: Schema.Array(Schema.String),
+  },
+  { httpApiStatus: 400 },
+) {}
+
+export class UnsupportedModelCapabilityError extends Schema.TaggedErrorClass<UnsupportedModelCapabilityError>()(
+  "UnsupportedModelCapabilityError",
+  {
+    provider: Schema.String,
+    model: Schema.String,
+    required: Schema.String,
+    supported: Schema.Array(Schema.String),
+    planned: Schema.Boolean,
+    message: Schema.String,
+  },
+  { httpApiStatus: 400 },
+) {}
+
 export class MessageNotFoundError extends Schema.TaggedErrorClass<MessageNotFoundError>()(
   "MessageNotFoundError",
   {
