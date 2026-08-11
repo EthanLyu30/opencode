@@ -103,6 +103,181 @@ describe("EventV2", () => {
     }),
   )
 
+  it.effect("inherits the primary routing envelope for atomically related events", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const fiber = yield* events.subscribe(SyncSent).pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
+      yield* Effect.yieldNow
+
+      const primary = yield* events.publish(
+        SyncMessage,
+        { id: "sync_related_primary", text: "primary" },
+        {
+          metadata: { source: "responses" },
+          related: [
+            {
+              definition: SyncSent,
+              data: { messageID: "sync_related_child", text: "related" },
+            },
+          ],
+        },
+      )
+      const [related] = Array.from(yield* Fiber.join(fiber))
+
+      expect(related?.location).toEqual(primary.location)
+      expect(related?.metadata).toEqual(primary.metadata)
+      expect(related?.data).toEqual({ messageID: "sync_related_child", text: "related" })
+    }),
+  )
+
+  it.effect("preserves related aggregate sequence order during reentrant durable publishes", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const messageID = "sync_reentrant_conversation"
+      const fiber = yield* events.subscribe(SyncSent).pipe(Stream.take(2), Stream.runCollect, Effect.forkScoped)
+      const stop = yield* events.listen((event) => {
+        if (event.type !== SyncMessage.type || (event.data as { id?: string }).id !== "sync_reentrant_outer") {
+          return Effect.void
+        }
+        return events
+          .publish(
+            SyncMessage,
+            { id: "sync_reentrant_inner", text: "inner primary" },
+            {
+              related: [
+                {
+                  definition: SyncSent,
+                  data: { messageID, text: "inner" },
+                },
+              ],
+            },
+          )
+          .pipe(Effect.asVoid)
+      })
+      yield* Effect.yieldNow
+
+      yield* events.publish(
+        SyncMessage,
+        { id: "sync_reentrant_outer", text: "outer primary" },
+        {
+          related: [
+            {
+              definition: SyncSent,
+              data: { messageID, text: "outer" },
+            },
+          ],
+        },
+      )
+      yield* stop
+      const received = Array.from(yield* Fiber.join(fiber))
+
+      expect(received.map((event) => event.durable?.seq)).toEqual([0, 1])
+      expect(received.map((event) => event.data.text)).toEqual(["outer", "inner"])
+    }),
+  )
+
+  it.effect("does not deadlock when a child fiber publishes during durable notification", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const messageID = "sync_reentrant_child_conversation"
+      const fiber = yield* events.subscribe(SyncSent).pipe(Stream.take(2), Stream.runCollect, Effect.forkScoped)
+      const stop = yield* events.listen((event) => {
+        if (event.type !== SyncMessage.type || (event.data as { id?: string }).id !== "sync_reentrant_child_outer") {
+          return Effect.void
+        }
+        return Effect.all(
+          [
+            events.publish(
+              SyncMessage,
+              { id: "sync_reentrant_child_inner", text: "inner primary" },
+              {
+                related: [
+                  {
+                    definition: SyncSent,
+                    data: { messageID, text: "inner" },
+                  },
+                ],
+              },
+            ),
+          ],
+          { concurrency: "unbounded", discard: true },
+        )
+      })
+      yield* Effect.yieldNow
+
+      yield* events
+        .publish(
+          SyncMessage,
+          { id: "sync_reentrant_child_outer", text: "outer primary" },
+          {
+            related: [
+              {
+                definition: SyncSent,
+                data: { messageID, text: "outer" },
+              },
+            ],
+          },
+        )
+        .pipe(Effect.timeout("1 second"))
+      yield* stop
+      const received = Array.from(yield* Fiber.join(fiber).pipe(Effect.timeout("1 second")))
+
+      expect(received.map((event) => event.durable?.seq)).toEqual([0, 1])
+      expect(received.map((event) => event.data.text)).toEqual(["outer", "inner"])
+    }),
+  )
+
+  it.effect("serializes reentrant replay notifications with committed related events", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const aggregateID = Session.ID.create()
+      const received = new Array<EventV2.Payload<typeof DurableMessage>>()
+      const stopCollecting = yield* events.listen((event) =>
+        Effect.sync(() => {
+          if (event.type === DurableMessage.type) received.push(event as EventV2.Payload<typeof DurableMessage>)
+        }),
+      )
+      const stop = yield* events.listen((event) => {
+        if (event.type !== SyncMessage.type || (event.data as { id?: string }).id !== "sync_reentrant_replay_outer") {
+          return Effect.void
+        }
+        return events.replay(
+          {
+            id: EventV2.ID.create(),
+            type: EventV2.versionedType(DurableMessage.type, 1),
+            seq: 1,
+            aggregateID,
+            data: durableData(aggregateID, "replayed"),
+          },
+          { publish: true },
+        )
+      })
+
+      yield* events
+        .publish(
+          SyncMessage,
+          { id: "sync_reentrant_replay_outer", text: "outer primary" },
+          {
+            related: [
+              {
+                definition: DurableMessage,
+                data: durableData(aggregateID, "outer"),
+              },
+            ],
+          },
+        )
+        .pipe(Effect.timeout("1 second"))
+      yield* stop
+      yield* stopCollecting
+
+      expect(received.map((event) => event.durable?.seq)).toEqual([0, 1])
+      expect(received.map((event) => event.data.messageID)).toEqual([
+        durableData(aggregateID, "outer").messageID,
+        durableData(aggregateID, "replayed").messageID,
+      ])
+    }),
+  )
+
   itWithoutLocation.effect("omits location when no location is available", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service

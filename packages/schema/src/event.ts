@@ -34,6 +34,8 @@ export type Payload<D extends Definition = Definition> = {
     readonly aggregateID: string
     readonly seq: number
     readonly version: number
+    readonly replay?: boolean
+    readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
   }
   readonly location?: Location.Ref
   readonly metadata?: Record<string, unknown>
@@ -55,7 +57,15 @@ export function define<
     id: ID,
     metadata: optional(Schema.Record(Schema.String, Schema.Unknown)),
     type: Schema.Literal(input.type),
-    durable: optional(Schema.Struct({ aggregateID: Schema.String, seq: Schema.Int, version: Schema.Int })),
+    durable: optional(
+      Schema.Struct({
+        aggregateID: Schema.String,
+        seq: Schema.Int,
+        version: Schema.Int,
+        replay: optional(Schema.Boolean),
+        related: optional(Schema.Array(Schema.Struct({ type: Schema.String, data: Schema.Unknown }))),
+      }),
+    ),
     location: optional(Location.Ref),
     data,
   })

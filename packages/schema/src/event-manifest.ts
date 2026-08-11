@@ -20,6 +20,7 @@ import { Pty } from "./pty"
 import { Question } from "./question"
 import { QuestionV1 } from "./question-v1"
 import { Reference } from "./reference"
+import { ResponseEvent } from "./response-event"
 import { ServerEvent } from "./server-event"
 import { SessionCompactionEvent } from "./session-compaction-event"
 import { SessionEvent } from "./session-event"
@@ -42,6 +43,7 @@ const foundationDefinitions = Event.inventory(
   ...Integration.Event.Definitions,
   ...Catalog.Event.Definitions,
   ...coreDefinitions,
+  ...ResponseEvent.Definitions,
   ...WorkflowEvent.Definitions,
 )
 

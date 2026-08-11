@@ -1,6 +1,6 @@
 export * as EventV2 from "./event"
 
-import { Cause, Context, Effect, Layer, Option, PubSub, Queue, Schema, Stream } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Layer, Option, PubSub, Queue, Schema, Stream } from "effect"
 import { Event } from "@opencode-ai/schema/event"
 import type { Data, Definition, Payload } from "@opencode-ai/schema/event"
 import { and, asc, eq, gt, inArray } from "drizzle-orm"
@@ -121,6 +121,12 @@ export interface PublishOptions {
   readonly location?: Location.Ref
   /** Local operational projection committed atomically with a new durable event. Not replayed or serialized. */
   readonly commit?: (seq: number) => Effect.Effect<void>
+  /** Additional durable events committed and projected atomically with the primary event. */
+  readonly related?: ReadonlyArray<{
+    readonly definition: Definition
+    readonly data: unknown
+    readonly id?: ID
+  }>
 }
 
 export interface Interface {
@@ -148,6 +154,10 @@ export interface Interface {
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Event") {}
+
+const InNotificationDrain = Context.Reference<boolean>("@opencode/Event/InNotificationDrain", {
+  defaultValue: () => false,
+})
 
 export const allBounded = (events: Interface, capacity: number) =>
   Effect.gen(function* () {
@@ -177,6 +187,11 @@ export const layerWith = (options?: LayerOptions) =>
         typed: new Map<string, PubSub.PubSub<Payload>>(),
       }
       const projectors = new Map<string, Subscriber[]>()
+      const notificationQueue = new Array<{
+        readonly events: Payload[]
+        readonly done: Deferred.Deferred<Exit.Exit<void>>
+      }>()
+      let notificationDraining = false
       // TODO: Bind durable projectors to exact type+version before supporting incompatible historical payloads.
       const listeners = new Array<Subscriber>()
       const { db } = yield* Database.Service
@@ -202,6 +217,88 @@ export const layerWith = (options?: LayerOptions) =>
         }),
       )
 
+      function commitRelatedEvent(
+        input: NonNullable<PublishOptions["related"]>[number],
+        envelope: Pick<Payload, "location" | "metadata">,
+      ) {
+        return Effect.gen(function* () {
+          const definition = input.definition
+          const durable = definition.durable
+          if (!durable) {
+            return yield* Effect.die(
+              new InvalidDurableEventError({
+                type: definition.type,
+                message: "Related events must be durable",
+              }),
+            )
+          }
+          const data = input.data as Record<string, unknown>
+          const aggregateID = data[durable.aggregate]
+          if (typeof aggregateID !== "string") {
+            return yield* Effect.die(
+              new InvalidDurableEventError({
+                type: definition.type,
+                message: `Expected string aggregate field ${durable.aggregate}`,
+              }),
+            )
+          }
+          const row = yield* db
+            .select({ seq: EventSequenceTable.seq })
+            .from(EventSequenceTable)
+            .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+            .get()
+            .pipe(Effect.orDie)
+          const seq = (row?.seq ?? -1) + 1
+          const id = input.id ?? ID.create()
+          const stored = yield* db
+            .select({ aggregateID: EventTable.aggregate_id, seq: EventTable.seq })
+            .from(EventTable)
+            .where(eq(EventTable.id, id))
+            .get()
+            .pipe(Effect.orDie)
+          if (stored) {
+            return yield* Effect.die(
+              new InvalidDurableEventError({
+                type: definition.type,
+                message: `Event ${id} already exists at aggregate ${stored.aggregateID} sequence ${stored.seq}`,
+              }),
+            )
+          }
+          const encoded = Schema.encodeUnknownSync(definition.data)(input.data) as Record<string, unknown>
+          const event = {
+            id,
+            type: definition.type,
+            data: input.data,
+            ...(envelope.location ? { location: envelope.location } : {}),
+            ...(envelope.metadata ? { metadata: envelope.metadata } : {}),
+            durable: { aggregateID, seq, version: durable.version },
+          } as Payload
+          for (const projector of projectors.get(definition.type) ?? []) {
+            yield* projector(event)
+          }
+          yield* db
+            .insert(EventSequenceTable)
+            .values([{ aggregate_id: aggregateID, seq }])
+            .onConflictDoUpdate({ target: EventSequenceTable.aggregate_id, set: { seq } })
+            .run()
+            .pipe(Effect.orDie)
+          yield* db
+            .insert(EventTable)
+            .values([
+              {
+                id,
+                aggregate_id: aggregateID,
+                seq,
+                type: versionedType(definition.type, durable.version),
+                data: encoded,
+              },
+            ])
+            .run()
+            .pipe(Effect.orDie)
+          return event
+        })
+      }
+
       function commitDurableEvent(
         definition: Definition,
         event: Payload,
@@ -212,6 +309,7 @@ export const layerWith = (options?: LayerOptions) =>
           readonly strictOwner?: boolean
         },
         commit?: (seq: number) => Effect.Effect<void>,
+        related?: PublishOptions["related"],
       ) {
         return Effect.gen(function* () {
           const durable = definition?.durable
@@ -315,7 +413,20 @@ export const layerWith = (options?: LayerOptions) =>
                             )
                           const committed = {
                             ...event,
-                            durable: { aggregateID, seq, version: durable.version },
+                            durable: {
+                              aggregateID,
+                              seq,
+                              version: durable.version,
+                              ...(input ? { replay: true } : {}),
+                              ...(related?.length
+                                ? {
+                                    related: related.map((item) => ({
+                                      type: item.definition.type,
+                                      data: item.data,
+                                    })),
+                                  }
+                                : {}),
+                            },
                           } as Payload
                           for (const projector of list) {
                             yield* projector(committed)
@@ -346,16 +457,23 @@ export const layerWith = (options?: LayerOptions) =>
                             ])
                             .run()
                             .pipe(Effect.orDie)
-                          return { aggregateID, seq }
+                          const relatedEvents = yield* Effect.forEach(related ?? [], (item) =>
+                            commitRelatedEvent(item, event),
+                          )
+                          return { aggregateID, seq, relatedEvents }
                         }),
                       { behavior: "immediate" },
                     )
                     .pipe(Effect.orDie)
                   if (committed) {
-                    yield* Effect.forEach(
-                      pubsub.durable.get(committed.aggregateID) ?? [],
-                      (wake) => PubSub.publish(wake, undefined),
-                      { discard: true },
+                    const aggregates = new Set([
+                      committed.aggregateID,
+                      ...committed.relatedEvents.map((event) => event.durable!.aggregateID),
+                    ])
+                    yield* Effect.forEach(aggregates, (aggregate) =>
+                      Effect.forEach(pubsub.durable.get(aggregate) ?? [], (wake) => PubSub.publish(wake, undefined), {
+                        discard: true,
+                      }),
                     )
                   }
                   return committed
@@ -366,9 +484,9 @@ export const layerWith = (options?: LayerOptions) =>
         })
       }
 
-      function publishEvent<D extends Definition>(definition: D, event: Payload<D>, commit?: PublishOptions["commit"]) {
+      function publishEvent<D extends Definition>(definition: D, event: Payload<D>, options?: PublishOptions) {
         return Effect.gen(function* () {
-          if (!definition?.durable && commit)
+          if (!definition?.durable && (options?.commit || options?.related?.length))
             return yield* Effect.die(
               new InvalidDurableEventError({
                 type: event.type,
@@ -376,7 +494,13 @@ export const layerWith = (options?: LayerOptions) =>
               }),
             )
           if (definition?.durable) {
-            const committed = yield* commitDurableEvent(definition, event as Payload, undefined, commit)
+            const committed = yield* commitDurableEvent(
+              definition,
+              event as Payload,
+              undefined,
+              options?.commit,
+              options?.related,
+            )
             if (committed) {
               event = {
                 ...event,
@@ -386,7 +510,7 @@ export const layerWith = (options?: LayerOptions) =>
                   version: definition.durable.version,
                 },
               }
-              yield* notify(event as Payload, true)
+              yield* notifyCommitted([event as Payload, ...committed.relatedEvents])
               return event
             }
           }
@@ -416,6 +540,38 @@ export const layerWith = (options?: LayerOptions) =>
         })
       }
 
+      function notifyCommitted(events: Payload[]) {
+        return Effect.gen(function* () {
+          const done = yield* Deferred.make<Exit.Exit<void>>()
+          const inNotificationDrain = yield* InNotificationDrain
+          notificationQueue.push({ events, done })
+          if (notificationDraining) {
+            if (inNotificationDrain) return
+            const result = yield* Deferred.await(done)
+            if (Exit.isFailure(result)) return yield* Effect.failCause(result.cause)
+            return
+          }
+          notificationDraining = true
+          return yield* Effect.gen(function* () {
+            while (notificationQueue.length > 0) {
+              const current = notificationQueue.shift()!
+              const result = yield* Effect.forEach(current.events, (event) => notify(event, true), {
+                discard: true,
+              }).pipe(Effect.exit)
+              yield* Deferred.succeed(current.done, result)
+              if (Exit.isFailure(result)) {
+                const pending = notificationQueue.splice(0)
+                yield* Effect.forEach(pending, (item) => Deferred.succeed(item.done, result), { discard: true })
+                return yield* Effect.failCause(result.cause)
+              }
+            }
+          }).pipe(
+            Effect.provideService(InNotificationDrain, true),
+            Effect.ensuring(Effect.sync(() => void (notificationDraining = false))),
+          )
+        })
+      }
+
       function publish<D extends Definition>(definition: D, data: Data<D>, options?: PublishOptions) {
         return Effect.gen(function* () {
           const serviceLocation = Option.getOrUndefined(yield* Effect.serviceOption(Location.Service))
@@ -433,7 +589,7 @@ export const layerWith = (options?: LayerOptions) =>
               ...(location ? { location } : {}),
               data,
             } as Payload<D>,
-            options?.commit,
+            options,
           )
         })
       }
@@ -461,17 +617,17 @@ export const layerWith = (options?: LayerOptions) =>
               strictOwner: options?.strictOwner,
             })
             if (committed && options?.publish) {
-              yield* notify(
+              yield* notifyCommitted([
                 {
                   ...payload,
                   durable: {
                     aggregateID: committed.aggregateID,
                     seq: committed.seq,
                     version: definition.durable.version,
+                    replay: true,
                   },
                 },
-                true,
-              )
+              ])
             }
           }
         })
