@@ -57,7 +57,6 @@ export const production =
 export interface DesignResult {
   readonly spec: unknown
   readonly referenceApp: {
-    readonly url: string
     readonly files: ReadonlyArray<WorkflowDesignArtifact.SourceFile>
   }
   readonly usage: Workflow.Usage
@@ -77,10 +76,14 @@ export interface Input {
   readonly workflowID: Workflow.ID
   readonly limits: VisualReview.Limits
   readonly design: (input: { readonly route: WorkflowRouting.Route }) => Effect.Effect<DesignResult, unknown>
+  readonly prepareReference: (input: {
+    readonly artifact: Workflow.ArtifactCommit
+    readonly app: WorkflowDesignArtifact.ReferenceApp
+  }) => Effect.Effect<string, unknown>
   readonly implement: (input: {
     readonly route: WorkflowRouting.Route
     readonly spec: DesignArtifact.Spec
-    readonly referenceApp: DesignResult["referenceApp"]
+    readonly referenceApp: WorkflowDesignArtifact.ReferenceApp
   }) => Effect.Effect<ImplementationResult, unknown>
   readonly repair: (input: {
     readonly route: WorkflowRouting.Route
@@ -124,6 +127,10 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   }
 
   const designed = yield* input.design({ route: WorkflowRouting.resolve({ role: "design", budget }) })
+  yield* Effect.try({
+    try: () => validateDesignResult(designed),
+    catch: (error) => (error instanceof Error ? error : new Error("Design result is invalid")),
+  })
   usage = addUsage(usage, designed.usage)
   const specCommit = WorkflowDesignArtifact.commitSpec(input.workflowID, designed.spec)
   const spec = WorkflowDesignArtifact.decodeSpec(specCommit)
@@ -131,11 +138,14 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   const durableReference = WorkflowDesignArtifact.decodeReferenceApp(referenceCommit)
   artifacts.push(specCommit, referenceCommit)
   if (exhausted(limits, usage)) return approval("budget_exhausted", 0, artifacts, usage)
+  const referenceUrl = yield* input.prepareReference({ artifact: referenceCommit, app: durableReference })
+  WorkflowSecretGuard.assertSafe(referenceUrl)
+  if (referenceUrl.length === 0) throw new Error("Host reference preview URL must not be empty")
 
   const reference = yield* captureAll({
     workflowID: input.workflowID,
     kind: "reference",
-    url: designed.referenceApp.url,
+    url: referenceUrl,
     readySelector: spec.referenceApp.readySelector,
     viewports: spec.referenceApp.viewports,
     revision: 0,
@@ -146,7 +156,7 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   let implementation = yield* input.implement({
     route: WorkflowRouting.resolve({ role: "implement", budget }),
     spec,
-    referenceApp: { ...designed.referenceApp, files: durableReference.files },
+    referenceApp: durableReference,
   })
   usage = addUsage(usage, implementation.usage)
   if (exhausted(limits, usage)) return approval("budget_exhausted", 0, artifacts, usage)
@@ -277,6 +287,29 @@ function addUsage(left: Workflow.Usage, right: Workflow.Usage): Workflow.Usage {
 
 function measuredReviewUsage(usage: Workflow.Usage): VisualReview.Usage {
   return { tokens: usage.tokens, turns: usage.turns, toolCalls: usage.toolCalls }
+}
+
+function validateDesignResult(result: DesignResult): void {
+  WorkflowSecretGuard.assertSafe(result)
+  assertExactKeys(result, ["referenceApp", "spec", "usage"], "Design result")
+  if (result.referenceApp === null || typeof result.referenceApp !== "object" || Array.isArray(result.referenceApp))
+    throw new Error("Design referenceApp must be an object")
+  assertExactKeys(result.referenceApp, ["files"], "Design referenceApp")
+  if (!Array.isArray(result.referenceApp.files) || result.referenceApp.files.length === 0)
+    throw new Error("Design referenceApp must contain source files")
+  for (const file of result.referenceApp.files) {
+    if (file === null || typeof file !== "object" || Array.isArray(file))
+      throw new Error("Design reference source must be an object")
+    assertExactKeys(file, ["content", "path"], "Design reference source")
+    if (typeof file.path !== "string" || typeof file.content !== "string")
+      throw new Error("Design reference source path and content must be strings")
+  }
+}
+
+function assertExactKeys(value: object, expected: ReadonlyArray<string>, name: string): void {
+  const actual = Object.keys(value).sort()
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index]))
+    throw new Error(`${name} contains an unexpected property`)
 }
 
 function approval(

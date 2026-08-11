@@ -26,10 +26,44 @@ export interface CapturedImage extends VisualReview.EvidenceImage {
 }
 
 export function assertPng(bytes: Uint8Array): void {
-  if (bytes.byteLength < pngSignature.byteLength) throw new Error("Browser capture is not a PNG")
+  if (bytes.byteLength < pngSignature.byteLength + 12) throw new Error("Browser capture is not a complete PNG")
   for (let index = 0; index < pngSignature.byteLength; index++) {
     if (bytes[index] !== pngSignature[index]) throw new Error("Browser capture is not a PNG")
   }
+  let offset = pngSignature.byteLength
+  let chunkIndex = 0
+  let hasIDAT = false
+  let hasIEND = false
+  while (offset < bytes.byteLength) {
+    if (bytes.byteLength - offset < 12) throw new Error("PNG chunk is truncated")
+    const view = new DataView(bytes.buffer, bytes.byteOffset + offset, bytes.byteLength - offset)
+    const length = view.getUint32(0)
+    const end = offset + 12 + length
+    if (end > bytes.byteLength || end < offset) throw new Error("PNG chunk length exceeds the capture")
+    const typeBytes = bytes.slice(offset + 4, offset + 8)
+    const type = String.fromCharCode(...typeBytes)
+    const data = bytes.slice(offset + 8, offset + 8 + length)
+    const expectedCrc = new DataView(bytes.buffer, bytes.byteOffset + offset + 8 + length, 4).getUint32(0)
+    if (crc32(typeBytes, data) !== expectedCrc) throw new Error(`PNG ${type} chunk CRC is invalid`)
+    if (chunkIndex === 0) {
+      if (type !== "IHDR" || length !== 13) throw new Error("PNG must start with a 13-byte IHDR chunk")
+      const dimensions = new DataView(data.buffer, data.byteOffset, data.byteLength)
+      if (dimensions.getUint32(0) === 0 || dimensions.getUint32(4) === 0)
+        throw new Error("PNG dimensions must be positive")
+    } else if (type === "IHDR") {
+      throw new Error("PNG must contain exactly one leading IHDR chunk")
+    }
+    if (type === "IDAT") hasIDAT = true
+    if (type === "IEND") {
+      if (length !== 0) throw new Error("PNG IEND chunk must be empty")
+      hasIEND = true
+      if (end !== bytes.byteLength) throw new Error("PNG must not contain data after IEND")
+    }
+    offset = end
+    chunkIndex++
+  }
+  if (!hasIDAT) throw new Error("PNG must contain an IDAT chunk")
+  if (!hasIEND) throw new Error("PNG must end with an IEND chunk")
 }
 
 export function capturedImage(input: {
@@ -45,7 +79,8 @@ export function capturedImage(input: {
   const viewport = Schema.decodeUnknownSync(VisualReview.EvidenceImage.fields.viewport)(input.viewport)
   const suffix = input.kind === "reference" ? "" : `-r${input.revision}`
   const metadata = Schema.decodeUnknownSync(VisualReview.EvidenceImage)({
-    id: `${input.kind}-${viewport}${suffix}`,
+    id: imageID(input.workflowID, input.kind, viewport, input.revision),
+    workflowID: input.workflowID,
     kind: input.kind,
     viewport,
     revision: input.revision,
@@ -62,6 +97,7 @@ export function commitScreenshot(image: CapturedImage): Workflow.ArtifactCommit 
   const { bytes, ...rawMetadata } = image
   WorkflowSecretGuard.assertSafe(rawMetadata)
   const metadata = Schema.decodeUnknownSync(VisualReview.EvidenceImage)(rawMetadata)
+  validateImageIdentity(metadata)
   const sha256 = Hash.sha256(Buffer.from(bytes))
   if (metadata.sha256 !== sha256 || metadata.size !== bytes.byteLength)
     throw new Error("Screenshot metadata does not match its PNG bytes")
@@ -69,38 +105,74 @@ export function commitScreenshot(image: CapturedImage): Workflow.ArtifactCommit 
     image: metadata,
     dataBase64: Buffer.from(bytes).toString("base64"),
   })
+  const body = WorkflowDesignArtifact.encode(payload)
+  const encoded = new TextEncoder().encode(body)
   return Workflow.ArtifactCommit.make({
     kind: image.kind === "reference" ? REFERENCE_SCREENSHOT_KIND : IMPLEMENTATION_SCREENSHOT_KIND,
     uri: image.uri,
     mime: image.mime,
-    sha256,
-    size: bytes.byteLength,
+    sha256: Hash.sha256(Buffer.from(encoded)),
+    size: encoded.byteLength,
     metadata: { payload },
   })
 }
 
-export function decodeScreenshot(artifact: Workflow.ArtifactCommit): CapturedImage {
+export function decodeScreenshot(artifact: Workflow.ArtifactCommit, expectedWorkflowID?: Workflow.ID): CapturedImage {
   WorkflowSecretGuard.assertSafe(artifact)
   const payload = Schema.decodeUnknownSync(ScreenshotPayload)(metadataPayload(artifact))
+  validateImageIdentity(payload.image)
+  if (expectedWorkflowID !== undefined && payload.image.workflowID !== expectedWorkflowID)
+    throw new Error("Screenshot belongs to a different workflow")
   const bytes = Uint8Array.from(Buffer.from(payload.dataBase64, "base64"))
   if (Buffer.from(bytes).toString("base64") !== payload.dataBase64)
     throw new Error("Screenshot base64 is not canonical")
   assertPng(bytes)
   const expectedKind = payload.image.kind === "reference" ? REFERENCE_SCREENSHOT_KIND : IMPLEMENTATION_SCREENSHOT_KIND
   const sha256 = Hash.sha256(Buffer.from(bytes))
+  const encoded = new TextEncoder().encode(WorkflowDesignArtifact.encode(payload))
   if (
     artifact.kind !== expectedKind ||
     artifact.uri !== payload.image.uri ||
     artifact.mime !== "image/png" ||
     payload.image.mime !== "image/png" ||
-    artifact.sha256 !== sha256 ||
+    artifact.sha256 !== Hash.sha256(Buffer.from(encoded)) ||
     payload.image.sha256 !== sha256 ||
-    artifact.size !== bytes.byteLength ||
+    artifact.size !== encoded.byteLength ||
     payload.image.size !== bytes.byteLength
   ) {
     throw new Error("Screenshot payload does not match its durable commit")
   }
   return { ...payload.image, bytes }
+}
+
+function validateImageIdentity(image: VisualReview.EvidenceImage): void {
+  if (image.kind === "reference" && image.revision !== 0)
+    throw new Error("Reference screenshots must use revision zero")
+  const suffix = image.kind === "reference" ? "" : `-r${image.revision}`
+  const id = imageID(image.workflowID, image.kind, image.viewport, image.revision)
+  const uri = `workflow://${image.workflowID}/${image.kind}-screenshot-${image.viewport}${suffix}.png`
+  if (image.id !== id || image.uri !== uri) throw new Error("Screenshot identity is not canonical")
+}
+
+function imageID(
+  workflowID: Workflow.ID,
+  kind: "reference" | "implementation",
+  viewport: string,
+  revision: number,
+): string {
+  const suffix = kind === "reference" ? "" : `-r${revision}`
+  return `screenshot-${workflowID}-${kind}-${viewport}${suffix}`
+}
+
+function crc32(type: Uint8Array, data: Uint8Array): number {
+  let crc = 0xffffffff
+  for (const bytes of [type, data]) {
+    for (const value of bytes) {
+      crc ^= value
+      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0)
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0
 }
 
 export function reviewMessage(spec: unknown, images: ReadonlyArray<CapturedImage>): Message {

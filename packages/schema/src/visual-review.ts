@@ -3,6 +3,7 @@ export * as VisualReview from "./visual-review"
 import { Schema } from "effect"
 import { NonNegativeInt, PositiveInt } from "./schema"
 import { DesignArtifact } from "./design-artifact"
+import { Workflow } from "./workflow"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 
@@ -28,6 +29,7 @@ export interface Usage extends Schema.Schema.Type<typeof Usage> {}
 
 export const EvidenceImage = Schema.Struct({
   id: DesignArtifact.SafeIdentifier,
+  workflowID: Workflow.ID,
   kind: Schema.Literals(["reference", "implementation"]),
   viewport: DesignArtifact.SafeIdentifier,
   revision: NonNegativeInt,
@@ -83,6 +85,8 @@ const internallyConsistent = Schema.makeFilter<Schema.Schema.Type<typeof Artifac
     return "Passing reviews must have no findings and failing reviews must have findings"
   const evidence = new Map(value.evidence.map((image) => [image.id, image]))
   if (evidence.size !== value.evidence.length) return "Evidence image IDs must be unique"
+  if (new Set(value.evidence.map((image) => image.workflowID)).size !== 1)
+    return "All evidence images must belong to one workflow"
   const viewports = new Set(value.evidence.map((image) => image.viewport))
   for (const viewport of viewports) {
     const images = value.evidence.filter((image) => image.viewport === viewport)

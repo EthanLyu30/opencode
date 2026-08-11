@@ -16,6 +16,19 @@ const png = Uint8Array.from(
   Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"),
 )
 
+const withoutPngChunk = (input: Uint8Array, removedType: string) => {
+  const output = Array.from(input.slice(0, 8))
+  let offset = 8
+  while (offset < input.byteLength) {
+    const length = new DataView(input.buffer, input.byteOffset + offset, 4).getUint32(0)
+    const end = offset + 12 + length
+    const type = new TextDecoder().decode(input.slice(offset + 4, offset + 8))
+    if (type !== removedType) output.push(...input.slice(offset, end))
+    offset = end
+  }
+  return Uint8Array.from(output)
+}
+
 const spec = {
   schemaVersion: 1 as const,
   goals: ["Let users review a release"],
@@ -44,7 +57,10 @@ const spec = {
 }
 const decodedSpec = Schema.decodeUnknownSync(DesignArtifact.Spec)(spec)
 
-const finding = (revision: number) => ({
+const evidenceID = (workflowID: string, kind: "reference" | "implementation", viewport: string, revision: number) =>
+  `screenshot-${workflowID}-${kind}-${viewport}${kind === "reference" ? "" : `-r${revision}`}`
+
+const finding = (revision: number, workflowID = "wfl_visual_loop") => ({
   schemaVersion: 1 as const,
   revision,
   verdict: "fail" as const,
@@ -62,7 +78,10 @@ const finding = (revision: number) => ({
       category: "spacing" as const,
       expected: "Matches the reference",
       actual: "Has extra margin",
-      evidenceImageIDs: ["reference-desktop", `implementation-desktop-r${revision}`],
+      evidenceImageIDs: [
+        evidenceID(workflowID, "reference", "desktop", 0),
+        evidenceID(workflowID, "implementation", "desktop", revision),
+      ],
       repair: "Remove the extra margin",
       requiresRecapture: true,
     },
@@ -106,11 +125,17 @@ describe("Kimi design and visual review loop", () => {
         return Effect.succeed({
           spec,
           referenceApp: {
-            url: "http://reference.test/index.html",
             files: [{ path: "index.html", content: referenceSource }],
           },
           usage: usage(500),
         })
+      },
+      prepareReference: ({ artifact, app }) => {
+        calls.push("host:prepare-reference")
+        expect(artifact.kind).toBe(WorkflowDesignArtifact.REFERENCE_APP_KIND)
+        expect(artifact.sha256).toMatch(/^[a-f0-9]{64}$/)
+        expect(app.files).toEqual([{ path: "index.html", content: referenceSource }])
+        return Effect.succeed("http://host-preview.test/index.html")
       },
       implement: ({ route }) => {
         calls.push("deepseek:implement")
@@ -161,8 +186,9 @@ describe("Kimi design and visual review loop", () => {
           usage: usage(300),
         })
       },
-      capture: ({ kind, viewport, revision }) => {
+      capture: ({ kind, url, viewport, revision }) => {
         calls.push(`browser:${kind}:${viewport.name}:r${revision}`)
+        if (kind === "reference") expect(url).toBe("http://host-preview.test/index.html")
         return Effect.succeed(png.slice())
       },
     }).pipe(Effect.runPromise)
@@ -171,6 +197,7 @@ describe("Kimi design and visual review loop", () => {
     expect(result.revision).toBe(1)
     expect(calls).toEqual([
       "kimi:design",
+      "host:prepare-reference",
       "browser:reference:desktop:r0",
       "browser:reference:mobile:r0",
       "deepseek:implement",
@@ -195,15 +222,18 @@ describe("Kimi design and visual review loop", () => {
         Effect.succeed({
           spec,
           referenceApp: {
-            url: "http://reference.test/index.html",
             files: [{ path: "index.html", content: referenceSource }],
           },
           usage: usage(1),
         }),
+      prepareReference: () => Effect.succeed("http://host-preview.test/index.html"),
       implement: () => Effect.succeed({ url: "http://implementation.test/index.html", usage: usage(1) }),
       repair: () => Effect.succeed({ url: "http://implementation.test/repaired.html", usage: usage(1) }),
       review: ({ evidence, revision }) =>
-        Effect.succeed({ review: { ...finding(revision), evidence }, usage: usage(1) }),
+        Effect.succeed({
+          review: { ...finding(revision, "wfl_visual_approval"), evidence },
+          usage: usage(1),
+        }),
       capture: () => Effect.succeed(png.slice()),
     }).pipe(Effect.runPromise)
 
@@ -252,11 +282,27 @@ describe("Kimi design and visual review loop", () => {
       bytes: png,
     })
     const screenshot = WorkflowVisualReviewArtifact.commitScreenshot(captured)
+    const { bytes: _capturedBytes, ...capturedEvidence } = captured
+    expect(screenshot.sha256).not.toBe(captured.sha256)
     expect(WorkflowVisualReviewArtifact.decodeScreenshot(screenshot).bytes).toEqual(png)
+    expect(() =>
+      WorkflowVisualReviewArtifact.decodeScreenshot(screenshot, Workflow.ID.make("wfl_other_workflow")),
+    ).toThrow()
     expect(() =>
       WorkflowVisualReviewArtifact.decodeScreenshot({
         ...screenshot,
         metadata: { ...screenshot.metadata, payload: { dataBase64: Buffer.from("tampered").toString("base64") } },
+      }),
+    ).toThrow()
+    expect(() =>
+      WorkflowVisualReviewArtifact.decodeScreenshot({
+        ...screenshot,
+        metadata: {
+          payload: {
+            image: { ...capturedEvidence, id: "attacker-id" },
+            dataBase64: Buffer.from(png).toString("base64"),
+          },
+        },
       }),
     ).toThrow()
 
@@ -273,7 +319,7 @@ describe("Kimi design and visual review loop", () => {
         bytes: undefined,
       },
     ].map(({ bytes: _, ...image }) => image)
-    const review = Schema.decodeUnknownSync(VisualReview.Artifact)({ ...finding(0), evidence })
+    const review = Schema.decodeUnknownSync(VisualReview.Artifact)({ ...finding(0, "wfl_codec"), evidence })
     const reviewCommit = WorkflowVisualReviewArtifact.commitReview(workflowID, review)
     expect(WorkflowDesignArtifact.encode(WorkflowVisualReviewArtifact.decodeReview(reviewCommit))).toBe(
       WorkflowDesignArtifact.encode(review),
@@ -285,15 +331,25 @@ describe("Kimi design and visual review loop", () => {
 
   test("rejects invalid PNGs, inconsistent screenshot metadata, and secret-bearing source", () => {
     const workflowID = Workflow.ID.make("wfl_invalid_capture")
-    expect(() =>
-      WorkflowVisualReviewArtifact.capturedImage({
-        workflowID,
-        kind: "reference",
-        viewport: "desktop",
-        revision: 0,
-        bytes: new TextEncoder().encode("not a png"),
-      }),
-    ).toThrow()
+    const malformed = [
+      png.slice(0, 8),
+      Uint8Array.from(png, (value, index) => (index === 11 ? 0 : value)),
+      Uint8Array.from(png, (value, index) => (index === 29 ? value ^ 1 : value)),
+      withoutPngChunk(png, "IDAT"),
+      withoutPngChunk(png, "IEND"),
+      Uint8Array.from([...png, 0]),
+    ]
+    for (const bytes of malformed) {
+      expect(() =>
+        WorkflowVisualReviewArtifact.capturedImage({
+          workflowID,
+          kind: "reference",
+          viewport: "desktop",
+          revision: 0,
+          bytes,
+        }),
+      ).toThrow()
+    }
     const image = WorkflowVisualReviewArtifact.capturedImage({
       workflowID,
       kind: "reference",
@@ -303,6 +359,19 @@ describe("Kimi design and visual review loop", () => {
     })
     expect(() => WorkflowVisualReviewArtifact.commitScreenshot({ ...image, sha256: "f".repeat(64) })).toThrow()
     expect(() => WorkflowVisualReviewArtifact.commitScreenshot({ ...image, size: image.size + 1 })).toThrow()
+    expect(() => WorkflowVisualReviewArtifact.commitScreenshot({ ...image, id: "attacker-id" })).toThrow()
+    expect(() =>
+      WorkflowVisualReviewArtifact.commitScreenshot({ ...image, uri: "workflow://attacker/image.png" }),
+    ).toThrow()
+    expect(() =>
+      WorkflowVisualReviewArtifact.capturedImage({
+        workflowID,
+        kind: "reference",
+        viewport: "desktop",
+        revision: 7,
+        bytes: png,
+      }),
+    ).toThrow()
     expect(() =>
       WorkflowDesignArtifact.commitReferenceApp(workflowID, decodedSpec, [
         { path: "index.html", content: "Bearer live-secret-source-value" },
@@ -318,17 +387,17 @@ describe("Kimi design and visual review loop", () => {
         Effect.succeed({
           spec,
           referenceApp: {
-            url: "http://reference.test/index.html",
             files: [{ path: "index.html", content: referenceSource }],
           },
           usage: usage(1),
         }),
+      prepareReference: () => Effect.succeed("http://host-preview.test/index.html"),
       implement: () => Effect.succeed({ url: "http://implementation.test/index.html", usage: usage(1) }),
       repair: () => Effect.die("repair must not run after an over-budget passing review"),
       review: ({ evidence, revision }) =>
         Effect.succeed({
           review: {
-            ...finding(revision),
+            ...finding(revision, "wfl_review_budget"),
             verdict: "pass" as const,
             score: 100,
             limits: { maxRevisions: 1, maxTokens: 3, maxTurns: 20, maxToolCalls: 20 },
@@ -378,5 +447,64 @@ describe("Kimi design and visual review loop", () => {
       bytes: png,
     })
     expect(WorkflowVisualReviewArtifact.reviewMessage(decodedSpec, [reference, implementation]).content).toHaveLength(3)
+  })
+
+  test("rejects model-authored reference URLs before host preview preparation", async () => {
+    let prepared = false
+    const modelResultWithUrl = {
+      spec,
+      referenceApp: {
+        url: "http://model-controlled.test/index.html",
+        files: [{ path: "index.html", content: referenceSource }],
+      },
+      usage: usage(1),
+    }
+    const error = await WorkflowRender.run({
+      workflowID: Workflow.ID.make("wfl_model_reference_url"),
+      limits: { maxRevisions: 1, maxTokens: 20, maxTurns: 20, maxToolCalls: 20 },
+      design: () => Effect.succeed(modelResultWithUrl),
+      prepareReference: () => {
+        prepared = true
+        return Effect.succeed("http://host-preview.test/index.html")
+      },
+      implement: () => Effect.die("implementation must not run"),
+      repair: () => Effect.die("repair must not run"),
+      review: () => Effect.die("review must not run"),
+      capture: () => Effect.succeed(png),
+    }).pipe(Effect.flip, Effect.runPromise)
+    expect(error).toBeInstanceOf(Error)
+    expect(prepared).toBe(false)
+  })
+
+  test("rejects invalid UTF-8 in otherwise self-consistent durable reference source", () => {
+    const workflowID = Workflow.ID.make("wfl_invalid_utf8")
+    const commit = WorkflowDesignArtifact.commitReferenceApp(workflowID, decodedSpec, [
+      { path: "index.html", content: referenceSource },
+    ])
+    const invalidBytes = Buffer.from([0xff])
+    const payload = {
+      schemaVersion: 1,
+      entrypoint: "index.html",
+      readySelector: "[data-render-ready]",
+      projectStack: ["html", "css", "javascript"],
+      files: [
+        {
+          path: "index.html",
+          sha256: createHash("sha256").update(invalidBytes).digest("hex"),
+          size: 1,
+          encoding: "base64",
+          contentBase64: invalidBytes.toString("base64"),
+        },
+      ],
+    }
+    const body = WorkflowDesignArtifact.encode(payload)
+    expect(() =>
+      WorkflowDesignArtifact.decodeReferenceApp({
+        ...commit,
+        sha256: createHash("sha256").update(body).digest("hex"),
+        size: new TextEncoder().encode(body).byteLength,
+        metadata: { payload },
+      }),
+    ).toThrow()
   })
 })

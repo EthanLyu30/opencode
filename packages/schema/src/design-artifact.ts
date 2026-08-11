@@ -11,11 +11,24 @@ export const SafeIdentifier = Schema.NonEmptyString.check(Schema.isPattern(/^[a-
 
 export const SourcePath = Schema.NonEmptyString.check(
   Schema.makeFilter<string>((value) => {
-    if (value.includes("\\") || value.startsWith("/") || /^[A-Za-z]:/.test(value))
+    if (
+      value.includes("\\") ||
+      value.includes(":") ||
+      value.includes("%") ||
+      value.startsWith("/") ||
+      /^[A-Za-z]:/.test(value) ||
+      /[\u0000-\u001f\u007f]/.test(value)
+    )
       return "Source path must be a normalized relative POSIX path"
     const segments = value.split("/")
     if (segments.some((segment) => segment === "" || segment === "." || segment === ".."))
       return "Source path must not contain empty, dot, or parent segments"
+    for (const segment of segments) {
+      if (/[. ]$/.test(segment)) return "Source path segments must not end in a dot or space"
+      const basename = segment.split(".")[0].toUpperCase()
+      if (/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(basename))
+        return "Source path must not contain a Windows device name"
+    }
     return undefined
   }),
 ).annotate({ identifier: "DesignArtifact.SourcePath" })

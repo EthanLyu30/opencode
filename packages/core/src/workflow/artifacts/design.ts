@@ -121,7 +121,9 @@ export function decodeReferenceApp(artifact: Workflow.ArtifactCommit): Reference
     ) {
       throw new Error(`Reference source ${file.path} does not match its durable hash`)
     }
-    const value = content.toString("utf8")
+    const value = new TextDecoder("utf-8", { fatal: true }).decode(content)
+    const reencoded = new TextEncoder().encode(value)
+    if (!Buffer.from(reencoded).equals(content)) throw new Error(`Reference source ${file.path} is not canonical UTF-8`)
     WorkflowSecretGuard.assertSafe(value)
     return { path: file.path, content: value }
   })

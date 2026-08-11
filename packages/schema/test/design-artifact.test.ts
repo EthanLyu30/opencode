@@ -28,6 +28,7 @@ const design = {
 
 const image = (kind: "reference" | "implementation", id: string) => ({
   id,
+  workflowID: "wfl_schema_review",
   kind,
   viewport: "desktop",
   revision: kind === "reference" ? 0 : 0,
@@ -178,7 +179,19 @@ describe("design and visual artifact schemas", () => {
   })
 
   test("rejects unsafe source paths, duplicate files, and unsafe viewport identifiers", () => {
-    for (const path of ["../secret.js", "/absolute.js", "C:/windows.js", "src\\app.js", "src//app.js"]) {
+    for (const path of [
+      "../secret.js",
+      "/absolute.js",
+      "C:/windows.js",
+      "src\\app.js",
+      "src//app.js",
+      "CON.js",
+      "assets/NUL.txt",
+      "index.html:secret",
+      "safe/%2e%2e/escape.js",
+      "trailing./app.js",
+      "control\u0000.js",
+    ]) {
       expect(() =>
         Schema.decodeUnknownSync(DesignArtifact.Spec)({
           ...design,
