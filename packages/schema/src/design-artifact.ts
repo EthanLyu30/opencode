@@ -3,22 +3,39 @@ export * as DesignArtifact from "./design-artifact"
 import { Schema } from "effect"
 import { PositiveInt } from "./schema"
 
+const exact = { parseOptions: { onExcessProperty: "error" as const } }
+
+export const SafeIdentifier = Schema.NonEmptyString.check(Schema.isPattern(/^[a-z0-9][a-z0-9_-]*$/)).annotate({
+  identifier: "DesignArtifact.SafeIdentifier",
+})
+
+export const SourcePath = Schema.NonEmptyString.check(
+  Schema.makeFilter<string>((value) => {
+    if (value.includes("\\") || value.startsWith("/") || /^[A-Za-z]:/.test(value))
+      return "Source path must be a normalized relative POSIX path"
+    const segments = value.split("/")
+    if (segments.some((segment) => segment === "" || segment === "." || segment === ".."))
+      return "Source path must not contain empty, dot, or parent segments"
+    return undefined
+  }),
+).annotate({ identifier: "DesignArtifact.SourcePath" })
+
 export const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)).annotate({
   identifier: "DesignArtifact.Sha256",
 })
 
 export const Viewport = Schema.Struct({
-  name: Schema.NonEmptyString,
+  name: SafeIdentifier,
   width: PositiveInt,
   height: PositiveInt,
-}).annotate({ identifier: "DesignArtifact.Viewport" })
+}).annotate({ identifier: "DesignArtifact.Viewport", ...exact })
 export interface Viewport extends Schema.Schema.Type<typeof Viewport> {}
 
 export const SourceFile = Schema.Struct({
-  path: Schema.NonEmptyString,
+  path: SourcePath,
   sha256: Sha256,
   size: PositiveInt,
-}).annotate({ identifier: "DesignArtifact.SourceFile" })
+}).annotate({ identifier: "DesignArtifact.SourceFile", ...exact })
 export interface SourceFile extends Schema.Schema.Type<typeof SourceFile> {}
 
 export const ReferenceApp = Schema.Struct({
@@ -26,7 +43,7 @@ export const ReferenceApp = Schema.Struct({
   readySelector: Schema.NonEmptyString,
   files: Schema.NonEmptyArray(SourceFile),
   viewports: Schema.NonEmptyArray(Viewport),
-}).annotate({ identifier: "DesignArtifact.ReferenceApp" })
+}).annotate({ identifier: "DesignArtifact.ReferenceApp", ...exact })
 export interface ReferenceApp extends Schema.Schema.Type<typeof ReferenceApp> {}
 
 const SpecShape = Schema.Struct({
@@ -88,6 +105,8 @@ const safePersistence = Schema.makeFilter<Schema.Schema.Type<typeof SpecShape>>(
 const internallyConsistent = Schema.makeFilter<Schema.Schema.Type<typeof SpecShape>>((value) => {
   const viewports = new Set(value.referenceApp.viewports.map((viewport) => viewport.name))
   if (viewports.size !== value.referenceApp.viewports.length) return "Reference viewport names must be unique"
+  const files = new Set(value.referenceApp.files.map((file) => file.path))
+  if (files.size !== value.referenceApp.files.length) return "Reference source paths must be unique"
   if (!value.referenceApp.files.some((file) => file.path === value.referenceApp.entrypoint))
     return "Reference entrypoint must name a hashed reference-app file"
   if (value.responsiveRules.some((rule) => !viewports.has(rule.viewport)))
@@ -97,6 +116,7 @@ const internallyConsistent = Schema.makeFilter<Schema.Schema.Type<typeof SpecSha
 
 export const Spec = SpecShape.check(safePersistence, internallyConsistent).annotate({
   identifier: "DesignArtifact.Spec",
+  ...exact,
 })
 export interface Spec extends Schema.Schema.Type<typeof Spec> {}
 

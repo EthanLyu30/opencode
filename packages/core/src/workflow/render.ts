@@ -7,6 +7,8 @@ import { Workflow } from "@opencode-ai/schema/workflow"
 import { Effect, Schema } from "effect"
 import { WorkflowDesignArtifact } from "./artifacts/design"
 import { WorkflowVisualReviewArtifact } from "./artifacts/visual-review"
+import { WorkflowRouting } from "./routing"
+import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowStageMachine } from "./stage-machine"
 
 export interface CaptureInput {
@@ -18,12 +20,6 @@ export interface CaptureInput {
 }
 
 export type Capture = (input: CaptureInput) => Effect.Effect<Uint8Array, unknown>
-
-export const KIMI_VISUAL_REVIEW_ROUTE = {
-  providerID: "kimi",
-  modelID: "kimi-k3",
-  protocol: "openai-chat",
-} as const
 
 /** A concrete browser adapter must navigate, set the exact viewport, wait for readySelector, and return PNG bytes. */
 export interface BrowserDriver {
@@ -39,12 +35,24 @@ export interface BrowserDriver {
 export const production =
   (driver: BrowserDriver): Capture =>
   (input) =>
-    driver.capturePage({
-      url: input.url,
-      readySelector: input.readySelector,
-      width: input.viewport.width,
-      height: input.viewport.height,
-    })
+    driver
+      .capturePage({
+        url: input.url,
+        readySelector: input.readySelector,
+        width: input.viewport.width,
+        height: input.viewport.height,
+      })
+      .pipe(
+        Effect.flatMap((bytes) =>
+          Effect.try({
+            try: () => {
+              WorkflowVisualReviewArtifact.assertPng(bytes)
+              return bytes
+            },
+            catch: (error) => (error instanceof Error ? error : new Error("Browser capture is not a PNG")),
+          }),
+        ),
+      )
 
 export interface DesignResult {
   readonly spec: unknown
@@ -68,18 +76,20 @@ export interface ReviewResult {
 export interface Input {
   readonly workflowID: Workflow.ID
   readonly limits: VisualReview.Limits
-  readonly design: () => Effect.Effect<DesignResult, unknown>
+  readonly design: (input: { readonly route: WorkflowRouting.Route }) => Effect.Effect<DesignResult, unknown>
   readonly implement: (input: {
+    readonly route: WorkflowRouting.Route
     readonly spec: DesignArtifact.Spec
     readonly referenceApp: DesignResult["referenceApp"]
   }) => Effect.Effect<ImplementationResult, unknown>
   readonly repair: (input: {
+    readonly route: WorkflowRouting.Route
     readonly spec: DesignArtifact.Spec
     readonly review: VisualReview.Artifact
     readonly revision: number
   }) => Effect.Effect<ImplementationResult, unknown>
   readonly review: (input: {
-    readonly route: typeof KIMI_VISUAL_REVIEW_ROUTE
+    readonly route: WorkflowRouting.Route
     readonly message: Message
     readonly evidence: ReadonlyArray<VisualReview.EvidenceImage>
     readonly spec: DesignArtifact.Spec
@@ -107,15 +117,19 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   let usage = zeroUsage
   const artifacts: Workflow.ArtifactCommit[] = []
   const limits = Schema.decodeUnknownSync(VisualReview.Limits)(input.limits)
+  const budget = {
+    maxTokens: limits.maxTokens,
+    maxTurns: limits.maxTurns,
+    maxToolCalls: limits.maxToolCalls,
+  }
 
-  const designed = yield* input.design()
+  const designed = yield* input.design({ route: WorkflowRouting.resolve({ role: "design", budget }) })
   usage = addUsage(usage, designed.usage)
   const specCommit = WorkflowDesignArtifact.commitSpec(input.workflowID, designed.spec)
-  const spec = WorkflowDesignArtifact.decodeSpec(specCommit, WorkflowDesignArtifact.encode(designed.spec))
-  artifacts.push(
-    specCommit,
-    WorkflowDesignArtifact.commitReferenceApp(input.workflowID, spec, designed.referenceApp.files),
-  )
+  const spec = WorkflowDesignArtifact.decodeSpec(specCommit)
+  const referenceCommit = WorkflowDesignArtifact.commitReferenceApp(input.workflowID, spec, designed.referenceApp.files)
+  const durableReference = WorkflowDesignArtifact.decodeReferenceApp(referenceCommit)
+  artifacts.push(specCommit, referenceCommit)
   if (exhausted(limits, usage)) return approval("budget_exhausted", 0, artifacts, usage)
 
   const reference = yield* captureAll({
@@ -129,11 +143,16 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   })
   artifacts.push(...reference.map(WorkflowVisualReviewArtifact.commitScreenshot))
 
-  let implementation = yield* input.implement({ spec, referenceApp: designed.referenceApp })
+  let implementation = yield* input.implement({
+    route: WorkflowRouting.resolve({ role: "implement", budget }),
+    spec,
+    referenceApp: { ...designed.referenceApp, files: durableReference.files },
+  })
   usage = addUsage(usage, implementation.usage)
   if (exhausted(limits, usage)) return approval("budget_exhausted", 0, artifacts, usage)
 
-  for (let revision = 0; ; revision++) {
+  let revision = 0
+  while (true) {
     const candidate = yield* captureAll({
       workflowID: input.workflowID,
       kind: "implementation",
@@ -147,16 +166,23 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
     const images = [...reference, ...candidate]
     const evidence = images.map(({ bytes: _, ...image }) => image)
     const reviewed = yield* input.review({
-      route: KIMI_VISUAL_REVIEW_ROUTE,
+      route: WorkflowRouting.resolve({ role: "visual_review", budget }),
       message: WorkflowVisualReviewArtifact.reviewMessage(spec, images),
       evidence,
       spec,
       revision,
     })
     usage = addUsage(usage, reviewed.usage)
-    const review = Schema.decodeUnknownSync(VisualReview.Artifact)(reviewed.review)
+    WorkflowSecretGuard.assertSafe(reviewed.review)
+    if (reviewed.review === null || typeof reviewed.review !== "object" || Array.isArray(reviewed.review))
+      throw new Error("Visual review model output must be an object")
+    const review = Schema.decodeUnknownSync(VisualReview.Artifact)({
+      ...reviewed.review,
+      usage: measuredReviewUsage(reviewed.usage),
+    })
     assertReviewContext(review, limits, evidence, revision)
     artifacts.push(WorkflowVisualReviewArtifact.commitReview(input.workflowID, review))
+    if (exhausted(limits, usage)) return approval("budget_exhausted", revision, artifacts, usage)
     if (review.verdict === "pass") return { status: "passed", revision, artifacts, usage }
     const decision = WorkflowStageMachine.decideVisualRepair({
       revision,
@@ -165,9 +191,15 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
       usage,
     })
     if (decision.type === "approval") return approval(decision.reason, revision, artifacts, usage)
-    implementation = yield* input.repair({ spec, review, revision })
+    implementation = yield* input.repair({
+      route: WorkflowRouting.resolve({ role: "repair", budget }),
+      spec,
+      review,
+      revision: decision.revision,
+    })
     usage = addUsage(usage, implementation.usage)
-    if (exhausted(limits, usage)) return approval("budget_exhausted", revision + 1, artifacts, usage)
+    revision = decision.revision
+    if (exhausted(limits, usage)) return approval("budget_exhausted", revision, artifacts, usage)
   }
 })
 
@@ -241,6 +273,10 @@ function addUsage(left: Workflow.Usage, right: Workflow.Usage): Workflow.Usage {
     toolCalls: left.toolCalls + right.toolCalls,
     attempts: left.attempts + right.attempts,
   }
+}
+
+function measuredReviewUsage(usage: Workflow.Usage): VisualReview.Usage {
+  return { tokens: usage.tokens, turns: usage.turns, toolCalls: usage.toolCalls }
 }
 
 function approval(

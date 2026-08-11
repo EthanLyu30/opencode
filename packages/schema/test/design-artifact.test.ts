@@ -30,6 +30,7 @@ const image = (kind: "reference" | "implementation", id: string) => ({
   id,
   kind,
   viewport: "desktop",
+  revision: kind === "reference" ? 0 : 0,
   uri: `artifact://${id}.png`,
   mime: "image/png" as const,
   sha256: hash,
@@ -70,6 +71,27 @@ describe("design and visual artifact schemas", () => {
   test("rejects incomplete design specifications", () => {
     const { accessibilityRules: _, ...incomplete } = design
     expect(() => Schema.decodeUnknownSync(DesignArtifact.Spec)(incomplete)).toThrow()
+  })
+
+  test("rejects excess properties at every object depth", () => {
+    expect(() => Schema.decodeUnknownSync(DesignArtifact.Spec)({ ...design, unexpected: true })).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(DesignArtifact.Spec)({
+        ...design,
+        routes: [{ ...design.routes[0], apiKey: "not-even-a-real-key" }],
+      }),
+    ).toThrow()
+    expect(() => Schema.decodeUnknownSync(VisualReview.Artifact)({ ...review, note: "unstructured" })).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(VisualReview.Artifact)({
+        ...review,
+        evidence: [{ ...review.evidence[0], secret: "hidden" }, review.evidence[1]],
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(DesignArtifact.Viewport)({ name: "desktop", width: 10, height: 10, extra: true }),
+    ).toThrow()
+    expect(() => Schema.decodeUnknownSync(VisualReview.EvidenceImage)({ ...review.evidence[0], extra: true })).toThrow()
   })
 
   test("rejects unhashed screenshot and reference-app artifacts", () => {
@@ -119,6 +141,72 @@ describe("design and visual artifact schemas", () => {
       Schema.decodeUnknownSync(VisualReview.Artifact)({
         ...review,
         verdict: "pass",
+      }),
+    ).toThrow()
+  })
+
+  test("requires one revision-bound reference and implementation image per viewport", () => {
+    expect(() =>
+      Schema.decodeUnknownSync(VisualReview.Artifact)({
+        ...review,
+        revision: 1,
+        evidence: [
+          { ...image("reference", "reference-desktop"), revision: 0 },
+          { ...image("implementation", "implementation-desktop"), revision: 0 },
+        ],
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(VisualReview.Artifact)({
+        ...review,
+        evidence: [
+          image("reference", "reference-desktop"),
+          image("implementation", "implementation-desktop"),
+          { ...image("implementation", "implementation-copy"), id: "implementation-copy" },
+        ],
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(VisualReview.Artifact)({
+        ...review,
+        evidence: [
+          { ...image("reference", "reference-desktop"), revision: 1 },
+          image("implementation", "implementation-desktop"),
+        ],
+      }),
+    ).toThrow()
+  })
+
+  test("rejects unsafe source paths, duplicate files, and unsafe viewport identifiers", () => {
+    for (const path of ["../secret.js", "/absolute.js", "C:/windows.js", "src\\app.js", "src//app.js"]) {
+      expect(() =>
+        Schema.decodeUnknownSync(DesignArtifact.Spec)({
+          ...design,
+          referenceApp: {
+            ...design.referenceApp,
+            entrypoint: path,
+            files: [{ ...design.referenceApp.files[0], path }],
+          },
+        }),
+      ).toThrow()
+    }
+    expect(() =>
+      Schema.decodeUnknownSync(DesignArtifact.Spec)({
+        ...design,
+        referenceApp: {
+          ...design.referenceApp,
+          files: [design.referenceApp.files[0], design.referenceApp.files[0]],
+        },
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(DesignArtifact.Spec)({
+        ...design,
+        responsiveRules: [{ ...design.responsiveRules[0], viewport: "desktop/../../escape" }],
+        referenceApp: {
+          ...design.referenceApp,
+          viewports: [{ ...design.referenceApp.viewports[0], name: "desktop/../../escape" }],
+        },
       }),
     ).toThrow()
   })

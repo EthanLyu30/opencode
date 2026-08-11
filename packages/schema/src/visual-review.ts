@@ -4,6 +4,8 @@ import { Schema } from "effect"
 import { NonNegativeInt, PositiveInt } from "./schema"
 import { DesignArtifact } from "./design-artifact"
 
+const exact = { parseOptions: { onExcessProperty: "error" as const } }
+
 export const MAX_VISUAL_REVISIONS = 10
 
 const MaxRevisions = PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_VISUAL_REVISIONS))
@@ -14,25 +16,26 @@ export const Limits = Schema.Struct({
   maxTokens: PositiveInt,
   maxTurns: PositiveInt,
   maxToolCalls: PositiveInt,
-}).annotate({ identifier: "VisualReview.Limits" })
+}).annotate({ identifier: "VisualReview.Limits", ...exact })
 export interface Limits extends Schema.Schema.Type<typeof Limits> {}
 
 export const Usage = Schema.Struct({
   tokens: NonNegativeInt,
   turns: NonNegativeInt,
   toolCalls: NonNegativeInt,
-}).annotate({ identifier: "VisualReview.Usage" })
+}).annotate({ identifier: "VisualReview.Usage", ...exact })
 export interface Usage extends Schema.Schema.Type<typeof Usage> {}
 
 export const EvidenceImage = Schema.Struct({
-  id: Schema.NonEmptyString,
+  id: DesignArtifact.SafeIdentifier,
   kind: Schema.Literals(["reference", "implementation"]),
-  viewport: Schema.NonEmptyString,
+  viewport: DesignArtifact.SafeIdentifier,
+  revision: NonNegativeInt,
   uri: Schema.NonEmptyString,
   mime: Schema.Literal("image/png"),
   sha256: DesignArtifact.Sha256,
   size: PositiveInt,
-}).annotate({ identifier: "VisualReview.EvidenceImage" })
+}).annotate({ identifier: "VisualReview.EvidenceImage", ...exact })
 export interface EvidenceImage extends Schema.Schema.Type<typeof EvidenceImage> {}
 
 export const Finding = Schema.Struct({
@@ -56,7 +59,7 @@ export const Finding = Schema.Struct({
   evidenceImageIDs: Schema.NonEmptyArray(Schema.NonEmptyString),
   repair: Schema.NonEmptyString,
   requiresRecapture: Schema.Boolean,
-}).annotate({ identifier: "VisualReview.Finding" })
+}).annotate({ identifier: "VisualReview.Finding", ...exact })
 export interface Finding extends Schema.Schema.Type<typeof Finding> {}
 
 const ArtifactShape = Schema.Struct({
@@ -80,9 +83,15 @@ const internallyConsistent = Schema.makeFilter<Schema.Schema.Type<typeof Artifac
     return "Passing reviews must have no findings and failing reviews must have findings"
   const evidence = new Map(value.evidence.map((image) => [image.id, image]))
   if (evidence.size !== value.evidence.length) return "Evidence image IDs must be unique"
-  if (!value.evidence.some((image) => image.kind === "reference")) return "Reference image evidence is required"
-  if (!value.evidence.some((image) => image.kind === "implementation"))
-    return "Implementation image evidence is required"
+  const viewports = new Set(value.evidence.map((image) => image.viewport))
+  for (const viewport of viewports) {
+    const images = value.evidence.filter((image) => image.viewport === viewport)
+    if (images.length !== 2) return `Viewport ${viewport} must have exactly two evidence images`
+    if (images.filter((image) => image.kind === "reference" && image.revision === 0).length !== 1)
+      return `Viewport ${viewport} must have exactly one revision-zero reference image`
+    if (images.filter((image) => image.kind === "implementation" && image.revision === value.revision).length !== 1)
+      return `Viewport ${viewport} must have exactly one implementation image for the review revision`
+  }
   for (const finding of value.findings) {
     const images = finding.evidenceImageIDs.map((id) => evidence.get(id))
     if (images.some((image) => image === undefined)) return `Finding ${finding.id} references unknown evidence`
@@ -96,6 +105,7 @@ const internallyConsistent = Schema.makeFilter<Schema.Schema.Type<typeof Artifac
 
 export const Artifact = ArtifactShape.check(safePersistence, internallyConsistent).annotate({
   identifier: "VisualReview.Artifact",
+  ...exact,
 })
 export interface Artifact extends Schema.Schema.Type<typeof Artifact> {}
 
