@@ -1,6 +1,7 @@
 export * as WorkflowVisualReviewArtifact from "./visual-review"
 
 import { Message } from "@opencode-ai/llm"
+import { DesignArtifact } from "@opencode-ai/schema/design-artifact"
 import { NonNegativeInt } from "@opencode-ai/schema/schema"
 import { VisualReview } from "@opencode-ai/schema/visual-review"
 import { Workflow } from "@opencode-ai/schema/workflow"
@@ -20,7 +21,7 @@ const ScreenshotPayload = Schema.Struct({
   dataBase64: Schema.String,
 }).annotate({ identifier: "WorkflowVisualReviewArtifact.ScreenshotPayload", ...exact })
 const ReviewPayload = Schema.Struct({
-  workflowID: Workflow.ID,
+  workflowID: DesignArtifact.SafeWorkflowID,
   artifactKind: Schema.Literal(REVIEW_KIND),
   revision: NonNegativeInt,
   review: VisualReview.Artifact,
@@ -55,8 +56,10 @@ export function assertPng(bytes: Uint8Array): void {
     if (chunkIndex === 0) {
       if (type !== "IHDR" || length !== 13) throw new Error("PNG must start with a 13-byte IHDR chunk")
       const dimensions = new DataView(data.buffer, data.byteOffset, data.byteLength)
-      if (dimensions.getUint32(0) === 0 || dimensions.getUint32(4) === 0)
-        throw new Error("PNG dimensions must be positive")
+      const width = dimensions.getUint32(0)
+      const height = dimensions.getUint32(4)
+      if (width === 0 || width > 0x7fffffff || height === 0 || height > 0x7fffffff)
+        throw new Error("PNG dimensions must be between 1 and 2^31 - 1")
       const bitDepth = data[8]
       const colorType = data[9]
       const validBitDepths: Readonly<Record<number, ReadonlyArray<number>>> = {
@@ -94,18 +97,19 @@ export function capturedImage(input: {
   readonly revision: number
   readonly bytes: Uint8Array
 }): CapturedImage {
+  const workflowID = safeWorkflowID(input.workflowID)
   assertPng(input.bytes)
   if (input.kind === "reference" && input.revision !== 0)
     throw new Error("Reference screenshots must use revision zero")
   const viewport = Schema.decodeUnknownSync(VisualReview.EvidenceImage.fields.viewport)(input.viewport)
   const suffix = input.kind === "reference" ? "" : `-r${input.revision}`
   const metadata = Schema.decodeUnknownSync(VisualReview.EvidenceImage)({
-    id: imageID(input.workflowID, input.kind, viewport, input.revision),
-    workflowID: input.workflowID,
+    id: imageID(workflowID, input.kind, viewport, input.revision),
+    workflowID,
     kind: input.kind,
     viewport,
     revision: input.revision,
-    uri: `workflow://${input.workflowID}/${input.kind}-screenshot-${viewport}${suffix}.png`,
+    uri: `workflow://${workflowID}/${input.kind}-screenshot-${viewport}${suffix}.png`,
     mime: "image/png",
     sha256: Hash.sha256(Buffer.from(input.bytes)),
     size: input.bytes.byteLength,
@@ -138,12 +142,12 @@ export function commitScreenshot(image: CapturedImage): Workflow.ArtifactCommit 
   })
 }
 
-export function decodeScreenshot(artifact: Workflow.ArtifactCommit, expectedWorkflowID?: Workflow.ID): CapturedImage {
+export function decodeScreenshot(artifact: Workflow.ArtifactCommit, expectedWorkflowID: Workflow.ID): CapturedImage {
+  const owner = safeWorkflowID(expectedWorkflowID)
   WorkflowSecretGuard.assertSafe(artifact)
   const payload = Schema.decodeUnknownSync(ScreenshotPayload)(metadataPayload(artifact))
   validateImageIdentity(payload.image)
-  if (expectedWorkflowID !== undefined && payload.image.workflowID !== expectedWorkflowID)
-    throw new Error("Screenshot belongs to a different workflow")
+  if (payload.image.workflowID !== owner) throw new Error("Screenshot belongs to a different workflow")
   const bytes = Uint8Array.from(Buffer.from(payload.dataBase64, "base64"))
   if (Buffer.from(bytes).toString("base64") !== payload.dataBase64)
     throw new Error("Screenshot base64 is not canonical")
@@ -176,7 +180,7 @@ function validateImageIdentity(image: VisualReview.EvidenceImage): void {
 }
 
 function imageID(
-  workflowID: Workflow.ID,
+  workflowID: DesignArtifact.SafeWorkflowID,
   kind: "reference" | "implementation",
   viewport: string,
   revision: number,
@@ -215,12 +219,13 @@ export function reviewMessage(spec: unknown, images: ReadonlyArray<CapturedImage
 }
 
 export function commitReview(workflowID: Workflow.ID, input: unknown): Workflow.ArtifactCommit {
+  const owner = safeWorkflowID(workflowID)
   WorkflowSecretGuard.assertSafe(input)
   const review = Schema.decodeUnknownSync(VisualReview.Artifact)(input)
-  if (review.evidence.some((image) => image.workflowID !== workflowID))
+  if (review.evidence.some((image) => image.workflowID !== owner))
     throw new Error("Visual review evidence belongs to a different workflow")
   const payload = Schema.decodeUnknownSync(ReviewPayload)({
-    workflowID,
+    workflowID: owner,
     artifactKind: REVIEW_KIND,
     revision: review.revision,
     review,
@@ -229,7 +234,7 @@ export function commitReview(workflowID: Workflow.ID, input: unknown): Workflow.
   const encoded = new TextEncoder().encode(body)
   return Workflow.ArtifactCommit.make({
     kind: REVIEW_KIND,
-    uri: reviewURI(workflowID, review.revision),
+    uri: reviewURI(owner, review.revision),
     mime: REVIEW_MIME,
     sha256: Hash.sha256(Buffer.from(encoded)),
     size: encoded.byteLength,
@@ -241,9 +246,10 @@ export function decodeReview(
   artifact: Workflow.ArtifactCommit,
   expectedWorkflowID: Workflow.ID,
 ): VisualReview.Artifact {
+  const owner = safeWorkflowID(expectedWorkflowID)
   const payload = Schema.decodeUnknownSync(ReviewPayload)(metadataPayload(artifact))
   WorkflowSecretGuard.assertSafe(payload)
-  if (payload.workflowID !== expectedWorkflowID) throw new Error("Visual review belongs to a different workflow")
+  if (payload.workflowID !== owner) throw new Error("Visual review belongs to a different workflow")
   if (payload.revision !== payload.review.revision) throw new Error("Visual review revision is not canonical")
   if (payload.review.evidence.some((image) => image.workflowID !== payload.workflowID))
     throw new Error("Visual review evidence belongs to a different workflow")
@@ -260,7 +266,11 @@ export function decodeReview(
   return payload.review
 }
 
-function reviewURI(workflowID: Workflow.ID, revision: number): string {
+function safeWorkflowID(input: unknown): DesignArtifact.SafeWorkflowID {
+  return Schema.decodeUnknownSync(DesignArtifact.SafeWorkflowID)(input)
+}
+
+function reviewURI(workflowID: DesignArtifact.SafeWorkflowID, revision: number): string {
   return `workflow://${workflowID}/visual-review-r${revision}.json`
 }
 

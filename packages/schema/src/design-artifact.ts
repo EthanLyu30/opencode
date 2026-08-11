@@ -2,6 +2,7 @@ export * as DesignArtifact from "./design-artifact"
 
 import { Schema } from "effect"
 import { PositiveInt } from "./schema"
+import { Workflow } from "./workflow"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 
@@ -9,8 +10,13 @@ export const SafeIdentifier = Schema.NonEmptyString.check(Schema.isPattern(/^[a-
   identifier: "DesignArtifact.SafeIdentifier",
 })
 
+export const SafeWorkflowID = Workflow.ID.check(Schema.isPattern(/^wfl_[A-Za-z0-9][A-Za-z0-9_-]*$/)).annotate({
+  identifier: "DesignArtifact.SafeWorkflowID",
+})
+export type SafeWorkflowID = typeof SafeWorkflowID.Type
+
 export function sourceCollisionKey(value: string): string {
-  return value.normalize("NFC").toLowerCase()
+  return value.toLowerCase()
 }
 
 export const SourcePath = Schema.NonEmptyString.check(
@@ -29,6 +35,8 @@ export const SourcePath = Schema.NonEmptyString.check(
     if (segments.some((segment) => segment === "" || segment === "." || segment === ".."))
       return "Source path must not contain empty, dot, or parent segments"
     for (const segment of segments) {
+      if (!/^[A-Za-z0-9_][A-Za-z0-9._@+()[\]-]*$/.test(segment))
+        return "Source path segments must use the portable ASCII subset"
       if (/[. ]$/.test(segment)) return "Source path segments must not end in a dot or space"
       const basename = segment.split(".")[0].toUpperCase()
       if (/^(?:CON|PRN|AUX|NUL|COM(?:[1-9]|¹|²|³)|LPT(?:[1-9]|¹|²|³))$/.test(basename))

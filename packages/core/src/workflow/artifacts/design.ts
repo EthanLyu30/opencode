@@ -15,7 +15,7 @@ export const REFERENCE_APP_MIME = "application/vnd.opencode.reference-app+json"
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 const Base64 = Schema.String.check(Schema.isPattern(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/))
 const SpecPayload = Schema.Struct({
-  workflowID: Workflow.ID,
+  workflowID: DesignArtifact.SafeWorkflowID,
   artifactKind: Schema.Literal(SPEC_KIND),
   spec: DesignArtifact.Spec,
 }).annotate({ identifier: "WorkflowDesignArtifact.SpecPayload", ...exact })
@@ -28,7 +28,7 @@ const ReferenceSourcePayload = Schema.Struct({
 })
 const ReferencePayload = Schema.Struct({
   schemaVersion: Schema.Literal(1),
-  workflowID: Workflow.ID,
+  workflowID: DesignArtifact.SafeWorkflowID,
   artifactKind: Schema.Literal(REFERENCE_APP_KIND),
   entrypoint: DesignArtifact.SourcePath,
   readySelector: Schema.NonEmptyString,
@@ -49,21 +49,23 @@ export interface ReferenceApp {
 }
 
 export function commitSpec(workflowID: Workflow.ID, input: unknown): Workflow.ArtifactCommit {
+  const owner = safeWorkflowID(workflowID)
   WorkflowSecretGuard.assertSafe(input)
   const spec = Schema.decodeUnknownSync(DesignArtifact.Spec)(input)
-  const payload = Schema.decodeUnknownSync(SpecPayload)({ workflowID, artifactKind: SPEC_KIND, spec })
+  const payload = Schema.decodeUnknownSync(SpecPayload)({ workflowID: owner, artifactKind: SPEC_KIND, spec })
   return commit({
     kind: SPEC_KIND,
     mime: SPEC_MIME,
-    uri: specURI(workflowID),
+    uri: specURI(owner),
     payload,
   })
 }
 
 export function decodeSpec(artifact: Workflow.ArtifactCommit, expectedWorkflowID: Workflow.ID): DesignArtifact.Spec {
+  const owner = safeWorkflowID(expectedWorkflowID)
   const payload = Schema.decodeUnknownSync(SpecPayload)(metadataPayload(artifact))
   WorkflowSecretGuard.assertSafe(payload)
-  if (payload.workflowID !== expectedWorkflowID) throw new Error("Design specification belongs to a different workflow")
+  if (payload.workflowID !== owner) throw new Error("Design specification belongs to a different workflow")
   validateCommit(artifact, encode(payload), SPEC_KIND, SPEC_MIME, specURI(payload.workflowID))
   return payload.spec
 }
@@ -73,6 +75,7 @@ export function commitReferenceApp(
   inputSpec: DesignArtifact.Spec,
   files: ReadonlyArray<SourceFile>,
 ): Workflow.ArtifactCommit {
+  const owner = safeWorkflowID(workflowID)
   WorkflowSecretGuard.assertSafe(inputSpec)
   const spec = Schema.decodeUnknownSync(DesignArtifact.Spec)(inputSpec)
   const expected = new Map(
@@ -103,7 +106,7 @@ export function commitReferenceApp(
   }
   const payload = Schema.decodeUnknownSync(ReferencePayload)({
     schemaVersion: 1,
-    workflowID,
+    workflowID: owner,
     artifactKind: REFERENCE_APP_KIND,
     entrypoint: spec.referenceApp.entrypoint,
     readySelector: spec.referenceApp.readySelector,
@@ -113,15 +116,16 @@ export function commitReferenceApp(
   return commit({
     kind: REFERENCE_APP_KIND,
     mime: REFERENCE_APP_MIME,
-    uri: referenceURI(workflowID),
+    uri: referenceURI(owner),
     payload,
   })
 }
 
 export function decodeReferenceApp(artifact: Workflow.ArtifactCommit, expectedWorkflowID: Workflow.ID): ReferenceApp {
+  const owner = safeWorkflowID(expectedWorkflowID)
   const payload = Schema.decodeUnknownSync(ReferencePayload)(metadataPayload(artifact))
   WorkflowSecretGuard.assertSafe(payload)
-  if (payload.workflowID !== expectedWorkflowID) throw new Error("Reference app belongs to a different workflow")
+  if (payload.workflowID !== owner) throw new Error("Reference app belongs to a different workflow")
   validateCommit(artifact, encode(payload), REFERENCE_APP_KIND, REFERENCE_APP_MIME, referenceURI(payload.workflowID))
   const seen = new Set<string>()
   const files = payload.files.map((file) => {
@@ -212,10 +216,14 @@ function validateCommit(
   }
 }
 
-function specURI(workflowID: Workflow.ID): string {
+function safeWorkflowID(input: unknown): DesignArtifact.SafeWorkflowID {
+  return Schema.decodeUnknownSync(DesignArtifact.SafeWorkflowID)(input)
+}
+
+function specURI(workflowID: DesignArtifact.SafeWorkflowID): string {
   return `workflow://${workflowID}/design-spec.json`
 }
 
-function referenceURI(workflowID: Workflow.ID): string {
+function referenceURI(workflowID: DesignArtifact.SafeWorkflowID): string {
   return `workflow://${workflowID}/reference-app/manifest.json`
 }

@@ -54,6 +54,15 @@ const withIhdr = (
   return output
 }
 
+const withIhdrDimension = (input: Uint8Array, field: "width" | "height", value: number) => {
+  const output = input.slice()
+  new DataView(output.buffer, output.byteOffset + 16, 8).setUint32(field === "width" ? 0 : 4, value)
+  const type = output.slice(12, 16)
+  const data = output.slice(16, 29)
+  new DataView(output.buffer, output.byteOffset + 29, 4).setUint32(0, pngCrc32(type, data))
+  return output
+}
+
 const spec = {
   schemaVersion: 1 as const,
   goals: ["Let users review a release"],
@@ -344,26 +353,33 @@ describe("Kimi design and visual review loop", () => {
     const screenshot = WorkflowVisualReviewArtifact.commitScreenshot(captured)
     const { bytes: _capturedBytes, ...capturedEvidence } = captured
     expect(screenshot.sha256).not.toBe(captured.sha256)
-    expect(WorkflowVisualReviewArtifact.decodeScreenshot(screenshot).bytes).toEqual(png)
+    expect(WorkflowVisualReviewArtifact.decodeScreenshot(screenshot, workflowID).bytes).toEqual(png)
+    expect(() => Reflect.apply(WorkflowVisualReviewArtifact.decodeScreenshot, undefined, [screenshot])).toThrow()
     expect(() =>
       WorkflowVisualReviewArtifact.decodeScreenshot(screenshot, Workflow.ID.make("wfl_other_workflow")),
     ).toThrow()
     expect(() =>
-      WorkflowVisualReviewArtifact.decodeScreenshot({
-        ...screenshot,
-        metadata: { ...screenshot.metadata, payload: { dataBase64: Buffer.from("tampered").toString("base64") } },
-      }),
+      WorkflowVisualReviewArtifact.decodeScreenshot(
+        {
+          ...screenshot,
+          metadata: { ...screenshot.metadata, payload: { dataBase64: Buffer.from("tampered").toString("base64") } },
+        },
+        workflowID,
+      ),
     ).toThrow()
     expect(() =>
-      WorkflowVisualReviewArtifact.decodeScreenshot({
-        ...screenshot,
-        metadata: {
-          payload: {
-            image: { ...capturedEvidence, id: "attacker-id" },
-            dataBase64: Buffer.from(png).toString("base64"),
+      WorkflowVisualReviewArtifact.decodeScreenshot(
+        {
+          ...screenshot,
+          metadata: {
+            payload: {
+              image: { ...capturedEvidence, id: "attacker-id" },
+              dataBase64: Buffer.from(png).toString("base64"),
+            },
           },
         },
-      }),
+        workflowID,
+      ),
     ).toThrow()
 
     const evidence = [
@@ -416,6 +432,8 @@ describe("Kimi design and visual review loop", () => {
       withIhdr(png, "interlace", 2),
       withIhdr(png, "colorType", 1),
       withIhdr(withIhdr(png, "colorType", 2), "bitDepth", 1),
+      withIhdrDimension(png, "width", 0x80000000),
+      withIhdrDimension(png, "height", 0x80000000),
     ]
     for (const bytes of malformed) {
       expect(() =>
@@ -455,6 +473,86 @@ describe("Kimi design and visual review loop", () => {
         { path: "index.html", content: "Bearer live-secret-source-value" },
       ]),
     ).toThrow()
+  })
+
+  test("rejects unsafe workflow owners before constructing artifact identities", () => {
+    for (const value of ["wfl_a/../wfl_b", "wfl_a@evil.test", "wfl_a:80"]) {
+      const workflowID = Workflow.ID.make(value)
+      expect(() => WorkflowDesignArtifact.commitSpec(workflowID, spec)).toThrow()
+      expect(() =>
+        WorkflowDesignArtifact.commitReferenceApp(workflowID, decodedSpec, [
+          { path: "index.html", content: referenceSource },
+        ]),
+      ).toThrow()
+      expect(() =>
+        WorkflowVisualReviewArtifact.capturedImage({
+          workflowID,
+          kind: "reference",
+          viewport: "desktop",
+          revision: 0,
+          bytes: png,
+        }),
+      ).toThrow()
+
+      const evidence = [
+        {
+          id: "reference-desktop",
+          workflowID,
+          kind: "reference" as const,
+          viewport: "desktop",
+          revision: 0,
+          uri: "artifact://reference-desktop.png",
+          mime: "image/png" as const,
+          sha256: hash,
+          size: 64,
+        },
+        {
+          id: "implementation-desktop",
+          workflowID,
+          kind: "implementation" as const,
+          viewport: "desktop",
+          revision: 0,
+          uri: "artifact://implementation-desktop.png",
+          mime: "image/png" as const,
+          sha256: hash,
+          size: 64,
+        },
+      ]
+      const review = {
+        schemaVersion: 1,
+        revision: 0,
+        verdict: "pass",
+        score: 100,
+        limits: { maxRevisions: 1, maxTokens: 10, maxTurns: 10, maxToolCalls: 10 },
+        usage: { tokens: 1, turns: 1, toolCalls: 0 },
+        evidence,
+        findings: [],
+      }
+      expect(() => WorkflowVisualReviewArtifact.commitReview(workflowID, review)).toThrow()
+    }
+  })
+
+  test("rejects an unsafe workflow owner before invoking a model callback", async () => {
+    let designed = false
+    const error = await WorkflowRender.run({
+      workflowID: Workflow.ID.make("wfl_a@evil.test"),
+      limits: { maxRevisions: 1, maxTokens: 10, maxTurns: 10, maxToolCalls: 10 },
+      design: () => {
+        designed = true
+        return Effect.succeed({
+          spec,
+          referenceApp: { files: [{ path: "index.html", content: referenceSource }] },
+          usage: usage(1),
+        })
+      },
+      prepareReference: () => Effect.fail(new Error("must not prepare")),
+      implement: () => Effect.fail(new Error("must not implement")),
+      repair: () => Effect.fail(new Error("must not repair")),
+      review: () => Effect.fail(new Error("must not review")),
+      capture: () => Effect.fail(new Error("must not capture")),
+    }).pipe(Effect.flip, Effect.runPromise)
+    expect(error).toBeInstanceOf(Error)
+    expect(designed).toBe(false)
   })
 
   test("uses host-measured review usage and requests approval before accepting an over-budget pass", async () => {

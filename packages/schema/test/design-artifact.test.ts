@@ -178,6 +178,17 @@ describe("design and visual artifact schemas", () => {
     ).toThrow()
   })
 
+  test("rejects workflow identifiers that cannot be used as canonical artifact URI authorities", () => {
+    for (const workflowID of ["wfl_a/../wfl_b", "wfl_a@evil.test", "wfl_a:80"]) {
+      expect(() =>
+        Schema.decodeUnknownSync(VisualReview.EvidenceImage)({
+          ...image("reference", "reference-desktop"),
+          workflowID,
+        }),
+      ).toThrow()
+    }
+  })
+
   test("rejects unsafe source paths, duplicate files, and unsafe viewport identifiers", () => {
     for (const path of [
       "../secret.js",
@@ -195,6 +206,8 @@ describe("design and visual artifact schemas", () => {
       "trailing./app.js",
       "control\u0000.js",
       "cafe\u0301.js",
+      "src/Σ.ts",
+      "src/ς.ts",
     ]) {
       expect(() =>
         Schema.decodeUnknownSync(DesignArtifact.Spec)({

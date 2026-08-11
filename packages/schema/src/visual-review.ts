@@ -3,7 +3,6 @@ export * as VisualReview from "./visual-review"
 import { Schema } from "effect"
 import { NonNegativeInt, PositiveInt } from "./schema"
 import { DesignArtifact } from "./design-artifact"
-import { Workflow } from "./workflow"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 
@@ -29,7 +28,7 @@ export interface Usage extends Schema.Schema.Type<typeof Usage> {}
 
 export const EvidenceImage = Schema.Struct({
   id: DesignArtifact.SafeIdentifier,
-  workflowID: Workflow.ID,
+  workflowID: DesignArtifact.SafeWorkflowID,
   kind: Schema.Literals(["reference", "implementation"]),
   viewport: DesignArtifact.SafeIdentifier,
   revision: NonNegativeInt,

@@ -117,6 +117,10 @@ export type Result =
     }
 
 export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Effect.fn.Return<Result, unknown> {
+  const workflowID = yield* Effect.try({
+    try: () => Schema.decodeUnknownSync(DesignArtifact.SafeWorkflowID)(input.workflowID),
+    catch: (error) => (error instanceof Error ? error : new Error("Workflow ID is unsafe")),
+  })
   let usage = zeroUsage
   const artifacts: Workflow.ArtifactCommit[] = []
   const limits = Schema.decodeUnknownSync(VisualReview.Limits)(input.limits)
@@ -132,10 +136,10 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
     catch: (error) => (error instanceof Error ? error : new Error("Design result is invalid")),
   })
   usage = addUsage(usage, designed.usage)
-  const specCommit = WorkflowDesignArtifact.commitSpec(input.workflowID, designed.spec)
-  const spec = WorkflowDesignArtifact.decodeSpec(specCommit, input.workflowID)
-  const referenceCommit = WorkflowDesignArtifact.commitReferenceApp(input.workflowID, spec, designed.referenceApp.files)
-  const durableReference = WorkflowDesignArtifact.decodeReferenceApp(referenceCommit, input.workflowID)
+  const specCommit = WorkflowDesignArtifact.commitSpec(workflowID, designed.spec)
+  const spec = WorkflowDesignArtifact.decodeSpec(specCommit, workflowID)
+  const referenceCommit = WorkflowDesignArtifact.commitReferenceApp(workflowID, spec, designed.referenceApp.files)
+  const durableReference = WorkflowDesignArtifact.decodeReferenceApp(referenceCommit, workflowID)
   artifacts.push(specCommit, referenceCommit)
   if (exhausted(limits, usage)) return approval("budget_exhausted", 0, artifacts, usage)
   const referenceUrl = yield* input.prepareReference({ artifact: referenceCommit, app: durableReference })
@@ -143,7 +147,7 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   if (referenceUrl.length === 0) throw new Error("Host reference preview URL must not be empty")
 
   const reference = yield* captureAll({
-    workflowID: input.workflowID,
+    workflowID,
     kind: "reference",
     url: referenceUrl,
     readySelector: spec.referenceApp.readySelector,
@@ -168,7 +172,7 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   let revision = 0
   while (true) {
     const candidate = yield* captureAll({
-      workflowID: input.workflowID,
+      workflowID,
       kind: "implementation",
       url: implementation.url,
       readySelector: spec.referenceApp.readySelector,
@@ -199,7 +203,7 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
       usage: measuredReviewUsage(reviewed.usage),
     })
     assertReviewContext(review, limits, evidence, revision)
-    artifacts.push(WorkflowVisualReviewArtifact.commitReview(input.workflowID, review))
+    artifacts.push(WorkflowVisualReviewArtifact.commitReview(workflowID, review))
     if (exhausted(limits, usage)) return approval("budget_exhausted", revision, artifacts, usage)
     if (review.verdict === "pass") return { status: "passed", revision, artifacts, usage }
     const decision = WorkflowStageMachine.decideVisualRepair({
@@ -234,6 +238,10 @@ export const captureAll = Effect.fn("WorkflowRender.captureAll")(function* (inpu
   readonly revision: number
   readonly capture: Capture
 }) {
+  const workflowID = yield* Effect.try({
+    try: () => Schema.decodeUnknownSync(DesignArtifact.SafeWorkflowID)(input.workflowID),
+    catch: (error) => (error instanceof Error ? error : new Error("Workflow ID is unsafe")),
+  })
   return yield* Effect.forEach(
     input.viewports,
     (viewport) =>
@@ -248,7 +256,7 @@ export const captureAll = Effect.fn("WorkflowRender.captureAll")(function* (inpu
         .pipe(
           Effect.map((bytes) =>
             WorkflowVisualReviewArtifact.capturedImage({
-              workflowID: input.workflowID,
+              workflowID,
               kind: input.kind,
               viewport: viewport.name,
               revision: input.revision,
