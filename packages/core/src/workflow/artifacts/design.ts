@@ -81,10 +81,12 @@ export function commitReferenceApp(
   const expected = new Map(
     spec.referenceApp.files.map((file) => [DesignArtifact.sourceCollisionKey(file.path), file] as const),
   )
+  for (const file of files) WorkflowSecretGuard.assertSafe(file)
+  const actualPaths = files.map((file) => Schema.decodeUnknownSync(DesignArtifact.SourcePath)(file.path))
+  assertSourceTopology(actualPaths)
   const actualKeys = new Set<string>()
-  const actual = files.map((file) => {
-    WorkflowSecretGuard.assertSafe(file)
-    const path = Schema.decodeUnknownSync(DesignArtifact.SourcePath)(file.path)
+  const actual = files.map((file, index) => {
+    const path = actualPaths[index]
     const key = DesignArtifact.sourceCollisionKey(path)
     if (actualKeys.has(key)) throw new Error("Reference source paths must be unique")
     actualKeys.add(key)
@@ -127,6 +129,7 @@ export function decodeReferenceApp(artifact: Workflow.ArtifactCommit, expectedWo
   WorkflowSecretGuard.assertSafe(payload)
   if (payload.workflowID !== owner) throw new Error("Reference app belongs to a different workflow")
   validateCommit(artifact, encode(payload), REFERENCE_APP_KIND, REFERENCE_APP_MIME, referenceURI(payload.workflowID))
+  assertSourceTopology(payload.files.map((file) => file.path))
   const seen = new Set<string>()
   const files = payload.files.map((file) => {
     const key = DesignArtifact.sourceCollisionKey(file.path)
@@ -220,10 +223,15 @@ function safeWorkflowID(input: unknown): DesignArtifact.SafeWorkflowID {
   return Schema.decodeUnknownSync(DesignArtifact.SafeWorkflowID)(input)
 }
 
+function assertSourceTopology(paths: ReadonlyArray<string>): void {
+  const error = DesignArtifact.sourceTopologyError(paths)
+  if (error !== undefined) throw new Error(error)
+}
+
 function specURI(workflowID: DesignArtifact.SafeWorkflowID): string {
-  return `workflow://${workflowID}/design-spec.json`
+  return `workflow://artifact/${workflowID}/design-spec.json`
 }
 
 function referenceURI(workflowID: DesignArtifact.SafeWorkflowID): string {
-  return `workflow://${workflowID}/reference-app/manifest.json`
+  return `workflow://artifact/${workflowID}/reference-app/manifest.json`
 }

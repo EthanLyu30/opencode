@@ -102,14 +102,13 @@ export function capturedImage(input: {
   if (input.kind === "reference" && input.revision !== 0)
     throw new Error("Reference screenshots must use revision zero")
   const viewport = Schema.decodeUnknownSync(VisualReview.EvidenceImage.fields.viewport)(input.viewport)
-  const suffix = input.kind === "reference" ? "" : `-r${input.revision}`
   const metadata = Schema.decodeUnknownSync(VisualReview.EvidenceImage)({
     id: imageID(workflowID, input.kind, viewport, input.revision),
     workflowID,
     kind: input.kind,
     viewport,
     revision: input.revision,
-    uri: `workflow://${workflowID}/${input.kind}-screenshot-${viewport}${suffix}.png`,
+    uri: imageURI(workflowID, input.kind, viewport, input.revision),
     mime: "image/png",
     sha256: Hash.sha256(Buffer.from(input.bytes)),
     size: input.bytes.byteLength,
@@ -173,9 +172,8 @@ export function decodeScreenshot(artifact: Workflow.ArtifactCommit, expectedWork
 function validateImageIdentity(image: VisualReview.EvidenceImage): void {
   if (image.kind === "reference" && image.revision !== 0)
     throw new Error("Reference screenshots must use revision zero")
-  const suffix = image.kind === "reference" ? "" : `-r${image.revision}`
   const id = imageID(image.workflowID, image.kind, image.viewport, image.revision)
-  const uri = `workflow://${image.workflowID}/${image.kind}-screenshot-${image.viewport}${suffix}.png`
+  const uri = imageURI(image.workflowID, image.kind, image.viewport, image.revision)
   if (image.id !== id || image.uri !== uri) throw new Error("Screenshot identity is not canonical")
 }
 
@@ -186,7 +184,18 @@ function imageID(
   revision: number,
 ): string {
   const suffix = kind === "reference" ? "" : `-r${revision}`
-  return `screenshot-${workflowID}-${kind}-${viewport}${suffix}`
+  const ownerDigest = Hash.sha256(Buffer.from(workflowID, "utf8"))
+  return `screenshot-${ownerDigest}-${kind}-${viewport}${suffix}`
+}
+
+function imageURI(
+  workflowID: DesignArtifact.SafeWorkflowID,
+  kind: "reference" | "implementation",
+  viewport: string,
+  revision: number,
+): string {
+  const suffix = kind === "reference" ? "" : `-r${revision}`
+  return `workflow://artifact/${workflowID}/${kind}-screenshot-${viewport}${suffix}.png`
 }
 
 function crc32(type: Uint8Array, data: Uint8Array): number {
@@ -222,6 +231,7 @@ export function commitReview(workflowID: Workflow.ID, input: unknown): Workflow.
   const owner = safeWorkflowID(workflowID)
   WorkflowSecretGuard.assertSafe(input)
   const review = Schema.decodeUnknownSync(VisualReview.Artifact)(input)
+  for (const image of review.evidence) validateImageIdentity(image)
   if (review.evidence.some((image) => image.workflowID !== owner))
     throw new Error("Visual review evidence belongs to a different workflow")
   const payload = Schema.decodeUnknownSync(ReviewPayload)({
@@ -251,6 +261,7 @@ export function decodeReview(
   WorkflowSecretGuard.assertSafe(payload)
   if (payload.workflowID !== owner) throw new Error("Visual review belongs to a different workflow")
   if (payload.revision !== payload.review.revision) throw new Error("Visual review revision is not canonical")
+  for (const image of payload.review.evidence) validateImageIdentity(image)
   if (payload.review.evidence.some((image) => image.workflowID !== payload.workflowID))
     throw new Error("Visual review evidence belongs to a different workflow")
   const encoded = new TextEncoder().encode(WorkflowDesignArtifact.encode(payload))
@@ -271,7 +282,7 @@ function safeWorkflowID(input: unknown): DesignArtifact.SafeWorkflowID {
 }
 
 function reviewURI(workflowID: DesignArtifact.SafeWorkflowID, revision: number): string {
-  return `workflow://${workflowID}/visual-review-r${revision}.json`
+  return `workflow://artifact/${workflowID}/visual-review-r${revision}.json`
 }
 
 function metadataPayload(artifact: Workflow.ArtifactCommit): unknown {

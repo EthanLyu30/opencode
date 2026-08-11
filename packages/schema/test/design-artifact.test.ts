@@ -103,7 +103,6 @@ describe("design and visual artifact schemas", () => {
         referenceApp: { ...design.referenceApp, files: [unhashedFile] },
       }),
     ).toThrow()
-
     const { sha256: _imageHash, ...unhashedImage } = review.evidence[0]
     expect(() => Schema.decodeUnknownSync(VisualReview.Artifact)({ ...review, evidence: [unhashedImage] })).toThrow()
   })
@@ -235,6 +234,32 @@ describe("design and visual artifact schemas", () => {
         referenceApp: {
           ...design.referenceApp,
           files: [design.referenceApp.files[0], { ...design.referenceApp.files[0], path: "INDEX.HTML" }],
+        },
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(DesignArtifact.Spec)({
+        ...design,
+        referenceApp: {
+          ...design.referenceApp,
+          entrypoint: "app",
+          files: [
+            { ...design.referenceApp.files[0], path: "app" },
+            { ...design.referenceApp.files[0], path: "app/index.html" },
+          ],
+        },
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(DesignArtifact.Spec)({
+        ...design,
+        referenceApp: {
+          ...design.referenceApp,
+          entrypoint: "Foo/a.js",
+          files: [
+            { ...design.referenceApp.files[0], path: "Foo/a.js" },
+            { ...design.referenceApp.files[0], path: "foo/b.js" },
+          ],
         },
       }),
     ).toThrow()

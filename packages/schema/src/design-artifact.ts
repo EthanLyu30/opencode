@@ -19,6 +19,30 @@ export function sourceCollisionKey(value: string): string {
   return value.toLowerCase()
 }
 
+export function sourceTopologyError(paths: ReadonlyArray<string>): string | undefined {
+  const files = new Set<string>()
+  const directories = new Set<string>()
+  const directorySpellings = new Map<string, string>()
+  for (const path of paths) {
+    const fileKey = sourceCollisionKey(path)
+    if (files.has(fileKey)) return "Reference source paths must be unique"
+    files.add(fileKey)
+    const segments = path.split("/")
+    for (let index = 1; index < segments.length; index++) {
+      const directory = segments.slice(0, index).join("/")
+      const directoryKey = sourceCollisionKey(directory)
+      const previous = directorySpellings.get(directoryKey)
+      if (previous !== undefined && previous !== directory)
+        return "Reference source directory casing must be consistent"
+      directorySpellings.set(directoryKey, directory)
+      directories.add(directoryKey)
+    }
+  }
+  if ([...directories].some((directory) => files.has(directory)))
+    return "A reference source file must not also be a directory"
+  return undefined
+}
+
 export const SourcePath = Schema.NonEmptyString.check(
   Schema.makeFilter<string>((value) => {
     if (
@@ -131,8 +155,10 @@ const safePersistence = Schema.makeFilter<Schema.Schema.Type<typeof SpecShape>>(
 const internallyConsistent = Schema.makeFilter<Schema.Schema.Type<typeof SpecShape>>((value) => {
   const viewports = new Set(value.referenceApp.viewports.map((viewport) => viewport.name))
   if (viewports.size !== value.referenceApp.viewports.length) return "Reference viewport names must be unique"
-  const files = new Set(value.referenceApp.files.map((file) => sourceCollisionKey(file.path)))
-  if (files.size !== value.referenceApp.files.length) return "Reference source paths must be unique"
+  const paths = value.referenceApp.files.map((file) => file.path)
+  const topologyError = sourceTopologyError(paths)
+  if (topologyError !== undefined) return topologyError
+  const files = new Set(paths.map(sourceCollisionKey))
   if (!files.has(sourceCollisionKey(value.referenceApp.entrypoint)))
     return "Reference entrypoint must name a hashed reference-app file"
   if (value.responsiveRules.some((rule) => !viewports.has(rule.viewport)))

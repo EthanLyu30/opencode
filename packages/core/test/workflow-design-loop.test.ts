@@ -92,7 +92,9 @@ const spec = {
 const decodedSpec = Schema.decodeUnknownSync(DesignArtifact.Spec)(spec)
 
 const evidenceID = (workflowID: string, kind: "reference" | "implementation", viewport: string, revision: number) =>
-  `screenshot-${workflowID}-${kind}-${viewport}${kind === "reference" ? "" : `-r${revision}`}`
+  `screenshot-${createHash("sha256").update(workflowID).digest("hex")}-${kind}-${viewport}${
+    kind === "reference" ? "" : `-r${revision}`
+  }`
 
 const finding = (revision: number, workflowID = "wfl_visual_loop") => ({
   schemaVersion: 1 as const,
@@ -145,8 +147,10 @@ describe("Kimi design and visual review loop", () => {
   test("renders Kimi's app, reviews paired images, repairs once, and passes", async () => {
     const calls: string[] = []
     let reviewCount = 0
+    const workflowID = Workflow.ID.create()
+    const nextWorkflowID = Workflow.ID.create()
     const result = await WorkflowRender.run({
-      workflowID: Workflow.ID.make("wfl_visual_loop"),
+      workflowID,
       limits: { maxRevisions: 1, maxTokens: 20_000, maxTurns: 20, maxToolCalls: 20 },
       design: (input) => {
         calls.push("kimi:design")
@@ -208,10 +212,11 @@ describe("Kimi design and visual review loop", () => {
           evidence.filter((item) => item.kind === "implementation").every((item) => item.revision === revision),
         ).toBe(true)
         reviewCount++
-        if (reviewCount === 1) return Effect.succeed({ review: { ...finding(revision), evidence }, usage: usage(300) })
+        if (reviewCount === 1)
+          return Effect.succeed({ review: { ...finding(revision, workflowID), evidence }, usage: usage(300) })
         return Effect.succeed({
           review: {
-            ...finding(revision),
+            ...finding(revision, workflowID),
             verdict: "pass" as const,
             score: 100,
             evidence,
@@ -246,6 +251,19 @@ describe("Kimi design and visual review loop", () => {
     expect(result.artifacts.some((item) => item.kind === WorkflowDesignArtifact.SPEC_KIND)).toBe(true)
     expect(result.artifacts.filter((item) => item.kind === WorkflowVisualReviewArtifact.REVIEW_KIND)).toHaveLength(2)
     for (const artifact of result.artifacts) expect(artifact.sha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(result.artifacts.every((artifact) => artifact.uri.startsWith(`workflow://artifact/${workflowID}/`))).toBe(
+      true,
+    )
+    const nextCapture = await WorkflowRender.captureAll({
+      workflowID: nextWorkflowID,
+      kind: "reference",
+      url: "http://host-preview.test/index.html",
+      readySelector: "[data-render-ready]",
+      viewports: [{ name: "desktop", width: 1440, height: 900 }],
+      revision: 0,
+      capture: () => Effect.succeed(png.slice()),
+    }).pipe(Effect.runPromise)
+    expect(nextCapture[0]?.uri).toBe(`workflow://artifact/${nextWorkflowID}/reference-screenshot-desktop.png`)
   })
 
   test("enters approval when the visual revision ceiling is exhausted", async () => {
@@ -415,6 +433,44 @@ describe("Kimi design and visual review loop", () => {
     const otherReview = Schema.decodeUnknownSync(VisualReview.Artifact)({ ...review, evidence: otherEvidence })
     expect(() => WorkflowVisualReviewArtifact.commitReview(workflowID, otherReview)).toThrow()
 
+    const passingReview = Schema.decodeUnknownSync(VisualReview.Artifact)({
+      ...review,
+      verdict: "pass",
+      score: 100,
+      findings: [],
+    })
+    const forgedEvidenceSets = [
+      passingReview.evidence.map((image, index) =>
+        index === 0 ? { ...image, uri: "workflow://artifact/wfl_other/reference-screenshot-desktop.png" } : image,
+      ),
+      passingReview.evidence.map((image, index) => (index === 0 ? { ...image, id: "forged-reference-id" } : image)),
+    ]
+    for (const forgedEvidence of forgedEvidenceSets) {
+      const forgedReview = Schema.decodeUnknownSync(VisualReview.Artifact)({
+        ...passingReview,
+        evidence: forgedEvidence,
+      })
+      expect(() => WorkflowVisualReviewArtifact.commitReview(workflowID, forgedReview)).toThrow()
+      const forgedPayload = {
+        workflowID,
+        artifactKind: WorkflowVisualReviewArtifact.REVIEW_KIND,
+        revision: 0,
+        review: forgedReview,
+      }
+      const forgedBody = WorkflowDesignArtifact.encode(forgedPayload)
+      expect(() =>
+        WorkflowVisualReviewArtifact.decodeReview(
+          {
+            ...reviewCommit,
+            sha256: createHash("sha256").update(forgedBody).digest("hex"),
+            size: new TextEncoder().encode(forgedBody).byteLength,
+            metadata: { payload: forgedPayload },
+          },
+          workflowID,
+        ),
+      ).toThrow()
+    }
+
     expect(() => Schema.decodeUnknownSync(Workflow.ArtifactCommit)({ ...specCommit, sha256: "bad" })).toThrow()
   })
 
@@ -530,6 +586,26 @@ describe("Kimi design and visual review loop", () => {
       }
       expect(() => WorkflowVisualReviewArtifact.commitReview(workflowID, review)).toThrow()
     }
+  })
+
+  test("keeps uppercase workflow owners distinct under a fixed URI authority", () => {
+    const upper = Workflow.ID.make("wfl_CaseOwner")
+    const lower = Workflow.ID.make("wfl_caseowner")
+    const upperCommit = WorkflowDesignArtifact.commitSpec(upper, spec)
+    const lowerCommit = WorkflowDesignArtifact.commitSpec(lower, spec)
+    expect(upperCommit.uri).toBe("workflow://artifact/wfl_CaseOwner/design-spec.json")
+    expect(lowerCommit.uri).toBe("workflow://artifact/wfl_caseowner/design-spec.json")
+    expect(upperCommit.uri).not.toBe(lowerCommit.uri)
+
+    const image = WorkflowVisualReviewArtifact.capturedImage({
+      workflowID: upper,
+      kind: "reference",
+      viewport: "desktop",
+      revision: 0,
+      bytes: png,
+    })
+    expect(image.id).toMatch(/^screenshot-[a-f0-9]{64}-reference-desktop$/)
+    expect(image.uri).toBe("workflow://artifact/wfl_CaseOwner/reference-screenshot-desktop.png")
   })
 
   test("rejects an unsafe workflow owner before invoking a model callback", async () => {
@@ -748,5 +824,72 @@ describe("Kimi design and visual review loop", () => {
         workflowID,
       ),
     ).toThrow()
+  })
+
+  test("rejects reference file-directory aliases and inconsistent directory casing at every codec boundary", () => {
+    const workflowID = Workflow.ID.make("wfl_source_topology")
+    const first = "export const first = 1"
+    const second = "export const second = 2"
+    const manifestFile = (path: string, content: string) => ({
+      path,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      size: new TextEncoder().encode(content).byteLength,
+    })
+    const topologySpec = Schema.decodeUnknownSync(DesignArtifact.Spec)({
+      ...spec,
+      referenceApp: {
+        ...spec.referenceApp,
+        entrypoint: "Foo/a.js",
+        files: [manifestFile("Foo/a.js", first), manifestFile("Foo/b.js", second)],
+      },
+    })
+    expect(() =>
+      WorkflowDesignArtifact.commitReferenceApp(workflowID, topologySpec, [
+        { path: "Foo/a.js", content: first },
+        { path: "foo/b.js", content: second },
+      ]),
+    ).toThrow()
+
+    const validCommit = WorkflowDesignArtifact.commitReferenceApp(workflowID, topologySpec, [
+      { path: "Foo/a.js", content: first },
+      { path: "Foo/b.js", content: second },
+    ])
+    const durableFile = (path: string, content: string) => ({
+      ...manifestFile(path, content),
+      encoding: "base64" as const,
+      contentBase64: Buffer.from(content).toString("base64"),
+    })
+    const forgedPayloads = [
+      {
+        entrypoint: "Foo/a.js",
+        files: [durableFile("Foo/a.js", first), durableFile("foo/b.js", second)],
+      },
+      {
+        entrypoint: "app",
+        files: [durableFile("app", first), durableFile("app/index.html", second)],
+      },
+    ]
+    for (const forged of forgedPayloads) {
+      const payload = {
+        schemaVersion: 1,
+        workflowID,
+        artifactKind: WorkflowDesignArtifact.REFERENCE_APP_KIND,
+        readySelector: "[data-render-ready]",
+        projectStack: ["html", "css", "javascript"],
+        ...forged,
+      }
+      const body = WorkflowDesignArtifact.encode(payload)
+      expect(() =>
+        WorkflowDesignArtifact.decodeReferenceApp(
+          {
+            ...validCommit,
+            sha256: createHash("sha256").update(body).digest("hex"),
+            size: new TextEncoder().encode(body).byteLength,
+            metadata: { payload },
+          },
+          workflowID,
+        ),
+      ).toThrow()
+    }
   })
 })
