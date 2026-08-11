@@ -240,6 +240,12 @@ describe("design and visual artifact schemas", () => {
     expect(() =>
       Schema.decodeUnknownSync(DesignArtifact.Spec)({
         ...design,
+        referenceApp: { ...design.referenceApp, entrypoint: "INDEX.HTML" },
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(DesignArtifact.Spec)({
+        ...design,
         referenceApp: {
           ...design.referenceApp,
           entrypoint: "app",

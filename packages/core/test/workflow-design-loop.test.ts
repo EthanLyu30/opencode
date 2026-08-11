@@ -183,7 +183,7 @@ describe("Kimi design and visual review loop", () => {
           modelID: "deepseek-v4-flash",
           protocol: "openai-responses",
         })
-        return Effect.succeed({ url: "http://implementation.test/index.html", usage: usage(800) })
+        return Effect.succeed({ usage: usage(800) })
       },
       repair: ({ revision, route }) => {
         calls.push(`deepseek:repair:${revision}`)
@@ -193,7 +193,11 @@ describe("Kimi design and visual review loop", () => {
           modelID: "deepseek-v4-flash",
           protocol: "openai-responses",
         })
-        return Effect.succeed({ url: "http://implementation.test/repaired.html", usage: usage(400) })
+        return Effect.succeed({ usage: usage(400) })
+      },
+      prepareImplementation: ({ revision }) => {
+        calls.push(`host:prepare-implementation:${revision}`)
+        return Effect.succeed(`http://host-implementation.test/revision-${revision}.html`)
       },
       review: ({ message, evidence, revision, route }) => {
         calls.push(`kimi:review:${revision}`)
@@ -228,6 +232,7 @@ describe("Kimi design and visual review loop", () => {
       capture: ({ kind, url, viewport, revision }) => {
         calls.push(`browser:${kind}:${viewport.name}:r${revision}`)
         if (kind === "reference") expect(url).toBe("http://host-preview.test/index.html")
+        if (kind === "implementation") expect(url).toBe(`http://host-implementation.test/revision-${revision}.html`)
         return Effect.succeed(png.slice())
       },
     }).pipe(Effect.runPromise)
@@ -240,10 +245,12 @@ describe("Kimi design and visual review loop", () => {
       "browser:reference:desktop:r0",
       "browser:reference:mobile:r0",
       "deepseek:implement",
+      "host:prepare-implementation:0",
       "browser:implementation:desktop:r0",
       "browser:implementation:mobile:r0",
       "kimi:review:0",
       "deepseek:repair:1",
+      "host:prepare-implementation:1",
       "browser:implementation:desktop:r1",
       "browser:implementation:mobile:r1",
       "kimi:review:1",
@@ -279,8 +286,9 @@ describe("Kimi design and visual review loop", () => {
           usage: usage(1),
         }),
       prepareReference: () => Effect.succeed("http://host-preview.test/index.html"),
-      implement: () => Effect.succeed({ url: "http://implementation.test/index.html", usage: usage(1) }),
-      repair: () => Effect.succeed({ url: "http://implementation.test/repaired.html", usage: usage(1) }),
+      implement: () => Effect.succeed({ usage: usage(1) }),
+      repair: () => Effect.succeed({ usage: usage(1) }),
+      prepareImplementation: ({ revision }) => Effect.succeed(`http://host-implementation.test/r${revision}.html`),
       review: ({ evidence, revision }) =>
         Effect.succeed({
           review: { ...finding(revision, "wfl_visual_approval"), evidence },
@@ -624,6 +632,7 @@ describe("Kimi design and visual review loop", () => {
       prepareReference: () => Effect.fail(new Error("must not prepare")),
       implement: () => Effect.fail(new Error("must not implement")),
       repair: () => Effect.fail(new Error("must not repair")),
+      prepareImplementation: () => Effect.fail(new Error("must not prepare implementation")),
       review: () => Effect.fail(new Error("must not review")),
       capture: () => Effect.fail(new Error("must not capture")),
     }).pipe(Effect.flip, Effect.runPromise)
@@ -644,8 +653,9 @@ describe("Kimi design and visual review loop", () => {
           usage: usage(1),
         }),
       prepareReference: () => Effect.succeed("http://host-preview.test/index.html"),
-      implement: () => Effect.succeed({ url: "http://implementation.test/index.html", usage: usage(1) }),
+      implement: () => Effect.succeed({ usage: usage(1) }),
       repair: () => Effect.die("repair must not run after an over-budget passing review"),
+      prepareImplementation: () => Effect.succeed("http://host-implementation.test/r0.html"),
       review: ({ evidence, revision }) =>
         Effect.succeed({
           review: {
@@ -679,14 +689,15 @@ describe("Kimi design and visual review loop", () => {
       { name: "review usage", phase: "review", badUsage: { ...usage(1), tokens: Number.NaN } },
       { name: "repair usage", phase: "repair", badUsage: { ...usage(1), toolCalls: -1 } },
       { name: "implementation result", phase: "implement-result", badUsage: usage(1) },
-      { name: "implementation URL", phase: "implement-url", badUsage: usage(1) },
+      { name: "implementation model URL", phase: "implement-url", badUsage: usage(1) },
       { name: "review result", phase: "review-result", badUsage: usage(1) },
       { name: "repair result", phase: "repair-result", badUsage: usage(1) },
+      { name: "repair model URL", phase: "repair-url", badUsage: usage(1) },
     ] as const
 
     for (const item of cases) {
       const workflowID = Workflow.ID.make(`wfl_invalid_${item.phase.replaceAll("-", "_")}`)
-      const mustRepair = item.phase === "repair" || item.phase === "repair-result"
+      const mustRepair = item.phase === "repair" || item.phase === "repair-result" || item.phase === "repair-url"
       const error = await WorkflowRender.run({
         workflowID,
         limits: { maxRevisions: 1, maxTokens: 20_000, maxTurns: 20, maxToolCalls: 20 },
@@ -699,16 +710,17 @@ describe("Kimi design and visual review loop", () => {
         prepareReference: () => Effect.succeed("http://host-preview.test/index.html"),
         implement: () =>
           Effect.succeed({
-            url: item.phase === "implement-url" ? "" : "http://implementation.test/index.html",
             usage: item.phase === "implement" ? item.badUsage : usage(1),
+            ...(item.phase === "implement-url" ? { url: "http://model-controlled.test/index.html" } : {}),
             ...(item.phase === "implement-result" ? { unexpected: true } : {}),
           }),
         repair: () =>
           Effect.succeed({
-            url: "http://implementation.test/repaired.html",
             usage: item.phase === "repair" ? item.badUsage : usage(1),
+            ...(item.phase === "repair-url" ? { url: "http://model-controlled.test/repaired.html" } : {}),
             ...(item.phase === "repair-result" ? { unexpected: true } : {}),
           }),
+        prepareImplementation: ({ revision }) => Effect.succeed(`http://host-implementation.test/r${revision}.html`),
         review: ({ evidence, revision }) =>
           Effect.succeed({
             review: mustRepair
@@ -782,6 +794,7 @@ describe("Kimi design and visual review loop", () => {
       },
       implement: () => Effect.die("implementation must not run"),
       repair: () => Effect.die("repair must not run"),
+      prepareImplementation: () => Effect.die("implementation preview must not run"),
       review: () => Effect.die("review must not run"),
       capture: () => Effect.succeed(png),
     }).pipe(Effect.flip, Effect.runPromise)
@@ -867,6 +880,10 @@ describe("Kimi design and visual review loop", () => {
       {
         entrypoint: "app",
         files: [durableFile("app", first), durableFile("app/index.html", second)],
+      },
+      {
+        entrypoint: "FOO/a.js",
+        files: [durableFile("Foo/a.js", first), durableFile("Foo/b.js", second)],
       },
     ]
     for (const forged of forgedPayloads) {

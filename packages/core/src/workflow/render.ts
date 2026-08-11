@@ -63,7 +63,6 @@ export interface DesignResult {
 }
 
 export interface ImplementationResult {
-  readonly url: string
   readonly usage: Workflow.Usage
 }
 
@@ -91,6 +90,8 @@ export interface Input {
     readonly review: VisualReview.Artifact
     readonly revision: number
   }) => Effect.Effect<ImplementationResult, unknown>
+  /** Host-owned preview preparation. Model implementation and repair results never supply capture URLs. */
+  readonly prepareImplementation: (input: { readonly revision: number }) => Effect.Effect<string, unknown>
   readonly review: (input: {
     readonly route: WorkflowRouting.Route
     readonly message: Message
@@ -143,8 +144,10 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   artifacts.push(specCommit, referenceCommit)
   if (exhausted(limits, usage)) return approval("budget_exhausted", 0, artifacts, usage)
   const referenceUrl = yield* input.prepareReference({ artifact: referenceCommit, app: durableReference })
-  WorkflowSecretGuard.assertSafe(referenceUrl)
-  if (referenceUrl.length === 0) throw new Error("Host reference preview URL must not be empty")
+  yield* Effect.try({
+    try: () => validateHostPreviewUrl(referenceUrl, "Reference preview"),
+    catch: (error) => (error instanceof Error ? error : new Error("Host reference preview URL is invalid")),
+  })
 
   const reference = yield* captureAll({
     workflowID,
@@ -162,7 +165,7 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
     spec,
     referenceApp: durableReference,
   })
-  let implementation = yield* Effect.try({
+  const implementation = yield* Effect.try({
     try: () => validateImplementationResult(rawImplementation, "Implementation result"),
     catch: (error) => (error instanceof Error ? error : new Error("Implementation result is invalid")),
   })
@@ -170,11 +173,16 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
   if (exhausted(limits, usage)) return approval("budget_exhausted", 0, artifacts, usage)
 
   let revision = 0
+  let implementationUrl = yield* input.prepareImplementation({ revision })
+  implementationUrl = yield* Effect.try({
+    try: () => validateHostPreviewUrl(implementationUrl, "Implementation preview"),
+    catch: (error) => (error instanceof Error ? error : new Error("Host implementation preview URL is invalid")),
+  })
   while (true) {
     const candidate = yield* captureAll({
       workflowID,
       kind: "implementation",
-      url: implementation.url,
+      url: implementationUrl,
       readySelector: spec.referenceApp.readySelector,
       viewports: spec.referenceApp.viewports,
       revision,
@@ -219,13 +227,18 @@ export const run = Effect.fn("WorkflowRender.run")(function* (input: Input): Eff
       review,
       revision: decision.revision,
     })
-    implementation = yield* Effect.try({
+    const repair = yield* Effect.try({
       try: () => validateImplementationResult(rawRepair, "Repair result"),
       catch: (error) => (error instanceof Error ? error : new Error("Repair result is invalid")),
     })
-    usage = addUsage(usage, implementation.usage)
+    usage = addUsage(usage, repair.usage)
     revision = decision.revision
     if (exhausted(limits, usage)) return approval("budget_exhausted", revision, artifacts, usage)
+    implementationUrl = yield* input.prepareImplementation({ revision })
+    implementationUrl = yield* Effect.try({
+      try: () => validateHostPreviewUrl(implementationUrl, "Implementation preview"),
+      catch: (error) => (error instanceof Error ? error : new Error("Host implementation preview URL is invalid")),
+    })
   }
 })
 
@@ -330,8 +343,8 @@ function validateDesignResult(result: DesignResult): DesignResult {
 function validateImplementationResult(result: ImplementationResult, name: string): ImplementationResult {
   WorkflowSecretGuard.assertSafe(result)
   assertPlainObject(result, name)
-  assertExactKeys(result, ["url", "usage"], name)
-  return { url: validateUrl(result.url, name), usage: decodeUsage(result.usage) }
+  assertExactKeys(result, ["usage"], name)
+  return { usage: decodeUsage(result.usage) }
 }
 
 function validateReviewResult(result: ReviewResult): ReviewResult {
@@ -348,7 +361,7 @@ function decodeUsage(input: unknown): Workflow.Usage {
   return Schema.decodeUnknownSync(Workflow.Usage)(input, { onExcessProperty: "error" })
 }
 
-function validateUrl(input: unknown, name: string): string {
+function validateHostPreviewUrl(input: unknown, name: string): string {
   if (typeof input !== "string" || input.length === 0) throw new Error(`${name} URL must not be empty`)
   WorkflowSecretGuard.assertSafe(input)
   let parsed: URL

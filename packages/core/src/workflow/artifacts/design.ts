@@ -149,7 +149,7 @@ export function decodeReferenceApp(artifact: Workflow.ArtifactCommit, expectedWo
     WorkflowSecretGuard.assertSafe(value)
     return { path: file.path, content: value }
   })
-  if (!seen.has(DesignArtifact.sourceCollisionKey(payload.entrypoint)))
+  if (!payload.files.some((file) => file.path === payload.entrypoint))
     throw new Error("Reference entrypoint is missing from the durable source files")
   return {
     entrypoint: payload.entrypoint,

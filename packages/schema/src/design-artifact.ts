@@ -158,8 +158,7 @@ const internallyConsistent = Schema.makeFilter<Schema.Schema.Type<typeof SpecSha
   const paths = value.referenceApp.files.map((file) => file.path)
   const topologyError = sourceTopologyError(paths)
   if (topologyError !== undefined) return topologyError
-  const files = new Set(paths.map(sourceCollisionKey))
-  if (!files.has(sourceCollisionKey(value.referenceApp.entrypoint)))
+  if (!value.referenceApp.files.some((file) => file.path === value.referenceApp.entrypoint))
     return "Reference entrypoint must name a hashed reference-app file"
   if (value.responsiveRules.some((rule) => !viewports.has(rule.viewport)))
     return "Every responsive rule must target a configured reference viewport"
