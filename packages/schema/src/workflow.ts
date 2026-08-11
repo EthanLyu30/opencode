@@ -4,6 +4,7 @@ import { Schema } from "effect"
 import { ascending } from "./identifier"
 import { DateTimeUtcFromMillis, NonNegativeInt, optional, PositiveInt, statics } from "./schema"
 import { SessionID } from "./session-id"
+import { WorkflowRole } from "./workflow-role"
 
 // ── Identifiers ──────────────────────────────────────────────────────────────
 
@@ -27,14 +28,7 @@ export type ArtifactID = typeof ArtifactID.Type
 
 // ── Status & category literals ───────────────────────────────────────────────
 
-export const RunStatus = Schema.Literals([
-  "queued",
-  "running",
-  "waiting_approval",
-  "succeeded",
-  "failed",
-  "cancelled",
-])
+export const RunStatus = Schema.Literals(["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled"])
 export type RunStatus = typeof RunStatus.Type
 
 export const StageStatus = Schema.Literals([
@@ -109,6 +103,12 @@ export const StageInput = Schema.Struct({
   input: Schema.Record(Schema.String, Schema.Unknown),
 }).annotate({ identifier: "Workflow.StageInput" })
 export interface StageInput extends Schema.Schema.Type<typeof StageInput> {}
+
+export const RoleStageInput = Schema.Struct({
+  ...StageInput.fields,
+  type: WorkflowRole.Role,
+}).annotate({ identifier: "Workflow.RoleStageInput" })
+export interface RoleStageInput extends Schema.Schema.Type<typeof RoleStageInput> {}
 
 export const CreateInput = Schema.Struct({
   id: ID.pipe(optional),

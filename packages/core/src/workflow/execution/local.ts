@@ -14,6 +14,7 @@ import { WorkflowRetry } from "../retry"
 import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowRunTable } from "../sql"
 import { WorkflowState } from "../state"
+import { WorkflowStageMachine } from "../stage-machine"
 import { WorkflowStore } from "../store"
 
 class CancelRequested extends Data.TaggedError("CancelRequested")<{
@@ -304,6 +305,8 @@ export const layerWith = (options: Options) =>
         const execution = executor.execute({
           workflow: initial.run,
           stage,
+          stages: initial.stages,
+          artifacts: initial.artifacts,
           remainingDurationMs,
           lease: {
             owner: options.ownerID,
@@ -436,6 +439,67 @@ export const layerWith = (options: Options) =>
             timestamp: now,
             artifact,
           })
+        }
+
+        const completionCandidate = yield* store.get(stage.workflowID)
+        if (
+          completionCandidate &&
+          completionCandidate.stages.every(
+            (item) => item.id === stage.id || item.status === "succeeded" || item.status === "skipped",
+          ) &&
+          completionCandidate.artifacts.some((artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND)
+        ) {
+          const completion = yield* WorkflowStageMachine.replay({
+            stages: completionCandidate.stages,
+            artifacts: completionCandidate.artifacts,
+          }).pipe(
+            Effect.match({
+              onFailure: (error) => ({ type: "invalid" as const, error }),
+              onSuccess: (state) => ({ type: "state" as const, state }),
+            }),
+          )
+          let failure: Workflow.Failure | undefined
+          if (completion.type === "invalid") {
+            failure = {
+              category: "schema",
+              code: "invalid_role_history",
+              message: `Role workflow history is invalid: ${completion.error.code}`,
+            }
+          } else if (completion.state.status === "active") {
+            failure = {
+              category: "invalid_request",
+              code: "incomplete_role_workflow",
+              message: `Role workflow stopped before ${completion.state.role}`,
+            }
+          }
+          if (failure) {
+            const failedAt = yield* DateTime.now
+            yield* ensureNotCancelled(stage.workflowID)
+            if (!(yield* currentLease(stage, DateTime.toEpochMillis(failedAt)))) return
+            yield* events.publish(WorkflowEvent.Stage.Failed, {
+              workflowID: stage.workflowID,
+              stageID: stage.id,
+              timestamp: failedAt,
+              attempt: stage.attempt,
+              leaseOwner: options.ownerID,
+              failure,
+              usage: outcome.exit.value.usage,
+              source: "execution",
+            })
+            yield* store.gateBudget({
+              workflowID: stage.workflowID,
+              now: DateTime.toEpochMillis(failedAt),
+            })
+            const settled = yield* store.get(stage.workflowID)
+            if (!settled) return
+            yield* events.publish(WorkflowEvent.Failed, {
+              workflowID: stage.workflowID,
+              timestamp: yield* DateTime.now,
+              failure,
+              usage: settled.run.usage,
+            })
+            return
+          }
         }
 
         const completedAt = yield* DateTime.now

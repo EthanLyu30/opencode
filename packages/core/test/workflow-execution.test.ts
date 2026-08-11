@@ -10,6 +10,7 @@ import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/loc
 import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
+import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { testEffect } from "./lib/effect"
 
@@ -97,6 +98,31 @@ const duplicateArtifactExecutor = Layer.succeed(
 )
 
 const duplicateArtifactIt = makeWorkerIt(duplicateArtifactExecutor)
+
+const incompleteRoleHistoryExecutor = Layer.succeed(
+  WorkflowExecutor.Service,
+  WorkflowExecutor.Service.of({
+    execute: ({ stage }) => {
+      const metadata = { schemaVersion: 1, role: "design", verdict: "ready", revision: 0 }
+      const body = JSON.stringify(metadata)
+      return Effect.succeed({
+        usage: { tokens: 8, turns: 1, toolCalls: 0, attempts: 0 },
+        artifacts: [
+          {
+            kind: WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
+            uri: `artifact://${stage.workflowID}/incomplete-role-outcome.json`,
+            mime: WorkflowStageMachine.OUTCOME_ARTIFACT_MIME,
+            sha256: new Bun.CryptoHasher("sha256").update(body).digest("hex"),
+            size: new TextEncoder().encode(body).byteLength,
+            metadata,
+          },
+        ],
+      })
+    },
+  }),
+)
+
+const incompleteRoleHistoryIt = makeWorkerIt(incompleteRoleHistoryExecutor)
 
 const classifiedFailureExecutor = Layer.succeed(
   WorkflowExecutor.Service,
@@ -346,6 +372,8 @@ describe("Workflow executor", () => {
         .execute({
           workflow: run,
           stage,
+          stages: [stage],
+          artifacts: [],
           lease: {
             owner: "worker-a",
             attempt: 1,
@@ -367,6 +395,24 @@ describe("Workflow executor", () => {
 })
 
 describe("Workflow local execution", () => {
+  incompleteRoleHistoryIt.live("fails final role validation before stage success can make the run stick", () =>
+    Effect.gen(function* () {
+      const workflow = yield* WorkflowV2.Service
+      const input = createInput("incomplete_role_history")
+      yield* workflow.create(input)
+      yield* workflow.events({ workflowID: input.id! }).pipe(
+        Stream.filter((event) => event.type === "workflow.failed"),
+        Stream.runHead,
+        Effect.timeout("2 seconds"),
+      )
+
+      const detail = yield* workflow.get(input.id!)
+      expect(detail.run.status).toBe("failed")
+      expect(detail.stages[0].status).toBe("failed")
+      expect(detail.stages[0].error?.code).toBe("incomplete_role_workflow")
+    }),
+  )
+
   deadlineIt.live(
     "times out at the workflow deadline before the duration gate requests approval",
     () =>
