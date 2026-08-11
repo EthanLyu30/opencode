@@ -4,6 +4,7 @@ import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Data, Effect, Schema } from "effect"
 import { Hash } from "../util/hash"
+import { WorkflowBudget } from "./budget"
 
 export const OUTCOME_ARTIFACT_KIND = "workflow.role.outcome"
 export const OUTCOME_ARTIFACT_MIME = "application/vnd.opencode.workflow-role-outcome+json"
@@ -26,6 +27,23 @@ export class InvalidOutcome extends Data.TaggedError("WorkflowStageMachine.Inval
 }> {}
 
 export const initial = (): State => ({ status: "active", role: "design", revision: 0 })
+
+export type VisualRepairDecision =
+  | { readonly type: "repair"; readonly revision: number }
+  | { readonly type: "approval"; readonly reason: "max_revisions" | "budget_exhausted" }
+
+/** Central authority for every visual-review repair edge. */
+export function decideVisualRepair(input: {
+  readonly revision: number
+  readonly maxRevisions: number
+  readonly budget: Workflow.Budget
+  readonly usage: Workflow.Usage
+}): VisualRepairDecision {
+  if (WorkflowBudget.evaluate({ budget: input.budget, usage: input.usage, notified: 0, elapsedMs: 0 }).exhausted)
+    return { type: "approval", reason: "budget_exhausted" }
+  if (input.revision >= input.maxRevisions) return { type: "approval", reason: "max_revisions" }
+  return { type: "repair", revision: input.revision + 1 }
+}
 
 export function encodeOutcome(outcome: WorkflowRole.Outcome) {
   return JSON.stringify({
