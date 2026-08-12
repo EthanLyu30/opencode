@@ -223,6 +223,88 @@ test("workflows create through the generated Effect contract", async () => {
   expect(DateTime.toEpochMillis(created.time.created)).toBe(1_717_171_717_000)
 })
 
+test("responses methods decode terminal resources and exclusive-cursor events", async () => {
+  const requests: Array<{ url: string; method: string; query: Record<string, string> }> = []
+  const httpClient = HttpClient.make((request) => {
+    requests.push({ url: request.url, method: request.method, query: Object.fromEntries(request.urlParams.params) })
+    if (request.url.endsWith("/event")) {
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(`data: ${JSON.stringify(responseCompletedEvent)}\n\n`, {
+            headers: { "content-type": "text/event-stream" },
+          }),
+        ),
+      )
+    }
+    if (request.url.endsWith("/input_items")) {
+      return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ data: [responseInputItem] })))
+    }
+    if (request.method === "DELETE") {
+      return Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status: 204 })))
+    }
+    return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(responseResource)))
+  })
+  const result = await Effect.gen(function* () {
+    const client = yield* OpenCode.make({ baseUrl: "http://localhost:3000" })
+    const created = yield* client.responses.create(responseCreateInput)
+    const retrieved = yield* client.responses.get({ responseID: "resp_test" })
+    const cancelled = yield* client.responses.cancel({ responseID: "resp_test" })
+    const inputItems = yield* client.responses.inputItems({ responseID: "resp_test" })
+    const events = yield* client.responses.events({ responseID: "resp_test", after: 1 }).pipe(Stream.runCollect)
+    yield* client.responses.delete({ responseID: "resp_test" })
+    return { created, retrieved, cancelled, inputItems, events: Array.from(events) }
+  }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.runPromise)
+
+  expect(result.created.status).toBe("completed")
+  expect(DateTime.toEpochMillis(result.created.createdAt)).toBe(1_717_171_717_000)
+  expect(result.retrieved.output).toEqual(responseResource.output)
+  expect(result.cancelled.usage).toEqual(responseResource.usage)
+  expect(result.inputItems).toEqual([responseInputItem])
+  expect(result.events[0]).toMatchObject({ type: "response.completed", sequenceNumber: 2 })
+  expect(DateTime.toEpochMillis(result.events[0].data.timestamp)).toBe(1_717_171_718_000)
+  expect(requests).toEqual([
+    { method: "POST", url: "http://localhost:3000/v1/responses", query: {} },
+    { method: "GET", url: "http://localhost:3000/v1/responses/resp_test", query: {} },
+    { method: "POST", url: "http://localhost:3000/v1/responses/resp_test/cancel", query: {} },
+    { method: "GET", url: "http://localhost:3000/v1/responses/resp_test/input_items", query: {} },
+    { method: "GET", url: "http://localhost:3000/v1/responses/resp_test/event", query: { after: "1" } },
+    { method: "DELETE", url: "http://localhost:3000/v1/responses/resp_test", query: {} },
+  ])
+})
+
+test("mixed Effect Responses POST maps an inner SSE reader failure to ClientError", async () => {
+  const encoder = new TextEncoder()
+  const httpClient = HttpClient.make((request) =>
+    Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ type: "response.completed", sequence_number: 1, data: {} })}\n\n`,
+                ),
+              )
+              controller.error(new Error("inner SSE reader failed"))
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      ),
+    ),
+  )
+  const error = await Effect.gen(function* () {
+    const client = yield* OpenCode.make({ baseUrl: "http://localhost:3000" })
+    const response = yield* client.responses.create({ ...responseCreateInput, stream: true })
+    if (!Stream.isStream(response)) return yield* Effect.die("Expected mixed SSE branch")
+    return yield* response.pipe(Stream.runDrain, Effect.flip)
+  }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.runPromise)
+
+  expect(error._tag).toBe("ClientError")
+})
+
 const session = {
   data: {
     id: "ses_test",
@@ -283,5 +365,49 @@ const workflowInfo = {
     usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
     version: 1,
     time: { created: 1_717_171_717_000, updated: 1_717_171_717_000 },
+  },
+}
+
+const responseCreateInput = {
+  id: "resp_test",
+  workflowID: "wfl_test",
+  model: "deepseek-v4-flash",
+  background: false,
+  store: true,
+  previous_response_id: "resp_parent",
+  requestHash: "sha256:response-test",
+  input: [{ type: "message", role: "user", content: "Continue" }] as const,
+}
+
+const responseResource = {
+  id: "resp_test",
+  workflowID: "wfl_test",
+  model: "deepseek-v4-flash",
+  status: "completed",
+  background: false,
+  store: true,
+  previousResponseID: "resp_parent",
+  requestHash: "sha256:response-test",
+  output: [{ type: "message", role: "assistant", content: "Done" }],
+  usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+  createdAt: 1_717_171_717_000,
+  completedAt: 1_717_171_718_000,
+}
+
+const responseInputItem = {
+  responseID: "resp_test",
+  ordinal: 0,
+  kind: "input",
+  payload: { type: "message", role: "user", content: "Continue" },
+}
+
+const responseCompletedEvent = {
+  type: "response.completed",
+  sequence_number: 2,
+  data: {
+    responseID: "resp_test",
+    timestamp: 1_717_171_718_000,
+    output: [{ type: "message", role: "assistant", content: "Done" }],
+    usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 },
   },
 }

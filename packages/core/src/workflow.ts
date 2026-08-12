@@ -8,12 +8,16 @@ import { EventV2 } from "./event"
 import { makeGlobalNode } from "./effect/app-node"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { WorkflowDurable } from "@opencode-ai/schema/durable-event-manifest"
 import { WorkflowStore } from "./workflow/store"
 import { WorkflowBudget } from "./workflow/budget"
 import { WorkflowSecretGuard } from "./workflow/secret-guard"
 import { WorkflowExecution } from "./workflow/execution"
+import { WorkflowModelExecution } from "./workflow/execution/model"
 import { WorkflowProjector } from "./workflow/projector"
+import { WorkflowRetry } from "./workflow/retry"
+import { ResponsesV2 } from "./responses"
 import { DateTime } from "effect"
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -120,6 +124,33 @@ const layer = Layer.effect(
     const events = yield* EventV2.Service
     const store = yield* WorkflowStore.Service
     const execution = yield* WorkflowExecution.Service
+    const responses = yield* ResponsesV2.Service
+
+    const activeResponses = (detail: Workflow.Detail) => responses.activeByWorkflowID(detail.run.id)
+
+    const reconcileRecoveryPublish = <A>(
+      effect: Effect.Effect<A>,
+      input: {
+        readonly workflowID: Workflow.ID
+        readonly stageID: Workflow.StageID
+        readonly action: "retry" | "fail"
+      },
+    ) =>
+      effect.pipe(
+        Effect.catchCause((cause) => {
+          if (!(Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict)) return Effect.failCause(cause)
+          return store.get(input.workflowID).pipe(
+            Effect.flatMap((current) => {
+              const stage = current?.stages.find((candidate) => candidate.id === input.stageID)
+              if (stage?.recoveryAction === input.action) return Effect.void
+              if (stage?.recoveryAction !== undefined) {
+                return Effect.fail(new ConflictError({ workflowID: input.workflowID, operation: "resolveRecovery" }))
+              }
+              return Effect.failCause(cause)
+            }),
+          )
+        }),
+      )
 
     const isDurableWorkflowEvent = Schema.is(WorkflowEvent.Durable)
 
@@ -249,27 +280,52 @@ const layer = Layer.effect(
         }
 
         const now = yield* DateTime.now
-        yield* events
-          .publish(WorkflowEvent.CancelRequested, {
-            workflowID,
-            timestamp: now,
-          })
-          .pipe(
-            Effect.catchCause((cause) => {
-              if (!(Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict)) {
-                return Effect.failCause(cause)
-              }
-              return store.get(workflowID).pipe(
-                Effect.flatMap((latest) => {
-                  if (latest?.run.cancelRequestedAt !== undefined) return Effect.void
-                  if (latest?.run.status === "succeeded" || latest?.run.status === "failed") {
-                    return Effect.fail(new ConflictError({ workflowID, operation: "cancel" }))
+        const active = yield* activeResponses(detail)
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            yield* events
+              .publish(
+                WorkflowEvent.CancelRequested,
+                {
+                  workflowID,
+                  timestamp: now,
+                },
+                {
+                  related: active.map((response) => ({
+                    definition: ResponseEvent.Cancelled,
+                    data: { responseID: response.id, timestamp: now },
+                  })),
+                },
+              )
+              .pipe(
+                Effect.catchCause((cause) => {
+                  if (!(Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict)) {
+                    return Effect.failCause(cause)
                   }
-                  return Effect.failCause(cause)
+                  return store.get(workflowID).pipe(
+                    Effect.flatMap((latest) => {
+                      if (latest?.run.cancelRequestedAt !== undefined) return Effect.void
+                      if (latest?.run.status === "succeeded" || latest?.run.status === "failed") {
+                        return Effect.fail(new ConflictError({ workflowID, operation: "cancel" }))
+                      }
+                      return Effect.failCause(cause)
+                    }),
+                  )
                 }),
               )
-            }),
-          )
+            yield* Effect.forEach(
+              active.filter((response) => !response.store),
+              (response) =>
+                responses.settleTransient({
+                  responseID: response.id,
+                  requestHash: response.requestHash,
+                  status: "cancelled",
+                  timestamp: now,
+                }),
+              { discard: true },
+            )
+          }),
+        )
         yield* execution.interrupt(workflowID)
         return yield* Effect.void
       }),
@@ -321,57 +377,149 @@ const layer = Layer.effect(
           return yield* new ConflictError({ workflowID: input.workflowID, operation: "resolveRecovery" })
         }
 
-        const now = yield* DateTime.now
-        yield* events.publish(WorkflowEvent.Approval.Resolved, {
-          workflowID: input.workflowID,
-          stageID: input.stageID,
-          timestamp: now,
-          action: input.action,
+        const checkpoint =
+          input.action === "fail"
+            ? yield* WorkflowModelExecution.checkpointState(stage.checkpoint).pipe(
+                Effect.mapError(
+                  () => new ConflictError({ workflowID: input.workflowID, operation: "resolveRecovery" }),
+                ),
+              )
+            : {
+                usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+                providerUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+              }
+        const unsettledUsage = WorkflowRetry.usageDelta(checkpoint.usage, {
+          tokens: 0,
+          turns: 0,
+          toolCalls: 0,
+          attempts: 0,
         })
-
+        const now = yield* DateTime.now
         if (input.action === "retry") {
-          // Transition to retry_wait so the stage can be claimed again
-          yield* events.publish(WorkflowEvent.Stage.RetryScheduled, {
-            workflowID: input.workflowID,
-            stageID: input.stageID,
-            timestamp: now,
-            attempt: stage.attempt,
-            leaseOwner: stage.leaseOwner,
-            failure: {
-              category: "ambiguous",
-              code: "recovery_retry",
-              message: "Explicit recovery retry",
-            },
-            usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
-            notBefore: now,
-          })
+          yield* reconcileRecoveryPublish(
+            events.publish(
+              WorkflowEvent.Approval.Resolved,
+              {
+                workflowID: input.workflowID,
+                stageID: input.stageID,
+                timestamp: now,
+                action: input.action,
+              },
+              {
+                related: [
+                  {
+                    definition: WorkflowEvent.Stage.RetryScheduled,
+                    data: {
+                      workflowID: input.workflowID,
+                      stageID: input.stageID,
+                      timestamp: now,
+                      attempt: stage.attempt,
+                      leaseOwner: stage.leaseOwner,
+                      failure: {
+                        category: "ambiguous",
+                        code: "recovery_retry",
+                        message: "Explicit recovery retry",
+                      },
+                      usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+                      notBefore: now,
+                    },
+                  },
+                ],
+              },
+            ),
+            input,
+          )
           yield* execution.wake
         } else {
           // Fail the stage
-          yield* events.publish(WorkflowEvent.Stage.Failed, {
-            workflowID: input.workflowID,
-            stageID: input.stageID,
-            timestamp: now,
-            attempt: stage.attempt,
-            leaseOwner: stage.leaseOwner,
-            failure: {
-              category: "ambiguous",
-              code: "recovery_fail",
-              message: "Explicit recovery failure",
-            },
-            usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
-            source: "recovery",
-          })
-          yield* events.publish(WorkflowEvent.Failed, {
-            workflowID: input.workflowID,
-            timestamp: now,
-            failure: {
-              category: "ambiguous",
-              code: "recovery_fail",
-              message: "Workflow failed via recovery resolution",
-            },
-            usage: detail.run.usage,
-          })
+          const stageFailure: Workflow.Failure = {
+            category: "ambiguous",
+            code: "recovery_fail",
+            message: "Explicit recovery failure",
+          }
+          const workflowFailure: Workflow.Failure = {
+            category: "ambiguous",
+            code: "recovery_fail",
+            message: "Workflow failed via recovery resolution",
+          }
+          const active = yield* activeResponses(detail)
+          yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* reconcileRecoveryPublish(
+                events.publish(
+                  WorkflowEvent.Approval.Resolved,
+                  {
+                    workflowID: input.workflowID,
+                    stageID: input.stageID,
+                    timestamp: now,
+                    action: input.action,
+                  },
+                  {
+                    related: [
+                      {
+                        definition: WorkflowEvent.Stage.Failed,
+                        data: {
+                          workflowID: input.workflowID,
+                          stageID: input.stageID,
+                          timestamp: now,
+                          attempt: stage.attempt,
+                          leaseOwner: stage.leaseOwner,
+                          failure: stageFailure,
+                          usage: unsettledUsage,
+                          source: "recovery",
+                        },
+                      },
+                      {
+                        definition: WorkflowEvent.Failed,
+                        data: {
+                          workflowID: input.workflowID,
+                          timestamp: now,
+                          failure: workflowFailure,
+                          usage: WorkflowRetry.addUsage(detail.run.usage, unsettledUsage),
+                        },
+                      },
+                      ...active.map((response) => ({
+                        definition: ResponseEvent.Failed,
+                        data: {
+                          responseID: response.id,
+                          timestamp: now,
+                          error: response.store
+                            ? {
+                                type: workflowFailure.category,
+                                code: workflowFailure.code,
+                                message: workflowFailure.message,
+                              }
+                            : undefined,
+                          usage:
+                            response.store && response.id === checkpoint.responseID
+                              ? checkpoint.providerUsage
+                              : undefined,
+                        },
+                      })),
+                    ],
+                  },
+                ),
+                input,
+              )
+              yield* Effect.forEach(
+                active.filter((response) => !response.store),
+                (response) =>
+                  responses.settleTransient({
+                    responseID: response.id,
+                    requestHash: response.requestHash,
+                    status: "failed",
+                    timestamp: now,
+                    error: {
+                      type: workflowFailure.category,
+                      code: workflowFailure.code,
+                      message: workflowFailure.message,
+                    },
+                    usage: response.id === checkpoint.responseID ? checkpoint.providerUsage : undefined,
+                  }),
+                { discard: true },
+              )
+            }),
+          )
         }
         return yield* Effect.void
       }),
@@ -382,5 +530,12 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [Database.node, EventV2.node, WorkflowProjector.node, WorkflowStore.node, WorkflowExecution.node],
+  deps: [
+    Database.node,
+    EventV2.node,
+    WorkflowProjector.node,
+    WorkflowStore.node,
+    WorkflowExecution.node,
+    ResponsesV2.node,
+  ],
 })

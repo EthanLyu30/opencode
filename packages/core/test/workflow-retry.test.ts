@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import { HttpContext, HttpRequestDetails, LLMError, RateLimitReason, TransportReason } from "@opencode-ai/llm"
+import {
+  HttpContext,
+  HttpRequestDetails,
+  HttpResponseDetails,
+  LLMError,
+  InvalidRequestReason,
+  RateLimitReason,
+  TransportReason,
+} from "@opencode-ai/llm"
 import { WorkflowRetry } from "../src/workflow/retry"
 
 describe("WorkflowRetry", () => {
@@ -23,6 +31,19 @@ describe("WorkflowRetry", () => {
         randomUnit: 0,
       }),
     ).toEqual({ type: "retry", notBefore: 8_500 })
+  })
+
+  test("settles only post-checkpoint usage for retry and approval decisions", () => {
+    const checkpointed = { tokens: 6, turns: 1, toolCalls: 1, attempts: 0 }
+    const current = { tokens: 11, turns: 2, toolCalls: 1, attempts: 0 }
+    const delta = { tokens: 5, turns: 1, toolCalls: 0, attempts: 0 }
+
+    expect(WorkflowRetry.usageForDecision({ type: "retry", notBefore: 1_000 }, current, checkpointed)).toEqual(delta)
+    expect(WorkflowRetry.usageForDecision({ type: "approval" }, current, checkpointed)).toEqual(delta)
+    expect(WorkflowRetry.usageForDecision({ type: "fail" }, current, checkpointed)).toEqual(current)
+    expect(() => WorkflowRetry.usageDelta(checkpointed, current)).toThrow(
+      "Workflow usage regressed below its checkpoint",
+    )
   })
 
   test("uses bounded exponential jitter", () => {
@@ -76,5 +97,34 @@ describe("WorkflowRetry", () => {
         }),
       ),
     ).toMatchObject({ category: "transient", code: "transport_timeout" })
+  })
+
+  test("retains HTTP status diagnostics but drops provider response bodies at the workflow boundary", () => {
+    const sentinel = "TASK20_PROVIDER_BODY_SENTINEL_DO_NOT_STORE"
+    const failure = WorkflowRetry.fromLLMError(
+      new LLMError({
+        module: "RequestExecutor",
+        method: "execute",
+        reason: new InvalidRequestReason({
+          message: `Provider request failed with HTTP 400: {"error":{"message":"${sentinel}"}}`,
+          http: new HttpContext({
+            request: new HttpRequestDetails({
+              method: "POST",
+              url: "https://api.deepseek.test/responses",
+              headers: {},
+            }),
+            response: new HttpResponseDetails({ status: 400, headers: {} }),
+            body: `{"error":{"message":"${sentinel}"}}`,
+          }),
+        }),
+      }),
+    )
+
+    expect(failure).toEqual({
+      category: "invalid_request",
+      code: "invalid_request",
+      message: "RequestExecutor.execute: Provider request failed with HTTP 400",
+    })
+    expect(JSON.stringify(failure)).not.toContain(sentinel)
   })
 })

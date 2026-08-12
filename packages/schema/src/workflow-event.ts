@@ -92,6 +92,16 @@ export namespace Stage {
   })
   export type Started = typeof Started.Type
 
+  export const Checkpointed = Event.define({
+    type: "workflow.stage.checkpointed",
+    durable,
+    schema: {
+      ...stageBase,
+      checkpoint: Schema.Record(Schema.String, Schema.Unknown),
+    },
+  })
+  export type Checkpointed = typeof Checkpointed.Type
+
   export const RetryScheduled = Event.define({
     type: "workflow.stage.retry_scheduled",
     durable,
@@ -232,6 +242,7 @@ export const DurableDefinitions = Event.inventory(
   Stage.Queued,
   Stage.Leased,
   Stage.Started,
+  Stage.Checkpointed,
   Artifact.Created,
   Stage.RetryScheduled,
   Stage.Succeeded,

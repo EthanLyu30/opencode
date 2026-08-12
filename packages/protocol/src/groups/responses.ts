@@ -72,7 +72,7 @@ export const ResponsesCreatePayload = Schema.Struct({
 
 export function unsupportedResponseFields(input: typeof ResponsesCreatePayload.Type) {
   return Object.entries(input)
-    .filter(([field, value]) => value !== undefined && (field === "stream" ? value === true : !createFields.has(field)))
+    .filter(([field, value]) => value !== undefined && !createFields.has(field) && field !== "stream")
     .map(([field]) => field)
     .toSorted()
 }
@@ -102,7 +102,7 @@ export const ResponsesGroup = HttpApiGroup.make("server.responses")
   .add(
     HttpApiEndpoint.post("responses.create", "/v1/responses", {
       payload: ResponsesCreatePayload,
-      success: Responses.Resource,
+      success: [Responses.Resource, HttpApiSchema.StreamSse({ data: ResponseStreamEvent })],
       error: [
         InvalidRequestError,
         UnsupportedCapabilityError,

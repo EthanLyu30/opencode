@@ -26,6 +26,37 @@ export function decide(input: {
   return { type: "retry", notBefore: input.now + Math.round(base * jitter) }
 }
 
+export function usageDelta(current: Workflow.Usage, checkpointed: Workflow.Usage): Workflow.Usage {
+  const delta = (field: keyof Workflow.Usage) => {
+    const value = current[field] - checkpointed[field]
+    if (value < 0) throw new RangeError(`Workflow usage regressed below its checkpoint for ${field}`)
+    return value
+  }
+  return {
+    tokens: delta("tokens"),
+    turns: delta("turns"),
+    toolCalls: delta("toolCalls"),
+    attempts: delta("attempts"),
+  }
+}
+
+export function addUsage(left: Workflow.Usage, right: Workflow.Usage): Workflow.Usage {
+  return {
+    tokens: left.tokens + right.tokens,
+    turns: left.turns + right.turns,
+    toolCalls: left.toolCalls + right.toolCalls,
+    attempts: left.attempts + right.attempts,
+  }
+}
+
+export function usageForDecision(
+  decision: Decision,
+  current: Workflow.Usage,
+  checkpointed: Workflow.Usage,
+): Workflow.Usage {
+  return decision.type === "retry" || decision.type === "approval" ? usageDelta(current, checkpointed) : current
+}
+
 export function fromLLMError(error: LLMError): Workflow.Failure {
   const tag = error.reason._tag
   const category =
@@ -56,9 +87,17 @@ export function fromLLMError(error: LLMError): Workflow.Failure {
   return {
     category,
     code,
-    message: WorkflowSecretGuard.sanitizeText(error.message),
+    message: workflowMessage(error),
     ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
   }
+}
+
+function workflowMessage(error: LLMError) {
+  const message = WorkflowSecretGuard.sanitizeText(error.message)
+  if (!("http" in error.reason) || error.reason.http?.body === undefined) return message
+  const status = error.reason.http.response?.status
+  if (status !== undefined) return `${error.module}.${error.method}: Provider request failed with HTTP ${status}`
+  return `${error.module}.${error.method}: Provider request failed`
 }
 
 function isTransportTimeout(error: LLMError) {

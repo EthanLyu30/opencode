@@ -449,7 +449,10 @@ const Endpoint5_0 = (raw: RawClient["server.responses"]) => (input: Endpoint5_0I
       previous_response_id: input["previous_response_id"],
       conversation: input["conversation"],
     },
-  }).pipe(Effect.mapError(mapClientError))
+  }).pipe(
+    Effect.mapError(mapClientError),
+    Effect.map((value) => (Stream.isStream(value) ? value.pipe(Stream.mapError(mapClientError)) : value)),
+  )
 
 type Endpoint5_1Request = Parameters<RawClient["server.responses"]["responses.get"]>[0]
 type Endpoint5_1Input = { readonly responseID: Endpoint5_1Request["params"]["responseID"] }

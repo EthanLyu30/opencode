@@ -7,11 +7,15 @@ import { EventV2 } from "../event"
 import { makeGlobalNode } from "../effect/app-node"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { WorkflowBudget } from "./budget"
+import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowState } from "./state"
 import { WorkflowRunTable, WorkflowStageTable, WorkflowArtifactTable } from "./sql"
+import { ResponseTable } from "../responses/sql"
 
 type DB = Database.Interface["db"]
+const MAX_CHECKPOINT_BYTES = 256 * 1024
 
 export class LifecycleConflict extends Error {
   constructor(
@@ -57,6 +61,40 @@ function requireNotCancelled(db: DB, workflowID: Workflow.ID, stageID?: Workflow
     const row = yield* requireRun(db, workflowID)
     if (row.cancel_requested_at !== null) throw new LifecycleConflict(workflowID, stageID)
     return row
+  })
+}
+
+function requireActiveResponsesSettled(
+  db: DB,
+  workflowID: Workflow.ID,
+  related: ReadonlyArray<{ readonly type: string; readonly data: unknown }> | undefined,
+  expectedType: string | ReadonlyArray<string>,
+) {
+  return Effect.gen(function* () {
+    const active = yield* db
+      .select({ id: ResponseTable.id })
+      .from(ResponseTable)
+      .where(
+        and(
+          eq(ResponseTable.workflow_id, workflowID),
+          isNull(ResponseTable.deleted_at),
+          inArray(ResponseTable.status, ["queued", "in_progress"]),
+        ),
+      )
+      .all()
+      .pipe(Effect.orDie)
+    if (active.length === 0) return
+    const settled = new Set(
+      (related ?? [])
+        .filter(
+          (item) =>
+            (typeof expectedType === "string" ? item.type === expectedType : expectedType.includes(item.type)) &&
+            typeof item.data === "object" &&
+            item.data !== null,
+        )
+        .map((item) => (item.data as Record<string, unknown>).responseID),
+    )
+    if (active.some((response) => !settled.has(response.id))) throw new LifecycleConflict(workflowID)
   })
 }
 
@@ -205,7 +243,7 @@ const layer = Layer.effectDiscard(
         yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "leased")
         const leaseOwner = requireLeaseOwner(data.workflowID, data.stageID, data.leaseOwner)
-        if (data.attempt !== row.attempt + 1) {
+        if (data.attempt !== row.attempt + 1 || data.attempt > row.max_attempts) {
           throw new LifecycleConflict(data.workflowID, data.stageID)
         }
         if (DateTime.toEpochMillis(data.leaseExpiresAt) <= DateTime.toEpochMillis(data.timestamp)) {
@@ -284,6 +322,44 @@ const layer = Layer.effectDiscard(
           .where(eq(WorkflowRunTable.id, data.workflowID))
           .run()
           .pipe(Effect.orDie)
+      }),
+    )
+
+    // workflow.stage.checkpointed
+    yield* events.project(WorkflowEvent.Stage.Checkpointed, (event) =>
+      Effect.gen(function* () {
+        const data = event.data
+        if (event.durable?.replay !== true) {
+          WorkflowSecretGuard.assertSafe(data.checkpoint)
+          if (new TextEncoder().encode(JSON.stringify(data.checkpoint)).byteLength > MAX_CHECKPOINT_BYTES) {
+            throw new LifecycleConflict(data.workflowID, data.stageID)
+          }
+        }
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
+        const row = yield* requireStage(db, data.workflowID, data.stageID)
+        if (row.status !== "running") throw new LifecycleConflict(data.workflowID, data.stageID)
+        const leaseOwner = requireLiveLease(row, data)
+        const updated = yield* db
+          .update(WorkflowStageTable)
+          .set({
+            checkpoint: data.checkpoint,
+            recovery_action: row.recovery_action === "retry" ? null : row.recovery_action,
+            time_updated: DateTime.toEpochMillis(data.timestamp),
+          })
+          .where(
+            and(
+              eq(WorkflowStageTable.id, data.stageID),
+              eq(WorkflowStageTable.workflow_id, data.workflowID),
+              eq(WorkflowStageTable.status, "running"),
+              eq(WorkflowStageTable.attempt, data.attempt),
+              eq(WorkflowStageTable.lease_owner, leaseOwner),
+              gte(WorkflowStageTable.lease_expires_at, DateTime.toEpochMillis(data.timestamp)),
+            ),
+          )
+          .returning({ id: WorkflowStageTable.id })
+          .get()
+          .pipe(Effect.orDie)
+        if (!updated) throw new LifecycleConflict(data.workflowID, data.stageID)
       }),
     )
 
@@ -654,6 +730,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Succeeded, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        yield* requireActiveResponsesSettled(db, data.workflowID, event.durable?.related, ResponseEvent.Completed.type)
         const row = yield* requireRun(db, data.workflowID)
         const stages = yield* db
           .select({ status: WorkflowStageTable.status })
@@ -695,6 +772,10 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Failed, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        yield* requireActiveResponsesSettled(db, data.workflowID, event.durable?.related, [
+          ResponseEvent.Failed.type,
+          ResponseEvent.Incomplete.type,
+        ])
         const row = yield* requireRun(db, data.workflowID)
         const failed = yield* db
           .select({ id: WorkflowStageTable.id })
@@ -729,6 +810,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Cancelled, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        yield* requireActiveResponsesSettled(db, data.workflowID, event.durable?.related, ResponseEvent.Cancelled.type)
         const row = yield* requireRun(db, data.workflowID)
         const stages = yield* db
           .select({ status: WorkflowStageTable.status })

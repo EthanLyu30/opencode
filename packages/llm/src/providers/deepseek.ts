@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { requireModelCapability } from "../capabilities"
 import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat"
 import * as OpenAIResponses from "../protocols/openai-responses"
@@ -7,6 +7,7 @@ import { Auth } from "../route/auth"
 import { Route, type RouteDefaultsInput } from "../route/client"
 import { Endpoint } from "../route/endpoint"
 import { Protocol } from "../route/protocol"
+import { HttpTransport } from "../route/transport"
 import {
   LLMRequest,
   Message,
@@ -42,7 +43,11 @@ const invalid = ProviderShared.invalidRequest
 const ALLOWED_HTTP_OVERLAY_FIELDS = new Set(["instructions", "user"])
 
 const definedKeys = (input: Record<string, unknown> | undefined) =>
-  input ? Object.entries(input).filter((entry) => entry[1] !== undefined).map(([key]) => key) : []
+  input
+    ? Object.entries(input)
+        .filter((entry) => entry[1] !== undefined)
+        .map(([key]) => key)
+    : []
 
 const normalizeReasoningEffort = (effort: unknown) => {
   if (effort === undefined) return undefined
@@ -176,6 +181,7 @@ const validateRequest = Effect.fn("DeepSeekResponses.validateRequest")(function*
       "DeepSeek Responses cannot select custom apply_patch by name; use required with apply_patch as the only tool",
     )
 
+  const hostedItemIDs = new Set<string>()
   for (const message of request.messages) {
     for (const part of message.content) {
       if (part.type === "media")
@@ -186,6 +192,17 @@ const validateRequest = Effect.fn("DeepSeekResponses.validateRequest")(function*
         part.result.value.some((item: unknown) => ProviderShared.isRecord(item) && item.type === "file")
       )
         return yield* invalid("DeepSeek Responses does not support image or file tool-result input")
+      if (part.type === "tool-result" && part.providerExecuted === true && part.result.type === "json") {
+        const value = part.result.value
+        if (ProviderShared.isRecord(value) && value.type === "web_search_call" && typeof value.id === "string") {
+          const openai = part.providerMetadata?.openai
+          const itemID = ProviderShared.isRecord(openai) && typeof openai.itemId === "string" ? openai.itemId : value.id
+          if (hostedItemIDs.has(itemID)) {
+            return yield* invalid(`DeepSeek Responses cannot replay duplicate hosted item id: ${itemID}`)
+          }
+          hostedItemIDs.add(itemID)
+        }
+      }
     }
   }
 
@@ -207,13 +224,19 @@ const fromResponsesRequest = Effect.fn("DeepSeekResponses.fromRequest")(function
   const topLogprobs = typeof options?.topLogprobs === "number" ? options.topLogprobs : undefined
   const projected = LLMRequest.update(request, {
     messages: normalizeMessages(request),
-    // Reuse the mature common Responses lowerer through a temporary semantic
-    // mapping, then return only fields DeepSeek documents as effective.
-    providerOptions: effort === undefined ? undefined : { openai: { reasoningEffort: effort } },
+    // Reuse the common Responses message/tool lowerer without presenting
+    // DeepSeek-only values to the OpenAI option validator.
+    providerOptions: undefined,
   })
   const body = yield* OpenAIResponses.fromRequest(projected)
-  const { store: _store, service_tier: _serviceTier, prompt_cache_key: _promptCacheKey, include: _include, ...native } =
-    body
+  const {
+    store: _store,
+    service_tier: _serviceTier,
+    prompt_cache_key: _promptCacheKey,
+    include: _include,
+    reasoning: _reasoning,
+    ...native
+  } = body
 
   const hosted = hostedWebSearchReplay(request)
   const input = native.input.map((item) =>
@@ -245,14 +268,27 @@ const fromResponsesRequest = Effect.fn("DeepSeekResponses.fromRequest")(function
         ? { type: "web_search" as const }
         : native.tool_choice,
     ...(format === undefined ? {} : { text: { format } }),
+    ...(effort === undefined ? {} : { reasoning: { effort } }),
     ...(topLogprobs === undefined ? {} : { top_logprobs: topLogprobs }),
   }
 })
 
+export const DeepSeekResponsesBody = Schema.Struct({
+  ...OpenAIResponses.OpenAIResponsesCoreFields,
+  reasoning: Schema.optional(
+    Schema.Struct({
+      effort: Schema.optional(Schema.Literals(["high", "max"])),
+      summary: Schema.optional(Schema.Literal("auto")),
+    }),
+  ),
+  stream: Schema.Literal(true),
+})
+export type DeepSeekResponsesBody = Schema.Schema.Type<typeof DeepSeekResponsesBody>
+
 const responsesProtocol = Protocol.make({
   id: OpenAIResponses.protocol.id,
   body: {
-    schema: OpenAIResponses.OpenAIResponsesBody,
+    schema: DeepSeekResponsesBody,
     from: fromResponsesRequest,
   },
   stream: OpenAIResponses.protocol.stream,
@@ -262,9 +298,9 @@ const nativeResponsesRoute = Route.make({
   id: OpenAIResponses.route.id,
   provider: id,
   protocol: responsesProtocol,
-  endpoint: Endpoint.path<OpenAIResponses.OpenAIResponsesBody>(OpenAIResponses.PATH, { baseURL: DEFAULT_BASE_URL }),
+  endpoint: Endpoint.path<DeepSeekResponsesBody>(OpenAIResponses.PATH, { baseURL: DEFAULT_BASE_URL }),
   auth: Auth.none,
-  transport: OpenAIResponses.httpTransport,
+  transport: HttpTransport.sseJson.with<DeepSeekResponsesBody>(),
 })
 
 export const routes = [nativeResponsesRoute, OpenAICompatibleChat.route]

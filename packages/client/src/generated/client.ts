@@ -229,10 +229,23 @@ export function make(options: ClientOptions) {
     return (await json(response)) as A
   }
 
+  const requestMixed = async <A>(descriptor: RequestDescriptor, requestOptions?: RequestOptions): Promise<A> => {
+    const response = await execute(descriptor, requestOptions)
+    if (response.status !== descriptor.successStatus) return responseError(response, descriptor)
+    if (isContentType(response, "text/event-stream")) return sseResponse(response) as A
+    return (await json(response)) as A
+  }
+
   const sse = <A>(descriptor: RequestDescriptor, requestOptions?: RequestOptions): AsyncIterable<A> => ({
     async *[Symbol.asyncIterator]() {
       const response = await execute(descriptor, requestOptions)
       if (response.status !== descriptor.successStatus) await responseError(response, descriptor)
+      yield* sseResponse<A>(response)
+    },
+  })
+
+  const sseResponse = <A>(response: Response): AsyncIterable<A> => ({
+    async *[Symbol.asyncIterator]() {
       if (!isContentType(response, "text/event-stream")) {
         try {
           await response.body?.cancel()
@@ -647,8 +660,8 @@ export function make(options: ClientOptions) {
         ),
     },
     responses: {
-      create: (input: ResponsesCreateInput, requestOptions?: RequestOptions) =>
-        request<ResponsesCreateOutput>(
+      create: (input: ResponsesCreateInput, requestOptions?: RequestOptions): Promise<ResponsesCreateOutput> =>
+        requestMixed<ResponsesCreateOutput>(
           {
             method: "POST",
             path: `/v1/responses`,

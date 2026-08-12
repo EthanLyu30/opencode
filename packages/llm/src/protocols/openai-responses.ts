@@ -148,7 +148,7 @@ const OpenAIResponsesTextFormat = Schema.Union([
 // message. The HTTP body adds `stream: true`; the WebSocket message adds
 // `type: "response.create"`. Defining the shared shape once keeps the two
 // transports in sync without a destructure-and-strip dance.
-const OpenAIResponsesCoreFields = {
+export const OpenAIResponsesCoreFields = {
   model: Schema.String,
   input: Schema.Array(OpenAIResponsesInputItem),
   instructions: Schema.optional(Schema.String),
@@ -271,6 +271,7 @@ interface ParserState {
   readonly reasoningItems: Readonly<Record<string, ReasoningStreamItem>>
   readonly store: boolean | undefined
   readonly sequenceNumber: number | undefined
+  readonly hostedItemIDs: ReadonlySet<string>
 }
 
 type ReasoningSummaryStatus = "active" | "can-conclude" | "concluded"
@@ -554,6 +555,11 @@ const mapUsage = (usage: OpenAIResponsesUsage | null | undefined) => {
 
 const mapFinishReason = (event: OpenAIResponsesEvent, hasFunctionCall: boolean): FinishReason => {
   const reason = event.response?.incomplete_details?.reason
+  if (event.type === "response.incomplete") {
+    if (reason === "max_output_tokens") return "length"
+    if (reason === "content_filter") return "content-filter"
+    return "unknown"
+  }
   if (reason === undefined || reason === null) return hasFunctionCall ? "tool-calls" : "stop"
   if (reason === "max_output_tokens") return "length"
   if (reason === "content_filter") return "content-filter"
@@ -607,8 +613,7 @@ const isReasoningItem = (
 // Round-trip the full item as the structured result so consumers can extract
 // outputs / sources / status without re-decoding.
 const hostedToolResult = (item: OpenAIResponsesStreamItem) => {
-  const isError = typeof item.error !== "undefined" && item.error !== null
-  return isError ? { type: "error" as const, value: item.error } : { type: "json" as const, value: item }
+  return { type: "json" as const, value: item }
 }
 
 const hostedToolEvents = (
@@ -701,8 +706,7 @@ const onOutputItemAdded = (state: ParserState, event: OpenAIResponsesEvent): Ste
       events,
     ]
   }
-  if ((item?.type !== "function_call" && item?.type !== "custom_tool_call") || !item.id)
-    return [state, NO_EVENTS]
+  if ((item?.type !== "function_call" && item?.type !== "custom_tool_call") || !item.id) return [state, NO_EVENTS]
   const providerMetadata = openaiMetadata({ itemId: item.id })
   const events: LLMEvent[] = []
   const lifecycle = Lifecycle.stepStart(state.lifecycle, events)
@@ -865,10 +869,7 @@ const onAuthoritativeToolInputDone = Effect.fn("OpenAIResponses.onAuthoritativeT
   if (!event.item_id || input === undefined) return [state, NO_EVENTS] satisfies StepResult
   const tool = state.tools[event.item_id]
   if (!tool)
-    return yield* ProviderShared.eventError(
-      ADAPTER,
-      "OpenAI Responses final tool input is missing its tool call",
-    )
+    return yield* ProviderShared.eventError(ADAPTER, "OpenAI Responses final tool input is missing its tool call")
   return [
     {
       ...state,
@@ -940,10 +941,18 @@ const onOutputItemDone = Effect.fn("OpenAIResponses.onOutputItemDone")(function*
   }
 
   if (isHostedToolItem(item)) {
+    if (state.hostedItemIDs.has(item.id)) {
+      return yield* Effect.fail(
+        ProviderShared.eventError(ADAPTER, `OpenAI Responses emitted duplicate hosted item id: ${item.id}`),
+      )
+    }
     const events: LLMEvent[] = []
     const lifecycle = Lifecycle.stepStart(state.lifecycle, events)
     events.push(...hostedToolEvents(item))
-    return [{ ...state, lifecycle }, events] satisfies StepResult
+    return [
+      { ...state, lifecycle, hostedItemIDs: new Set([...state.hostedItemIDs, item.id]) },
+      events,
+    ] satisfies StepResult
   }
 
   if (isReasoningItem(item)) {
@@ -1010,6 +1019,7 @@ const providerError = (event: OpenAIResponsesEvent, fallback: string) => {
   return LLMEvent.providerError({
     message,
     classification: code === "context_length_exceeded" || isContextOverflow(message) ? "context-overflow" : undefined,
+    usage: mapUsage(event.response?.usage),
   })
 }
 
@@ -1081,11 +1091,7 @@ const stepEvent = (state: ParserState, event: OpenAIResponsesEvent) => {
 
 const step = Effect.fn("OpenAIResponses.step")(function* (state: ParserState, event: OpenAIResponsesEvent) {
   const sequenceNumber = event.sequence_number
-  if (
-    sequenceNumber !== undefined &&
-    state.sequenceNumber !== undefined &&
-    sequenceNumber <= state.sequenceNumber
-  )
+  if (sequenceNumber !== undefined && state.sequenceNumber !== undefined && sequenceNumber <= state.sequenceNumber)
     return yield* ProviderShared.eventError(
       ADAPTER,
       `OpenAI Responses sequence_number must increase monotonically; received ${sequenceNumber} after ${state.sequenceNumber}`,
@@ -1117,6 +1123,7 @@ export const protocol = Protocol.make({
       reasoningItems: {},
       store: OpenAIOptions.store(request),
       sequenceNumber: undefined,
+      hostedItemIDs: new Set<string>(),
     }),
     step,
     terminal: (event) => TERMINAL_TYPES.has(event.type),

@@ -2,6 +2,7 @@ export * as WorkflowExecutor from "./executor"
 
 import { LLMError } from "@opencode-ai/llm"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { Responses } from "@opencode-ai/schema/responses"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Context, DateTime, Effect, Layer, Schema, Scope } from "effect"
 import { makeGlobalNode } from "../effect/app-node"
@@ -23,6 +24,12 @@ export interface ExecutionInput {
     readonly attempt: number
     readonly expiresAt: DateTime.Utc
   }
+  /**
+   * Persists a bounded, secret-checked continuation for the current fenced
+   * attempt. The local runtime owns event publication so executors cannot
+   * bypass cancellation or lease fencing.
+   */
+  readonly saveCheckpoint: (checkpoint: Checkpoint) => Effect.Effect<void, ExecutionFailure>
 }
 
 /**
@@ -44,12 +51,40 @@ export interface Result {
   readonly checkpoint?: Checkpoint
   readonly artifacts?: ReadonlyArray<Workflow.ArtifactCommit>
   readonly usage: Workflow.Usage
+  readonly responseSettlement?: Extract<ResponseSettlement, { readonly type: "completed" }>
 }
 
 export interface ExecutionFailure {
   readonly failure: Workflow.Failure
   readonly usage: Workflow.Usage
+  readonly responseSettlement?: Extract<ResponseSettlement, { readonly type: "failed" | "incomplete" }>
 }
+
+export type ResponseSettlement =
+  | {
+      readonly type: "completed"
+      readonly responseID: Responses.ID
+      readonly output: ReadonlyArray<Responses.ItemPayload>
+      readonly usage?: Responses.Usage
+      readonly store: boolean
+      readonly conversationID?: Responses.ConversationID
+    }
+  | {
+      readonly type: "incomplete"
+      readonly responseID: Responses.ID
+      readonly output: ReadonlyArray<Responses.ItemPayload>
+      readonly error: Responses.Error
+      readonly usage?: Responses.Usage
+      readonly store: boolean
+      readonly conversationID?: Responses.ConversationID
+    }
+  | {
+      readonly type: "failed"
+      readonly responseID: Responses.ID
+      readonly error: Responses.Error
+      readonly usage?: Responses.Usage
+      readonly store: boolean
+    }
 
 export interface Interface {
   readonly execute: (input: ExecutionInput) => Effect.Effect<Result, ExecutionFailure, Scope.Scope>
@@ -108,27 +143,42 @@ export const roleLayer = Layer.effect(
           const result = yield* models.execute({ ...input, route }).pipe(Effect.mapError(modelFailure))
           if (result.artifacts?.some((artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND))
             return yield* Effect.fail(
-              invalidOutcome("Model execution returned a reserved role outcome artifact", result.usage),
+              invalidOutcome(
+                "Model execution returned a reserved role outcome artifact",
+                result.usage,
+                result.responseSettlement,
+              ),
             )
           const outcome = yield* Schema.decodeUnknownEffect(WorkflowRole.Outcome)(result.outcome).pipe(
-            Effect.mapError(() => invalidOutcome("Model output did not match WorkflowRole.Outcome", result.usage)),
+            Effect.mapError(() =>
+              invalidOutcome(
+                "Model output did not match WorkflowRole.Outcome",
+                result.usage,
+                result.responseSettlement,
+              ),
+            ),
           )
           const artifact = outcomeArtifact(input.stage, outcome)
           const nextState = yield* WorkflowStageMachine.advance(state, artifact).pipe(
             Effect.mapError((error) =>
-              invalidOutcome(`Model outcome violated role state: ${error.code}`, result.usage),
+              invalidOutcome(
+                `Model outcome violated role state: ${error.code}`,
+                result.usage,
+                result.responseSettlement,
+              ),
             ),
           )
           const hasFutureRoleStage = input.stages.some(
             (stage) => stage.ordinal > input.stage.ordinal && Schema.is(WorkflowRole.Role)(stage.type),
           )
           if (!hasFutureRoleStage && nextState.status !== "completed")
-            return yield* Effect.fail(incompleteRoleWorkflow(nextState.role, result.usage))
+            return yield* Effect.fail(incompleteRoleWorkflow(nextState.role, result.usage, result.responseSettlement))
 
           return {
             checkpoint: result.checkpoint,
             usage: result.usage,
             artifacts: [...(result.artifacts ?? []), artifact],
+            responseSettlement: result.responseSettlement,
           }
         }),
     })
@@ -201,28 +251,61 @@ function modelFailure(error: ExecutionFailure | LLMError): ExecutionFailure {
       message: WorkflowSecretGuard.sanitizeText(error.failure.message),
     },
     usage: error.usage,
+    ...(error.responseSettlement === undefined ? {} : { responseSettlement: error.responseSettlement }),
   }
 }
 
-function invalidOutcome(message: string, usage: Workflow.Usage): ExecutionFailure {
-  return {
-    failure: {
+function invalidOutcome(
+  message: string,
+  usage: Workflow.Usage,
+  settlement?: Result["responseSettlement"],
+): ExecutionFailure {
+  return failedOutcome(
+    {
       category: "schema",
       code: "invalid_role_outcome",
       message: WorkflowSecretGuard.sanitizeText(message),
     },
     usage,
-  }
+    settlement,
+  )
 }
 
-function incompleteRoleWorkflow(nextRole: WorkflowRole.Role, usage: Workflow.Usage): ExecutionFailure {
-  return {
-    failure: {
+function incompleteRoleWorkflow(
+  nextRole: WorkflowRole.Role,
+  usage: Workflow.Usage,
+  settlement?: Result["responseSettlement"],
+): ExecutionFailure {
+  return failedOutcome(
+    {
       category: "invalid_request",
       code: "incomplete_role_workflow",
       message: `Role workflow has no stage for ${nextRole}`,
     },
     usage,
+    settlement,
+  )
+}
+
+function failedOutcome(
+  failure: Workflow.Failure,
+  usage: Workflow.Usage,
+  settlement?: Result["responseSettlement"],
+): ExecutionFailure {
+  return {
+    failure,
+    usage,
+    ...(settlement === undefined
+      ? {}
+      : {
+          responseSettlement: {
+            type: "failed" as const,
+            responseID: settlement.responseID,
+            error: { type: failure.category, code: failure.code, message: failure.message },
+            usage: settlement.usage,
+            store: settlement.store,
+          },
+        }),
   }
 }
 

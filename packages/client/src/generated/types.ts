@@ -765,6 +765,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -784,6 +785,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -803,6 +805,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -822,6 +825,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -855,6 +859,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -888,6 +893,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -907,6 +913,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -926,6 +933,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -946,6 +954,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -965,6 +974,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -986,6 +996,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1014,6 +1025,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1033,6 +1045,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1052,6 +1065,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1072,6 +1086,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1092,6 +1107,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1112,6 +1128,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1137,6 +1154,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1161,6 +1179,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1191,6 +1210,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1216,6 +1236,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1236,6 +1257,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1257,6 +1279,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1283,6 +1306,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1302,6 +1326,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1323,6 +1348,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1353,6 +1379,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1367,6 +1394,7 @@ export type SessionsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1391,6 +1419,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1410,6 +1439,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1429,6 +1459,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1448,6 +1479,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1481,6 +1513,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1514,6 +1547,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1533,6 +1567,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1552,6 +1587,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1572,6 +1608,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1591,6 +1628,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1612,6 +1650,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1640,6 +1679,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1659,6 +1699,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1678,6 +1719,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1698,6 +1740,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1718,6 +1761,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1738,6 +1782,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1763,6 +1808,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1787,6 +1833,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1817,6 +1864,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1842,6 +1890,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1862,6 +1911,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1883,6 +1933,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1909,6 +1960,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1928,6 +1980,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1949,6 +2002,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1979,6 +2033,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1993,6 +2048,7 @@ export type SessionsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2497,6 +2553,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2543,6 +2600,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2557,6 +2615,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2571,6 +2630,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2592,6 +2652,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2606,12 +2667,35 @@ export type WorkflowsHistoryOutput = {
     | {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.stage.checkpointed"
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: number
+          readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly attempt: number
+          readonly leaseOwner?: string
+          readonly checkpoint: { readonly [x: string]: JsonValue }
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.artifact.created"
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2642,6 +2726,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2686,6 +2771,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2713,6 +2799,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2757,6 +2844,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2799,6 +2887,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2818,6 +2907,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2850,6 +2940,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2874,6 +2965,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2888,6 +2980,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2909,6 +3002,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2923,6 +3017,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2946,6 +3041,7 @@ export type WorkflowsHistoryOutput = {
           readonly seq: number
           readonly version: number
           readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
         }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -2996,6 +3092,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3042,6 +3139,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3056,6 +3154,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3070,6 +3169,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3091,6 +3191,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3105,12 +3206,35 @@ export type WorkflowsEventsOutput =
   | {
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.stage.checkpointed"
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: number
+        readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly attempt: number
+        readonly leaseOwner?: string
+        readonly checkpoint: { readonly [x: string]: unknown }
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.artifact.created"
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3141,6 +3265,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3185,6 +3310,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3212,6 +3338,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3256,6 +3383,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3298,6 +3426,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3317,6 +3446,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3349,6 +3479,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3373,6 +3504,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3387,6 +3519,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3408,6 +3541,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3422,6 +3556,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -3445,6 +3580,7 @@ export type WorkflowsEventsOutput =
         readonly seq: number
         readonly version: number
         readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
       }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -6047,29 +6183,142 @@ export type ResponsesCreateInput = {
   }["conversation"]
 }
 
-export type ResponsesCreateOutput = {
-  readonly id: string
-  readonly workflowID: string
-  readonly model: string
-  readonly status: "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled"
-  readonly background: boolean
-  readonly store: boolean
-  readonly previousResponseID?: string
-  readonly conversationID?: string
-  readonly requestHash: string
-  readonly output: ReadonlyArray<{ readonly [x: string]: JsonValue }>
-  readonly error?: { readonly code: string; readonly message: string; readonly type?: string; readonly param?: string }
-  readonly usage?: {
-    readonly inputTokens: number
-    readonly outputTokens: number
-    readonly totalTokens: number
-    readonly inputTokensDetails?: { readonly cachedTokens: number }
-    readonly outputTokensDetails?: { readonly reasoningTokens: number }
-  }
-  readonly createdAt: number
-  readonly completedAt?: number
-  readonly deletedAt?: number
-}
+export type ResponsesCreateOutput =
+  | {
+      readonly id: string
+      readonly workflowID: string
+      readonly model: string
+      readonly status: "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled"
+      readonly background: boolean
+      readonly store: boolean
+      readonly previousResponseID?: string
+      readonly conversationID?: string
+      readonly requestHash: string
+      readonly output: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+      readonly error?: {
+        readonly code: string
+        readonly message: string
+        readonly type?: string
+        readonly param?: string
+      }
+      readonly usage?: {
+        readonly inputTokens: number
+        readonly outputTokens: number
+        readonly totalTokens: number
+        readonly inputTokensDetails?: { readonly cachedTokens: number }
+        readonly outputTokensDetails?: { readonly reasoningTokens: number }
+      }
+      readonly createdAt: number
+      readonly completedAt?: number
+      readonly deletedAt?: number
+    }
+  | AsyncIterable<
+      | {
+          readonly type: "response.created"
+          readonly sequence_number: number
+          readonly data: {
+            readonly responseID: string
+            readonly timestamp: number
+            readonly workflowID: string
+            readonly model: string
+            readonly background: boolean
+            readonly store: boolean
+            readonly previousResponseID?: string
+            readonly conversationID?: string
+            readonly requestHash: string
+            readonly context: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+            readonly input: readonly [
+              { readonly [x: string]: JsonValue },
+              ...Array<{ readonly [x: string]: JsonValue }>,
+            ]
+          }
+        }
+      | {
+          readonly type: "response.in_progress"
+          readonly sequence_number: number
+          readonly data: { readonly responseID: string; readonly timestamp: number }
+        }
+      | {
+          readonly type: "response.completed"
+          readonly sequence_number: number
+          readonly data: {
+            readonly responseID: string
+            readonly timestamp: number
+            readonly output?: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+            readonly usage?: {
+              readonly inputTokens: number
+              readonly outputTokens: number
+              readonly totalTokens: number
+              readonly inputTokensDetails?: { readonly cachedTokens: number }
+              readonly outputTokensDetails?: { readonly reasoningTokens: number }
+            }
+          }
+        }
+      | {
+          readonly type: "response.incomplete"
+          readonly sequence_number: number
+          readonly data: {
+            readonly responseID: string
+            readonly timestamp: number
+            readonly output?: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+            readonly error?: {
+              readonly code: string
+              readonly message: string
+              readonly type?: string
+              readonly param?: string
+            }
+            readonly usage?: {
+              readonly inputTokens: number
+              readonly outputTokens: number
+              readonly totalTokens: number
+              readonly inputTokensDetails?: { readonly cachedTokens: number }
+              readonly outputTokensDetails?: { readonly reasoningTokens: number }
+            }
+          }
+        }
+      | {
+          readonly type: "response.failed"
+          readonly sequence_number: number
+          readonly data: {
+            readonly responseID: string
+            readonly timestamp: number
+            readonly error?: {
+              readonly code: string
+              readonly message: string
+              readonly type?: string
+              readonly param?: string
+            }
+            readonly usage?: {
+              readonly inputTokens: number
+              readonly outputTokens: number
+              readonly totalTokens: number
+              readonly inputTokensDetails?: { readonly cachedTokens: number }
+              readonly outputTokensDetails?: { readonly reasoningTokens: number }
+            }
+          }
+        }
+      | {
+          readonly type: "response.cancelled"
+          readonly sequence_number: number
+          readonly data: {
+            readonly responseID: string
+            readonly timestamp: number
+            readonly error?: {
+              readonly code: string
+              readonly message: string
+              readonly type?: string
+              readonly param?: string
+            }
+            readonly usage?: {
+              readonly inputTokens: number
+              readonly outputTokens: number
+              readonly totalTokens: number
+              readonly inputTokensDetails?: { readonly cachedTokens: number }
+              readonly outputTokensDetails?: { readonly reasoningTokens: number }
+            }
+          }
+        }
+    >
 
 export type ResponsesGetInput = { readonly responseID: { readonly responseID: string }["responseID"] }
 

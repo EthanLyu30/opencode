@@ -4,18 +4,35 @@ import { eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { EventTable } from "@opencode-ai/core/event/sql"
 import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
+import { WorkflowModelExecution } from "@opencode-ai/core/workflow/execution/model"
 import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
+import { ResponsesV2 } from "@opencode-ai/core/responses"
+import { ResponsesProjector } from "@opencode-ai/core/responses/projector"
+import { ResponsesStore } from "@opencode-ai/core/responses/store"
 import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
+import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
-  AppNodeBuilder.build(LayerNode.group([WorkflowV2.node, WorkflowStore.node, WorkflowExecutor.node])),
+  AppNodeBuilder.build(
+    LayerNode.group([
+      Database.node,
+      WorkflowV2.node,
+      WorkflowStore.node,
+      WorkflowExecutor.node,
+      ResponsesProjector.node,
+      ResponsesStore.node,
+      ResponsesV2.node,
+    ]),
+    [[WorkflowModelExecution.node, WorkflowModelExecution.emptyLayer]],
+  ),
 )
 
 const successfulExecutor = Layer.succeed(
@@ -59,6 +76,9 @@ const makeWorkerIt = (
         WorkflowStore.node,
         WorkflowExecutor.node,
         WorkflowExecution.node,
+        ResponsesProjector.node,
+        ResponsesStore.node,
+        ResponsesV2.node,
       ]),
       [
         [WorkflowExecution.node, WorkflowExecutionLocal.nodeWith(options)],
@@ -98,6 +118,22 @@ const duplicateArtifactExecutor = Layer.succeed(
 )
 
 const duplicateArtifactIt = makeWorkerIt(duplicateArtifactExecutor)
+
+const checkpointGuardExecutor = Layer.succeed(
+  WorkflowExecutor.Service,
+  WorkflowExecutor.Service.of({
+    execute: (input) => {
+      const checkpoint = input.workflow.id.includes("secret")
+        ? { apiKey: "sk-checkpoint-secret-sentinel" }
+        : { payload: "x".repeat(256 * 1024) }
+      return input
+        .saveCheckpoint(checkpoint)
+        .pipe(Effect.andThen(Effect.succeed({ usage: { tokens: 1, turns: 1, toolCalls: 0, attempts: 0 } })))
+    },
+  }),
+)
+
+const checkpointGuardIt = makeWorkerIt(checkpointGuardExecutor)
 
 const incompleteRoleHistoryExecutor = Layer.succeed(
   WorkflowExecutor.Service,
@@ -263,6 +299,128 @@ const createInput = (suffix: string): Workflow.CreateInput => ({
 })
 
 describe("Workflow lease acquisition", () => {
+  it.effect("workflow cancellation atomically cancels every active explicit Response", () =>
+    Effect.gen(function* () {
+      const workflow = yield* WorkflowV2.Service
+      const responses = yield* ResponsesV2.Service
+      const first = Responses.ID.make("resp_cancel_multi_first")
+      const second = Responses.ID.make("resp_cancel_multi_second")
+      const blocker = Responses.ID.make("resp_cancel_multi_blocker")
+      const base = createInput("cancel_multi_response")
+      const input: Workflow.CreateInput = {
+        ...base,
+        stages: [
+          { ...base.stages[0], input: { responseID: blocker } },
+          {
+            id: Workflow.StageID.make("wfs_cancel_multi_first"),
+            type: "deliver",
+            ordinal: 1,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "cancel/multi/first",
+            input: { responseID: first },
+          },
+          {
+            id: Workflow.StageID.make("wfs_cancel_multi_second"),
+            type: "deliver",
+            ordinal: 2,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "cancel/multi/second",
+            input: { responseID: second },
+          },
+        ],
+      }
+      yield* workflow.create(input)
+      for (const responseID of [first, second]) {
+        yield* responses.create({
+          id: responseID,
+          workflowID: input.id!,
+          model: "deepseek-v4-flash",
+          background: true,
+          store: true,
+          requestHash: `sha256:${responseID}`,
+          input: [{ type: "message", role: "user", content: responseID }],
+        })
+      }
+
+      yield* workflow.cancel(input.id!)
+      expect((yield* responses.get(first)).status).toBe("cancelled")
+      expect((yield* responses.get(second)).status).toBe("cancelled")
+      expect((yield* workflow.get(input.id!)).run.cancelRequestedAt).toBeDefined()
+    }),
+  )
+
+  it.effect("does not consume an attempt before a linked response is admitted", () =>
+    Effect.gen(function* () {
+      const workflow = yield* WorkflowV2.Service
+      const store = yield* WorkflowStore.Service
+      const base = createInput("response_not_admitted_claim")
+      const input: Workflow.CreateInput = {
+        ...base,
+        stages: [{ ...base.stages[0], input: { responseID: "resp_not_admitted_claim" } }],
+      }
+      yield* workflow.create(input)
+
+      expect(Option.isNone(yield* store.claim({ owner: "worker-a", now: 1_000, leaseDurationMs: 30_000 }))).toBe(true)
+      expect((yield* store.stage(input.stages[0].id!))?.attempt).toBe(0)
+    }),
+  )
+
+  it.effect("does not consume an attempt before a workflow-bound Response is admitted", () =>
+    Effect.gen(function* () {
+      const workflow = yield* WorkflowV2.Service
+      const store = yield* WorkflowStore.Service
+      const responses = yield* ResponsesV2.Service
+      const base = createInput("workflow_bound_response_claim")
+      const responseID = Responses.ID.make("resp_workflow_bound_response_claim")
+      const input: Workflow.CreateInput = {
+        ...base,
+        stages: [
+          {
+            ...base.stages[0],
+            type: "deliver",
+            maxAttempts: 1,
+            input: { responseBinding: "workflow" },
+          },
+        ],
+      }
+      yield* workflow.create(input)
+
+      expect(Option.isNone(yield* store.claim({ owner: "worker-a", now: 1_000, leaseDurationMs: 30_000 }))).toBe(true)
+      expect((yield* store.stage(input.stages[0].id!))?.attempt).toBe(0)
+
+      yield* responses.create({
+        id: responseID,
+        workflowID: input.id!,
+        model: "deepseek-v4-flash",
+        background: true,
+        store: true,
+        requestHash: `sha256:${responseID}`,
+        input: [{ type: "message", role: "user", content: "continue" }],
+      })
+
+      expect(Option.isSome(yield* store.claim({ owner: "worker-a", now: 2_000, leaseDurationMs: 30_000 }))).toBe(true)
+      expect((yield* store.stage(input.stages[0].id!))?.attempt).toBe(1)
+    }),
+  )
+
+  it.effect("leases an ordinary deliver stage without a Response binding", () =>
+    Effect.gen(function* () {
+      const workflow = yield* WorkflowV2.Service
+      const store = yield* WorkflowStore.Service
+      const base = createInput("ordinary_deliver_claim")
+      const input: Workflow.CreateInput = {
+        ...base,
+        stages: [{ ...base.stages[0], type: "deliver", maxAttempts: 1, input: {} }],
+      }
+      yield* workflow.create(input)
+
+      expect(Option.isSome(yield* store.claim({ owner: "worker-a", now: 1_000, leaseDurationMs: 30_000 }))).toBe(true)
+      expect((yield* store.stage(input.stages[0].id!))?.attempt).toBe(1)
+    }),
+  )
+
   it.effect("allows only one worker to lease one stage", () =>
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
@@ -374,6 +532,7 @@ describe("Workflow executor", () => {
           stage,
           stages: [stage],
           artifacts: [],
+          saveCheckpoint: () => Effect.void,
           lease: {
             owner: "worker-a",
             attempt: 1,
@@ -395,6 +554,43 @@ describe("Workflow executor", () => {
 })
 
 describe("Workflow local execution", () => {
+  checkpointGuardIt.live(
+    "rejects secret-bearing and oversized mid-stage checkpoints before durable publication",
+    () =>
+      Effect.gen(function* () {
+        const workflow = yield* WorkflowV2.Service
+        const { db } = yield* Database.Service
+        const inputs = [createInput("checkpoint_secret"), createInput("checkpoint_oversized")]
+        for (const input of inputs) {
+          yield* workflow.create(input)
+          yield* workflow.events({ workflowID: input.id! }).pipe(
+            Stream.filter((event) => event.type === "workflow.approval.requested"),
+            Stream.runHead,
+            Effect.timeout("2 seconds"),
+          )
+        }
+
+        const secret = yield* workflow.get(inputs[0].id!)
+        const oversized = yield* workflow.get(inputs[1].id!)
+        expect(secret.stages[0]).toMatchObject({
+          status: "waiting_approval",
+          checkpoint: undefined,
+          error: { code: "unsafe_checkpoint" },
+        })
+        expect(oversized.stages[0]).toMatchObject({
+          status: "waiting_approval",
+          checkpoint: undefined,
+          error: { code: "checkpoint_too_large" },
+        })
+        const durable = JSON.stringify(
+          yield* db.select({ type: EventTable.type, data: EventTable.data }).from(EventTable).all().pipe(Effect.orDie),
+        )
+        expect(durable).not.toContain("checkpoint-secret-sentinel")
+        expect(durable).not.toContain('"workflow.stage.checkpointed"')
+      }),
+    5_000,
+  )
+
   incompleteRoleHistoryIt.live("fails final role validation before stage success can make the run stick", () =>
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
@@ -507,6 +703,70 @@ describe("Workflow local execution", () => {
     5_000,
   )
 
+  permanentFailureIt.live(
+    "atomically fails every active Response when a pre-deliver stage fails",
+    () =>
+      Effect.gen(function* () {
+        const workflow = yield* WorkflowV2.Service
+        const responses = yield* ResponsesV2.Service
+        const first = Responses.ID.make("resp_worker_multi_first")
+        const second = Responses.ID.make("resp_worker_multi_second")
+        const base = createInput("worker_multi_response_failure")
+        const input: Workflow.CreateInput = {
+          ...base,
+          stages: [
+            { ...base.stages[0], input: { responseID: first }, maxAttempts: 1 },
+            {
+              id: Workflow.StageID.make("wfs_worker_multi_deliver_first"),
+              type: "deliver",
+              ordinal: 1,
+              maxAttempts: 1,
+              recoveryPolicy: "restart_safe",
+              idempotencyKey: "worker/multi/deliver-first",
+              input: { responseID: first },
+            },
+            {
+              id: Workflow.StageID.make("wfs_worker_multi_deliver_second"),
+              type: "deliver",
+              ordinal: 2,
+              maxAttempts: 1,
+              recoveryPolicy: "restart_safe",
+              idempotencyKey: "worker/multi/deliver-second",
+              input: { responseID: second },
+            },
+          ],
+        }
+        yield* workflow.create(input)
+        yield* responses.create({
+          id: second,
+          workflowID: input.id!,
+          model: "deepseek-v4-flash",
+          background: true,
+          store: true,
+          requestHash: `sha256:${second}`,
+          input: [{ type: "message", role: "user", content: "second" }],
+        })
+        yield* responses.create({
+          id: first,
+          workflowID: input.id!,
+          model: "deepseek-v4-flash",
+          background: true,
+          store: true,
+          requestHash: `sha256:${first}`,
+          input: [{ type: "message", role: "user", content: "first" }],
+        })
+
+        yield* workflow.events({ workflowID: input.id! }).pipe(
+          Stream.filter((event) => event.type === "workflow.failed"),
+          Stream.runHead,
+          Effect.timeout("2 seconds"),
+        )
+        expect((yield* responses.get(first)).status).toBe("failed")
+        expect((yield* responses.get(second)).status).toBe("failed")
+      }),
+    5_000,
+  )
+
   ambiguousFailureIt.live(
     "pauses an ambiguous execution for approval and accounts its usage",
     () =>
@@ -551,7 +811,7 @@ describe("Workflow local execution", () => {
   )
 
   workerIt.live(
-    "runs two stages in ordinal order and commits each artifact before stage success",
+    "runs two stages in ordinal order and commits each artifact atomically with stage success",
     () =>
       Effect.gen(function* () {
         const workflow = yield* WorkflowV2.Service
@@ -599,10 +859,10 @@ describe("Workflow local execution", () => {
           history.events.filter((event) => event.type === "workflow.stage.started").map((event) => event.data.stageID),
         ).toEqual([first, second])
         expect(lifecycle.map((event) => event.type)).toEqual([
-          "workflow.artifact.created",
           "workflow.stage.succeeded",
           "workflow.artifact.created",
           "workflow.stage.succeeded",
+          "workflow.artifact.created",
         ])
       }),
     5_000,

@@ -74,7 +74,7 @@ describe("DeepSeek native Responses route", () => {
 
   it.effect("lowers DeepSeek-only effort and logprob options without OpenAI state fields", () =>
     Effect.gen(function* () {
-      const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
+      const prepared = yield* LLMClient.prepare<DeepSeek.DeepSeekResponsesBody>(
         LLM.updateRequest(request, {
           providerOptions: { deepseek: { reasoningEffort: "low", topLogprobs: 4 } },
         }),
@@ -83,6 +83,18 @@ describe("DeepSeek native Responses route", () => {
       expect(prepared.body.reasoning).toEqual({ effort: "high", summary: undefined })
       expect(prepared.body.top_logprobs).toBe(4)
       expect(prepared.body).not.toHaveProperty("store")
+    }),
+  )
+
+  it.effect("keeps DeepSeek native max reasoning effort out of the OpenAI option validator", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare<DeepSeek.DeepSeekResponsesBody>(
+        LLM.updateRequest(request, {
+          providerOptions: { deepseek: { reasoningEffort: "max" } },
+        }),
+      )
+
+      expect(prepared.body.reasoning).toEqual({ effort: "max", summary: undefined })
     }),
   )
 
@@ -139,10 +151,7 @@ describe("DeepSeek native Responses route", () => {
         }),
       )
 
-      expect(prepared.body.tools).toEqual([
-        { type: "custom", name: "apply_patch" },
-        { type: "web_search" },
-      ])
+      expect(prepared.body.tools).toEqual([{ type: "custom", name: "apply_patch" }, { type: "web_search" }])
       expect(prepared.body.tool_choice).toEqual({ type: "web_search" })
     }),
   )
@@ -179,9 +188,7 @@ describe("DeepSeek native Responses route", () => {
   it.effect("parses native text, reasoning and detailed usage without a DONE sentinel", () =>
     Effect.gen(function* () {
       const events = yield* Effect.promise(() => fixture("text-stream"))
-      const response = yield* LLMClient.generate(request).pipe(
-        Effect.provide(fixedResponse(deepSeekSSE(events))),
-      )
+      const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(deepSeekSSE(events))))
 
       expect(response.text).toBe("你好！")
       expect(response.reasoning).toBe("先检查约束。")
@@ -210,9 +217,7 @@ describe("DeepSeek native Responses route", () => {
   it.effect("assembles function and custom apply_patch inputs exactly once and preserves web search", () =>
     Effect.gen(function* () {
       const events = yield* Effect.promise(() => fixture("tool-stream"))
-      const response = yield* LLMClient.generate(request).pipe(
-        Effect.provide(fixedResponse(deepSeekSSE(events))),
-      )
+      const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(deepSeekSSE(events))))
       const calls = response.events.filter((event) => event.type === "tool-call")
       const results = response.events.filter((event) => event.type === "tool-result")
       const statuses = response.events.filter((event) => event.type === "tool-status")
@@ -265,6 +270,141 @@ describe("DeepSeek native Responses route", () => {
     }),
   )
 
+  it.effect("preserves failed hosted items and rejects duplicate hosted ids in output and replay input", () =>
+    Effect.gen(function* () {
+      const failedItem = {
+        type: "web_search_call",
+        id: "search_failed_1",
+        status: "failed",
+        action: { type: "search", query: "failed query" },
+        error: { code: "search_unavailable", message: "offline fixture failure" },
+      } as const
+      const failed = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(
+            deepSeekSSE([
+              { type: "response.created", sequence_number: 0, response: { id: "resp_hosted_failed" } },
+              { type: "response.output_item.done", sequence_number: 1, item: failedItem },
+              { type: "response.completed", sequence_number: 2, response: { id: "resp_hosted_failed" } },
+            ]),
+          ),
+        ),
+      )
+      expect(failed.events.filter((event) => event.type === "tool-call" || event.type === "tool-result")).toEqual([
+        {
+          type: "tool-call",
+          id: "search_failed_1",
+          name: "web_search",
+          input: { type: "search", query: "failed query" },
+          providerExecuted: true,
+          providerMetadata: { openai: { itemId: "search_failed_1" } },
+        },
+        {
+          type: "tool-result",
+          id: "search_failed_1",
+          name: "web_search",
+          providerExecuted: true,
+          result: { type: "json", value: failedItem },
+          output: undefined,
+          providerMetadata: { openai: { itemId: "search_failed_1" } },
+        },
+      ])
+
+      const duplicateOutput = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(
+            deepSeekSSE([
+              { type: "response.created", sequence_number: 0, response: { id: "resp_hosted_duplicate" } },
+              {
+                type: "response.output_item.done",
+                sequence_number: 1,
+                item: { type: "web_search_call", id: "search_duplicate", status: "completed", results: ["A"] },
+              },
+              {
+                type: "response.output_item.done",
+                sequence_number: 2,
+                item: { type: "web_search_call", id: "search_duplicate", status: "failed", results: ["B"] },
+              },
+              { type: "response.completed", sequence_number: 3, response: { id: "resp_hosted_duplicate" } },
+            ]),
+          ),
+        ),
+        Effect.flip,
+      )
+      expect(duplicateOutput.reason).toMatchObject({ _tag: "InvalidProviderOutput" })
+
+      const hostedPart = (value: Record<string, unknown>) => [
+        {
+          type: "tool-call" as const,
+          id: "search_duplicate",
+          name: "web_search",
+          input: {},
+          providerExecuted: true,
+          providerMetadata: { openai: { itemId: "search_duplicate" } },
+        },
+        {
+          type: "tool-result" as const,
+          id: "search_duplicate",
+          name: "web_search",
+          result: { type: "json" as const, value },
+          providerExecuted: true,
+          providerMetadata: { openai: { itemId: "search_duplicate" } },
+        },
+      ]
+      const duplicateReplay = yield* LLMClient.prepare(
+        LLM.request({
+          model,
+          messages: [
+            Message.assistant([
+              ...hostedPart({ type: "web_search_call", id: "search_duplicate", status: "completed", result: "A" }),
+              ...hostedPart({ type: "web_search_call", id: "search_duplicate", status: "failed", result: "B" }),
+            ]),
+          ],
+        }),
+      ).pipe(Effect.flip)
+      expect(duplicateReplay.reason).toMatchObject({ _tag: "InvalidRequest" })
+    }),
+  )
+
+  it.effect("marks incomplete without a known reason even when a function call completed", () =>
+    Effect.gen(function* () {
+      const incomplete = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(
+            deepSeekSSE([
+              { type: "response.created", sequence_number: 0, response: { id: "resp_incomplete_unknown" } },
+              {
+                type: "response.output_item.done",
+                sequence_number: 1,
+                item: {
+                  type: "function_call",
+                  id: "fc_incomplete_unknown",
+                  call_id: "call_incomplete_unknown",
+                  name: "read_file",
+                  arguments: '{"path":"partial.md"}',
+                  status: "completed",
+                },
+              },
+              {
+                type: "response.incomplete",
+                sequence_number: 2,
+                response: {
+                  id: "resp_incomplete_unknown",
+                  usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11 },
+                },
+              },
+            ]),
+          ),
+        ),
+      )
+      expect(incomplete.finishReason).toBe("unknown")
+      expect(incomplete.toolCalls).toEqual([
+        expect.objectContaining({ id: "call_incomplete_unknown", name: "read_file", input: { path: "partial.md" } }),
+      ])
+      expect(incomplete.usage?.totalTokens).toBe(11)
+    }),
+  )
+
   it.effect("maps incomplete and failed terminal events without a DONE sentinel", () =>
     Effect.gen(function* () {
       const incompleteEvents = yield* Effect.promise(() => fixture("incomplete-stream"))
@@ -277,10 +417,37 @@ describe("DeepSeek native Responses route", () => {
       expect(incomplete.usage?.reasoningTokens).toBe(3)
 
       const failedEvents = yield* Effect.promise(() => fixture("failed-stream"))
-      const failed = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(deepSeekSSE(failedEvents))))
+      const failedUsage = {
+        input_tokens: 9,
+        output_tokens: 2,
+        total_tokens: 11,
+        input_tokens_details: { cached_tokens: 3 },
+        output_tokens_details: { reasoning_tokens: 1 },
+      }
+      const failedWithUsage = failedEvents.map((event) =>
+        event.type === "response.failed"
+          ? { ...event, response: { ...(event.response as Record<string, unknown>), usage: failedUsage } }
+          : event,
+      )
+      const failed = yield* LLMClient.generate(request).pipe(
+        Effect.provide(fixedResponse(deepSeekSSE(failedWithUsage))),
+      )
       expect(failed.events).toEqual([
-        { type: "provider-error", message: "server_error: DeepSeek upstream unavailable" },
+        {
+          type: "provider-error",
+          message: "server_error: DeepSeek upstream unavailable",
+          usage: new Usage({
+            inputTokens: 9,
+            outputTokens: 2,
+            nonCachedInputTokens: 6,
+            cacheReadInputTokens: 3,
+            reasoningTokens: 1,
+            totalTokens: 11,
+            providerMetadata: { openai: failedUsage },
+          }),
+        },
       ])
+      expect(failed.usage?.totalTokens).toBe(11)
     }),
   )
 

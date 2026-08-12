@@ -15,11 +15,15 @@ export const EventTable = sqliteTable(
       .notNull()
       .references(() => EventSequenceTable.aggregate_id, { onDelete: "cascade" }),
     seq: integer().notNull(),
+    batch_id: text(),
+    batch_index: integer(),
+    batch_size: integer(),
     type: text().notNull(),
     data: text({ mode: "json" }).$type<Record<string, unknown>>().notNull(),
   },
   (table) => [
     uniqueIndex("event_aggregate_seq_idx").on(table.aggregate_id, table.seq),
     index("event_aggregate_type_seq_idx").on(table.aggregate_id, table.type, table.seq),
+    index("event_batch_idx").on(table.batch_id, table.batch_index),
   ],
 )

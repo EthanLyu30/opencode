@@ -262,6 +262,120 @@ test("sessions.history decodes SessionNotFoundError", async () => {
   }
 })
 
+test("responses methods preserve the native Responses wire contract", async () => {
+  const requests: Array<{ url: string; init?: RequestInit }> = []
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      requests.push({ url, init })
+      if (url.endsWith("/event?after=1")) {
+        return new Response(`data: ${JSON.stringify(responseCompletedEvent)}\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        })
+      }
+      if (url.endsWith("/input_items")) return Response.json({ data: [responseInputItem] })
+      if (init?.method === "DELETE") return new Response(null, { status: 204 })
+      return Response.json(responseResource)
+    },
+  })
+
+  const created = await client.responses.create(responseCreateInput)
+  const retrieved = await client.responses.get({ responseID: "resp_test" })
+  const cancelled = await client.responses.cancel({ responseID: "resp_test" })
+  const inputItems = await client.responses.inputItems({ responseID: "resp_test" })
+  const events = []
+  for await (const event of client.responses.events({ responseID: "resp_test", after: 1 })) events.push(event)
+  await client.responses.delete({ responseID: "resp_test" })
+
+  expect(created).toEqual(responseResource)
+  expect(retrieved).toEqual(responseResource)
+  expect(cancelled).toEqual(responseResource)
+  expect(inputItems).toEqual([responseInputItem])
+  expect(events).toEqual([responseCompletedEvent])
+  expect(requests.map((request) => [request.init?.method, request.url])).toEqual([
+    ["POST", "http://localhost:3000/v1/responses"],
+    ["GET", "http://localhost:3000/v1/responses/resp_test"],
+    ["POST", "http://localhost:3000/v1/responses/resp_test/cancel"],
+    ["GET", "http://localhost:3000/v1/responses/resp_test/input_items"],
+    ["GET", "http://localhost:3000/v1/responses/resp_test/event?after=1"],
+    ["DELETE", "http://localhost:3000/v1/responses/resp_test"],
+  ])
+  const body = requests[0]?.init?.body
+  if (typeof body !== "string") throw new Error("Expected Responses JSON request body")
+  expect(JSON.parse(body)).toEqual(responseCreateInput)
+})
+
+test("mixed Responses POST classifies JSON, SSE, transport, and content-type failures", async () => {
+  const encoder = new TextEncoder()
+  const event = JSON.stringify({ type: "response.completed", sequence_number: 1, data: {} })
+  const client = OpenCode.make({
+    baseUrl: "http://localhost:3000",
+    fetch: async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { requestHash: string }
+      if (request.requestHash.endsWith("declared")) {
+        return Response.json(
+          { _tag: "InvalidRequestError", message: "declared", kind: "invalid_model" },
+          { status: 400 },
+        )
+      }
+      if (request.requestHash.endsWith("wrong-content-type")) {
+        return new Response("not json", { headers: { "content-type": "text/plain" } })
+      }
+      if (request.requestHash.endsWith("malformed-json")) {
+        return new Response("{not-json", { headers: { "content-type": "application/json" } })
+      }
+      if (request.requestHash.endsWith("reader-error")) {
+        let reads = 0
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (reads++ === 0) controller.enqueue(encoder.encode(`data: ${event}\n\n`))
+              else controller.error(new Error("reader failed"))
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(`data: ${event}\r`))
+            controller.enqueue(encoder.encode("\n\r"))
+            controller.enqueue(encoder.encode("\n"))
+            controller.close()
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    },
+  })
+  const create = (suffix: string) =>
+    client.responses.create({ ...responseCreateInput, stream: true, requestHash: `sha256:mixed:${suffix}` })
+
+  await expect(create("declared")).rejects.toMatchObject({ _tag: "InvalidRequestError", kind: "invalid_model" })
+  await expect(create("wrong-content-type")).rejects.toMatchObject({
+    name: "ClientError",
+    reason: "UnsupportedContentType",
+  })
+  await expect(create("malformed-json")).rejects.toMatchObject({
+    name: "ClientError",
+    reason: "MalformedResponse",
+  })
+
+  const crlf = await create("crlf")
+  if (!(Symbol.asyncIterator in Object(crlf))) throw new Error("Expected CRLF SSE branch")
+  const crlfEvents = []
+  for await (const item of crlf) crlfEvents.push(item)
+  expect(crlfEvents).toEqual([{ type: "response.completed", sequence_number: 1, data: {} }])
+
+  const broken = await create("reader-error")
+  if (!(Symbol.asyncIterator in Object(broken))) throw new Error("Expected failing SSE branch")
+  const iterator = broken[Symbol.asyncIterator]()
+  expect((await iterator.next()).value).toEqual({ type: "response.completed", sequence_number: 1, data: {} })
+  await expect(iterator.next()).rejects.toMatchObject({ name: "ClientError", reason: "Transport" })
+})
+
 const session = {
   data: {
     id: "ses_test",
@@ -375,5 +489,49 @@ const workflowCreatedEvent = {
     input: { brief: "Build" },
     budget: { maxAttempts: 3 },
     stages: workflowCreateInput.stages,
+  },
+}
+
+const responseCreateInput = {
+  id: "resp_test",
+  workflowID: "wfl_test",
+  model: "deepseek-v4-flash",
+  background: false,
+  store: true,
+  previous_response_id: "resp_parent",
+  requestHash: "sha256:response-test",
+  input: [{ type: "message", role: "user", content: "Continue" }],
+}
+
+const responseResource = {
+  id: "resp_test",
+  workflowID: "wfl_test",
+  model: "deepseek-v4-flash",
+  status: "completed" as const,
+  background: false,
+  store: true,
+  previousResponseID: "resp_parent",
+  requestHash: "sha256:response-test",
+  output: [{ type: "message", role: "assistant", content: "Done" }],
+  usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+  createdAt: 1_717_171_717_000,
+  completedAt: 1_717_171_718_000,
+}
+
+const responseInputItem = {
+  responseID: "resp_test",
+  ordinal: 0,
+  kind: "input" as const,
+  payload: { type: "message", role: "user", content: "Continue" },
+}
+
+const responseCompletedEvent = {
+  type: "response.completed" as const,
+  sequence_number: 2,
+  data: {
+    responseID: "resp_test",
+    timestamp: 1_717_171_718_000,
+    output: [{ type: "message", role: "assistant", content: "Done" }],
+    usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 },
   },
 }

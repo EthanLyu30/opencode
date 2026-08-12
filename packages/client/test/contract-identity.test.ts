@@ -21,7 +21,7 @@ import { Workspace } from "@opencode-ai/schema/workspace"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Api } from "@opencode-ai/server/api"
-import { compile, emitPromise } from "@opencode-ai/httpapi-codegen"
+import { compile, emitEffectImported, emitPromise } from "@opencode-ai/httpapi-codegen"
 import { ClientApi, endpointNames, groupNames, omitEndpoints } from "../src/contract"
 
 test("Core and Server reuse the authoritative Schema and Protocol values", () => {
@@ -52,6 +52,9 @@ test("client and Server contracts generate identically", () => {
   const client = compile(ClientApi, { groupNames, endpointNames, omitEndpoints })
 
   expect(emitPromise(client)).toEqual(emitPromise(server))
+  expect(emitEffectImported(client, { module: "../contract", api: "ClientApi" })).toEqual(
+    emitEffectImported(server, { module: "../contract", api: "ClientApi" }),
+  )
 })
 
 test("shared DTO schemas construct and decode plain objects", () => {

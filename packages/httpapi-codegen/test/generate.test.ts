@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { Effect, FileSystem, Schema, SchemaAST, SchemaGetter } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema } from "effect/unstable/httpapi"
 import { format } from "prettier"
@@ -607,7 +608,7 @@ describe("HttpApiCodegen.generate", () => {
     Effect.gen(function* () {
       const output = compile(FixtureApi)
       const actual = yield* Effect.promise(() =>
-        Array.fromAsync(new Bun.Glob("*.ts").scan(new URL("generated", import.meta.url).pathname)),
+        Array.fromAsync(new Bun.Glob("*.ts").scan(fileURLToPath(new URL("generated", import.meta.url)))),
       )
       expect(actual.sort((a, b) => a.localeCompare(b))).toEqual(
         output.files.map((file) => file.path).sort((a, b) => a.localeCompare(b)),
@@ -618,7 +619,11 @@ describe("HttpApiCodegen.generate", () => {
             Bun.file(new URL(`generated/${file.path}`, import.meta.url)).text(),
             format(file.content, { parser: "typescript", semi: false, printWidth: 120 }),
           ]),
-        ).pipe(Effect.map(([content, expected]) => expect(content).toBe(expected))),
+        ).pipe(
+          Effect.map(([content, expected]) =>
+            expect(content.replaceAll("\r\n", "\n")).toBe(expected.replaceAll("\r\n", "\n")),
+          ),
+        ),
       )
     }),
   )
@@ -758,16 +763,74 @@ describe("HttpApiCodegen.generate", () => {
     expect(output.operations[0]?.success).toBe("value")
   })
 
-  test("rejects multiple success shapes until their public semantics are explicit", () => {
-    expect(() =>
-      compile(
+  test("models one buffered and one SSE success as a mixed response", () => {
+    const contract = compileContract(
+      api(
+        HttpApiEndpoint.post("create", "/session", {
+          payload: Schema.Struct({ stream: Schema.Boolean }),
+          success: [Schema.String, HttpApiSchema.StreamSse({ data: Schema.Number })],
+        }),
+      ),
+    )
+
+    expect(contract.groups[0]?.endpoints[0]?.operation.success).toBe("mixed")
+    expect(emitEffect(contract).files.find((file) => file.path === "session.ts")?.content).toContain(
+      "Stream.isStream(value)",
+    )
+    expect(emitPromise(contract).files.find((file) => file.path === "types.ts")?.content).toContain(
+      "export type SessionCreateOutput = string | AsyncIterable<number>",
+    )
+  })
+
+  test("decodes a mixed POST as JSON or SSE without issuing a second request", async () => {
+    const output = emitPromise(
+      compileContract(
         api(
-          HttpApiEndpoint.get("get", "/session", {
-            success: [Schema.String, Schema.Number],
+          HttpApiEndpoint.post("create", "/session", {
+            payload: Schema.Struct({ stream: Schema.Boolean }),
+            success: [
+              Schema.Struct({ status: Schema.String }),
+              HttpApiSchema.StreamSse({ data: Schema.Struct({ type: Schema.String }) }),
+            ],
           }),
         ),
       ),
-    ).toThrow("Multiple success schemas: session.get")
+    )
+    const directory = await mkdtemp(join(tmpdir(), "opencode-httpapi-codegen-mixed-"))
+
+    try {
+      await Promise.all(output.files.map((file) => Bun.write(join(directory, file.path), file.content)))
+      const generated = await import(`${join(directory, "index.ts")}?t=${crypto.randomUUID()}`)
+      let requests = 0
+      const client = generated.OpenCode.make({
+        baseUrl: "https://example.com",
+        fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+          requests++
+          const body = JSON.parse(String(init?.body)) as { stream: boolean }
+          return body.stream
+            ? new Response('data: {"type":"completed"}\n\n', {
+                headers: { "content-type": "text/event-stream" },
+              })
+            : Response.json({ status: "completed" })
+        },
+      })
+
+      expect(await client.session.create({ stream: false })).toEqual({ status: "completed" })
+      const streamed = await client.session.create({ stream: true })
+      if (!(Symbol.asyncIterator in Object(streamed))) throw new Error("Expected the mixed SSE branch")
+      const events = []
+      for await (const event of streamed) events.push(event)
+      expect(events).toEqual([{ type: "completed" }])
+      expect(requests).toBe(2)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("continues to reject ambiguous multiple buffered successes", () => {
+    expect(() =>
+      compileContract(api(HttpApiEndpoint.get("get", "/session", { success: [Schema.String, Schema.Number] }))),
+    ).toThrow("Unsupported multiple success schemas: session.get")
   })
 
   test("models an SSE success as a direct stream", () => {

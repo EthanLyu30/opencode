@@ -13,6 +13,7 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
+import { Responses } from "@opencode-ai/schema/responses"
 import { DateTime, Effect, Layer, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 
@@ -223,6 +224,7 @@ const executionInput: WorkflowExecutor.ExecutionInput = {
     }),
   ],
   artifacts: [],
+  saveCheckpoint: () => Effect.void,
   lease: { owner: "worker", attempt: 1, expiresAt: DateTime.makeUnsafe(60_000) },
 }
 
@@ -527,6 +529,7 @@ describe("WorkflowExecutor role integration", () => {
   })
 
   test("maps malformed model outcomes to a schema failure", async () => {
+    const responseID = Responses.ID.make("resp_malformed_role_outcome")
     const failure = await Effect.gen(function* () {
       const executor = yield* WorkflowExecutor.Service
       return yield* executor.execute(executionInput).pipe(Effect.flip)
@@ -539,6 +542,12 @@ describe("WorkflowExecutor role integration", () => {
               Effect.succeed({
                 outcome: { role: "design", verdict: "looks-good" },
                 usage: { tokens: 3, turns: 1, toolCalls: 0, attempts: 0 },
+                responseSettlement: {
+                  type: "completed" as const,
+                  responseID,
+                  output: [{ type: "message" as const, role: "assistant" as const, content: "malformed" }],
+                  store: true,
+                },
               }),
             ),
           ),
@@ -549,6 +558,12 @@ describe("WorkflowExecutor role integration", () => {
 
     expect(failure.failure).toMatchObject({ category: "schema", code: "invalid_role_outcome" })
     expect(failure.usage).toEqual({ tokens: 3, turns: 1, toolCalls: 0, attempts: 0 })
+    expect(failure.responseSettlement).toMatchObject({
+      type: "failed",
+      responseID,
+      store: true,
+      error: { type: "schema", code: "invalid_role_outcome" },
+    })
   })
 })
 

@@ -1,12 +1,14 @@
 export * as WorkflowStore from "./store"
 
 import { and, asc, eq, gte, inArray, isNull, lt, lte, or } from "drizzle-orm"
-import { Cause, Context, DateTime, Effect, Layer, Option } from "effect"
+import { Cause, Context, DateTime, Effect, Layer, Option, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
 import { makeGlobalNode } from "../effect/app-node"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { Responses } from "@opencode-ai/schema/responses"
+import { ResponseTable } from "../responses/sql"
 import { WorkflowBudget } from "./budget"
 import { WorkflowProjector } from "./projector"
 import { WorkflowState } from "./state"
@@ -254,10 +256,10 @@ const layer = Layer.effect(
               ),
               inArray(WorkflowRunTable.status, ["queued", "running"]),
               isNull(WorkflowRunTable.cancel_requested_at),
+              lt(WorkflowStageTable.attempt, WorkflowStageTable.max_attempts),
             ),
           )
           .orderBy(asc(WorkflowStageTable.ordinal))
-          .limit(input.limit)
           .all()
           .pipe(Effect.orDie)
 
@@ -274,6 +276,42 @@ const layer = Layer.effect(
             .pipe(Effect.orDie)
 
           const stage = stageRow(row.stage)
+          const linkedResponseID = Schema.is(Responses.ID)(stage.input.responseID) ? stage.input.responseID : undefined
+          if (linkedResponseID !== undefined) {
+            const response = yield* db
+              .select({ workflowID: ResponseTable.workflow_id, status: ResponseTable.status })
+              .from(ResponseTable)
+              .where(eq(ResponseTable.id, linkedResponseID))
+              .get()
+              .pipe(Effect.orDie)
+            if (
+              !response ||
+              response.workflowID !== stage.workflowID ||
+              (response.status !== "queued" && response.status !== "in_progress")
+            ) {
+              continue
+            }
+          }
+          if (
+            linkedResponseID === undefined &&
+            stage.type === "deliver" &&
+            stage.input.responseBinding === "workflow"
+          ) {
+            const responses = yield* db
+              .select({ id: ResponseTable.id })
+              .from(ResponseTable)
+              .where(
+                and(
+                  eq(ResponseTable.workflow_id, stage.workflowID),
+                  isNull(ResponseTable.deleted_at),
+                  inArray(ResponseTable.status, ["queued", "in_progress"]),
+                ),
+              )
+              .limit(2)
+              .all()
+              .pipe(Effect.orDie)
+            if (responses.length !== 1) continue
+          }
           if (
             WorkflowState.previousStagesComplete(
               allStages.map((s) => ({ ordinal: s.ordinal, status: s.status })),
@@ -281,6 +319,7 @@ const layer = Layer.effect(
             )
           ) {
             candidates.push(stage)
+            if (candidates.length >= input.limit) return candidates
           }
         }
         return candidates

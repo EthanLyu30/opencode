@@ -1,14 +1,19 @@
 export * as ResponsesV2 from "./responses"
 
-import { Cause, Context, DateTime, Effect, Layer, Schema } from "effect"
+import { Cause, Context, DateTime, Deferred, Effect, Layer, Schema } from "effect"
+import * as Semaphore from "effect/Semaphore"
 import { isDeepStrictEqual } from "node:util"
 import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { Responses } from "@opencode-ai/schema/responses"
+import { Workflow } from "@opencode-ai/schema/workflow"
+import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { EventV2 } from "./event"
 import { makeGlobalNode } from "./effect/app-node"
 import { ResponsesProjector } from "./responses/projector"
 import { ResponsesStore } from "./responses/store"
 import { WorkflowSecretGuard } from "./workflow/secret-guard"
+
+export const ID = Responses.ID
 
 export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Responses.NotFoundError", {
   responseID: Responses.ID,
@@ -26,11 +31,27 @@ export class ConflictError extends Schema.TaggedErrorClass<ConflictError>()("Res
 
 type ServiceError = ConflictError | WorkflowSecretGuard.UnsafePersistenceError
 
+export interface TransientLease {
+  readonly await: Effect.Effect<{ readonly resource: Responses.Resource; readonly sequenceNumber: number }>
+  readonly release: Effect.Effect<void>
+}
+
+type TransientSettlement = {
+  readonly status: Extract<Responses.Status, "completed" | "incomplete" | "failed" | "cancelled">
+  readonly timestamp: DateTime.Utc
+  readonly sequenceNumber?: number
+  readonly output?: ReadonlyArray<Responses.ItemPayload>
+  readonly error?: Responses.Error
+  readonly usage?: Responses.Usage
+  readonly requestHash?: string
+}
+
 export interface Interface {
   readonly create: (input: Responses.CreateInput) => Effect.Effect<Responses.Resource, ServiceError>
   readonly list: () => Effect.Effect<Responses.Resource[]>
   readonly get: (responseID: Responses.ID) => Effect.Effect<Responses.Resource, NotFoundError>
   readonly findByRequestHash: (requestHash: string) => Effect.Effect<Responses.Resource | undefined>
+  readonly activeByWorkflowID: (workflowID: Workflow.ID) => Effect.Effect<Responses.Resource[]>
   readonly inputItems: (responseID: Responses.ID) => Effect.Effect<Responses.ResponseItem[], NotFoundError>
   readonly contextItems: (responseID: Responses.ID) => Effect.Effect<Responses.ItemPayload[], NotFoundError>
   readonly start: (responseID: Responses.ID) => Effect.Effect<Responses.Resource, NotFoundError | ConflictError>
@@ -55,6 +76,11 @@ export interface Interface {
     readonly error?: Responses.Error
     readonly usage?: Responses.Usage
   }) => Effect.Effect<Responses.Resource, NotFoundError | ServiceError>
+  readonly cancelWorkflow: (input: {
+    readonly responseID: Responses.ID
+    readonly error?: Responses.Error
+    readonly usage?: Responses.Usage
+  }) => Effect.Effect<Responses.Resource, NotFoundError | ServiceError>
   readonly delete: (responseID: Responses.ID) => Effect.Effect<void, NotFoundError | ConflictError>
   readonly createConversation: (
     input: Responses.ConversationCreateInput,
@@ -71,6 +97,20 @@ export interface Interface {
   readonly deleteConversation: (
     conversationID: Responses.ConversationID,
   ) => Effect.Effect<void, ConversationNotFoundError | ConflictError>
+  readonly acquireTransient: (input: {
+    readonly requestHash: string
+    readonly responseID: Responses.ID
+  }) => Effect.Effect<TransientLease>
+  readonly registerTransient: (resource: Responses.Resource) => Effect.Effect<void>
+  readonly settleTransient: (input: TransientSettlement & { readonly responseID: Responses.ID }) => Effect.Effect<void>
+  readonly transientInput: (responseID: Responses.ID) => Effect.Effect<ReadonlyArray<Responses.ItemPayload> | undefined>
+  readonly saveTransientContinuation: (
+    responseID: Responses.ID,
+    continuation: Readonly<Record<string, unknown>>,
+  ) => Effect.Effect<void>
+  readonly transientContinuation: (
+    responseID: Responses.ID,
+  ) => Effect.Effect<Readonly<Record<string, unknown>> | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Responses") {}
@@ -128,6 +168,175 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const events = yield* EventV2.Service
     const store = yield* ResponsesStore.Service
+    const transient = new Map<
+      string,
+      {
+        readonly requestHash: string
+        readonly responseIDs: Set<Responses.ID>
+        resource?: Responses.Resource
+        settlement?: TransientSettlement & { readonly sequenceNumber: number }
+        readonly deferred: Deferred.Deferred<{
+          readonly resource: Responses.Resource
+          readonly sequenceNumber: number
+        }>
+        refs: number
+      }
+    >()
+    type TransientEntry = typeof transient extends Map<string, infer A> ? A : never
+    type TransientPrivate = {
+      readonly requestHash: string
+      input: ReadonlyArray<Responses.ItemPayload>
+      responseID?: Responses.ID
+      continuation?: Readonly<Record<string, unknown>>
+    }
+    const transientPrivate = new Map<string, TransientPrivate>()
+    const transientByResponseID = new Map<Responses.ID, Set<TransientEntry>>()
+    const transientLock = yield* Semaphore.make(1)
+
+    const bindTransientID = (responseID: Responses.ID, entry: TransientEntry) => {
+      const owners = transientByResponseID.get(responseID) ?? new Set<TransientEntry>()
+      owners.add(entry)
+      transientByResponseID.set(responseID, owners)
+    }
+
+    const unbindTransient = (entry: TransientEntry) => {
+      for (const responseID of entry.responseIDs) {
+        const owners = transientByResponseID.get(responseID)
+        if (!owners) continue
+        owners.delete(entry)
+        if (owners.size === 0) transientByResponseID.delete(responseID)
+      }
+    }
+
+    const acquireTransient = Effect.fn("Responses.acquireTransient")(function* (input: {
+      readonly requestHash: string
+      readonly responseID: Responses.ID
+    }) {
+      const pending = yield* transientLock.withPermits(1)(
+        Effect.gen(function* () {
+          const existing = transient.get(input.requestHash)
+          if (existing) {
+            existing.refs++
+            existing.responseIDs.add(input.responseID)
+            bindTransientID(input.responseID, existing)
+            return existing
+          }
+          const created: TransientEntry = {
+            requestHash: input.requestHash,
+            responseIDs: new Set([input.responseID]),
+            deferred: yield* Deferred.make<{
+              readonly resource: Responses.Resource
+              readonly sequenceNumber: number
+            }>(),
+            refs: 1,
+          }
+          transient.set(input.requestHash, created)
+          bindTransientID(input.responseID, created)
+          return created
+        }),
+      )
+      let released = false
+      return {
+        await: Deferred.await(pending.deferred),
+        release: transientLock.withPermits(1)(
+          Effect.sync(() => {
+            if (released) return
+            released = true
+            if (transient.get(input.requestHash) !== pending) return
+            pending.refs--
+            if (pending.refs !== 0) return
+            transient.delete(input.requestHash)
+            unbindTransient(pending)
+            if (!pending.resource) transientPrivate.delete(input.requestHash)
+          }),
+        ),
+      } satisfies TransientLease
+    })
+
+    const registerTransient = Effect.fn("Responses.registerTransient")(function* (resource: Responses.Resource) {
+      if (resource.store) return
+      yield* transientLock.withPermits(1)(
+        Effect.gen(function* () {
+          const pending = transient.get(resource.requestHash)
+          if (!pending) return
+          pending.responseIDs.add(resource.id)
+          bindTransientID(resource.id, pending)
+          pending.resource = resource
+          const privateState = transientPrivate.get(resource.requestHash)
+          if (privateState) privateState.responseID = resource.id
+          if (!pending.settlement) return
+          transient.delete(resource.requestHash)
+          unbindTransient(pending)
+          transientPrivate.delete(resource.requestHash)
+          yield* Deferred.succeed(pending.deferred, {
+            resource: terminal(resource, pending.settlement.status, pending.settlement.timestamp, pending.settlement),
+            sequenceNumber: pending.settlement.sequenceNumber,
+          })
+        }),
+      )
+    })
+
+    const settleTransient = Effect.fn("Responses.settleTransient")(function* (
+      input: TransientSettlement & { readonly responseID: Responses.ID },
+    ) {
+      yield* Effect.uninterruptible(
+        transientLock.withPermits(1)(
+          Effect.gen(function* () {
+            const owners = transientByResponseID.get(input.responseID)
+            const requestOwner = input.requestHash ? transient.get(input.requestHash) : undefined
+            const pending =
+              requestOwner?.responseIDs.has(input.responseID) === true
+                ? requestOwner
+                : owners
+                  ? (Array.from(owners).find((entry) => entry.resource?.id === input.responseID) ??
+                    (owners.size === 1 ? owners.values().next().value : undefined))
+                  : undefined
+            if (!pending) {
+              if (input.requestHash) transientPrivate.delete(input.requestHash)
+              return
+            }
+            const sequenceNumber = input.sequenceNumber ?? (yield* events.latestSequence(input.responseID))
+            if (!pending.resource) {
+              pending.settlement = { ...input, sequenceNumber }
+              return
+            }
+            transient.delete(pending.requestHash)
+            unbindTransient(pending)
+            transientPrivate.delete(pending.requestHash)
+            yield* Deferred.succeed(pending.deferred, {
+              resource: terminal(pending.resource, input.status, input.timestamp, input),
+              sequenceNumber,
+            })
+          }),
+        ),
+      )
+    })
+
+    const privateForResponse = (responseID: Responses.ID) =>
+      Array.from(transientPrivate.values()).find((state) => state.responseID === responseID)
+
+    const transientInput = Effect.fn("Responses.transientInput")((responseID: Responses.ID) =>
+      transientLock.withPermits(1)(
+        Effect.sync(() => {
+          const state = privateForResponse(responseID)
+          return state ? [...state.input] : undefined
+        }),
+      ),
+    )
+
+    const saveTransientContinuation = Effect.fn("Responses.saveTransientContinuation")(
+      (responseID: Responses.ID, continuation: Readonly<Record<string, unknown>>) =>
+        transientLock.withPermits(1)(
+          Effect.sync(() => {
+            const state = privateForResponse(responseID)
+            if (state) state.continuation = continuation
+          }),
+        ),
+    )
+
+    const transientContinuation = Effect.fn("Responses.transientContinuation")((responseID: Responses.ID) =>
+      transientLock.withPermits(1)(Effect.sync(() => privateForResponse(responseID)?.continuation)),
+    )
 
     function requireResponse(responseID: Responses.ID) {
       return Effect.gen(function* () {
@@ -157,6 +366,10 @@ const layer = Layer.effect(
         ) {
           return false
         }
+        if (!existing.store) {
+          const state = transientPrivate.get(existing.requestHash)
+          return state !== undefined && isDeepStrictEqual(state.input, input.input)
+        }
         const items = yield* store.items(existing.id, "input")
         return isDeepStrictEqual(
           items.map((item) => item.payload),
@@ -181,6 +394,7 @@ const layer = Layer.effect(
         readonly error?: Responses.Error
         readonly usage?: Responses.Usage
       },
+      cancelWorkflow = false,
     ) {
       return Effect.gen(function* () {
         yield* guardSafe(input)
@@ -188,7 +402,7 @@ const layer = Layer.effect(
         const timestamp = yield* DateTime.now
         const value = terminal(resource, status, timestamp, input)
         const persistPayload = resource.store
-        const related =
+        const conversationRelated =
           resource.store && resource.conversationID
             ? (input.output ?? []).map((payload) => ({
                 definition: ResponseEvent.Conversation.ItemAdded,
@@ -200,72 +414,91 @@ const layer = Layer.effect(
                 },
               }))
             : []
+        const related = [
+          ...conversationRelated,
+          ...(cancelWorkflow
+            ? [
+                {
+                  definition: WorkflowEvent.CancelRequested,
+                  data: { workflowID: resource.workflowID, timestamp },
+                },
+              ]
+            : []),
+        ]
         const publishOptions = related.length > 0 ? { related } : undefined
-        if (status === "completed") {
-          yield* mapConflict(
-            events.publish(
-              ResponseEvent.Completed,
-              {
-                responseID: input.responseID,
-                timestamp,
-                output: persistPayload ? [...(input.output ?? [])] : undefined,
-                usage: persistPayload ? input.usage : undefined,
-              },
-              publishOptions,
-            ),
-            input.responseID,
-            status,
-          )
-        }
-        if (status === "incomplete") {
-          yield* mapConflict(
-            events.publish(
-              ResponseEvent.Incomplete,
-              {
-                responseID: input.responseID,
-                timestamp,
-                output: persistPayload && input.output ? [...input.output] : undefined,
-                error: persistPayload ? input.error : undefined,
-                usage: persistPayload ? input.usage : undefined,
-              },
-              publishOptions,
-            ),
-            input.responseID,
-            status,
-          )
-        }
-        if (status === "failed") {
-          yield* mapConflict(
-            events.publish(
-              ResponseEvent.Failed,
-              {
-                responseID: input.responseID,
-                timestamp,
-                error: persistPayload ? input.error : undefined,
-                usage: persistPayload ? input.usage : undefined,
-              },
-              publishOptions,
-            ),
-            input.responseID,
-            status,
-          )
-        }
-        if (status === "cancelled") {
-          yield* mapConflict(
-            events.publish(
-              ResponseEvent.Cancelled,
-              {
-                responseID: input.responseID,
-                timestamp,
-                error: persistPayload ? input.error : undefined,
-                usage: persistPayload ? input.usage : undefined,
-              },
-              publishOptions,
-            ),
-            input.responseID,
-            status,
-          )
-        }
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            let terminalEvent: EventV2.Payload | undefined
+            if (status === "completed") {
+              terminalEvent = yield* mapConflict(
+                events.publish(
+                  ResponseEvent.Completed,
+                  {
+                    responseID: input.responseID,
+                    timestamp,
+                    output: persistPayload ? [...(input.output ?? [])] : undefined,
+                    usage: persistPayload ? input.usage : undefined,
+                  },
+                  publishOptions,
+                ),
+                input.responseID,
+                status,
+              )
+            }
+            if (status === "incomplete") {
+              terminalEvent = yield* mapConflict(
+                events.publish(
+                  ResponseEvent.Incomplete,
+                  {
+                    responseID: input.responseID,
+                    timestamp,
+                    output: persistPayload && input.output ? [...input.output] : undefined,
+                    error: persistPayload ? input.error : undefined,
+                    usage: persistPayload ? input.usage : undefined,
+                  },
+                  publishOptions,
+                ),
+                input.responseID,
+                status,
+              )
+            }
+            if (status === "failed") {
+              terminalEvent = yield* mapConflict(
+                events.publish(
+                  ResponseEvent.Failed,
+                  {
+                    responseID: input.responseID,
+                    timestamp,
+                    error: persistPayload ? input.error : undefined,
+                    usage: persistPayload ? input.usage : undefined,
+                  },
+                  publishOptions,
+                ),
+                input.responseID,
+                status,
+              )
+            }
+            if (status === "cancelled") {
+              terminalEvent = yield* mapConflict(
+                events.publish(
+                  ResponseEvent.Cancelled,
+                  {
+                    responseID: input.responseID,
+                    timestamp,
+                    error: persistPayload ? input.error : undefined,
+                    usage: persistPayload ? input.usage : undefined,
+                  },
+                  publishOptions,
+                ),
+                input.responseID,
+                status,
+              )
+            }
+            const sequenceNumber = terminalEvent?.durable?.seq
+            if (sequenceNumber === undefined) yield* Effect.die("Terminal Response event was not durable")
+            yield* settleTransient({ ...input, status, timestamp, sequenceNumber, requestHash: resource.requestHash })
+          }),
+        )
         return (yield* store.get(input.responseID)) ?? value
       })
     }
@@ -303,6 +536,23 @@ const layer = Layer.effect(
           if (!conversation) return yield* new ConflictError({ resourceID: responseID, operation: "create" })
           context = (yield* store.conversationItems(input.conversationID)).map((item) => item.payload)
         }
+        if (!input.store) {
+          const accepted = yield* transientLock.withPermits(1)(
+            Effect.sync(() => {
+              const existing = transientPrivate.get(input.requestHash)
+              if (existing && !isDeepStrictEqual(existing.input, input.input)) return false
+              if (!existing) {
+                transientPrivate.set(input.requestHash, {
+                  requestHash: input.requestHash,
+                  input: [...input.input],
+                  responseID,
+                })
+              }
+              return true
+            }),
+          )
+          if (!accepted) return yield* new ConflictError({ resourceID: responseID, operation: "create" })
+        }
         const timestamp = yield* DateTime.now
         const admitted: Responses.Resource = {
           id: responseID,
@@ -330,8 +580,8 @@ const layer = Layer.effect(
               previousResponseID: input.previousResponseID,
               conversationID: input.conversationID,
               requestHash: input.requestHash,
-              context,
-              input: input.input,
+              context: input.store ? context : [],
+              input: input.store ? input.input : [{ type: "redacted" }],
             },
             {
               related: input.conversationID
@@ -362,7 +612,11 @@ const layer = Layer.effect(
             ),
           ),
         )
-        if (reconciled) return reconciled
+        if (reconciled) {
+          const state = transientPrivate.get(input.requestHash)
+          if (state) state.responseID = reconciled.id
+          return reconciled
+        }
         return admitted
       }),
 
@@ -374,6 +628,10 @@ const layer = Layer.effect(
 
       findByRequestHash: Effect.fn("Responses.findByRequestHash")(function* (requestHash) {
         return yield* store.request(requestHash)
+      }),
+
+      activeByWorkflowID: Effect.fn("Responses.activeByWorkflowID")(function* (workflowID) {
+        return yield* store.activeByWorkflowID(workflowID)
       }),
 
       inputItems: Effect.fn("Responses.inputItems")(function* (responseID) {
@@ -406,6 +664,10 @@ const layer = Layer.effect(
 
       cancel: Effect.fn("Responses.cancel")(function* (input) {
         return yield* settle("cancelled", input)
+      }),
+
+      cancelWorkflow: Effect.fn("Responses.cancelWorkflow")(function* (input) {
+        return yield* settle("cancelled", input, true)
       }),
 
       delete: Effect.fn("Responses.delete")(function* (responseID) {
@@ -475,6 +737,12 @@ const layer = Layer.effect(
           "deleteConversation",
         )
       }),
+      acquireTransient,
+      registerTransient,
+      settleTransient,
+      transientInput,
+      saveTransientContinuation,
+      transientContinuation,
     })
   }),
 )

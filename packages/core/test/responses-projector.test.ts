@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import path from "node:path"
 import { DateTime, Effect, Exit } from "effect"
 import { eq } from "drizzle-orm"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -9,11 +10,13 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ResponsesProjector } from "@opencode-ai/core/responses/projector"
 import { ConversationItemTable, ResponseItemTable, ResponseTable } from "@opencode-ai/core/responses/sql"
 import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
+import { WorkflowRunTable, WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
 import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { Responses } from "@opencode-ai/schema/responses"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { testEffect } from "./lib/effect"
+import { tmpdir } from "./fixture/tmpdir"
 
 const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, WorkflowProjector.node, ResponsesProjector.node])),
@@ -32,12 +35,12 @@ function createWorkflow(events: EventV2.Interface) {
     stages: [
       {
         id: stageID,
-        type: "respond",
+        type: "deliver",
         ordinal: 0,
         maxAttempts: 1,
         recoveryPolicy: "restart_safe",
         idempotencyKey: "responses/projector",
-        input: {},
+        input: { responseBinding: "workflow" },
       },
     ],
   })
@@ -302,6 +305,467 @@ describe("ResponsesProjector", () => {
     }),
   )
 
+  it.effect("settles a conversation response atomically from a workflow-related event batch", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const database = yield* Database.Service
+      const conversationID = Responses.ConversationID.make("conv_workflow_atomic")
+      const responseID = Responses.ID.make("resp_workflow_atomic")
+      const output = { type: "message" as const, role: "assistant" as const, content: "done" }
+      yield* createWorkflow(events)
+      yield* events.publish(ResponseEvent.Conversation.Created, {
+        conversationID,
+        timestamp: DateTime.makeUnsafe(2_000),
+        metadata: {},
+      })
+      const input = created(responseID, { conversationID })
+      yield* events.publish(ResponseEvent.Created, input, {
+        related: input.input.map((payload) => ({
+          definition: ResponseEvent.Conversation.ItemAdded,
+          data: { conversationID, timestamp: input.timestamp, responseID, payload },
+        })),
+      })
+
+      yield* events.publish(
+        WorkflowEvent.CancelRequested,
+        { workflowID, timestamp: DateTime.makeUnsafe(3_000) },
+        {
+          related: [
+            {
+              definition: ResponseEvent.Completed,
+              data: { responseID, timestamp: DateTime.makeUnsafe(3_000), output: [output] },
+            },
+            {
+              definition: ResponseEvent.Conversation.ItemAdded,
+              data: { conversationID, timestamp: DateTime.makeUnsafe(3_000), responseID, payload: output },
+            },
+          ],
+        },
+      )
+
+      expect(
+        yield* database.db
+          .select({ status: ResponseTable.status, output: ResponseTable.output })
+          .from(ResponseTable)
+          .where(eq(ResponseTable.id, responseID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "completed", output: [output] })
+      expect(
+        yield* database.db
+          .select({ payload: ConversationItemTable.payload })
+          .from(ConversationItemTable)
+          .where(eq(ConversationItemTable.conversation_id, conversationID))
+          .all()
+          .pipe(Effect.orDie),
+      ).toEqual([{ payload: { type: "message", role: "user", content: "hello" } }, { payload: output }])
+    }),
+  )
+
+  it.effect("rolls back workflow and response settlement when a later related projector fails", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const database = yield* Database.Service
+      const conversationID = Responses.ConversationID.make("conv_workflow_atomic_rollback")
+      const responseID = Responses.ID.make("resp_workflow_atomic_rollback")
+      const missingResponseID = Responses.ID.make("resp_workflow_atomic_missing")
+      const output = { type: "message" as const, role: "assistant" as const, content: "must roll back" }
+      yield* createWorkflow(events)
+      yield* events.publish(ResponseEvent.Conversation.Created, {
+        conversationID,
+        timestamp: DateTime.makeUnsafe(2_000),
+        metadata: {},
+      })
+      const input = created(responseID, { conversationID })
+      yield* events.publish(ResponseEvent.Created, input, {
+        related: input.input.map((payload) => ({
+          definition: ResponseEvent.Conversation.ItemAdded,
+          data: { conversationID, timestamp: input.timestamp, responseID, payload },
+        })),
+      })
+
+      const failed = yield* events
+        .publish(
+          WorkflowEvent.CancelRequested,
+          { workflowID, timestamp: DateTime.makeUnsafe(3_000) },
+          {
+            related: [
+              {
+                definition: ResponseEvent.Completed,
+                data: { responseID, timestamp: DateTime.makeUnsafe(3_000), output: [output] },
+              },
+              {
+                definition: ResponseEvent.Conversation.ItemAdded,
+                data: { conversationID, timestamp: DateTime.makeUnsafe(3_000), responseID, payload: output },
+              },
+              {
+                definition: ResponseEvent.Completed,
+                data: { responseID: missingResponseID, timestamp: DateTime.makeUnsafe(3_000), output: [] },
+              },
+            ],
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(failed)).toBe(true)
+      expect(
+        yield* database.db
+          .select({ status: ResponseTable.status, output: ResponseTable.output })
+          .from(ResponseTable)
+          .where(eq(ResponseTable.id, responseID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "queued", output: [] })
+      expect(
+        yield* database.db
+          .select({ cancelRequestedAt: WorkflowRunTable.cancel_requested_at })
+          .from(WorkflowRunTable)
+          .where(eq(WorkflowRunTable.id, workflowID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ cancelRequestedAt: null })
+      expect(yield* EventV2.latestSequence(database.db, workflowID)).toBe(0)
+      expect(yield* EventV2.latestSequence(database.db, responseID)).toBe(0)
+      expect(yield* EventV2.latestSequence(database.db, missingResponseID)).toBe(-1)
+    }),
+  )
+
+  it.effect("rejects an atomic response settlement owned by a different workflow", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const database = yield* Database.Service
+      const otherWorkflowID = Workflow.ID.make("wfl_response_other_owner")
+      const otherStageID = Workflow.StageID.make("wfs_response_other_owner")
+      const responseID = Responses.ID.make("resp_cross_workflow_settlement")
+      yield* createWorkflow(events)
+      yield* events.publish(WorkflowEvent.Created, {
+        workflowID: otherWorkflowID,
+        timestamp: DateTime.makeUnsafe(1_000),
+        type: "responses",
+        input: {},
+        budget: {},
+        stages: [
+          {
+            id: otherStageID,
+            type: "deliver",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "responses/other-owner",
+            input: { responseID },
+          },
+        ],
+      })
+      yield* events.publish(ResponseEvent.Created, created(responseID, { workflowID: otherWorkflowID }))
+
+      const failed = yield* events
+        .publish(
+          WorkflowEvent.CancelRequested,
+          { workflowID, timestamp: DateTime.makeUnsafe(3_000) },
+          {
+            related: [
+              {
+                definition: ResponseEvent.Completed,
+                data: {
+                  responseID,
+                  timestamp: DateTime.makeUnsafe(3_000),
+                  output: [{ type: "message", role: "assistant", content: "wrong owner" }],
+                },
+              },
+            ],
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(failed)).toBe(true)
+      expect(
+        yield* database.db
+          .select({ status: ResponseTable.status })
+          .from(ResponseTable)
+          .where(eq(ResponseTable.id, responseID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "queued" })
+      expect(
+        yield* database.db
+          .select({ cancelRequestedAt: WorkflowRunTable.cancel_requested_at })
+          .from(WorkflowRunTable)
+          .where(eq(WorkflowRunTable.id, workflowID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ cancelRequestedAt: null })
+    }),
+  )
+
+  it.effect("rejects a Response that does not match an explicitly linked deliver stage", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const linkedResponseID = Responses.ID.make("resp_explicit_deliver")
+      const otherResponseID = Responses.ID.make("resp_explicit_deliver_other")
+      yield* events.publish(WorkflowEvent.Created, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(1_000),
+        type: "responses",
+        input: {},
+        budget: {},
+        stages: [
+          {
+            id: stageID,
+            type: "deliver",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "responses/explicit-deliver",
+            input: { responseID: linkedResponseID },
+          },
+        ],
+      })
+
+      expect(
+        Exit.isFailure(yield* events.publish(ResponseEvent.Created, created(otherResponseID)).pipe(Effect.exit)),
+      ).toBe(true)
+    }),
+  )
+
+  it.effect("rejects Core event admission when the workflow has no deliver stage", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const responseID = Responses.ID.make("resp_without_deliver_stage")
+      yield* events.publish(WorkflowEvent.Created, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(1_000),
+        type: "responses",
+        input: {},
+        budget: {},
+        stages: [
+          {
+            id: stageID,
+            type: "implement",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "responses/no-deliver",
+            input: {},
+          },
+        ],
+      })
+
+      const admitted = yield* events.publish(ResponseEvent.Created, created(responseID)).pipe(Effect.exit)
+
+      expect(Exit.isFailure(admitted)).toBe(true)
+    }),
+  )
+
+  it.effect("rejects a second active Response for a workflow-bound deliver stage", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const first = Responses.ID.make("resp_implicit_deliver_first")
+      const second = Responses.ID.make("resp_implicit_deliver_second")
+      yield* events.publish(WorkflowEvent.Created, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(1_000),
+        type: "responses",
+        input: {},
+        budget: {},
+        stages: [
+          {
+            id: stageID,
+            type: "deliver",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "responses/workflow-bound-deliver",
+            input: { responseBinding: "workflow" },
+          },
+        ],
+      })
+      yield* events.publish(ResponseEvent.Created, created(first))
+
+      expect(Exit.isFailure(yield* events.publish(ResponseEvent.Created, created(second)).pipe(Effect.exit))).toBe(true)
+    }),
+  )
+
+  it.effect("admits distinct Responses for distinct explicit deliver bindings", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const first = Responses.ID.make("resp_explicit_multi_first")
+      const second = Responses.ID.make("resp_explicit_multi_second")
+      yield* events.publish(WorkflowEvent.Created, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(1_000),
+        type: "responses",
+        input: {},
+        budget: {},
+        stages: [
+          {
+            id: stageID,
+            type: "deliver",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "responses/explicit-multi-first",
+            input: { responseID: first },
+          },
+          {
+            id: Workflow.StageID.make("wfs_responses_projector_second"),
+            type: "deliver",
+            ordinal: 1,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "responses/explicit-multi-second",
+            input: { responseID: second },
+          },
+        ],
+      })
+
+      yield* events.publish(ResponseEvent.Created, created(first))
+      yield* events.publish(ResponseEvent.Created, created(second))
+    }),
+  )
+
+  it.effect("rejects a workflow terminal event that would orphan an active Response", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const database = yield* Database.Service
+      const responseID = Responses.ID.make("resp_terminal_sibling_guard")
+      const failure: Workflow.Failure = {
+        category: "authentication",
+        code: "invalid_key",
+        message: "provider rejected credentials",
+      }
+      yield* events.publish(WorkflowEvent.Created, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(1_000),
+        type: "responses",
+        input: {},
+        budget: {},
+        stages: [
+          {
+            id: stageID,
+            type: "deliver",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "responses/terminal-sibling-guard",
+            input: { responseID },
+          },
+        ],
+      })
+      yield* events.publish(ResponseEvent.Created, created(responseID))
+      yield* events.publish(WorkflowEvent.Started, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(2_100),
+      })
+      yield* events.publish(WorkflowEvent.Stage.Leased, {
+        workflowID,
+        stageID,
+        timestamp: DateTime.makeUnsafe(2_200),
+        attempt: 1,
+        leaseOwner: "worker-a",
+        leaseExpiresAt: DateTime.makeUnsafe(10_000),
+      })
+      yield* events.publish(WorkflowEvent.Stage.Started, {
+        workflowID,
+        stageID,
+        timestamp: DateTime.makeUnsafe(2_300),
+        attempt: 1,
+        leaseOwner: "worker-a",
+      })
+      yield* events.publish(WorkflowEvent.Stage.Failed, {
+        workflowID,
+        stageID,
+        timestamp: DateTime.makeUnsafe(2_400),
+        attempt: 1,
+        leaseOwner: "worker-a",
+        failure,
+        usage: { tokens: 1, turns: 1, toolCalls: 0, attempts: 0 },
+        source: "execution",
+      })
+
+      const terminal = {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(2_500),
+        failure,
+        usage: { tokens: 1, turns: 1, toolCalls: 0, attempts: 1 },
+      }
+      expect(Exit.isFailure(yield* events.publish(WorkflowEvent.Failed, terminal).pipe(Effect.exit))).toBe(true)
+      expect(
+        yield* database.db
+          .select({ status: ResponseTable.status })
+          .from(ResponseTable)
+          .where(eq(ResponseTable.id, responseID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "queued" })
+
+      yield* events.publish(WorkflowEvent.Failed, terminal, {
+        related: [
+          {
+            definition: ResponseEvent.Failed,
+            data: {
+              responseID,
+              timestamp: terminal.timestamp,
+              error: { type: failure.category, code: failure.code, message: failure.message },
+            },
+          },
+        ],
+      })
+      expect(
+        yield* database.db
+          .select({ status: ResponseTable.status })
+          .from(ResponseTable)
+          .where(eq(ResponseTable.id, responseID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "failed" })
+    }),
+  )
+
+  it.effect("rejects a Response admitted after workflow cancellation was requested", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const responseID = Responses.ID.make("resp_cancel_requested_workflow")
+      yield* createWorkflow(events)
+      yield* events.publish(WorkflowEvent.CancelRequested, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(1_500),
+      })
+
+      expect(Exit.isFailure(yield* events.publish(ResponseEvent.Created, created(responseID)).pipe(Effect.exit))).toBe(
+        true,
+      )
+    }),
+  )
+
+  it.effect("rejects a Response for an ordinary deliver stage without an explicit binding", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const responseID = Responses.ID.make("resp_unbound_ordinary_deliver")
+      yield* events.publish(WorkflowEvent.Created, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(1_000),
+        type: "development",
+        input: {},
+        budget: {},
+        stages: [
+          {
+            id: stageID,
+            type: "deliver",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "development/ordinary-deliver",
+            input: {},
+          },
+        ],
+      })
+
+      expect(Exit.isFailure(yield* events.publish(ResponseEvent.Created, created(responseID)).pipe(Effect.exit))).toBe(
+        true,
+      )
+    }),
+  )
+
   it.effect("rejects a live previous-response event with a fabricated context snapshot", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
@@ -330,7 +794,10 @@ describe("ResponsesProjector", () => {
       const database = yield* Database.Service
       const responseID = Responses.ID.make("resp_transient_redaction")
       yield* createWorkflow(events)
-      yield* events.publish(ResponseEvent.Created, created(responseID, { store: false }))
+      yield* events.publish(
+        ResponseEvent.Created,
+        created(responseID, { store: false, context: [], input: [{ type: "redacted" }] }),
+      )
 
       const failed = yield* events
         .publish(ResponseEvent.Completed, {
@@ -361,6 +828,112 @@ describe("ResponsesProjector", () => {
     }),
   )
 
+  it.effect("keeps pre-terminal store:false durable events append-only and payload-free", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const database = yield* Database.Service
+      const responseID = Responses.ID.make("resp_transient_continuation")
+      const sentinel = "TASK20_TRANSIENT_TOOL_RESULT_SENTINEL"
+      yield* createWorkflow(events)
+      yield* events.publish(WorkflowEvent.Stage.Leased, {
+        workflowID,
+        stageID,
+        timestamp: DateTime.makeUnsafe(2_100),
+        attempt: 1,
+        leaseOwner: "worker-a",
+        leaseExpiresAt: DateTime.makeUnsafe(32_100),
+      })
+      yield* events.publish(WorkflowEvent.Stage.Started, {
+        workflowID,
+        stageID,
+        timestamp: DateTime.makeUnsafe(2_200),
+        attempt: 1,
+        leaseOwner: "worker-a",
+      })
+      yield* events.publish(
+        ResponseEvent.Created,
+        created(responseID, { store: false, context: [], input: [{ type: "redacted" }] }),
+      )
+      yield* events.publish(WorkflowEvent.Stage.Checkpointed, {
+        workflowID,
+        stageID,
+        timestamp: DateTime.makeUnsafe(2_300),
+        attempt: 1,
+        leaseOwner: "worker-a",
+        checkpoint: {
+          kind: "workflow.model.continuation.transient",
+          version: 1,
+          responseID,
+          usage: { tokens: 10, turns: 1, toolCalls: 1, attempts: 0 },
+          providerUsage: { inputTokens: 6, outputTokens: 4, totalTokens: 10 },
+        },
+      })
+      const before = yield* database.db.select().from(EventTable).all().pipe(Effect.orDie)
+      expect(JSON.stringify(before)).not.toContain(sentinel)
+
+      yield* events.publish(ResponseEvent.Completed, {
+        responseID,
+        timestamp: DateTime.makeUnsafe(3_000),
+      })
+
+      const after = yield* database.db.select().from(EventTable).all().pipe(Effect.orDie)
+      expect(after.slice(0, before.length)).toEqual(before)
+      expect(JSON.stringify(after)).not.toContain(sentinel)
+      expect(JSON.stringify(after)).toContain("workflow.model.continuation.transient")
+
+      const directory = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (temporary) => Effect.promise(() => temporary[Symbol.asyncDispose]()),
+      )
+      const replayLayer = AppNodeBuilder.build(
+        LayerNode.group([Database.node, EventV2.node, WorkflowProjector.node, ResponsesProjector.node]),
+        [[Database.node, Database.layerFromPath(path.join(directory.path, "pre-terminal-replay.sqlite"))]],
+      )
+      const replayed = yield* Effect.gen(function* () {
+        const replayEvents = yield* EventV2.Service
+        const replayDatabase = yield* Database.Service
+        yield* replayEvents.replayBatches(
+          before.map((event) => ({
+            id: event.id,
+            aggregateID: event.aggregate_id,
+            seq: event.seq,
+            type: event.type,
+            data: event.data,
+            batchID: event.batch_id!,
+            batchIndex: event.batch_index!,
+            batchSize: event.batch_size!,
+          })),
+        )
+        return {
+          checkpoint: yield* replayDatabase.db
+            .select({ checkpoint: WorkflowStageTable.checkpoint })
+            .from(WorkflowStageTable)
+            .where(eq(WorkflowStageTable.id, stageID))
+            .get()
+            .pipe(Effect.orDie),
+          inputs: yield* replayDatabase.db
+            .select({ payload: ResponseItemTable.payload })
+            .from(ResponseItemTable)
+            .where(eq(ResponseItemTable.response_id, responseID))
+            .all()
+            .pipe(Effect.orDie),
+        }
+      }).pipe(Effect.provide(replayLayer), Effect.scoped)
+      expect(replayed).toEqual({
+        checkpoint: {
+          checkpoint: {
+            kind: "workflow.model.continuation.transient",
+            version: 1,
+            responseID,
+            usage: { tokens: 10, turns: 1, toolCalls: 1, attempts: 0 },
+            providerUsage: { inputTokens: 6, outputTokens: 4, totalTokens: 10 },
+          },
+        },
+        inputs: [],
+      })
+    }),
+  )
+
   it.effect("requires complete terminal payloads for stored responses", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
@@ -369,7 +942,6 @@ describe("ResponsesProjector", () => {
       const failedID = Responses.ID.make("resp_stored_failed_contract")
       yield* createWorkflow(events)
       yield* events.publish(ResponseEvent.Created, created(completedID))
-      yield* events.publish(ResponseEvent.Created, created(failedID))
 
       expect(
         Exit.isFailure(
@@ -381,6 +953,13 @@ describe("ResponsesProjector", () => {
             .pipe(Effect.exit),
         ),
       ).toBe(true)
+      expect(yield* EventV2.latestSequence(database.db, completedID)).toBe(0)
+      yield* events.publish(ResponseEvent.Completed, {
+        responseID: completedID,
+        timestamp: DateTime.makeUnsafe(3_100),
+        output: [],
+      })
+      yield* events.publish(ResponseEvent.Created, created(failedID))
       expect(
         Exit.isFailure(
           yield* events
@@ -391,7 +970,7 @@ describe("ResponsesProjector", () => {
             .pipe(Effect.exit),
         ),
       ).toBe(true)
-      expect(yield* EventV2.latestSequence(database.db, completedID)).toBe(0)
+      expect(yield* EventV2.latestSequence(database.db, completedID)).toBe(1)
       expect(yield* EventV2.latestSequence(database.db, failedID)).toBe(0)
     }),
   )

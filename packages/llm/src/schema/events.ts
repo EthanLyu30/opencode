@@ -212,6 +212,7 @@ export const ProviderErrorEvent = Schema.Struct({
   message: Schema.String,
   classification: Schema.optional(ProviderFailureClassification),
   retryable: Schema.optional(Schema.Boolean),
+  usage: Schema.optional(Usage),
   providerMetadata: Schema.optional(ProviderMetadata),
 }).annotate({ identifier: "LLM.Event.ProviderError" })
 export type ProviderErrorEvent = Schema.Schema.Type<typeof ProviderErrorEvent>
@@ -272,8 +273,7 @@ export const LLMEvent = Object.assign(llmEventTagged, {
       id: toolCallID(input.id),
       output: input.output === undefined ? undefined : ToolOutput.make(input.output.structured, input.output.content),
     }),
-  toolStatus: (input: WithID<ToolStatus, ToolCallID>) =>
-    ToolStatus.make({ ...input, id: toolCallID(input.id) }),
+  toolStatus: (input: WithID<ToolStatus, ToolCallID>) => ToolStatus.make({ ...input, id: toolCallID(input.id) }),
   toolError: (input: WithID<ToolError, ToolCallID>) => ToolError.make({ ...input, id: toolCallID(input.id) }),
   stepFinish: (input: WithUsage<StepFinish>) =>
     StepFinish.make({
@@ -285,7 +285,11 @@ export const LLMEvent = Object.assign(llmEventTagged, {
       ...input,
       usage: input.usage === undefined ? undefined : Usage.from(input.usage),
     }),
-  providerError: ProviderErrorEvent.make,
+  providerError: (input: WithUsage<ProviderErrorEvent>) =>
+    ProviderErrorEvent.make({
+      ...input,
+      usage: input.usage === undefined ? undefined : Usage.from(input.usage),
+    }),
   is: {
     stepStart: llmEventTagged.guards["step-start"],
     textStart: llmEventTagged.guards["text-start"],
@@ -393,6 +397,7 @@ const appendEvent = (state: ResponseState, event: LLMEvent): ResponseState => {
     return {
       ...state,
       events,
+      usage: event.usage ?? state.usage,
       finishReason: state.finishReason ?? "error",
     }
   }

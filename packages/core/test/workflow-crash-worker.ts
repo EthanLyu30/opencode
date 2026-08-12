@@ -8,6 +8,9 @@ import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
 import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
+import { ResponsesV2 } from "@opencode-ai/core/responses"
+import { ResponsesProjector } from "@opencode-ai/core/responses/projector"
+import { ResponsesStore } from "@opencode-ai/core/responses/store"
 import { Workflow } from "@opencode-ai/schema/workflow"
 
 const [databasePath, rawWorkflowID, rawPolicy, markerPath] = process.argv.slice(2)
@@ -49,6 +52,9 @@ const layer = AppNodeBuilder.build(
     WorkflowStore.node,
     WorkflowExecutor.node,
     WorkflowExecution.node,
+    ResponsesProjector.node,
+    ResponsesStore.node,
+    ResponsesV2.node,
   ]),
   [
     [Database.node, database],

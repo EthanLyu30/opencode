@@ -30,12 +30,13 @@ const withEmbedded = async (name: string, run: (directory: string) => Effect.Eff
   }
 }
 
-test("embedded gateway admits foreground and background responses without dropping unsupported fields", async () => {
+test("embedded gateway handles foreground and background contracts without dropping unsupported fields", async () => {
   await withEmbedded("admission", () =>
     Effect.gen(function* () {
       const { OpenCode, Responses, Workflow } = yield* Effect.promise(() => import("../src"))
       const opencode = yield* OpenCode.create()
       const workflowID = Workflow.ID.make(`wfl_gateway_${crypto.randomUUID()}`)
+      const foregroundID = Responses.ID.make(`resp_foreground_${crypto.randomUUID()}`)
       yield* opencode.workflows.create({
         id: workflowID,
         type: "responses-gateway-test",
@@ -43,17 +44,16 @@ test("embedded gateway admits foreground and background responses without droppi
         budget: { maxAttempts: 1 },
         stages: [
           {
-            type: "gateway-test",
+            type: "deliver",
             ordinal: 0,
             maxAttempts: 1,
             recoveryPolicy: "restart_safe",
             idempotencyKey: `gateway/${workflowID}`,
-            input: {},
+            input: { responseID: foregroundID },
           },
         ],
       })
 
-      const foregroundID = Responses.ID.make(`resp_foreground_${crypto.randomUUID()}`)
       const foreground = yield* opencode.responses.create({
         id: foregroundID,
         workflowID,
@@ -63,12 +63,30 @@ test("embedded gateway admits foreground and background responses without droppi
         requestHash: `sha256:${foregroundID}`,
         input: [{ type: "message", role: "user", content: "foreground" }],
       })
+      if (Stream.isStream(foreground)) return yield* Effect.die("Expected JSON, received SSE")
       const inputItems = yield* opencode.responses.inputItems({ responseID: foregroundID })
 
+      const backgroundWorkflowID = Workflow.ID.make(`wfl_background_${crypto.randomUUID()}`)
       const backgroundID = Responses.ID.make(`resp_background_${crypto.randomUUID()}`)
+      yield* opencode.workflows.create({
+        id: backgroundWorkflowID,
+        type: "responses-gateway-background",
+        input: {},
+        budget: { maxAttempts: 1 },
+        stages: [
+          {
+            type: "deliver",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: `gateway/${backgroundWorkflowID}`,
+            input: { responseID: backgroundID },
+          },
+        ],
+      })
       const background = yield* opencode.responses.create({
         id: backgroundID,
-        workflowID,
+        workflowID: backgroundWorkflowID,
         model: "deepseek-v4-flash",
         background: true,
         store: true,
@@ -76,14 +94,32 @@ test("embedded gateway admits foreground and background responses without droppi
         input: [{ type: "message", role: "user", content: "background" }],
       })
       const retrieved = yield* opencode.responses.get({ responseID: backgroundID })
+      const generatedWorkflowID = Workflow.ID.make(`wfl_generated_${crypto.randomUUID()}`)
+      yield* opencode.workflows.create({
+        id: generatedWorkflowID,
+        type: "responses-gateway-generated",
+        input: {},
+        budget: { maxAttempts: 1 },
+        stages: [
+          {
+            type: "deliver",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: `gateway/${generatedWorkflowID}`,
+            input: { responseBinding: "workflow" },
+          },
+        ],
+      })
       const generated = yield* opencode.responses.create({
-        workflowID,
+        workflowID: generatedWorkflowID,
         model: "deepseek-v4-flash",
         background: false,
         store: true,
         requestHash: `sha256:generated:${crypto.randomUUID()}`,
         input: [{ type: "message", role: "user", content: "generated id" }],
       })
+      if (Stream.isStream(generated)) return yield* Effect.die("Expected JSON, received SSE")
 
       const unsupported = yield* opencode.responses
         .create({
@@ -107,7 +143,7 @@ test("embedded gateway admits foreground and background responses without droppi
         })
         .pipe(Effect.flip)
 
-      expect(foreground).toMatchObject({ id: foregroundID, background: false, status: "queued" })
+      expect(foreground).toMatchObject({ id: foregroundID, background: false, status: "failed" })
       expect(inputItems.map((item) => [item.ordinal, item.kind, item.payload.content])).toEqual([
         [0, "input", "foreground"],
       ])
@@ -122,6 +158,45 @@ test("embedded gateway admits foreground and background responses without droppi
         required: "responses",
         planned: true,
       })
+    }),
+  )
+}, 10_000)
+
+test("embedded gateway rejects a Response without exactly one workflow binding", async () => {
+  await withEmbedded("unbound-admission", () =>
+    Effect.gen(function* () {
+      const { OpenCode, Responses, Workflow } = yield* Effect.promise(() => import("../src"))
+      const opencode = yield* OpenCode.create()
+      const workflowID = Workflow.ID.make(`wfl_unbound_${crypto.randomUUID()}`)
+      yield* opencode.workflows.create({
+        id: workflowID,
+        type: "unbound-response",
+        input: {},
+        budget: { maxAttempts: 1 },
+        stages: [
+          {
+            type: "design",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: `unbound/${workflowID}/design`,
+            input: {},
+          },
+        ],
+      })
+
+      const failure = yield* opencode.responses
+        .create({
+          id: Responses.ID.make(`resp_unbound_${crypto.randomUUID()}`),
+          workflowID,
+          model: "deepseek-v4-flash",
+          background: true,
+          store: true,
+          requestHash: `sha256:unbound:${crypto.randomUUID()}`,
+          input: [{ type: "message", role: "user", content: "must be bound" }],
+        })
+        .pipe(Effect.flip)
+      expect(failure).toMatchObject({ _tag: "InvalidRequestError", kind: "invalid_response_binding" })
     }),
   )
 }, 10_000)
@@ -142,12 +217,12 @@ test("embedded gateway replays SSE after an exclusive cursor and emits one termi
             budget: { maxAttempts: 1 },
             stages: [
               {
-                type: "gateway-test",
+                type: "deliver",
                 ordinal: 0,
                 maxAttempts: 1,
                 recoveryPolicy: "restart_safe",
                 idempotencyKey: `gateway/${workflowID}`,
-                input: {},
+                input: { responseID },
               },
             ],
           })
@@ -155,7 +230,7 @@ test("embedded gateway replays SSE after an exclusive cursor and emits one termi
             id: responseID,
             workflowID,
             model: "deepseek-v4-flash",
-            background: false,
+            background: true,
             store: true,
             requestHash: `sha256:${responseID}`,
             input: [{ type: "message", role: "user", content: "stream" }],
@@ -197,17 +272,17 @@ test("embedded gateway preserves conversation item order and protects active con
         budget: { maxAttempts: 1 },
         stages: [
           {
-            type: "gateway-test",
+            type: "deliver",
             ordinal: 0,
             maxAttempts: 1,
             recoveryPolicy: "restart_safe",
             idempotencyKey: `gateway/${workflowID}`,
-            input: {},
+            input: { responseID: Responses.ID.make(`resp_conversation_${workflowID.slice(4)}`) },
           },
         ],
       })
       const conversationID = Responses.ConversationID.make(`conv_gateway_${crypto.randomUUID()}`)
-      const responseID = Responses.ID.make(`resp_conversation_${crypto.randomUUID()}`)
+      const responseID = Responses.ID.make(`resp_conversation_${workflowID.slice(4)}`)
       const generated = yield* opencode.conversations.create({ metadata: { purpose: "generated-id" } })
       yield* opencode.conversations.delete({ conversationID: generated.id })
       const created = yield* opencode.conversations.create({ id: conversationID, metadata: { purpose: "test" } })
@@ -219,7 +294,7 @@ test("embedded gateway preserves conversation item order and protects active con
         id: responseID,
         workflowID,
         model: "deepseek-v4-flash",
-        background: false,
+        background: true,
         store: true,
         conversation: conversationID,
         requestHash: `sha256:${responseID}`,

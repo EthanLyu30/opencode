@@ -33,6 +33,8 @@ const capture = () => {
     project: () => Effect.void,
     replay: () => Effect.void,
     replayAll: () => Effect.succeed(undefined),
+    replayBatches: () => Effect.void,
+    latestSequence: () => Effect.succeed(-1),
     remove: () => Effect.void,
     claim: () => Effect.void,
   })

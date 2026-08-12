@@ -8,6 +8,7 @@ import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
 import { WorkflowRunTable, WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
+import { EventTable } from "@opencode-ai/core/event/sql"
 import { testEffect } from "./lib/effect"
 import { eq } from "drizzle-orm"
 
@@ -62,6 +63,15 @@ const startedData = (opts: { owner: string; attempt: number }) => ({
   leaseOwner: opts.owner,
 })
 
+const checkpointedData = (opts: { owner: string; attempt: number }) => ({
+  workflowID,
+  stageID: designStageID,
+  timestamp: DateTime.makeUnsafe(3_500),
+  attempt: opts.attempt,
+  leaseOwner: opts.owner,
+  checkpoint: { kind: "workflow.model.continuation", version: 1, turns: [] },
+})
+
 const retryData = (opts: { owner: string; attempt: number }) => ({
   workflowID,
   stageID: designStageID,
@@ -83,6 +93,140 @@ const succeededData = (opts: { owner: string; attempt: number }) => ({
 })
 
 describe("WorkflowProjector", () => {
+  it.effect("rejects unsafe and oversized checkpoints before projection or durable insertion", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+
+      const unsafe = yield* events
+        .publish(WorkflowEvent.Stage.Checkpointed, {
+          ...checkpointedData({ owner: "worker-a", attempt: 1 }),
+          checkpoint: { apiKey: "sk-direct-checkpoint-secret" },
+        })
+        .pipe(Effect.exit)
+      const oversized = yield* events
+        .publish(WorkflowEvent.Stage.Checkpointed, {
+          ...checkpointedData({ owner: "worker-a", attempt: 1 }),
+          checkpoint: { payload: "x".repeat(256 * 1024) },
+        })
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(unsafe)).toBe(true)
+      expect(Exit.isFailure(oversized)).toBe(true)
+      expect(
+        yield* db
+          .select({ checkpoint: WorkflowStageTable.checkpoint })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ checkpoint: null })
+      expect(
+        yield* db
+          .select({ type: EventTable.type })
+          .from(EventTable)
+          .where(eq(EventTable.type, EventV2.versionedType(WorkflowEvent.Stage.Checkpointed.type, 1)))
+          .all()
+          .pipe(Effect.orDie),
+      ).toEqual([])
+    }),
+  )
+
+  it.effect("rejects a lease whose attempt exceeds the stage maximum", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      yield* events.publish(WorkflowEvent.Created, {
+        ...createdData,
+        budget: { maxAttempts: 3 },
+        stages: [{ ...createdData.stages[0], maxAttempts: 1 }],
+      })
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.RetryScheduled, retryData({ owner: "worker-a", attempt: 1 }))
+
+      expect(
+        Exit.isFailure(
+          yield* events
+            .publish(WorkflowEvent.Stage.Leased, {
+              ...leasedData({ owner: "worker-b", attempt: 2 }),
+              timestamp: DateTime.makeUnsafe(6_000),
+              leaseExpiresAt: DateTime.makeUnsafe(36_000),
+            })
+            .pipe(Effect.exit),
+        ),
+      ).toBe(true)
+    }),
+  )
+
+  it.effect("persists checkpoints only for the live running lease", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Checkpointed, checkpointedData({ owner: "worker-a", attempt: 1 }))
+
+      expect(
+        yield* db
+          .select({ checkpoint: WorkflowStageTable.checkpoint })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ checkpoint: checkpointedData({ owner: "worker-a", attempt: 1 }).checkpoint })
+
+      yield* events.publish(WorkflowEvent.Stage.RetryScheduled, retryData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Leased, {
+        ...leasedData({ owner: "worker-b", attempt: 2 }),
+        timestamp: DateTime.makeUnsafe(6_000),
+        leaseExpiresAt: DateTime.makeUnsafe(36_000),
+      })
+      yield* events.publish(WorkflowEvent.Stage.Started, {
+        ...startedData({ owner: "worker-b", attempt: 2 }),
+        timestamp: DateTime.makeUnsafe(7_000),
+      })
+
+      const stale = yield* events
+        .publish(WorkflowEvent.Stage.Checkpointed, {
+          ...checkpointedData({ owner: "worker-a", attempt: 1 }),
+          timestamp: DateTime.makeUnsafe(8_000),
+          checkpoint: { stale: true },
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(stale)).toBe(true)
+      expect(
+        yield* db
+          .select({ checkpoint: WorkflowStageTable.checkpoint })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ checkpoint: checkpointedData({ owner: "worker-a", attempt: 1 }).checkpoint })
+    }),
+  )
+
+  it.effect("rejects checkpoints after cancellation", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.CancelRequested, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(3_250),
+      })
+
+      const cancelled = yield* events
+        .publish(WorkflowEvent.Stage.Checkpointed, checkpointedData({ owner: "worker-a", attempt: 1 }))
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(cancelled)).toBe(true)
+    }),
+  )
+
   it.effect("projects one run and ordered immutable stages", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
@@ -176,6 +320,60 @@ describe("WorkflowProjector", () => {
           .get()
           .pipe(Effect.orDie),
       ).toEqual({ usage: { tokens: 150, turns: 2, toolCalls: 0, attempts: 2 } })
+    }),
+  )
+
+  it.effect("rolls back a final stage when its related workflow terminal projector fails", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const onlyStage = Workflow.StageID.make("wfs_atomic_terminal")
+      yield* events.publish(WorkflowEvent.Created, {
+        ...createdData,
+        stages: [{ ...createdData.stages[0], id: onlyStage, ordinal: 0 }],
+      })
+      yield* events.publish(WorkflowEvent.Stage.Leased, {
+        ...leasedData({ owner: "worker-a", attempt: 1 }),
+        stageID: onlyStage,
+      })
+      yield* events.publish(WorkflowEvent.Stage.Started, {
+        ...startedData({ owner: "worker-a", attempt: 1 }),
+        stageID: onlyStage,
+      })
+      yield* events.project(WorkflowEvent.Succeeded, () => Effect.die(new Error("injected terminal failure")))
+
+      const failed = yield* events
+        .publish(
+          WorkflowEvent.Stage.Succeeded,
+          {
+            ...succeededData({ owner: "worker-a", attempt: 1 }),
+            stageID: onlyStage,
+          },
+          {
+            related: [
+              {
+                definition: WorkflowEvent.Succeeded,
+                data: {
+                  workflowID,
+                  timestamp: DateTime.makeUnsafe(6_000),
+                  usage: { tokens: 100, turns: 1, toolCalls: 0, attempts: 1 },
+                },
+              },
+            ],
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(failed)).toBe(true)
+      expect(
+        yield* db
+          .select({ run: WorkflowRunTable.status, stage: WorkflowStageTable.status })
+          .from(WorkflowStageTable)
+          .innerJoin(WorkflowRunTable, eq(WorkflowRunTable.id, WorkflowStageTable.workflow_id))
+          .where(eq(WorkflowStageTable.id, onlyStage))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ run: "queued", stage: "running" })
     }),
   )
 
@@ -285,6 +483,86 @@ describe("WorkflowProjector", () => {
           .get()
           .pipe(Effect.orDie),
       ).toEqual({ status: "waiting_approval", leaseOwner: null })
+    }),
+  )
+
+  it.effect("consumes recovery retry authorization at the next durable checkpoint", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Approval.Requested, {
+        workflowID,
+        stageID: designStageID,
+        timestamp: DateTime.makeUnsafe(4_000),
+        reason: "ambiguous_execution",
+        failure: { category: "ambiguous", code: "tool_execution_ambiguous", message: "unknown result" },
+      })
+      yield* events.publish(
+        WorkflowEvent.Approval.Resolved,
+        {
+          workflowID,
+          stageID: designStageID,
+          timestamp: DateTime.makeUnsafe(5_000),
+          action: "retry",
+        },
+        {
+          related: [
+            {
+              definition: WorkflowEvent.Stage.RetryScheduled,
+              data: {
+                workflowID,
+                stageID: designStageID,
+                timestamp: DateTime.makeUnsafe(5_000),
+                attempt: 1,
+                failure: { category: "ambiguous", code: "recovery_retry", message: "explicit retry" },
+                usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+                notBefore: DateTime.makeUnsafe(5_000),
+              },
+            },
+          ],
+        },
+      )
+      yield* events.publish(WorkflowEvent.Stage.Leased, {
+        ...leasedData({ owner: "worker-b", attempt: 2 }),
+        timestamp: DateTime.makeUnsafe(6_000),
+        leaseExpiresAt: DateTime.makeUnsafe(36_000),
+      })
+      yield* events.publish(WorkflowEvent.Stage.Started, {
+        ...startedData({ owner: "worker-b", attempt: 2 }),
+        timestamp: DateTime.makeUnsafe(6_100),
+      })
+      yield* events.publish(WorkflowEvent.Stage.Checkpointed, {
+        ...checkpointedData({ owner: "worker-b", attempt: 2 }),
+        timestamp: DateTime.makeUnsafe(6_200),
+        checkpoint: { kind: "workflow.model.continuation", version: 1, activeTurn: { pendingCallID: "call-1" } },
+      })
+
+      expect(
+        yield* db
+          .select({ recoveryAction: WorkflowStageTable.recovery_action })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ recoveryAction: null })
+      yield* events.publish(WorkflowEvent.Approval.Requested, {
+        workflowID,
+        stageID: designStageID,
+        timestamp: DateTime.makeUnsafe(6_300),
+        reason: "ambiguous_execution",
+        failure: { category: "ambiguous", code: "tool_execution_ambiguous", message: "unknown again" },
+      })
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status, recoveryAction: WorkflowStageTable.recovery_action })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "waiting_approval", recoveryAction: null })
     }),
   )
 

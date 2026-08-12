@@ -12,7 +12,7 @@ export class UnsafePersistenceError extends Schema.TaggedErrorClass<UnsafePersis
 ) {}
 
 const sensitiveKey =
-  /^(authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|secret|password|cookie|set-cookie)$/i
+  /^(authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|secret|password|cookie|set-cookie|provider[-_]?response[-_]?body)$/i
 const sensitiveQuery = /^(token|key|signature|sig|credential|x-amz-signature)$/i
 
 const sensitiveValue = /\b(?:Bearer\s+[A-Za-z0-9._~+/=-]{8,}|sk-[A-Za-z0-9_-]{8,})\b/
@@ -69,6 +69,9 @@ function walk(value: unknown, path: string, active: Set<object>): void {
   for (const [key, item] of Object.entries(value)) {
     if (sensitiveKey.test(key)) {
       throw unsafe(`${path}.${key}`, `Sensitive key "${key}"`)
+    }
+    if (key === "persistable" && item === false && Object.hasOwn(value, "reasoning_content")) {
+      throw unsafe(path, "Reasoning content marked non-persistable cannot be persisted")
     }
     walk(item, `${path}.${key}`, active)
   }

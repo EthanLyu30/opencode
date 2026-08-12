@@ -4,11 +4,13 @@ import { and, inArray, isNotNull } from "drizzle-orm"
 import { Cause, Data, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, PubSub, Semaphore, Stream } from "effect"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { Database } from "../../database/database"
 import { makeGlobalNode } from "../../effect/app-node"
 import { EventV2 } from "../../event"
+import { ResponsesV2 } from "../../responses"
 import { WorkflowExecution } from "../execution"
-import { WorkflowExecutor } from "../executor"
+import { WorkflowExecutor, type ExecutionFailure } from "../executor"
 import { WorkflowProjector } from "../projector"
 import { WorkflowRetry } from "../retry"
 import { WorkflowSecretGuard } from "../secret-guard"
@@ -37,11 +39,14 @@ export const defaults: Options = {
   concurrency: 2,
 }
 
+const MAX_CHECKPOINT_BYTES = 256 * 1024
+
 export const layerWith = (options: Options) =>
   Layer.effect(
     WorkflowExecution.Service,
     Effect.gen(function* () {
       const events = yield* EventV2.Service
+      const responses = yield* ResponsesV2.Service
       const executor = yield* WorkflowExecutor.Service
       const store = yield* WorkflowStore.Service
       const db = (yield* Database.Service).db
@@ -76,6 +81,8 @@ export const layerWith = (options: Options) =>
         if (detail?.run.cancelRequestedAt === undefined) return
         yield* new CancelRequested({ workflowID })
       })
+
+      const activeResponses = (detail: Workflow.Detail) => responses.activeByWorkflowID(detail.run.id)
 
       const settleStageCancellation = Effect.fnUntraced(function* (
         stage: Workflow.Stage,
@@ -152,25 +159,51 @@ export const layerWith = (options: Options) =>
 
         const settled = yield* store.get(workflowID)
         if (!settled || settled.stages.some((stage) => !WorkflowState.isTerminal(stage.status))) return
-        yield* events
-          .publish(WorkflowEvent.Cancelled, {
-            workflowID,
-            timestamp: yield* DateTime.now,
-          })
-          .pipe(
-            Effect.catchCause((cause) => {
-              if (!(Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict)) {
-                return Effect.failCause(cause)
-              }
-              return store
-                .get(workflowID)
-                .pipe(
-                  Effect.flatMap((latest) =>
-                    latest?.run.status === "cancelled" ? Effect.void : Effect.failCause(cause),
-                  ),
-                )
-            }),
-          )
+        const active = yield* activeResponses(settled)
+        const timestamp = yield* DateTime.now
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            yield* events
+              .publish(
+                WorkflowEvent.Cancelled,
+                {
+                  workflowID,
+                  timestamp,
+                },
+                {
+                  related: active.map((response) => ({
+                    definition: ResponseEvent.Cancelled,
+                    data: { responseID: response.id, timestamp },
+                  })),
+                },
+              )
+              .pipe(
+                Effect.catchCause((cause) => {
+                  if (!(Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict)) {
+                    return Effect.failCause(cause)
+                  }
+                  return store
+                    .get(workflowID)
+                    .pipe(
+                      Effect.flatMap((latest) =>
+                        latest?.run.status === "cancelled" ? Effect.void : Effect.failCause(cause),
+                      ),
+                    )
+                }),
+              )
+            yield* Effect.forEach(
+              active.filter((response) => !response.store),
+              (response) =>
+                responses.settleTransient({
+                  responseID: response.id,
+                  requestHash: response.requestHash,
+                  status: "cancelled",
+                  timestamp,
+                }),
+              { discard: true },
+            )
+          }),
+        )
       })
 
       const settlePersistedCancellations = Effect.gen(function* () {
@@ -214,7 +247,7 @@ export const layerWith = (options: Options) =>
                 return
               }
 
-              if (current.recoveryPolicy === "restart_safe") {
+              if (current.recoveryPolicy === "restart_safe" && current.attempt < current.maxAttempts) {
                 yield* events.publish(WorkflowEvent.Stage.RetryScheduled, {
                   workflowID: current.workflowID,
                   stageID: current.id,
@@ -239,8 +272,11 @@ export const layerWith = (options: Options) =>
                 reason: "ambiguous_execution",
                 failure: {
                   category: "ambiguous",
-                  code: "lease_expired",
-                  message: "Execution may have produced side effects before the worker lease expired.",
+                  code: current.attempt >= current.maxAttempts ? "max_attempts_exhausted" : "lease_expired",
+                  message:
+                    current.attempt >= current.maxAttempts
+                      ? "The stage exhausted its maximum attempts after the worker lease expired."
+                      : "Execution may have produced side effects before the worker lease expired.",
                 },
                 usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
               })
@@ -302,6 +338,48 @@ export const layerWith = (options: Options) =>
                 initial.run.budget.maxDurationMs -
                   (executionStartedAt - DateTime.toEpochMillis(initial.run.time.created)),
               )
+        const saveCheckpoint: WorkflowExecutor.ExecutionInput["saveCheckpoint"] = (checkpoint) =>
+          Effect.gen(function* () {
+            const encoded = yield* Effect.try({
+              try: () => {
+                WorkflowSecretGuard.assertSafe(checkpoint)
+                return JSON.stringify(checkpoint)
+              },
+              catch: () => checkpointFailure("unsafe_checkpoint", "Workflow checkpoint is not safe to persist"),
+            })
+            if (Buffer.byteLength(encoded) > MAX_CHECKPOINT_BYTES) {
+              return yield* Effect.fail(
+                checkpointFailure("checkpoint_too_large", "Workflow checkpoint exceeds the 256 KiB limit"),
+              )
+            }
+            yield* ensureNotCancelled(stage.workflowID).pipe(
+              Effect.mapError(() =>
+                checkpointFailure("checkpoint_cancelled", "Workflow cancellation fenced checkpoint"),
+              ),
+            )
+            const timestamp = yield* DateTime.now
+            if (!(yield* currentLease(stage, DateTime.toEpochMillis(timestamp)))) {
+              return yield* Effect.fail(
+                checkpointFailure("stale_checkpoint_lease", "Workflow lease no longer owns checkpoint persistence"),
+              )
+            }
+            const published = yield* events
+              .publish(WorkflowEvent.Stage.Checkpointed, {
+                workflowID: stage.workflowID,
+                stageID: stage.id,
+                timestamp,
+                attempt: stage.attempt,
+                leaseOwner: options.ownerID,
+                checkpoint,
+              })
+              .pipe(Effect.exit)
+            if (Exit.isFailure(published)) {
+              return yield* Effect.fail(
+                checkpointFailure("stale_checkpoint_lease", "Workflow checkpoint lost its fenced lease"),
+              )
+            }
+          })
+
         const execution = executor.execute({
           workflow: initial.run,
           stage,
@@ -313,6 +391,7 @@ export const layerWith = (options: Options) =>
             attempt: stage.attempt,
             expiresAt: stage.leaseExpiresAt,
           },
+          saveCheckpoint,
         })
 
         const outcome = yield* Effect.raceFirst(
@@ -322,7 +401,7 @@ export const layerWith = (options: Options) =>
                 Effect.timeoutOrElse({
                   duration: remainingDurationMs,
                   orElse: () =>
-                    Effect.fail({
+                    Effect.fail<ExecutionFailure>({
                       failure: {
                         category: "transient" as const,
                         code: "workflow_deadline",
@@ -396,52 +475,131 @@ export const layerWith = (options: Options) =>
             return
           }
 
-          yield* events.publish(WorkflowEvent.Stage.Failed, {
-            workflowID: stage.workflowID,
-            stageID: stage.id,
-            timestamp: completedAt,
-            attempt: stage.attempt,
-            leaseOwner: options.ownerID,
-            failure,
-            usage: error.usage,
-            source: "execution",
-          })
-          yield* store.gateBudget({
-            workflowID: stage.workflowID,
-            now: DateTime.toEpochMillis(completedAt),
-          })
-          const settled = yield* store.get(stage.workflowID)
-          if (!settled) return
-          yield* events.publish(WorkflowEvent.Failed, {
-            workflowID: stage.workflowID,
-            timestamp: yield* DateTime.now,
-            failure,
-            usage: settled.run.usage,
-          })
+          const active = yield* activeResponses(initial)
+          const responseSettlements = active.map((response) =>
+            error.responseSettlement?.responseID === response.id
+              ? { ...error.responseSettlement, requestHash: response.requestHash }
+              : {
+                  type: "failed" as const,
+                  responseID: response.id,
+                  requestHash: response.requestHash,
+                  error: { type: failure.category, code: failure.code, message: failure.message },
+                  store: response.store,
+                },
+          )
+          const responseRelated: Array<{ definition: EventV2.Definition; data: unknown }> = []
+          for (const settlement of responseSettlements) {
+            if (settlement.type === "incomplete") {
+              responseRelated.push({
+                definition: ResponseEvent.Incomplete,
+                data: {
+                  responseID: settlement.responseID,
+                  timestamp: completedAt,
+                  output: settlement.store ? settlement.output : undefined,
+                  error: settlement.store ? settlement.error : undefined,
+                  usage: settlement.store ? settlement.usage : undefined,
+                },
+              })
+              if (settlement.store && settlement.conversationID !== undefined) {
+                for (const payload of settlement.output) {
+                  responseRelated.push({
+                    definition: ResponseEvent.Conversation.ItemAdded,
+                    data: {
+                      conversationID: settlement.conversationID,
+                      timestamp: completedAt,
+                      responseID: settlement.responseID,
+                      payload,
+                    },
+                  })
+                }
+              }
+            } else {
+              responseRelated.push({
+                definition: ResponseEvent.Failed,
+                data: {
+                  responseID: settlement.responseID,
+                  timestamp: completedAt,
+                  error: settlement.store ? settlement.error : undefined,
+                  usage: settlement.store ? settlement.usage : undefined,
+                },
+              })
+            }
+          }
+
+          yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* events.publish(
+                WorkflowEvent.Stage.Failed,
+                {
+                  workflowID: stage.workflowID,
+                  stageID: stage.id,
+                  timestamp: completedAt,
+                  attempt: stage.attempt,
+                  leaseOwner: options.ownerID,
+                  failure,
+                  usage: error.usage,
+                  source: "execution",
+                },
+                {
+                  related: [
+                    {
+                      definition: WorkflowEvent.Failed,
+                      data: {
+                        workflowID: stage.workflowID,
+                        timestamp: completedAt,
+                        failure,
+                        usage: addUsage(initial.run.usage, error.usage),
+                      },
+                    },
+                    ...responseRelated,
+                  ],
+                },
+              )
+              yield* Effect.forEach(
+                responseSettlements.filter((settlement) => !settlement.store),
+                (settlement) =>
+                  responses.settleTransient({
+                    responseID: settlement.responseID,
+                    requestHash: settlement.requestHash,
+                    status: settlement.type === "incomplete" ? "incomplete" : "failed",
+                    timestamp: completedAt,
+                    ...(settlement.type === "incomplete" ? { output: settlement.output } : {}),
+                    error: settlement.error,
+                    usage: settlement.usage,
+                  }),
+                { discard: true },
+              )
+            }),
+          )
           return
         }
 
-        for (const commit of outcome.exit.value.artifacts ?? []) {
+        const executionResult = outcome.exit.value
+        const committedArtifacts = [] as Workflow.Artifact[]
+        for (const commit of executionResult.artifacts ?? []) {
           yield* ensureNotCancelled(stage.workflowID)
           const now = yield* DateTime.now
           if (!(yield* currentLease(stage, DateTime.toEpochMillis(now)))) return
           WorkflowSecretGuard.assertSafe(commit)
-          const artifact = Workflow.Artifact.make({
-            id: Workflow.ArtifactID.create(),
-            workflowID: stage.workflowID,
-            stageID: stage.id,
-            ...commit,
-            timeCreated: now,
-          })
-          yield* events.publish(WorkflowEvent.Artifact.Created, {
-            workflowID: stage.workflowID,
-            stageID: stage.id,
-            timestamp: now,
-            artifact,
-          })
+          committedArtifacts.push(
+            Workflow.Artifact.make({
+              id: Workflow.ArtifactID.create(),
+              workflowID: stage.workflowID,
+              stageID: stage.id,
+              ...commit,
+              timeCreated: now,
+            }),
+          )
         }
 
-        const completionCandidate = yield* store.get(stage.workflowID)
+        const storedCompletionCandidate = yield* store.get(stage.workflowID)
+        const completionCandidate =
+          storedCompletionCandidate === undefined
+            ? undefined
+            : {
+                ...storedCompletionCandidate,
+                artifacts: [...storedCompletionCandidate.artifacts, ...committedArtifacts],
+              }
         if (
           completionCandidate &&
           completionCandidate.stages.every(
@@ -476,28 +634,69 @@ export const layerWith = (options: Options) =>
             const failedAt = yield* DateTime.now
             yield* ensureNotCancelled(stage.workflowID)
             if (!(yield* currentLease(stage, DateTime.toEpochMillis(failedAt)))) return
-            yield* events.publish(WorkflowEvent.Stage.Failed, {
-              workflowID: stage.workflowID,
-              stageID: stage.id,
-              timestamp: failedAt,
-              attempt: stage.attempt,
-              leaseOwner: options.ownerID,
-              failure,
-              usage: outcome.exit.value.usage,
-              source: "execution",
+            const active = yield* activeResponses(completionCandidate)
+            const outcomeSettlement = executionResult.responseSettlement
+            const responseSettlements = active.map((response) => {
+              return {
+                responseID: response.id,
+                requestHash: response.requestHash,
+                store: response.store,
+                error: { type: failure.category, code: failure.code, message: failure.message },
+                usage: outcomeSettlement?.responseID === response.id ? outcomeSettlement.usage : undefined,
+              }
             })
-            yield* store.gateBudget({
-              workflowID: stage.workflowID,
-              now: DateTime.toEpochMillis(failedAt),
-            })
-            const settled = yield* store.get(stage.workflowID)
-            if (!settled) return
-            yield* events.publish(WorkflowEvent.Failed, {
-              workflowID: stage.workflowID,
-              timestamp: yield* DateTime.now,
-              failure,
-              usage: settled.run.usage,
-            })
+            yield* Effect.uninterruptible(
+              Effect.gen(function* () {
+                yield* events.publish(
+                  WorkflowEvent.Stage.Failed,
+                  {
+                    workflowID: stage.workflowID,
+                    stageID: stage.id,
+                    timestamp: failedAt,
+                    attempt: stage.attempt,
+                    leaseOwner: options.ownerID,
+                    failure,
+                    usage: executionResult.usage,
+                    source: "execution",
+                  },
+                  {
+                    related: [
+                      {
+                        definition: WorkflowEvent.Failed,
+                        data: {
+                          workflowID: stage.workflowID,
+                          timestamp: failedAt,
+                          failure,
+                          usage: addUsage(initial.run.usage, executionResult.usage),
+                        },
+                      },
+                      ...responseSettlements.map((settlement) => ({
+                        definition: ResponseEvent.Failed,
+                        data: {
+                          responseID: settlement.responseID,
+                          timestamp: failedAt,
+                          error: settlement.store ? settlement.error : undefined,
+                          usage: settlement.store ? settlement.usage : undefined,
+                        },
+                      })),
+                    ],
+                  },
+                )
+                yield* Effect.forEach(
+                  responseSettlements.filter((settlement) => !settlement.store),
+                  (settlement) =>
+                    responses.settleTransient({
+                      responseID: settlement.responseID,
+                      requestHash: settlement.requestHash,
+                      status: "failed",
+                      timestamp: failedAt,
+                      error: settlement.error,
+                      usage: settlement.usage,
+                    }),
+                  { discard: true },
+                )
+              }),
+            )
             return
           }
         }
@@ -505,18 +704,93 @@ export const layerWith = (options: Options) =>
         const completedAt = yield* DateTime.now
         yield* ensureNotCancelled(stage.workflowID)
         if (!(yield* currentLease(stage, DateTime.toEpochMillis(completedAt)))) return
-        if (outcome.exit.value.checkpoint !== undefined) {
-          WorkflowSecretGuard.assertSafe(outcome.exit.value.checkpoint)
+        if (executionResult.checkpoint !== undefined) {
+          WorkflowSecretGuard.assertSafe(executionResult.checkpoint)
         }
-        yield* events.publish(WorkflowEvent.Stage.Succeeded, {
-          workflowID: stage.workflowID,
-          stageID: stage.id,
-          timestamp: completedAt,
-          attempt: stage.attempt,
-          leaseOwner: options.ownerID,
-          usage: outcome.exit.value.usage,
-          checkpoint: outcome.exit.value.checkpoint,
-        })
+        const responseSettlement = executionResult.responseSettlement
+        const responseResource =
+          responseSettlement === undefined
+            ? undefined
+            : (yield* activeResponses(initial)).find((response) => response.id === responseSettlement.responseID)
+        const completesWorkflow =
+          completionCandidate?.stages.every(
+            (item) => item.id === stage.id || item.status === "succeeded" || item.status === "skipped",
+          ) === true
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            yield* events.publish(
+              WorkflowEvent.Stage.Succeeded,
+              {
+                workflowID: stage.workflowID,
+                stageID: stage.id,
+                timestamp: completedAt,
+                attempt: stage.attempt,
+                leaseOwner: options.ownerID,
+                usage: executionResult.usage,
+                checkpoint: executionResult.checkpoint,
+              },
+              {
+                related: [
+                  ...committedArtifacts.map((artifact) => ({
+                    definition: WorkflowEvent.Artifact.Created,
+                    data: {
+                      workflowID: stage.workflowID,
+                      stageID: stage.id,
+                      timestamp: artifact.timeCreated,
+                      artifact,
+                    },
+                  })),
+                  ...(completesWorkflow
+                    ? [
+                        {
+                          definition: WorkflowEvent.Succeeded,
+                          data: {
+                            workflowID: stage.workflowID,
+                            timestamp: completedAt,
+                            usage: addUsage(initial.run.usage, executionResult.usage),
+                          },
+                        },
+                      ]
+                    : []),
+                  ...(responseSettlement?.type === "completed"
+                    ? [
+                        {
+                          definition: ResponseEvent.Completed,
+                          data: {
+                            responseID: responseSettlement.responseID,
+                            timestamp: completedAt,
+                            output: responseSettlement.store ? responseSettlement.output : undefined,
+                            usage: responseSettlement.store ? responseSettlement.usage : undefined,
+                          },
+                        },
+                        ...(responseSettlement.store && responseSettlement.conversationID !== undefined
+                          ? responseSettlement.output.map((payload) => ({
+                              definition: ResponseEvent.Conversation.ItemAdded,
+                              data: {
+                                conversationID: responseSettlement.conversationID!,
+                                timestamp: completedAt,
+                                responseID: responseSettlement.responseID,
+                                payload,
+                              },
+                            }))
+                          : []),
+                      ]
+                    : []),
+                ],
+              },
+            )
+            if (responseSettlement?.type === "completed" && !responseSettlement.store) {
+              yield* responses.settleTransient({
+                responseID: responseSettlement.responseID,
+                requestHash: responseResource?.requestHash,
+                status: "completed",
+                timestamp: completedAt,
+                output: responseSettlement.output,
+                usage: responseSettlement.usage,
+              })
+            }
+          }),
+        )
 
         const settled = yield* store.get(stage.workflowID)
         if (!settled) return
@@ -525,14 +799,7 @@ export const layerWith = (options: Options) =>
           workflowID: stage.workflowID,
           now: DateTime.toEpochMillis(completedAt),
         })
-        if (settled.stages.every((item) => item.status === "succeeded" || item.status === "skipped")) {
-          yield* events.publish(WorkflowEvent.Succeeded, {
-            workflowID: stage.workflowID,
-            timestamp: yield* DateTime.now,
-            usage: settled.run.usage,
-          })
-          return
-        }
+        if (settled.run.status === "succeeded") return
         if (paused) return
         if (settled.stages.some((item) => !WorkflowState.isTerminal(item.status))) {
           yield* PubSub.publish(wake, undefined)
@@ -622,7 +889,30 @@ export const nodeWith = (options: Options) =>
   makeGlobalNode({
     service: WorkflowExecution.Service,
     layer: layerWith(options),
-    deps: [Database.node, EventV2.node, WorkflowProjector.node, WorkflowStore.node, WorkflowExecutor.node],
+    deps: [
+      Database.node,
+      EventV2.node,
+      ResponsesV2.node,
+      WorkflowProjector.node,
+      WorkflowStore.node,
+      WorkflowExecutor.node,
+    ],
   })
 
 export const node = nodeWith(defaults)
+
+function addUsage(left: Workflow.Usage, right: Workflow.Usage): Workflow.Usage {
+  return {
+    tokens: left.tokens + right.tokens,
+    turns: left.turns + right.turns,
+    toolCalls: left.toolCalls + right.toolCalls,
+    attempts: left.attempts + right.attempts,
+  }
+}
+
+function checkpointFailure(code: string, message: string): ExecutionFailure {
+  return {
+    failure: { category: "ambiguous", code, message },
+    usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+  }
+}

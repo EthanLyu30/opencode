@@ -117,7 +117,8 @@ describe("Responses protocol groups", () => {
 
     expect(unsupportedResponseFields(generatedPayload)).toEqual([])
     expect(unsupportedResponseFields({ ...decoded, stream: false })).toEqual([])
-    expect(unsupportedResponseFields({ ...decoded, stream: true })).toEqual(["stream"])
+    expect(unsupportedResponseFields({ ...decoded, stream: true })).toEqual([])
+    expect(Array.from(ResponsesGroup.endpoints["responses.create"].success)).toHaveLength(2)
   })
 
   test("decodes exclusive SSE cursors and emits wire-compatible sequence numbers", async () => {

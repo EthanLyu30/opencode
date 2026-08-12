@@ -35,6 +35,11 @@ export type Payload<D extends Definition = Definition> = {
     readonly seq: number
     readonly version: number
     readonly replay?: boolean
+    readonly batch?: {
+      readonly id: string
+      readonly index: number
+      readonly size: number
+    }
     readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
   }
   readonly location?: Location.Ref
@@ -63,6 +68,13 @@ export function define<
         seq: Schema.Int,
         version: Schema.Int,
         replay: optional(Schema.Boolean),
+        batch: optional(
+          Schema.Struct({
+            id: Schema.String,
+            index: Schema.Int,
+            size: Schema.Int,
+          }),
+        ),
         related: optional(Schema.Array(Schema.Struct({ type: Schema.String, data: Schema.Unknown }))),
       }),
     ),

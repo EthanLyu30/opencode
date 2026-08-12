@@ -11,6 +11,7 @@ import { ResponsesProjector } from "@opencode-ai/core/responses/projector"
 import { ResponsesStore } from "@opencode-ai/core/responses/store"
 import { ConversationTable, ResponseItemTable, ResponseTable } from "@opencode-ai/core/responses/sql"
 import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
+import { WorkflowRunTable } from "@opencode-ai/core/workflow/sql"
 import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { Responses } from "@opencode-ai/schema/responses"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
@@ -43,12 +44,12 @@ function createWorkflow(events: EventV2.Interface) {
     stages: [
       {
         id: stageID,
-        type: "respond",
+        type: "deliver",
         ordinal: 0,
         maxAttempts: 1,
         recoveryPolicy: "restart_safe",
         idempotencyKey: "responses/store",
-        input: {},
+        input: { responseBinding: "workflow" },
       },
     ],
   })
@@ -67,6 +68,42 @@ function createInput(responseID: Responses.ID, store = true): Responses.CreateIn
 }
 
 describe("ResponsesStore and ResponsesV2", () => {
+  it.effect("cancels a Response and requests workflow cancellation in one transaction", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const responses = yield* ResponsesV2.Service
+      const database = yield* Database.Service
+      const responseID = Responses.ID.make("resp_atomic_workflow_cancel")
+      yield* createWorkflow(events)
+      yield* responses.create(createInput(responseID))
+
+      expect((yield* responses.cancelWorkflow({ responseID })).status).toBe("cancelled")
+      expect(
+        yield* database.db
+          .select({ cancelRequestedAt: WorkflowRunTable.cancel_requested_at })
+          .from(WorkflowRunTable)
+          .where(eq(WorkflowRunTable.id, workflowID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ cancelRequestedAt: expect.any(Number) })
+    }),
+  )
+
+  it.effect("rolls back Response cancellation when workflow cancellation projection fails", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const responses = yield* ResponsesV2.Service
+      const store = yield* ResponsesStore.Service
+      const responseID = Responses.ID.make("resp_atomic_workflow_cancel_rollback")
+      yield* createWorkflow(events)
+      yield* responses.create(createInput(responseID))
+      yield* events.project(WorkflowEvent.CancelRequested, () => Effect.die(new Error("injected projector failure")))
+
+      expect(Exit.isFailure(yield* responses.cancelWorkflow({ responseID }).pipe(Effect.exit))).toBe(true)
+      expect((yield* store.get(responseID))?.status).toBe("queued")
+    }),
+  )
+
   it.effect("admits an idempotent request hash once and exposes ordered items", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service

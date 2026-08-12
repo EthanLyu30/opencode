@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
+import { test } from "bun:test"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Event } from "@opencode-ai/schema/event"
 import { Session } from "@opencode-ai/schema/session"
@@ -12,8 +13,10 @@ import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { Location } from "@opencode-ai/core/location"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
-import { eq } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
+import path from "node:path"
 import { location } from "./fixture/location"
+import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 
 const locationLayer = Layer.succeed(
@@ -948,6 +951,413 @@ describe("EventV2", () => {
     }),
   )
 
+  it.effect("replays one complete durable batch across aggregates and notifies primary before related", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const primaryID = Session.ID.create()
+      const relatedID = Session.ID.create()
+      yield* events.publish(DurableMessage, durableData(primaryID, "batch-primary"), {
+        related: [{ definition: DurableMessage, data: durableData(relatedID, "batch-related") }],
+      })
+      const stored = yield* db.select().from(EventTable).orderBy(EventTable.batch_index).all().pipe(Effect.orDie)
+      const serialized = stored.map((event) => ({
+        id: event.id,
+        aggregateID: event.aggregate_id,
+        seq: event.seq,
+        type: event.type,
+        data: event.data,
+        batchID: event.batch_id!,
+        batchIndex: event.batch_index!,
+        batchSize: event.batch_size!,
+      }))
+      expect(serialized.map((event) => [event.batchIndex, event.batchSize])).toEqual([
+        [0, 2],
+        [1, 2],
+      ])
+      yield* events.remove(primaryID)
+      yield* events.remove(relatedID)
+      const received: EventV2.Payload[] = []
+      const projected: EventV2.Payload[] = []
+      yield* events.listen((event) => Effect.sync(() => received.push(event)))
+      yield* events.project(DurableMessage, (event) => Effect.sync(() => projected.push(event)))
+
+      yield* events.replayBatches(serialized, { publish: true })
+
+      expect(received.map((event) => event.durable?.aggregateID)).toEqual([primaryID, relatedID])
+      expect(received.map((event) => event.durable?.batch)).toEqual([
+        { id: serialized[0]!.batchID, index: 0, size: 2 },
+        { id: serialized[0]!.batchID, index: 1, size: 2 },
+      ])
+      expect(projected[0]?.durable?.related).toMatchObject([{ type: DurableMessage.type }])
+      expect(projected[1]?.durable?.related).toHaveLength(2)
+
+      yield* events.replayBatches(serialized, { publish: true })
+      expect(received.map((event) => event.durable?.aggregateID)).toEqual([primaryID, relatedID])
+      expect(projected).toHaveLength(2)
+    }),
+  )
+
+  it.effect("exact batch replay claims every unowned aggregate", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const primaryID = Session.ID.create()
+      const relatedID = Session.ID.create()
+      yield* events.publish(DurableMessage, durableData(primaryID, "claim-primary"), {
+        related: [{ definition: DurableMessage, data: durableData(relatedID, "claim-related") }],
+      })
+      const stored = yield* db.select().from(EventTable).orderBy(EventTable.batch_index).all().pipe(Effect.orDie)
+      const serialized = stored.map((event) => ({
+        id: event.id,
+        aggregateID: event.aggregate_id,
+        seq: event.seq,
+        type: event.type,
+        data: event.data,
+        batchID: event.batch_id!,
+        batchIndex: event.batch_index!,
+        batchSize: event.batch_size!,
+      }))
+
+      yield* events.replayBatches(serialized, { ownerID: "owner-exact", strictOwner: true })
+
+      const owners = yield* db
+        .select({ aggregateID: EventSequenceTable.aggregate_id, ownerID: EventSequenceTable.owner_id })
+        .from(EventSequenceTable)
+        .all()
+        .pipe(Effect.orDie)
+      expect(new Map(owners.map((row) => [row.aggregateID, row.ownerID]))).toEqual(
+        new Map([
+          [primaryID, "owner-exact"],
+          [relatedID, "owner-exact"],
+        ]),
+      )
+    }),
+  )
+
+  it.effect("strict exact batch replay rejects a conflicting owner", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const primaryID = Session.ID.create()
+      const relatedID = Session.ID.create()
+      yield* events.publish(DurableMessage, durableData(primaryID, "conflict-primary"), {
+        related: [{ definition: DurableMessage, data: durableData(relatedID, "conflict-related") }],
+      })
+      const stored = yield* db.select().from(EventTable).orderBy(EventTable.batch_index).all().pipe(Effect.orDie)
+      yield* events.claim(primaryID, "owner-a")
+      yield* events.claim(relatedID, "owner-a")
+
+      const error = yield* events
+        .replayBatches(
+          stored.map((event) => ({
+            id: event.id,
+            aggregateID: event.aggregate_id,
+            seq: event.seq,
+            type: event.type,
+            data: event.data,
+            batchID: event.batch_id!,
+            batchIndex: event.batch_index!,
+            batchSize: event.batch_size!,
+          })),
+          { ownerID: "owner-b", strictOwner: true },
+        )
+        .pipe(Effect.flip)
+
+      expect(error).toMatchObject({ _tag: "EventV2.InvalidReplayBatch", reason: "owner_mismatch" })
+    }),
+  )
+
+  it.effect("allows only one concurrent owner to claim an exact replay batch", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateIDs = Array.from({ length: 24 }, () => Session.ID.create())
+      yield* events.publish(DurableMessage, durableData(aggregateIDs[0]!, "concurrent-owner-primary"), {
+        related: aggregateIDs.slice(1).map((aggregateID, index) => ({
+          definition: DurableMessage,
+          data: durableData(aggregateID, `concurrent-owner-related-${index}`),
+        })),
+      })
+      const stored = yield* db.select().from(EventTable).orderBy(EventTable.batch_index).all().pipe(Effect.orDie)
+      const serialized = stored.map((event) => ({
+        id: event.id,
+        aggregateID: event.aggregate_id,
+        seq: event.seq,
+        type: event.type,
+        data: event.data,
+        batchID: event.batch_id!,
+        batchIndex: event.batch_index!,
+        batchSize: event.batch_size!,
+      }))
+
+      const claims = yield* Effect.all(
+        ["owner-concurrent-a", "owner-concurrent-b"].map((ownerID) =>
+          events.replayBatches(serialized, { ownerID, strictOwner: true }).pipe(Effect.exit),
+        ),
+        { concurrency: "unbounded" },
+      )
+      const owners = yield* db
+        .select({ ownerID: EventSequenceTable.owner_id })
+        .from(EventSequenceTable)
+        .all()
+        .pipe(Effect.orDie)
+
+      expect(claims.filter(Exit.isSuccess)).toHaveLength(1)
+      expect(new Set(owners.map((row) => row.ownerID)).size).toBe(1)
+    }),
+  )
+
+  it.effect("rejects incomplete cross-aggregate batches without committing a prefix", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const primaryID = Session.ID.create()
+      const relatedID = Session.ID.create()
+      yield* events.publish(DurableMessage, durableData(primaryID, "incomplete-primary"), {
+        related: [{ definition: DurableMessage, data: durableData(relatedID, "incomplete-related") }],
+      })
+      const stored = yield* db.select().from(EventTable).orderBy(EventTable.batch_index).all().pipe(Effect.orDie)
+      yield* events.remove(primaryID)
+      yield* events.remove(relatedID)
+
+      const error = yield* events
+        .replayBatches([
+          {
+            id: stored[0]!.id,
+            aggregateID: stored[0]!.aggregate_id,
+            seq: stored[0]!.seq,
+            type: stored[0]!.type,
+            data: stored[0]!.data,
+            batchID: stored[0]!.batch_id!,
+            batchIndex: stored[0]!.batch_index!,
+            batchSize: stored[0]!.batch_size!,
+          },
+        ])
+        .pipe(Effect.flip)
+
+      expect(error).toBeInstanceOf(EventV2.InvalidReplayBatchError)
+      expect(error.reason).toBe("incomplete_batch")
+      expect(yield* EventV2.latestSequence(db, primaryID)).toBe(-1)
+      expect(yield* EventV2.latestSequence(db, relatedID)).toBe(-1)
+    }),
+  )
+
+  it.effect("rejects a multi-member batch through single-aggregate replayAll", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const aggregateID = Session.ID.create()
+      const error = yield* events
+        .replayAll([
+          {
+            id: EventV2.ID.create(),
+            type: EventV2.versionedType(DurableMessage.type, 1),
+            seq: 0,
+            aggregateID,
+            data: durableData(aggregateID, "fragment"),
+            batchID: "batch_fragment",
+            batchIndex: 0,
+            batchSize: 2,
+          },
+        ])
+        .pipe(Effect.flip)
+
+      expect(error).toBeInstanceOf(EventV2.InvalidReplayBatchError)
+      expect(error.reason).toBe("incomplete_batch")
+    }),
+  )
+
+  it.effect("rejects duplicate batch indices before projection", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const batchID = "batch_duplicate_index"
+      const firstID = Session.ID.create()
+      const secondID = Session.ID.create()
+      const error = yield* events
+        .replayBatches([
+          {
+            id: EventV2.ID.create(),
+            type: EventV2.versionedType(DurableMessage.type, 1),
+            seq: 0,
+            aggregateID: firstID,
+            data: durableData(firstID, "duplicate-first"),
+            batchID,
+            batchIndex: 0,
+            batchSize: 2,
+          },
+          {
+            id: EventV2.ID.create(),
+            type: EventV2.versionedType(DurableMessage.type, 1),
+            seq: 0,
+            aggregateID: secondID,
+            data: durableData(secondID, "duplicate-second"),
+            batchID,
+            batchIndex: 0,
+            batchSize: 2,
+          },
+        ])
+        .pipe(Effect.flip)
+
+      expect(error).toMatchObject({ _tag: "EventV2.InvalidReplayBatch", reason: "invalid_batch", batchID })
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toEqual([])
+    }),
+  )
+
+  it.effect("rejects a replay dependency deadlock without writing the future event", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = Session.ID.create()
+      const error = yield* events
+        .replayBatches([
+          {
+            id: EventV2.ID.create(),
+            type: EventV2.versionedType(DurableMessage.type, 1),
+            seq: 1,
+            aggregateID,
+            data: durableData(aggregateID, "future"),
+            batchID: "batch_future",
+            batchIndex: 0,
+            batchSize: 1,
+          },
+        ])
+        .pipe(Effect.flip)
+
+      expect(error).toMatchObject({ _tag: "EventV2.InvalidReplayBatch", reason: "deadlock" })
+      expect(yield* EventV2.latestSequence(db, aggregateID)).toBe(-1)
+    }),
+  )
+
+  it.effect("plans every batch before a ready prefix can precede a deadlock", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const readyID = Session.ID.create()
+      const futureID = Session.ID.create()
+      const received = new Array<EventV2.Payload>()
+      yield* events.listen((event) => Effect.sync(() => received.push(event)))
+
+      const error = yield* events
+        .replayBatches(
+          [
+            {
+              id: EventV2.ID.create(),
+              type: EventV2.versionedType(DurableMessage.type, 1),
+              seq: 0,
+              aggregateID: readyID,
+              data: durableData(readyID, "ready-before-deadlock"),
+              batchID: "batch_ready_before_deadlock",
+              batchIndex: 0,
+              batchSize: 1,
+            },
+            {
+              id: EventV2.ID.create(),
+              type: EventV2.versionedType(DurableMessage.type, 1),
+              seq: 1,
+              aggregateID: futureID,
+              data: durableData(futureID, "deadlocked-after-ready"),
+              batchID: "batch_deadlocked_after_ready",
+              batchIndex: 0,
+              batchSize: 1,
+            },
+          ],
+          { publish: true },
+        )
+        .pipe(Effect.flip)
+
+      expect(error).toMatchObject({ _tag: "EventV2.InvalidReplayBatch", reason: "deadlock" })
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toEqual([])
+      expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual([])
+      expect(received).toEqual([])
+    }),
+  )
+
+  it.effect("rolls back every batch and notification when a later projector fails", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const firstID = Session.ID.create()
+      const failingID = Session.ID.create()
+      const received = new Array<EventV2.Payload>()
+      yield* db.run("CREATE TABLE event_replay_batch_probe (aggregate_id text NOT NULL)")
+      yield* events.listen((event) => Effect.sync(() => received.push(event)))
+      yield* events.project(DurableMessage, (event) =>
+        Effect.gen(function* () {
+          yield* db
+            .run(sql`INSERT INTO event_replay_batch_probe (aggregate_id) VALUES (${event.data.sessionID})`)
+            .pipe(Effect.orDie)
+          if (event.data.sessionID === failingID) yield* Effect.die("later replay projector failed")
+          return yield* Effect.void
+        }),
+      )
+
+      const exit = yield* events
+        .replayBatches(
+          [
+            {
+              id: EventV2.ID.create(),
+              type: EventV2.versionedType(DurableMessage.type, 1),
+              seq: 0,
+              aggregateID: firstID,
+              data: durableData(firstID, "first-projector"),
+              batchID: "batch_first_projector",
+              batchIndex: 0,
+              batchSize: 1,
+            },
+            {
+              id: EventV2.ID.create(),
+              type: EventV2.versionedType(DurableMessage.type, 1),
+              seq: 0,
+              aggregateID: failingID,
+              data: durableData(failingID, "failing-projector"),
+              batchID: "batch_failing_projector",
+              batchIndex: 0,
+              batchSize: 1,
+            },
+          ],
+          { publish: true },
+        )
+        .pipe(Effect.exit)
+
+      expect(String(exit)).toContain("later replay projector failed")
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toEqual([])
+      expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual([])
+      expect(yield* db.all("SELECT aggregate_id FROM event_replay_batch_probe")).toEqual([])
+      expect(received).toEqual([])
+    }),
+  )
+
+  it.effect("rejects replay into a partially stored batch", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const primaryID = Session.ID.create()
+      const relatedID = Session.ID.create()
+      yield* events.publish(DurableMessage, durableData(primaryID, "partial-primary"), {
+        related: [{ definition: DurableMessage, data: durableData(relatedID, "partial-related") }],
+      })
+      const stored = yield* db.select().from(EventTable).orderBy(EventTable.batch_index).all().pipe(Effect.orDie)
+      const serialized = stored.map((event) => ({
+        id: event.id,
+        aggregateID: event.aggregate_id,
+        seq: event.seq,
+        type: event.type,
+        data: event.data,
+        batchID: event.batch_id!,
+        batchIndex: event.batch_index!,
+        batchSize: event.batch_size!,
+      }))
+      yield* events.remove(relatedID)
+
+      const error = yield* events.replayBatches(serialized).pipe(Effect.flip)
+
+      expect(error).toMatchObject({ _tag: "EventV2.InvalidReplayBatch", reason: "partial_batch" })
+      expect(yield* EventV2.latestSequence(db, primaryID)).toBe(0)
+      expect(yield* EventV2.latestSequence(db, relatedID)).toBe(-1)
+    }),
+  )
+
   it.effect("claim fences replay owners", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
@@ -1008,6 +1418,9 @@ describe("EventV2", () => {
         seq: published.durable!.seq,
         aggregateID,
         data: published.data,
+        batchID: published.durable!.batch!.id,
+        batchIndex: published.durable!.batch!.index,
+        batchSize: published.durable!.batch!.size,
       }
 
       yield* events.replay(replayed, { ownerID: "owner-a", strictOwner: true })
@@ -1297,3 +1710,77 @@ describe("EventV2", () => {
     }),
   )
 })
+
+test("exact replay revalidates an owner claimed after preflight but before its transaction", async () => {
+  await using temporary = await tmpdir()
+  const databasePath = path.join(temporary.path, "event-replay-owner-race.sqlite")
+  const markerPath = path.join(temporary.path, "owner-claimed")
+  const replayLayer = AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node]), [
+    [Database.node, Database.layerFromPath(databasePath)],
+  ])
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = Session.ID.create()
+      yield* events.publish(DurableMessage, durableData(aggregateID, "owner-race"))
+      const stored = yield* db.select().from(EventTable).get().pipe(Effect.orDie)
+      if (!stored) return yield* Effect.die("Expected a stored event")
+      const script = [
+        'import { Database } from "bun:sqlite"',
+        "const db = new Database(process.env.REPLAY_DB_PATH!)",
+        'db.exec("PRAGMA busy_timeout = 5000")',
+        'db.exec("BEGIN IMMEDIATE")',
+        'db.query("update event_sequence set owner_id = ? where aggregate_id = ?").run("owner-race-b", process.env.REPLAY_AGGREGATE_ID!)',
+        'await Bun.write(process.env.REPLAY_MARKER_PATH!, "ready")',
+        "await Bun.sleep(300)",
+        'db.exec("COMMIT")',
+        "db.close()",
+      ].join("\n")
+      const child = Bun.spawn([process.execPath, "-e", script], {
+        cwd: temporary.path,
+        env: {
+          ...process.env,
+          REPLAY_DB_PATH: databasePath,
+          REPLAY_AGGREGATE_ID: aggregateID,
+          REPLAY_MARKER_PATH: markerPath,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      while (!(yield* Effect.promise(() => Bun.file(markerPath).exists()))) yield* Effect.sleep(5)
+
+      const replay = yield* events
+        .replayBatches(
+          [
+            {
+              id: stored.id,
+              aggregateID: stored.aggregate_id,
+              seq: stored.seq,
+              type: stored.type,
+              data: stored.data,
+              batchID: stored.batch_id!,
+              batchIndex: stored.batch_index!,
+              batchSize: stored.batch_size!,
+            },
+          ],
+          { ownerID: "owner-race-a", strictOwner: true },
+        )
+        .pipe(Effect.exit)
+      const exitCode = yield* Effect.promise(() => child.exited)
+      const stderr = yield* Effect.promise(() => new Response(child.stderr).text())
+      if (exitCode !== 0) return yield* Effect.die(`Owner race worker failed: ${stderr}`)
+
+      expect(Exit.isFailure(replay)).toBe(true)
+      expect(
+        yield* db
+          .select({ ownerID: EventSequenceTable.owner_id })
+          .from(EventSequenceTable)
+          .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ ownerID: "owner-race-b" })
+    }).pipe(Effect.provide(replayLayer), Effect.scoped),
+  )
+}, 5_000)

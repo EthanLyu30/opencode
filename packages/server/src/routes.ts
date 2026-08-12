@@ -34,6 +34,7 @@ const applicationServices = LayerNode.group([
   ToolOutputStore.cleanupNode,
   SessionV2.node,
   WorkflowV2.node,
+  WorkflowExecution.node,
   ResponsesV2.node,
   PermissionSaved.node,
   PtyTicket.node,
