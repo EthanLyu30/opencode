@@ -1,7 +1,8 @@
 import type { HttpRecorder } from "@opencode-ai/http-recorder"
 import { describe } from "bun:test"
 import { Effect } from "effect"
-import type { Model } from "../src"
+import type { LLMRequest, Model } from "../src"
+import { LLMClient } from "../src/route"
 import { goldenScenarioTags, goldenScenarioTitle, runGoldenScenario, type GoldenScenarioID } from "./recorded-scenarios"
 import { recordedTests } from "./recorded-test"
 import { kebab } from "./recorded-utils"
@@ -32,6 +33,29 @@ type TargetInput = {
   readonly options?: HttpRecorder.RecorderOptions
   readonly scenarios: ReadonlyArray<ScenarioInput>
 }
+
+type Task21RequestBudget = {
+  readonly authorize: (id: "design-vision-review" | "flash-text-tool", body: unknown) => void
+}
+
+export const authorizeTask21RecordedRequest = Effect.fn("RecordedGolden.authorizeTask21Request")(function* (
+  budget: Task21RequestBudget,
+  id: "design-vision-review" | "flash-text-tool",
+  request: LLMRequest,
+) {
+  const prepared = yield* LLMClient.prepare<Record<string, unknown>>(request)
+  yield* Effect.sync(() => budget.authorize(id, prepared.body))
+  return prepared
+})
+
+export const generateTask21RecordedRequest = Effect.fn("RecordedGolden.generateTask21Request")(function* (
+  budget: Task21RequestBudget,
+  id: "design-vision-review" | "flash-text-tool",
+  request: LLMRequest,
+) {
+  yield* authorizeTask21RecordedRequest(budget, id, request)
+  return yield* LLMClient.generate(request)
+})
 
 const scenarioInput = (input: ScenarioInput) => (typeof input === "string" ? { id: input } : input)
 

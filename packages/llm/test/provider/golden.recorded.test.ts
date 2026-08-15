@@ -1,3 +1,5 @@
+import { describe, expect } from "bun:test"
+import { Effect, Schema } from "effect"
 import * as Anthropic from "../../src/providers/anthropic"
 import { CloudflareAIGateway, CloudflareWorkersAI } from "../../src/providers/cloudflare"
 import * as Google from "../../src/providers/google"
@@ -5,7 +7,11 @@ import * as OpenAI from "../../src/providers/openai"
 import * as OpenAICompatible from "../../src/providers/openai-compatible"
 import * as OpenRouter from "../../src/providers/openrouter"
 import * as XAI from "../../src/providers/xai"
-import { describeRecordedGoldenScenarios } from "../recorded-golden"
+import { LLM, LLMEvent, MediaPart, Message } from "../../src"
+import { DeepSeek, Kimi } from "../../src/providers"
+import { assertTask21CassetteSafe, makeTask21LiveBudget, redactTask21Body } from "../../script/task21-live-contract"
+import { describeRecordedGoldenScenarios, generateTask21RecordedRequest } from "../recorded-golden"
+import { recordedTests } from "../recorded-test"
 
 const openAI = OpenAI.configure({
   apiKey: process.env.OPENAI_API_KEY ?? "fixture",
@@ -221,3 +227,145 @@ describeRecordedGoldenScenarios([
     scenarios: ["tool-loop"],
   },
 ])
+
+const task21RecorderOptions = {
+  redact: {
+    headers: ["authorization", "cookie", "set-cookie", "x-request-id"],
+    jsonFields: ["authorization", "cookie", "request_id"],
+    body: redactTask21Body,
+  },
+}
+
+const task21ReplayEnv = {
+  RECORD: "true",
+  RECORDED_PREFIX: "kimi-k3,deepseek-responses",
+  TASK21_LIVE_TOKEN_CEILING: "512",
+  DEEPSEEK_API_KEY: "fixture-deepseek-key",
+  MOONSHOT_API_KEY: "fixture-kimi-key",
+}
+
+let task21Budget: ReturnType<typeof makeTask21LiveBudget> | undefined
+const getTask21Budget = () =>
+  (task21Budget ??= makeTask21LiveBudget(process.env.RECORD === "true" ? process.env : task21ReplayEnv))
+
+const assertTask21Fixture = (relative: string) =>
+  Effect.promise(() => Bun.file(new URL(`../fixtures/recordings/${relative}.json`, import.meta.url)).json()).pipe(
+    Effect.tap((cassette) => Effect.sync(() => assertTask21CassetteSafe(cassette))),
+  )
+
+const kimiTask21 = recordedTests({
+  prefix: "kimi-k3",
+  provider: "kimi",
+  protocol: "openai-compatible-chat",
+  requires: ["MOONSHOT_API_KEY"],
+  tags: ["task21", "vision", "structured-output"],
+  options: task21RecorderOptions,
+})
+
+const Task21Review = Schema.Struct({ approved: Schema.Boolean, summary: Schema.String })
+const decodeTask21Review = Schema.decodeUnknownSync(Schema.fromJsonString(Task21Review))
+
+describe("Kimi K3 Task21 recorded", () => {
+  kimiTask21.effect.with("design vision review", { cassette: "kimi-k3/design-vision-review" }, () =>
+    Effect.gen(function* () {
+      const request = LLM.request({
+        model: Kimi.configure({ apiKey: process.env.MOONSHOT_API_KEY ?? "fixture" }).model("kimi-k3"),
+        system: "Review one reference image. Return only the requested compact JSON object.",
+        messages: [
+          Message.user([
+            MediaPart.make({
+              mediaType: "image/png",
+              data: Uint8Array.from(
+                Buffer.from(
+                  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                  "base64",
+                ),
+              ),
+            }),
+            Message.text("Approve this one-pixel reference and summarize it in at most eight words."),
+          ]),
+        ],
+        responseFormat: {
+          type: "json",
+          schema: {
+            type: "object",
+            properties: { approved: { type: "boolean" }, summary: { type: "string" } },
+            required: ["approved", "summary"],
+            additionalProperties: false,
+          },
+        },
+        generation: { maxTokens: 256 },
+        providerOptions: { kimi: { reasoningEffort: "low" } },
+      })
+      const response = yield* generateTask21RecordedRequest(getTask21Budget(), "design-vision-review", request)
+      const review = decodeTask21Review(response.text)
+
+      expect(review.summary.length).toBeGreaterThan(0)
+      expect(response.events.filter(LLMEvent.is.finish)).toHaveLength(1)
+      expect(response.events.at(-1)).toMatchObject({ type: "finish", reason: "stop" })
+      expect(response.usage?.inputTokens ?? 0).toBeGreaterThan(0)
+      expect(response.usage?.outputTokens ?? 0).toBeGreaterThan(0)
+      yield* assertTask21Fixture("kimi-k3/design-vision-review")
+    }),
+  )
+})
+
+const deepseekTask21 = recordedTests({
+  prefix: "deepseek-responses",
+  provider: "deepseek",
+  protocol: "openai-responses",
+  requires: ["DEEPSEEK_API_KEY"],
+  tags: ["task21", "text", "tool"],
+  options: task21RecorderOptions,
+})
+
+describe("DeepSeek Responses Task21 recorded", () => {
+  deepseekTask21.effect.with("flash text tool", { cassette: "deepseek-responses/flash-text-tool" }, () =>
+    Effect.gen(function* () {
+      const model = DeepSeek.configure({ apiKey: process.env.DEEPSEEK_API_KEY ?? "fixture" }).responses(
+        "deepseek-v4-flash",
+      )
+      const first = LLM.request({
+        model,
+        system:
+          "Call read_file exactly once. After its result, answer exactly `primary=#0057ff`; do not call another tool.",
+        prompt: "Read tokens.json and report its primary color.",
+        tools: [
+          {
+            name: "read_file",
+            description: "Read one named design-token file.",
+            inputSchema: {
+              type: "object",
+              properties: { path: { type: "string" } },
+              required: ["path"],
+              additionalProperties: false,
+            },
+          },
+        ],
+        generation: { maxTokens: 128 },
+      })
+      const toolResponse = yield* generateTask21RecordedRequest(getTask21Budget(), "flash-text-tool", first)
+      const calls = toolResponse.events.filter(LLMEvent.is.toolCall)
+      expect(calls).toHaveLength(1)
+      expect(calls[0]).toMatchObject({ name: "read_file", input: { path: "tokens.json" } })
+
+      const call = calls[0]
+      const second = LLM.updateRequest(first, {
+        tools: [],
+        messages: [
+          ...first.messages,
+          toolResponse.message,
+          Message.tool({ id: call.id, name: call.name, result: { primary: "#0057ff" } }),
+        ],
+      })
+      const response = yield* generateTask21RecordedRequest(getTask21Budget(), "flash-text-tool", second)
+
+      expect(response.text.toLowerCase()).toContain("primary=#0057ff")
+      expect(response.events.filter(LLMEvent.is.finish)).toHaveLength(1)
+      expect(response.events.at(-1)).toMatchObject({ type: "finish", reason: "stop" })
+      expect(response.usage?.inputTokens ?? 0).toBeGreaterThan(0)
+      expect(response.usage?.outputTokens ?? 0).toBeGreaterThan(0)
+      yield* assertTask21Fixture("deepseek-responses/flash-text-tool")
+    }),
+  )
+})

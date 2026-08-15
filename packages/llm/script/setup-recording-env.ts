@@ -8,6 +8,7 @@ import { Config, ConfigProvider, Effect, FileSystem, PlatformError, Redacted } f
 import { FetchHttpClient, HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
 import * as ProviderShared from "../src/protocols/shared"
 import * as Cloudflare from "../src/providers/cloudflare"
+import { formatTask21DryRun } from "./task21-live-contract"
 
 type Provider = {
   readonly id: string
@@ -149,9 +150,17 @@ const PROVIDERS: ReadonlyArray<Provider> = [
     id: "deepseek",
     label: "DeepSeek",
     tier: "compatible",
-    note: "Existing OpenAI-compatible recorded tests",
+    note: "Native Responses and compatible Chat recorded tests",
     vars: [{ name: "DEEPSEEK_API_KEY" }],
     validate: (env) => validateBearer("https://api.deepseek.com/models", Redacted.make(env.DEEPSEEK_API_KEY)),
+  },
+  {
+    id: "kimi",
+    label: "Kimi K3",
+    tier: "compatible",
+    note: "Kimi K3 Chat vision and structured-output recorded tests",
+    vars: [{ name: "MOONSHOT_API_KEY" }],
+    validate: (env) => validateBearer("https://api.moonshot.cn/v1/models", Redacted.make(env.MOONSHOT_API_KEY)),
   },
   {
     id: "togetherai",
@@ -230,6 +239,7 @@ const option = (name: string) => {
 
 const envPath = path.resolve(process.cwd(), option("--env") ?? ".env.local")
 const checkOnly = hasFlag("--check")
+const task21DryRun = hasFlag("--task21-dry-run")
 const providerOption = option("--providers")
 const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
 
@@ -503,6 +513,10 @@ const promptProviderValues = Effect.fn("RecordingEnv.promptProviderValues")(func
 })
 
 const main = Effect.fn("RecordingEnv.main")(function* () {
+  if (task21DryRun) {
+    console.log(formatTask21DryRun())
+    return
+  }
   prompts.intro("LLM recording credentials")
   const contents = yield* readEnvFile()
   const fileEnv = yield* parseEnv(contents)
