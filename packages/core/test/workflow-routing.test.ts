@@ -53,7 +53,7 @@ const cases = [
   [
     "implement",
     "deepseek",
-    "deepseek-v4-flash",
+    "deepseek-v4-pro",
     "openai-responses",
     "max",
     ["responses", "structured_output", "required_tool_choice"],
@@ -69,7 +69,7 @@ const cases = [
   [
     "repair",
     "deepseek",
-    "deepseek-v4-flash",
+    "deepseek-v4-pro",
     "openai-responses",
     "max",
     ["responses", "structured_output", "required_tool_choice"],
@@ -77,7 +77,7 @@ const cases = [
   [
     "deliver",
     "deepseek",
-    "deepseek-v4-flash",
+    "deepseek-v4-pro",
     "openai-responses",
     "high",
     ["responses", "structured_output", "required_tool_choice"],
@@ -118,16 +118,12 @@ describe("WorkflowRouting", () => {
     ["design", { providerID: "kimi", modelID: "kimi-k2.7", protocol: "openai-chat" }, false, "chat"],
     [
       "implement",
-      { providerID: "deepseek", modelID: "deepseek-v4-pro", protocol: "openai-responses" },
-      true,
-      "responses",
-    ],
-    [
-      "implement",
-      { providerID: "deepseek", modelID: "deepseek-v4-flash", protocol: "openai-chat" },
+      { providerID: "deepseek", modelID: "deepseek-v4-flash", protocol: "openai-responses" },
       false,
       "responses",
     ],
+    ["test", { providerID: "deepseek", modelID: "deepseek-v4-pro", protocol: "openai-responses" }, false, "responses"],
+    ["implement", { providerID: "deepseek", modelID: "deepseek-v4-pro", protocol: "openai-chat" }, false, "responses"],
     [
       "visual_review",
       { providerID: "deepseek", modelID: "deepseek-v4-flash", protocol: "openai-responses" },
@@ -153,11 +149,23 @@ describe("WorkflowRouting", () => {
       budget,
       requested: {
         providerID: "deepseek",
-        modelID: "deepseek-v4-flash",
+        modelID: "deepseek-v4-pro",
         protocol: "openai-responses",
       },
     })
-    expect(route.modelID).toBe("deepseek-v4-flash")
+    expect(route.modelID).toBe("deepseek-v4-pro")
+  })
+
+  test.each([
+    ["implement", "deepseek-v4-flash"],
+    ["test", "deepseek-v4-pro"],
+    ["repair", "deepseek-v4-flash"],
+  ] as const)("does not let a linked Response replace the %s role model", (role, modelID) => {
+    const route = WorkflowRouting.resolve({ role, budget })
+
+    expect(() => WorkflowRouting.forResponseModel(route, modelID)).toThrow(
+      "Only a deliver stage can execute an explicitly selected Response model",
+    )
   })
 
   test("redacts secret-shaped route overrides from policy diagnostics", () => {

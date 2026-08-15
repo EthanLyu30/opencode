@@ -35,17 +35,19 @@ The existing DeepSeek Responses validator, body projection, SSE parser, tool han
 
 Role routing becomes:
 
-| Role | Provider | Model | Protocol | Effort |
-| --- | --- | --- | --- | --- |
-| `design` | Kimi | `kimi-k3` | Chat | max |
-| `decompose` | Kimi | `kimi-k3` | Chat | high |
-| `implement` | DeepSeek | `deepseek-v4-pro` | Responses | max |
-| `test` | DeepSeek | `deepseek-v4-flash` | Responses | high |
-| `visual_review` | Kimi | `kimi-k3` | Chat | max |
-| `repair` | DeepSeek | `deepseek-v4-pro` | Responses | max |
-| `deliver` | DeepSeek | `deepseek-v4-pro` | Responses | high |
+| Role            | Provider | Model               | Protocol  | Effort |
+| --------------- | -------- | ------------------- | --------- | ------ |
+| `design`        | Kimi     | `kimi-k3`           | Chat      | max    |
+| `decompose`     | Kimi     | `kimi-k3`           | Chat      | high   |
+| `implement`     | DeepSeek | `deepseek-v4-pro`   | Responses | max    |
+| `test`          | DeepSeek | `deepseek-v4-flash` | Responses | high   |
+| `visual_review` | Kimi     | `kimi-k3`           | Chat      | max    |
+| `repair`        | DeepSeek | `deepseek-v4-pro`   | Responses | max    |
+| `deliver`       | DeepSeek | `deepseek-v4-pro`   | Responses | high   |
 
 The policy remains exact and role-based. A caller may restate the exact route for a stage, but may not replace Pro with Flash on a Pro stage, replace Flash with Pro on the test stage, or change Responses to Chat. Such changes remain typed policy violations rather than fallbacks.
+
+That stage-route rule is distinct from the public Responses API's explicit `model` field. A `deliver` stage bound to a direct Responses request executes the requested, capability-validated DeepSeek Responses model (`deepseek-v4-flash` or `deepseek-v4-pro`) for that Response only. This preserves existing Flash gateway behavior while keeping the automatic role policy on Pro. The explicit choice is carried through tool continuations and never becomes a fallback or a stage `route` override.
 
 ## Responses Gateway Behavior
 
@@ -81,8 +83,9 @@ Tests must prove:
 3. Incompatible model/protocol overrides fail with non-planned typed diagnostics.
 4. A native Pro request reaches `/responses` with `model: "deepseek-v4-pro"` and preserves structured output, tools, SSE terminal events, and usage.
 5. The embedded Responses gateway admits Pro and returns a terminal resource through the existing local workflow runtime.
-6. Existing Flash behavior and all Kimi K3-only constraints remain unchanged.
-7. No API key, authorization header, provider body, or reasoning marked non-persistable enters durable state or logs.
+6. The embedded Responses gateway also continues to execute an explicitly requested Flash Response, including multi-turn tool continuation, without changing the automatic `deliver` policy.
+7. Existing Flash behavior and all Kimi K3-only constraints remain unchanged.
+8. No API key, authorization header, provider body, or reasoning marked non-persistable enters durable state or logs.
 
 ## Documentation and Task Placement
 

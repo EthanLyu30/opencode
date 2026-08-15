@@ -38,9 +38,7 @@ describe("model capability contracts", () => {
       "required_tool_choice",
     ])
     expect([...kimi.plannedCapabilities]).toEqual([])
-    expect(Capabilities.supportsModelCapability({ provider: "kimi", model: "kimi-k3", required: "chat" })).toBe(
-      true,
-    )
+    expect(Capabilities.supportsModelCapability({ provider: "kimi", model: "kimi-k3", required: "chat" })).toBe(true)
 
     for (const model of ["kimi-k2.6", "kimi-k2.7", "kimi-k2.7-code"]) {
       expect(Capabilities.getModelCapabilityProfile("kimi", model)).toBeUndefined()
@@ -67,41 +65,26 @@ describe("model capability contracts", () => {
     expect([...flash.plannedCapabilities]).toEqual([])
   })
 
-  test("reserves but does not prematurely enable Responses for DeepSeek V4 Pro", () => {
+  test("selects native Responses for DeepSeek V4 Pro", () => {
     const pro = profile("deepseek", "deepseek-v4-pro")
 
-    expect(pro.protocol).toBe("openai-chat")
-    expect([...pro.capabilities]).toEqual(["chat", "structured_output"])
-    expect([...pro.plannedCapabilities]).toEqual(["responses"])
+    expect(pro.protocol).toBe("openai-responses")
+    expect([...pro.capabilities]).toEqual(["chat", "responses", "structured_output", "required_tool_choice"])
+    expect([...pro.plannedCapabilities]).toEqual([])
     expect(
       Capabilities.supportsModelCapability({
         provider: "deepseek",
         model: "deepseek-v4-pro",
         required: "responses",
       }),
-    ).toBe(false)
-
-    const error = unsupported(() =>
-      Capabilities.requireModelCapability({
-        provider: "deepseek",
-        model: "deepseek-v4-pro",
-        required: "responses",
-      }),
-    )
-    expect(error.supported).toEqual(["chat", "structured_output"])
-    expect(error.planned).toBe(true)
-    expect(error.message).toBe(
-      "deepseek/deepseek-v4-pro does not support responses yet; it is planned (supported: chat, structured_output)",
-    )
-
-    const toolChoice = unsupported(() =>
-      Capabilities.requireModelCapability({
+    ).toBe(true)
+    expect(
+      Capabilities.supportsModelCapability({
         provider: "deepseek",
         model: "deepseek-v4-pro",
         required: "required_tool_choice",
       }),
-    )
-    expect(toolChoice.planned).toBe(false)
+    ).toBe(true)
   })
 
   test("does not expose mutable canonical capability sets", () => {
@@ -117,8 +100,8 @@ describe("model capability contracts", () => {
         model: "deepseek-v4-pro",
         required: "responses",
       }),
-    ).toBe(false)
-    expect([...profile("deepseek", "deepseek-v4-pro").capabilities]).not.toContain("responses")
+    ).toBe(true)
+    expect([...profile("deepseek", "deepseek-v4-pro").capabilities]).toContain("responses")
   })
 })
 
@@ -139,13 +122,11 @@ describe("provider capability routing", () => {
     expect(flash.route.id).toBe("openai-responses")
     expect(flash.route.endpoint.baseURL).toBe("https://api.deepseek.com")
     expect(String(DeepSeek.responses("deepseek-v4-flash").provider)).toBe("deepseek")
+    expect(DeepSeek.model("deepseek-v4-pro").route.id).toBe("openai-responses")
+    expect(DeepSeek.responses("deepseek-v4-pro").route.id).toBe("openai-responses")
     expect(DeepSeek.chat("deepseek-v4-pro").route.id).toBe("openai-compatible-chat")
     expect(
       DeepSeek.configure({ baseURL: "https://deepseek.test" }).responses("deepseek-v4-flash").route.endpoint.baseURL,
     ).toBe("https://deepseek.test")
-
-    const error = unsupported(() => DeepSeek.model("deepseek-v4-pro"))
-    expect(error.required).toBe("responses")
-    expect(error.planned).toBe(true)
   })
 })

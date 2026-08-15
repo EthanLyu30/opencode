@@ -169,11 +169,11 @@ describe("Responses protocol groups", () => {
     expect(
       new UnsupportedModelCapabilityError({
         provider: "deepseek",
-        model: "deepseek-v4-pro",
+        model: "deepseek-v5-future",
         required: "responses",
-        supported: ["chat", "structured_output"],
-        planned: true,
-        message: "deepseek-v4-pro does not support Responses yet",
+        supported: [],
+        planned: false,
+        message: "deepseek-v5-future does not support Responses",
       })._tag,
     ).toBe("UnsupportedModelCapabilityError")
   })

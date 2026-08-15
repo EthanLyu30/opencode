@@ -57,7 +57,7 @@ test("embedded gateway handles foreground and background contracts without dropp
       const foreground = yield* opencode.responses.create({
         id: foregroundID,
         workflowID,
-        model: "deepseek-v4-flash",
+        model: "deepseek-v4-pro",
         background: false,
         store: true,
         requestHash: `sha256:${foregroundID}`,
@@ -87,7 +87,7 @@ test("embedded gateway handles foreground and background contracts without dropp
       const background = yield* opencode.responses.create({
         id: backgroundID,
         workflowID: backgroundWorkflowID,
-        model: "deepseek-v4-flash",
+        model: "deepseek-v4-pro",
         background: true,
         store: true,
         requestHash: `sha256:${backgroundID}`,
@@ -113,13 +113,42 @@ test("embedded gateway handles foreground and background contracts without dropp
       })
       const generated = yield* opencode.responses.create({
         workflowID: generatedWorkflowID,
-        model: "deepseek-v4-flash",
+        model: "deepseek-v4-pro",
         background: false,
         store: true,
         requestHash: `sha256:generated:${crypto.randomUUID()}`,
         input: [{ type: "message", role: "user", content: "generated id" }],
       })
       if (Stream.isStream(generated)) return yield* Effect.die("Expected JSON, received SSE")
+
+      const proWorkflowID = Workflow.ID.make(`wfl_pro_${crypto.randomUUID()}`)
+      const proID = Responses.ID.make(`resp_pro_${crypto.randomUUID()}`)
+      yield* opencode.workflows.create({
+        id: proWorkflowID,
+        type: "responses-gateway-pro",
+        input: {},
+        budget: { maxAttempts: 1 },
+        stages: [
+          {
+            type: "deliver",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: `gateway/${proWorkflowID}`,
+            input: { responseID: proID },
+          },
+        ],
+      })
+      const pro = yield* opencode.responses.create({
+        id: proID,
+        workflowID: proWorkflowID,
+        model: "deepseek-v4-pro",
+        background: false,
+        store: true,
+        requestHash: `sha256:${proID}`,
+        input: [{ type: "message", role: "user", content: "native pro" }],
+      })
+      if (Stream.isStream(pro)) return yield* Effect.die("Expected JSON, received SSE")
 
       const unsupported = yield* opencode.responses
         .create({
@@ -135,7 +164,7 @@ test("embedded gateway handles foreground and background contracts without dropp
       const unsupportedModel = yield* opencode.responses
         .create({
           workflowID,
-          model: "deepseek-v4-pro",
+          model: "deepseek-v5-future",
           background: false,
           store: true,
           requestHash: `sha256:unsupported-model:${crypto.randomUUID()}`,
@@ -150,13 +179,14 @@ test("embedded gateway handles foreground and background contracts without dropp
       expect(background).toMatchObject({ id: backgroundID, background: true, status: "queued" })
       expect(retrieved.id).toBe(backgroundID)
       expect(generated.id).toStartWith("resp_")
+      expect(pro).toMatchObject({ id: proID, model: "deepseek-v4-pro", status: "failed" })
       expect(unsupported).toMatchObject({ _tag: "UnsupportedCapabilityError", capability: "tools" })
       expect(unsupportedModel).toMatchObject({
         _tag: "UnsupportedModelCapabilityError",
         provider: "deepseek",
-        model: "deepseek-v4-pro",
+        model: "deepseek-v5-future",
         required: "responses",
-        planned: true,
+        planned: false,
       })
     }),
   )

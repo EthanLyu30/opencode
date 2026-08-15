@@ -35,10 +35,10 @@ describe("workflow model state-machine conformance", () => {
     const expected: ReadonlyArray<readonly [string, string, string, string]> = [
       ["design", "kimi", "kimi-k3", "openai-chat"],
       ["decompose", "kimi", "kimi-k3", "openai-chat"],
-      ["implement", "deepseek", "deepseek-v4-flash", "openai-responses"],
+      ["implement", "deepseek", "deepseek-v4-pro", "openai-responses"],
       ["test", "deepseek", "deepseek-v4-flash", "openai-responses"],
       ["visual_review", "kimi", "kimi-k3", "openai-chat"],
-      ["deliver", "deepseek", "deepseek-v4-flash", "openai-responses"],
+      ["deliver", "deepseek", "deepseek-v4-pro", "openai-responses"],
     ]
     const verdicts = ["ready", "ready", "ready", "pass", "pass", "complete"]
     const actual: Array<readonly [string, string, string, string]> = []
@@ -71,7 +71,7 @@ describe("workflow model state-machine conformance", () => {
 
     expect([route.providerID, route.modelID, route.model.route.protocol]).toEqual([
       "deepseek",
-      "deepseek-v4-flash",
+      "deepseek-v4-pro",
       "openai-responses",
     ])
     expect(afterRepair).toEqual({ status: "active", role: "test", revision: 1 })

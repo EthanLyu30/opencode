@@ -823,7 +823,7 @@ test("concurrent foreground store:false JSON and SSE retries share one terminal 
                 opencode.responses.create({
                   id: jsonCandidate,
                   workflowID,
-                  model: "deepseek-v4-flash",
+                  model: "deepseek-v4-pro",
                   background: false,
                   store: false,
                   stream: false,
@@ -833,7 +833,7 @@ test("concurrent foreground store:false JSON and SSE retries share one terminal 
                 opencode.responses.create({
                   id: sseCandidate,
                   workflowID,
-                  model: "deepseek-v4-flash",
+                  model: "deepseek-v4-pro",
                   background: false,
                   store: false,
                   stream: true,
@@ -1014,7 +1014,7 @@ test("production embedded runtime executes Responses context through exact crede
             yield* opencode.workflows.create(roleWorkflowInput(workflowID))
             const admitted = yield* opencode.responses.create({
               workflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               previous_response_id: parentID,
@@ -1073,7 +1073,7 @@ test("production embedded runtime executes Responses context through exact crede
             yield* opencode.workflows.create(roleWorkflowInput(unsupportedChildWorkflowID))
             const unsupported = yield* opencode.responses.create({
               workflowID: unsupportedChildWorkflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               previous_response_id: unsupportedParentID,
@@ -1108,6 +1108,28 @@ test("production embedded runtime executes Responses context through exact crede
       ...productionURLs,
       ...productionURLs,
       ...productionURLs.slice(0, 5),
+    ])
+    const productionModels = [
+      "kimi-k3",
+      "kimi-k3",
+      "deepseek-v4-pro",
+      "deepseek-v4-flash",
+      "kimi-k3",
+      "deepseek-v4-pro",
+      "deepseek-v4-pro",
+    ]
+    expect(
+      requests.map((request) =>
+        typeof request.body === "object" && request.body !== null && "model" in request.body
+          ? request.body.model
+          : undefined,
+      ),
+    ).toEqual([
+      ...productionModels,
+      ...productionModels.slice(0, 5),
+      "deepseek-v4-flash",
+      "deepseek-v4-flash",
+      ...productionModels.slice(0, 5),
     ])
     expect(requests.map((request) => request.authorization)).toEqual(
       Array.from({ length: 19 }, () => `Bearer ${authSentinel}`),
@@ -1242,7 +1264,7 @@ test("production tool continuation survives a crash into incomplete without re-e
           yield* responses.create({
             id: responseID,
             workflowID,
-            model: "deepseek-v4-flash",
+            model: "deepseek-v4-pro",
             background: false,
             store: true,
             requestHash: `sha256:${responseID}`,
@@ -1508,7 +1530,7 @@ test("production tool pending intent survives a pre-result crash without re-exec
           yield* responses.create({
             id: responseID,
             workflowID,
-            model: "deepseek-v4-flash",
+            model: "deepseek-v4-pro",
             background: false,
             store: true,
             requestHash: `sha256:${responseID}`,
@@ -1712,7 +1734,7 @@ test("HTTP cancellation atomically cancels a Response and fences a late producti
             yield* opencode.responses.create({
               id: responseID,
               workflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: true,
               store: true,
               requestHash: `sha256:${responseID}`,
@@ -1901,7 +1923,7 @@ test("concurrent HTTP retries with one request hash admit one response for one w
                 opencode.responses.create({
                   id: responseID,
                   workflowID,
-                  model: "deepseek-v4-flash",
+                  model: "deepseek-v4-pro",
                   background: true,
                   store: true,
                   requestHash,
@@ -2004,7 +2026,7 @@ test("foreground JSON POST waits for and returns the complete terminal Response"
             const created = yield* opencode.responses.create({
               id: responseID,
               workflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               stream: false,
@@ -2067,7 +2089,7 @@ test("foreground streaming POST returns one semantic SSE lifecycle ending at the
             const created = yield* opencode.responses.create({
               id: responseID,
               workflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               stream: true,
@@ -2139,7 +2161,7 @@ test("foreground store:false POST returns its terminal payload once without enab
             const input = {
               id: responseID,
               workflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: false,
               stream: false,
@@ -2215,7 +2237,7 @@ test("foreground store:false streaming POST returns the transient terminal paylo
             const created = yield* opencode.responses.create({
               id: responseID,
               workflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: false,
               stream: true,
@@ -2286,7 +2308,7 @@ test("a pre-deliver provider failure atomically fails the bound foreground Respo
             const failed = yield* opencode.responses.create({
               id: responseID,
               workflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               stream: false,
@@ -2303,7 +2325,7 @@ test("a pre-deliver provider failure atomically fails the bound foreground Respo
             const transient = yield* opencode.responses.create({
               id: transientResponseID,
               workflowID: transientWorkflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: false,
               stream: true,
@@ -2390,7 +2412,7 @@ test("production hosted web search persists to output and conversation and repla
             const parent = yield* opencode.responses.create({
               id: parentID,
               workflowID: parentWorkflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               stream: false,
@@ -2429,7 +2451,7 @@ test("production hosted web search persists to output and conversation and repla
             const child = yield* opencode.responses.create({
               id: childID,
               workflowID: childWorkflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               stream: false,
@@ -2581,7 +2603,7 @@ test("all native incomplete terminals settle JSON and SSE as replayable partial 
             const json = yield* opencode.responses.create({
               id: jsonID,
               workflowID: jsonWorkflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               stream: false,
@@ -2608,7 +2630,7 @@ test("all native incomplete terminals settle JSON and SSE as replayable partial 
             const sse = yield* opencode.responses.create({
               id: sseID,
               workflowID: sseWorkflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               stream: true,
@@ -2639,7 +2661,7 @@ test("all native incomplete terminals settle JSON and SSE as replayable partial 
             const unknown = yield* opencode.responses.create({
               id: unknownID,
               workflowID: unknownWorkflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               stream: false,
@@ -2798,7 +2820,7 @@ test("native response.failed usage settles Workflow and Response once without pe
             const stream = yield* opencode.responses.create({
               id: responseID,
               workflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: true,
               stream: true,
@@ -3273,10 +3295,10 @@ test("unsupported DeepSeek fields remain explicit diagnostics", async () => {
               reasoning: { effort: "high" },
             })
             .pipe(Effect.flip)
-          const futureModel = yield* opencode.responses
+          const unknownModel = yield* opencode.responses
             .create({
               workflowID,
-              model: "deepseek-v4-pro",
+              model: "deepseek-v5-future",
               background: false,
               store: true,
               requestHash: `sha256:model:${crypto.randomUUID()}`,
@@ -3301,13 +3323,13 @@ test("unsupported DeepSeek fields remain explicit diagnostics", async () => {
             kind: "invalid_combination",
             field: "stream",
           })
-          expect(futureModel).toMatchObject({
+          expect(unknownModel).toMatchObject({
             _tag: "UnsupportedModelCapabilityError",
             provider: "deepseek",
-            model: "deepseek-v4-pro",
+            model: "deepseek-v5-future",
             required: "responses",
-            supported: ["chat", "structured_output"],
-            planned: true,
+            supported: [],
+            planned: false,
           })
         }),
       ),

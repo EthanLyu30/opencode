@@ -19,6 +19,32 @@ const request = LLM.request({
   generation: { maxTokens: 64 },
 })
 
+const proRequest = LLM.request({
+  model: DeepSeek.configure({ baseURL: "https://api.deepseek.test", apiKey: "test" }).responses("deepseek-v4-pro"),
+  prompt: "Return a title.",
+  responseFormat: {
+    type: "json",
+    schema: {
+      type: "object",
+      properties: { title: { type: "string" } },
+      required: ["title"],
+      additionalProperties: false,
+    },
+  },
+  tools: [
+    {
+      name: "read_file",
+      description: "Read one file.",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+  ],
+})
+
 const fixture = (name: string) =>
   Bun.file(new URL(`../fixtures/deepseek-responses/${name}.json`, import.meta.url)).json() as Promise<
     ReadonlyArray<Record<string, unknown>>
@@ -69,6 +95,36 @@ describe("DeepSeek native Responses route", () => {
           ),
         ),
       )
+    }),
+  )
+
+  it.effect("routes V4 Pro through native Responses without changing its model id or contract", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(proRequest)
+      expect(prepared.route).toBe("openai-responses")
+      expect(prepared.body.model).toBe("deepseek-v4-pro")
+      expect(prepared.body.tools).toEqual([
+        expect.objectContaining({ type: "function", name: "read_file", strict: false }),
+      ])
+      expect(prepared.body.text).toEqual({
+        format: expect.objectContaining({ type: "json_schema", name: "response", strict: true }),
+      })
+
+      const events = yield* Effect.promise(() => fixture("text-stream"))
+      const response = yield* LLMClient.generate(proRequest).pipe(
+        Effect.provide(
+          dynamicResponse(({ request, text, respond }) =>
+            Effect.gen(function* () {
+              const web = yield* HttpClientRequest.toWeb(request).pipe(Effect.orDie)
+              expect(web.url).toBe("https://api.deepseek.test/responses")
+              expect(JSON.parse(text)).toMatchObject({ model: "deepseek-v4-pro", stream: true })
+              return respond(deepSeekSSE(events), { headers: { "content-type": "text/event-stream" } })
+            }),
+          ),
+        ),
+      )
+      expect(response.text).toBe("你好！")
+      expect(response.usage).toEqual(expect.objectContaining({ totalTokens: 135 }))
     }),
   )
 

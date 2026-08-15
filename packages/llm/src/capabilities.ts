@@ -63,11 +63,8 @@ const definitions = [
   {
     provider: "deepseek",
     model: "deepseek-v4-pro",
-    // Promotion gate: after official Responses support and Task14 wire fixtures
-    // are verified, switch the preferred protocol and move "responses" below.
-    protocol: "openai-chat",
-    capabilities: ["chat", "structured_output"],
-    plannedCapabilities: ["responses"],
+    protocol: "openai-responses",
+    capabilities: ["chat", "responses", "structured_output", "required_tool_choice"],
   },
 ] as const satisfies ReadonlyArray<CapabilityDefinition>
 

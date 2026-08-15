@@ -4,7 +4,7 @@
 
 **Goal:** 在已经完成的 Workflow 持久化底座上，实现 Kimi K3 负责设计、拆解与视觉复审，DeepSeek 负责主要编码、测试、修复与交付的自动路由；DeepSeek 原生 Responses 能力直接使用，缺失的资源、会话、后台任务、取消、恢复和重放语义由 OpenCode 本地运行时补齐，并对外提供 Responses 风格兼容接口。
 
-**Architecture:** Provider 层只处理模型原生 wire protocol 并统一为现有 `LLMEvent`；Workflow 层负责跨模型阶段状态机、预算、租约、取消、重试、恢复与工件；Responses Runtime 把 OpenAI Responses 的资源语义映射到 Workflow 和本地 SQLite。Kimi 仅允许 `kimi-k3`，不配置 K2.6/K2.7 降级；DeepSeek `deepseek-v4-flash` 走原生 Responses，`deepseek-v4-pro` 只有在能力探测与官方契约都确认支持后才能进入 Responses 路由。
+**Architecture:** Provider 层只处理模型原生 wire protocol 并统一为现有 `LLMEvent`；Workflow 层负责跨模型阶段状态机、预算、租约、取消、重试、恢复与工件；Responses Runtime 把 OpenAI Responses 的资源语义映射到 Workflow 和本地 SQLite。Kimi 仅允许 `kimi-k3`，不配置 K2.6/K2.7 降级；DeepSeek `deepseek-v4-flash` 与 `deepseek-v4-pro` 均走原生 Responses，具体型号由精确的角色策略选择，绝不静默互相降级。
 
 **Tech Stack:** TypeScript、Bun、Effect 4、Effect Schema、Effect HttpApi、SQLite、Drizzle ORM、现有 `@opencode-ai/llm` route/protocol、Workflow V2、OpenCode client codegen、浏览器渲染截图。
 
@@ -37,17 +37,17 @@
 
 ## Target Capability Matrix
 
-| Provider/model | Native wire protocol | Required Stage B use | Local additions | Failure behavior |
-| --- | --- | --- | --- | --- |
-| `kimi-k3` | Chat Completions | design, decomposition, visual review | preserved reasoning replay, image lowering, strict structured output, artifact validation | typed `unsupported_model` for every older Kimi ID |
-| `deepseek-v4-flash` | Responses | implementation, tests, fixes, delivery | durable response resource, chaining, background, cancellation, replay, conversations | typed capability error if the native contract changes |
-| `deepseek-v4-pro` | Chat today; Responses only after verified support | excluded from Responses-required stages until verified | none by assumption | explicit `responses_not_supported`, never Chat fallback |
+| Provider/model      | Native wire protocol | Required Stage B use                 | Local additions                                                                           | Failure behavior                                                |
+| ------------------- | -------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `kimi-k3`           | Chat Completions     | design, decomposition, visual review | preserved reasoning replay, image lowering, strict structured output, artifact validation | typed `unsupported_model` for every older Kimi ID               |
+| `deepseek-v4-flash` | Responses            | tests                                | durable response resource, chaining, background, cancellation, replay, conversations      | typed capability error if the native contract changes           |
+| `deepseek-v4-pro`   | Responses            | implementation, fixes, delivery      | 与 Flash 共享本地 Responses 生命周期；按角色使用 Pro                                      | typed capability/provider failure, never Flash or Chat fallback |
 
-Official baseline verified on 2026-08-09:
+Official baseline reverified on 2026-08-15:
 
 - Kimi's [model parameter reference](https://platform.kimi.com/docs/api/models-overview) defines `kimi-k3` as a 1M-context model with `low | high | max` reasoning effort, required tool choice, fixed sampling parameters, and preserved assistant reasoning replay.
 - Kimi's [K3 guide](https://platform.kimi.com/docs/guide/kimi-k3-quickstart) documents Chat Completions, image input, strict structured output, tools, and complete assistant-message replay.
-- DeepSeek's [current model table](https://api-docs.deepseek.com/quick_start/pricing/) still marks Responses as supported for `deepseek-v4-flash` and unsupported for `deepseek-v4-pro`.
+- DeepSeek's [current model table](https://api-docs.deepseek.com/quick_start/pricing/) marks Responses as supported for both `deepseek-v4-flash` and `deepseek-v4-pro`; its [models endpoint](https://api-docs.deepseek.com/api/list-models/) lists both identifiers.
 - OpenAI's [Responses migration](https://developers.openai.com/api/docs/guides/migrate-to-responses), [background mode](https://developers.openai.com/api/docs/guides/background), and [conversation state](https://developers.openai.com/api/docs/guides/conversation-state) define the target resource and lifecycle semantics for the local compatibility layer.
 
 ## Responses Compatibility Boundary
@@ -390,3 +390,31 @@ After every task:
 - Push only after the committed task is verified; never force-push `dev`.
 
 At the end of Task20, the offline acceptance target is complete architecture parity inside the modified OpenCode runtime. Task21 validates provider wire assumptions; it does not carry the burden of proving persistence, replay, cancellation, or state-machine correctness.
+
+### Task 22: Promote DeepSeek V4 Pro to Native Responses and Tiered Routing
+
+**Approved design:** `docs/superpowers/specs/2026-08-15-deepseek-v4-pro-responses-design.md`
+
+**Execution plan:** `docs/superpowers/plans/2026-08-15-deepseek-v4-pro-responses-promotion.md`
+
+**Exact route matrix introduced by this task:**
+
+| Role            | Provider/model               | Protocol  | Effort |
+| --------------- | ---------------------------- | --------- | ------ |
+| `design`        | `kimi/kimi-k3`               | Chat      | max    |
+| `decompose`     | `kimi/kimi-k3`               | Chat      | high   |
+| `implement`     | `deepseek/deepseek-v4-pro`   | Responses | max    |
+| `test`          | `deepseek/deepseek-v4-flash` | Responses | high   |
+| `visual_review` | `kimi/kimi-k3`               | Chat      | max    |
+| `repair`        | `deepseek/deepseek-v4-pro`   | Responses | max    |
+| `deliver`       | `deepseek/deepseek-v4-pro`   | Responses | high   |
+
+This table controls automatic role routing. A direct `/v1/responses` request remains free to explicitly select either supported DeepSeek Responses model; its bound `deliver` execution preserves that validated model without changing the stage route policy or introducing fallback.
+
+- [ ] Promote the canonical Pro capability profile from planned Chat-first to native Responses, retaining explicit Chat only as a legacy escape hatch.
+- [ ] Prove the Pro model ID reaches the existing DeepSeek `/responses` route unchanged and shares its structured-output, tool, SSE terminal, and usage semantics.
+- [ ] Change only implement/repair/deliver to Pro; retain Flash for test and Kimi K3 for design/decompose/visual review.
+- [ ] Replace stale gateway diagnostics with deterministic embedded Pro execution coverage; retain unknown-model and unsupported-field errors.
+- [ ] Run focused provider/workflow/protocol/SDK/typecheck/format/secret/diff gates, independently review, commit on `dev`, and push to `fork/dev`.
+
+Task22 supersedes only Task18's original all-Flash DeepSeek tier choice. It does not alter the completed Responses lifecycle work, does not spend provider credits, and does not implement the deferred Location/browser/preview visual host.

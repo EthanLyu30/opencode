@@ -11,7 +11,7 @@ type Capability = Capabilities.ProviderCapability
 
 interface Policy {
   readonly providerID: "kimi" | "deepseek"
-  readonly modelID: "kimi-k3" | "deepseek-v4-flash"
+  readonly modelID: "kimi-k3" | "deepseek-v4-flash" | "deepseek-v4-pro"
   readonly protocol: WorkflowRole.Protocol
   readonly reasoningEffort: WorkflowRole.ReasoningEffort
   readonly requiredCapability: Capability
@@ -37,7 +37,7 @@ const policies = {
   },
   implement: {
     providerID: "deepseek",
-    modelID: "deepseek-v4-flash",
+    modelID: "deepseek-v4-pro",
     protocol: "openai-responses",
     reasoningEffort: "max",
     requiredCapability: "responses",
@@ -61,7 +61,7 @@ const policies = {
   },
   repair: {
     providerID: "deepseek",
-    modelID: "deepseek-v4-flash",
+    modelID: "deepseek-v4-pro",
     protocol: "openai-responses",
     reasoningEffort: "max",
     requiredCapability: "responses",
@@ -69,7 +69,7 @@ const policies = {
   },
   deliver: {
     providerID: "deepseek",
-    modelID: "deepseek-v4-flash",
+    modelID: "deepseek-v4-pro",
     protocol: "openai-responses",
     reasoningEffort: "high",
     requiredCapability: "responses",
@@ -103,7 +103,7 @@ export class InvalidRouteOverride extends Data.TaggedError("WorkflowRouting.Inva
 export interface Route {
   readonly role: WorkflowRole.Role
   readonly providerID: "kimi" | "deepseek"
-  readonly modelID: "kimi-k3" | "deepseek-v4-flash"
+  readonly modelID: "kimi-k3" | "deepseek-v4-flash" | "deepseek-v4-pro"
   readonly protocol: WorkflowRole.Protocol
   readonly reasoningEffort: WorkflowRole.ReasoningEffort
   readonly requiredCapabilities: ReadonlyArray<Capability>
@@ -115,6 +115,31 @@ export interface ResolveInput {
   readonly role: WorkflowRole.Role
   readonly budget: Workflow.Budget
   readonly requested?: WorkflowRole.RequestedRoute
+}
+
+export function forResponseModel(route: Route, modelID: string): Route {
+  if (route.role !== "deliver") {
+    throw new Error("Only a deliver stage can execute an explicitly selected Response model")
+  }
+  if (route.providerID !== "deepseek" || route.protocol !== "openai-responses") {
+    throw new Error("Only DeepSeek Responses routes can execute a linked Response model")
+  }
+
+  for (const required of route.requiredCapabilities) {
+    Capabilities.requireModelCapability({ provider: route.providerID, model: modelID, required })
+  }
+
+  if (modelID !== "deepseek-v4-flash" && modelID !== "deepseek-v4-pro") {
+    throw new Error(`Unsupported DeepSeek Responses model: ${modelID}`)
+  }
+
+  return Object.freeze({
+    ...route,
+    modelID,
+    model: DeepSeek.configure({ providerOptions: { deepseek: { reasoningEffort: route.reasoningEffort } } }).responses(
+      modelID,
+    ),
+  })
 }
 
 export function resolve(input: ResolveInput): Route {

@@ -180,7 +180,19 @@ const productionLayer = Layer.effect(
               ),
             )
           }
-          const continuation = yield* continuationFromStage(input, responseID, responses)
+          const route =
+            response === undefined
+              ? input.route
+              : yield* Effect.try({
+                  try: () => WorkflowRouting.forResponseModel(input.route, response.model),
+                  catch: () =>
+                    executionFailure(
+                      "invalid_request",
+                      "unsupported_response_model",
+                      "The linked Response model is not supported by this workflow route",
+                    ),
+                })
+          const continuation = yield* continuationFromStage(input, responseID, responses, route)
           if (continuation?.activeTurn?.pendingCallID !== undefined && input.stage.recoveryAction !== "retry") {
             return yield* Effect.fail({
               failure: {
@@ -191,13 +203,13 @@ const productionLayer = Layer.effect(
               usage: zeroUsage,
             } satisfies ExecutionFailure)
           }
-          const model = yield* credentialedModel(credentials, input.route).pipe(
+          const model = yield* credentialedModel(credentials, route).pipe(
             Effect.mapError((error) => settleExecutionFailure(response, error)),
           )
           const context =
             responseID === undefined
               ? undefined
-              : yield* responseContext(responses, responseID, input.route).pipe(
+              : yield* responseContext(responses, responseID, route).pipe(
                   Effect.mapError((error) => settleExecutionFailure(response, error)),
                 )
           if (responseID !== undefined) {
@@ -228,15 +240,15 @@ const productionLayer = Layer.effect(
           while (true) {
             if (activeTurn === undefined) {
               if (
-                input.route.budget.maxTurns !== undefined &&
-                input.workflow.usage.turns + usage.turns >= input.route.budget.maxTurns
+                route.budget.maxTurns !== undefined &&
+                input.workflow.usage.turns + usage.turns >= route.budget.maxTurns
               ) {
                 return yield* Effect.fail(budgetFailure("turn", WorkflowRetry.usageDelta(usage, checkpointedUsage)))
               }
               const remainingTokens =
-                input.route.budget.maxTokens === undefined
+                route.budget.maxTokens === undefined
                   ? undefined
-                  : Math.max(0, input.route.budget.maxTokens - input.workflow.usage.tokens - usage.tokens)
+                  : Math.max(0, route.budget.maxTokens - input.workflow.usage.tokens - usage.tokens)
               if (remainingTokens === 0)
                 return yield* Effect.fail(budgetFailure("token", WorkflowRetry.usageDelta(usage, checkpointedUsage)))
               generated = yield* modelClient
@@ -347,8 +359,8 @@ const productionLayer = Layer.effect(
             const settledResults = [...activeTurn.results]
             for (const call of remainingCalls) {
               if (
-                input.route.budget.maxToolCalls !== undefined &&
-                input.workflow.usage.toolCalls + usage.toolCalls + 1 > input.route.budget.maxToolCalls
+                route.budget.maxToolCalls !== undefined &&
+                input.workflow.usage.toolCalls + usage.toolCalls + 1 > route.budget.maxToolCalls
               ) {
                 return yield* Effect.fail(
                   budgetFailure("tool call", WorkflowRetry.usageDelta(usage, checkpointedUsage)),
@@ -358,8 +370,8 @@ const productionLayer = Layer.effect(
               yield* saveContinuation(input, responses, response, {
                 kind: "workflow.model.continuation",
                 version: 1,
-                providerID: input.route.providerID,
-                modelID: input.route.modelID,
+                providerID: route.providerID,
+                modelID: route.modelID,
                 ...(responseID === undefined ? {} : { responseID }),
                 completedTurns: usage.turns,
                 turns: continuationTurns,
@@ -418,8 +430,8 @@ const productionLayer = Layer.effect(
               yield* saveContinuation(input, responses, response, {
                 kind: "workflow.model.continuation",
                 version: 1,
-                providerID: input.route.providerID,
-                modelID: input.route.modelID,
+                providerID: route.providerID,
+                modelID: route.modelID,
                 ...(responseID === undefined ? {} : { responseID }),
                 completedTurns: usage.turns,
                 turns: continuationTurns,
@@ -504,7 +516,12 @@ function responseBindingFromStage(input: Readonly<Record<string, unknown>>) {
   )
 }
 
-function continuationFromStage(input: Input, responseID: Responses.ID | undefined, responses: ResponsesV2.Interface) {
+function continuationFromStage(
+  input: Input,
+  responseID: Responses.ID | undefined,
+  responses: ResponsesV2.Interface,
+  route: WorkflowRouting.Route,
+) {
   const checkpoint = input.stage.checkpoint
   if (checkpoint?.kind === "workflow.model.continuation.transient") {
     return Schema.decodeUnknownEffect(TransientContinuation)(checkpoint).pipe(
@@ -533,17 +550,22 @@ function continuationFromStage(input: Input, responseID: Responses.ID | undefine
                       "The non-stored Response continuation is no longer available in this process",
                     ),
                   )
-                : decodeAndValidateContinuation(continuation, input, responseID),
+                : decodeAndValidateContinuation(continuation, input, responseID, route),
             ),
           )
       }),
     )
   }
   if (checkpoint?.kind !== "workflow.model.continuation") return Effect.succeed(undefined)
-  return decodeAndValidateContinuation(checkpoint, input, responseID)
+  return decodeAndValidateContinuation(checkpoint, input, responseID, route)
 }
 
-function decodeAndValidateContinuation(checkpoint: unknown, input: Input, responseID: Responses.ID | undefined) {
+function decodeAndValidateContinuation(
+  checkpoint: unknown,
+  input: Input,
+  responseID: Responses.ID | undefined,
+  route: WorkflowRouting.Route,
+) {
   return decodeContinuation(checkpoint).pipe(
     Effect.flatMap((continuation) => {
       const toolCalls = continuation.turns.reduce((total, turn) => total + turn.calls.length, 0)
@@ -570,8 +592,8 @@ function decodeAndValidateContinuation(checkpoint: unknown, input: Input, respon
           ),
       )
       if (
-        continuation.providerID !== input.route.providerID ||
-        continuation.modelID !== input.route.modelID ||
+        continuation.providerID !== route.providerID ||
+        continuation.modelID !== route.modelID ||
         continuation.responseID !== responseID ||
         continuation.completedTurns !== continuation.usage.turns ||
         continuation.completedTurns !== continuation.turns.length + (continuation.activeTurn === undefined ? 0 : 1) ||
