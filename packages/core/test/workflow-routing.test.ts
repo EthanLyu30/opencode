@@ -14,6 +14,10 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Responses } from "@opencode-ai/schema/responses"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Location } from "@opencode-ai/schema/location"
+import { AbsolutePath } from "@opencode-ai/schema/schema"
+import { Session } from "@opencode-ai/schema/session"
 import { DateTime, Effect, Layer, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 
@@ -320,6 +324,14 @@ const roleWorkflowInput = (
   }
 }
 
+const admitRoleWorkflow = (workflow: WorkflowV2.Interface, input: Workflow.CreateInput) =>
+  workflow.admit({
+    ...input,
+    location: Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit\\.tmp\\workflow-routing-test") }),
+    sessionID: Session.ID.make("ses_workflow_routing_test"),
+    agent: Agent.ID.make("build"),
+  })
+
 const waitForTerminal = (workflow: WorkflowV2.Interface, workflowID: Workflow.ID) =>
   workflow.events({ workflowID }).pipe(
     Stream.filter((event) => event.type === "workflow.succeeded" || event.type === "workflow.failed"),
@@ -580,7 +592,7 @@ describe("Workflow role execution state authority", () => {
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
       const input = roleWorkflowInput("happy", ["design", "decompose", "implement", "test", "visual_review", "deliver"])
-      yield* workflow.create(input)
+      yield* admitRoleWorkflow(workflow, input)
       yield* waitForTerminal(workflow, input.id!)
 
       const detail = yield* workflow.get(input.id!)
@@ -594,7 +606,7 @@ describe("Workflow role execution state authority", () => {
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
       const input = roleWorkflowInput("deliver_only", ["deliver"])
-      yield* workflow.create(input)
+      yield* admitRoleWorkflow(workflow, input)
       yield* waitForTerminal(workflow, input.id!)
 
       const detail = yield* workflow.get(input.id!)
@@ -608,7 +620,7 @@ describe("Workflow role execution state authority", () => {
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
       const input = roleWorkflowInput("truncated", ["design"])
-      yield* workflow.create(input)
+      yield* admitRoleWorkflow(workflow, input)
       yield* waitForTerminal(workflow, input.id!)
 
       const detail = yield* workflow.get(input.id!)
@@ -625,7 +637,7 @@ describe("Workflow role execution state authority", () => {
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
       const input = roleWorkflowInput("wrong_revision", ["design"], () => ({ forceRevision: 9 }))
-      yield* workflow.create(input)
+      yield* admitRoleWorkflow(workflow, input)
       yield* waitForTerminal(workflow, input.id!)
 
       const detail = yield* workflow.get(input.id!)
