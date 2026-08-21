@@ -44,8 +44,10 @@ describe("Workflow placement", () => {
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
       const created = yield* workflow.admit(admitted)
+      const retried = yield* workflow.admit(admitted)
 
       expect(created).toMatchObject({ location, sessionID, agent })
+      expect(retried).toEqual(created)
       expect((yield* workflow.get(workflowID)).run).toMatchObject({ location, sessionID, agent })
 
       const conflict = yield* workflow.admit({ ...admitted, location: otherLocation }).pipe(Effect.flip)
@@ -56,6 +58,20 @@ describe("Workflow placement", () => {
       expect(sessionConflict._tag).toBe("Workflow.ConflictError")
       const agentConflict = yield* workflow.admit({ ...admitted, agent: Agent.ID.make("review") }).pipe(Effect.flip)
       expect(agentConflict._tag).toBe("Workflow.ConflictError")
+    }),
+  )
+
+  it.effect("reconciles an exact admission retry without a workspace identity", () =>
+    Effect.gen(function* () {
+      const workflow = yield* WorkflowV2.Service
+      const input: Workflow.AdmissionInput = {
+        ...admitted,
+        id: Workflow.ID.make("wfl_placement_without_workspace"),
+        location: Location.Ref.make({ directory: admitted.location.directory }),
+      }
+
+      const created = yield* workflow.admit(input)
+      expect(yield* workflow.admit(input)).toEqual(created)
     }),
   )
 })

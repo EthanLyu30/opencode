@@ -4,6 +4,7 @@ import { and, asc, eq, gte, inArray, isNotNull, isNull, lt, lte, or } from "driz
 import { Cause, Context, DateTime, Effect, Layer, Option, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
+import { EventTable } from "../event/sql"
 import { makeGlobalNode } from "../effect/app-node"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
@@ -53,7 +54,12 @@ function runRow(row: typeof WorkflowRunTable.$inferSelect): Workflow.Info {
     budget: row.budget,
     usage: row.usage,
     location:
-      row.directory === null ? undefined : { directory: row.directory, workspaceID: row.workspace_id ?? undefined },
+      row.directory === null
+        ? undefined
+        : {
+            directory: row.directory,
+            ...(row.workspace_id === null ? {} : { workspaceID: row.workspace_id }),
+          },
     sessionID: row.session_id ?? undefined,
     agent: row.agent ?? undefined,
     cancelRequestedAt: row.cancel_requested_at === null ? undefined : DateTime.makeUnsafe(row.cancel_requested_at),
@@ -258,16 +264,51 @@ const layer = Layer.effect(
         yield* Effect.forEach(
           unbound,
           (run) =>
-            events.publish(WorkflowEvent.Approval.Requested, {
-              workflowID: run.id,
-              timestamp: DateTime.makeUnsafe(input.now),
-              reason: "workflow_location_required",
-              failure: {
-                category: "invalid_request",
-                code: "workflow_location_required",
-                message: "Workflow placement must be configured before execution",
-              },
-            }),
+            events
+              .publish(WorkflowEvent.Approval.Requested, {
+                workflowID: run.id,
+                timestamp: DateTime.makeUnsafe(input.now),
+                reason: "workflow_location_required",
+                failure: {
+                  category: "invalid_request",
+                  code: "workflow_location_required",
+                  message: "Workflow placement must be configured before execution",
+                },
+              })
+              .pipe(
+                Effect.catchCause((cause) => {
+                  if (!(Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict)) {
+                    return Effect.failCause(cause)
+                  }
+                  return Effect.gen(function* () {
+                    const current = yield* db
+                      .select({ directory: WorkflowRunTable.directory, status: WorkflowRunTable.status })
+                      .from(WorkflowRunTable)
+                      .where(eq(WorkflowRunTable.id, run.id))
+                      .get()
+                      .pipe(Effect.orDie)
+                    const recovery = yield* db
+                      .select({ data: EventTable.data })
+                      .from(EventTable)
+                      .where(
+                        and(
+                          eq(EventTable.aggregate_id, run.id),
+                          eq(EventTable.type, EventV2.versionedType(WorkflowEvent.Approval.Requested.type, 1)),
+                        ),
+                      )
+                      .all()
+                      .pipe(Effect.orDie)
+                    if (
+                      current?.directory === null &&
+                      current.status === "waiting_approval" &&
+                      recovery.some((event) => event.data.reason === "workflow_location_required")
+                    ) {
+                      return yield* Effect.void
+                    }
+                    return yield* Effect.failCause(cause)
+                  })
+                }),
+              ),
           { discard: true },
         )
 

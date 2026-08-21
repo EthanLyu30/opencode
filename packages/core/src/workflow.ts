@@ -120,7 +120,8 @@ function matchesCreateInput(existing: Workflow.Detail, input: Workflow.CreateInp
 function matchesAdmissionInput(existing: Workflow.Detail, input: Workflow.AdmissionInput) {
   return (
     matchesCreateInput(existing, input) &&
-    isDeepStrictEqual(existing.run.location, input.location) &&
+    existing.run.location?.directory === input.location.directory &&
+    existing.run.location.workspaceID === input.location.workspaceID &&
     existing.run.sessionID === input.sessionID &&
     existing.run.agent === input.agent
   )

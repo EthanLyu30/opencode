@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect } from "effect"
+import { DateTime, Deferred, Effect, Layer } from "effect"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -19,6 +19,39 @@ import { and, eq } from "drizzle-orm"
 
 const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, WorkflowProjector.node, WorkflowStore.node])),
+)
+
+const databaseLayer = LayerNode.compile(Database.node)
+const racingEventLayer = Layer.effect(
+  EventV2.Service,
+  Effect.gen(function* () {
+    const events = yield* EventV2.Service
+    const firstPublication = yield* Deferred.make<void>()
+    const secondPublication = yield* Deferred.make<void>()
+    let publications = 0
+    const publish: EventV2.Interface["publish"] = (definition, data, options) => {
+      if (definition.type !== WorkflowEvent.Approval.Requested.type) return events.publish(definition, data, options)
+      return Effect.gen(function* () {
+        publications++
+        if (publications === 1) {
+          yield* Deferred.succeed(firstPublication, undefined)
+          yield* Deferred.await(secondPublication)
+        }
+        if (publications === 2) {
+          yield* Deferred.await(firstPublication)
+          yield* Deferred.succeed(secondPublication, undefined)
+        }
+        return yield* events.publish(definition, data, options)
+      })
+    }
+    return EventV2.Service.of({ ...events, publish })
+  }),
+).pipe(Layer.provide(EventV2.layerWith().pipe(Layer.provide(databaseLayer))))
+const racingIt = testEffect(
+  AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, WorkflowProjector.node, WorkflowStore.node]), [
+    [Database.node, databaseLayer],
+    [EventV2.node, racingEventLayer],
+  ]),
 )
 
 const workflowID1 = Workflow.ID.make("wfl_test1")
@@ -205,6 +238,49 @@ describe("WorkflowStore", () => {
           failure: { code: "workflow_location_required" },
         },
       })
+    }),
+  )
+
+  racingIt.effect("reconciles concurrent legacy placement recovery discovery", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const store = yield* WorkflowStore.Service
+      const { db } = yield* Database.Service
+      const legacyWorkflowID = Workflow.ID.make("wfl_legacy_unbound_race")
+      yield* events.publish(WorkflowEvent.Created, {
+        ...createData1,
+        workflowID: legacyWorkflowID,
+        location: undefined,
+        sessionID: undefined,
+        agent: undefined,
+        stages: [
+          {
+            ...createData1.stages[0],
+            id: Workflow.StageID.make("wfs_legacy_unbound_race"),
+            idempotencyKey: "wfl_legacy_unbound_race/design",
+          },
+        ],
+      })
+
+      expect(
+        yield* Effect.all(
+          Array.from({ length: 32 }, () => store.claimCandidates({ now: 2_000, limit: 10 })),
+          { concurrency: "unbounded" },
+        ),
+      ).toEqual(Array.from({ length: 32 }, () => []))
+      expect(
+        yield* db
+          .select({ data: EventTable.data })
+          .from(EventTable)
+          .where(
+            and(
+              eq(EventTable.aggregate_id, legacyWorkflowID),
+              eq(EventTable.type, EventV2.versionedType(WorkflowEvent.Approval.Requested.type, 1)),
+            ),
+          )
+          .all()
+          .pipe(Effect.orDie),
+      ).toHaveLength(1)
     }),
   )
 })
