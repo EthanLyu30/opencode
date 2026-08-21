@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
+import { WorkflowGraph } from "@opencode-ai/core/workflow/graph"
+import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { DateTime, Effect } from "effect"
 import { createHash } from "node:crypto"
@@ -105,6 +107,91 @@ describe("WorkflowStageMachine", () => {
     }).pipe(Effect.runPromise)
 
     expect(state).toEqual({ status: "active", role: "test", revision: 0 })
+  })
+
+  test("replays an authorized skipped branch without requiring skipped-stage artifacts", async () => {
+    const declared = WorkflowGraph.expandVisualBuild({
+      maxRevisions: 1,
+      maxAttempts: 3,
+      responseID: Responses.ID.make("resp_machine_skips"),
+    })
+    const stages = declared.map((input, index) =>
+      Workflow.Stage.make({
+        ...input,
+        id: Workflow.StageID.make(`wfs_machine_skip_${index}`),
+        workflowID: Workflow.ID.make("wfl_machine"),
+        status:
+          input.type === "visual_review" && input.input.revision === 0
+            ? "skipped"
+            : input.ordinal <= 6
+              ? "succeeded"
+              : "pending",
+        attempt: input.type === "visual_review" && input.input.revision === 0 ? 0 : 1,
+        time: {
+          created: DateTime.makeUnsafe(1),
+          updated: DateTime.makeUnsafe(2),
+          ...(input.type === "visual_review" && input.input.revision === 0
+            ? { completed: DateTime.makeUnsafe(2) }
+            : {}),
+        },
+      }),
+    )
+    const succeeded = stages.filter((item) => item.status === "succeeded")
+    const outcomes = [
+      stageOutcome(succeeded[0], "design", "ready", 0),
+      stageOutcome(succeeded[1], "decompose", "ready", 0),
+      stageOutcome(succeeded[2], "implement", "ready", 0),
+      stageOutcome(succeeded[3], "test", "revise", 0),
+      stageOutcome(succeeded[4], "repair", "ready", 1),
+      stageOutcome(succeeded[5], "test", "pass", 1),
+    ]
+
+    const state = await WorkflowStageMachine.replay({ stages, artifacts: outcomes, beforeOrdinal: 7 }).pipe(
+      Effect.runPromise,
+    )
+
+    expect(state).toEqual({ status: "active", role: "visual_review", revision: 1 })
+  })
+
+  test.each([
+    ["an active-chain skip", "decompose", "unexpected_skip"],
+    ["a missing authorized skip", "visual_review", "missing_skip"],
+  ] as const)("rejects %s during replay", async (_name, mutation, code) => {
+    const inputs = WorkflowGraph.expandVisualBuild({
+      maxRevisions: 1,
+      maxAttempts: 3,
+      responseID: Responses.ID.make("resp_machine_forged"),
+    })
+    const stages = inputs.slice(0, 6).map((input, index) =>
+      Workflow.Stage.make({
+        ...input,
+        id: Workflow.StageID.make(`wfs_machine_forged_${index}`),
+        workflowID: Workflow.ID.make("wfl_machine"),
+        status:
+          input.type === mutation
+            ? mutation === "decompose"
+              ? "skipped"
+              : "succeeded"
+            : input.type === "visual_review"
+              ? "skipped"
+              : "succeeded",
+        attempt: input.type === mutation && mutation === "decompose" ? 0 : 1,
+        time: { created: DateTime.makeUnsafe(1), updated: DateTime.makeUnsafe(2) },
+      }),
+    )
+    const artifacts = stages
+      .filter((item) => item.status === "succeeded")
+      .map((item) =>
+        stageOutcome(
+          item,
+          item.type,
+          item.type === "test" ? "revise" : "ready",
+          typeof item.input.revision === "number" ? item.input.revision : 0,
+        ),
+      )
+
+    const error = await WorkflowStageMachine.replay({ stages, artifacts }).pipe(Effect.flip, Effect.runPromise)
+    expect(error.code).toBe(code)
   })
 
   test.each([

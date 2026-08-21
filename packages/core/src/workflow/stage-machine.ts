@@ -5,6 +5,7 @@ import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Data, Effect, Schema } from "effect"
 import { Hash } from "../util/hash"
 import { WorkflowBudget } from "./budget"
+import { WorkflowGraph } from "./graph"
 
 export const OUTCOME_ARTIFACT_KIND = "workflow.role.outcome"
 export const OUTCOME_ARTIFACT_MIME = "application/vnd.opencode.workflow-role-outcome+json"
@@ -24,6 +25,9 @@ export class InvalidOutcome extends Data.TaggedError("WorkflowStageMachine.Inval
     | "missing_outcome"
     | "duplicate_outcome"
     | "stage_role_mismatch"
+    | "unexpected_skip"
+    | "missing_skip"
+    | "invalid_skip"
 }> {}
 
 export const initial = (): State => ({ status: "active", role: "design", revision: 0 })
@@ -54,11 +58,9 @@ export function encodeOutcome(outcome: WorkflowRole.Outcome) {
   })
 }
 
-export const advance = Effect.fn("WorkflowStageMachine.advance")(function* (
-  state: State,
+export const decodeOutcome = Effect.fn("WorkflowStageMachine.decodeOutcome")(function* (
   artifact: Workflow.ArtifactCommit,
 ) {
-  if (state.status === "completed") return yield* new InvalidOutcome({ code: "already_completed" })
   if (artifact.kind !== OUTCOME_ARTIFACT_KIND || artifact.mime !== OUTCOME_ARTIFACT_MIME)
     return yield* new InvalidOutcome({ code: "invalid_artifact" })
 
@@ -67,6 +69,15 @@ export const advance = Effect.fn("WorkflowStageMachine.advance")(function* (
   )
   if (Hash.sha256(encodeOutcome(outcome)) !== artifact.sha256)
     return yield* new InvalidOutcome({ code: "hash_mismatch" })
+  return outcome
+})
+
+export const advance = Effect.fn("WorkflowStageMachine.advance")(function* (
+  state: State,
+  artifact: Workflow.ArtifactCommit,
+) {
+  if (state.status === "completed") return yield* new InvalidOutcome({ code: "already_completed" })
+  const outcome = yield* decodeOutcome(artifact)
   if (outcome.role !== state.role) return yield* new InvalidOutcome({ code: "role_mismatch" })
   if (outcome.revision !== state.revision) return yield* new InvalidOutcome({ code: "revision_mismatch" })
 
@@ -89,15 +100,18 @@ export interface ReplayInput {
 
 export const replay = Effect.fn("WorkflowStageMachine.replay")(function* (input: ReplayInput) {
   let state = initial()
-  const stages = input.stages
-    .filter(
-      (stage) =>
-        Schema.is(WorkflowRole.Role)(stage.type) &&
-        (input.beforeOrdinal === undefined || stage.ordinal < input.beforeOrdinal),
-    )
+  const roleStages = input.stages.filter((stage) => Schema.is(WorkflowRole.Role)(stage.type))
+  const stages = roleStages
+    .filter((stage) => input.beforeOrdinal === undefined || stage.ordinal < input.beforeOrdinal)
     .sort((left, right) => left.ordinal - right.ordinal)
+  const authorizedSkips = new Set<Workflow.StageID>()
 
   for (const stage of stages) {
+    if (stage.status === "skipped") {
+      if (!authorizedSkips.delete(stage.id)) return yield* new InvalidOutcome({ code: "unexpected_skip" })
+      continue
+    }
+    if (authorizedSkips.has(stage.id)) return yield* new InvalidOutcome({ code: "missing_skip" })
     if (state.status === "active" && stage.type !== state.role)
       return yield* new InvalidOutcome({ code: "stage_role_mismatch" })
     const outcomes = input.artifacts.filter(
@@ -105,8 +119,15 @@ export const replay = Effect.fn("WorkflowStageMachine.replay")(function* (input:
     )
     if (outcomes.length === 0) return yield* new InvalidOutcome({ code: "missing_outcome" })
     if (outcomes.length > 1) return yield* new InvalidOutcome({ code: "duplicate_outcome" })
+    const outcome = yield* decodeOutcome(outcomes[0])
     state = yield* advance(state, outcomes[0])
+    const skipped = yield* Effect.try({
+      try: () => WorkflowGraph.unreachableAfter({ stages: roleStages, stageID: stage.id, outcome }),
+      catch: () => new InvalidOutcome({ code: "invalid_skip" }),
+    })
+    for (const stageID of skipped) authorizedSkips.add(stageID)
   }
+  if (stages.some((stage) => authorizedSkips.has(stage.id))) return yield* new InvalidOutcome({ code: "missing_skip" })
   return state
 })
 

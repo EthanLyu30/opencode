@@ -12,6 +12,7 @@ import { WorkflowRetry } from "./retry"
 import { WorkflowRouting } from "./routing"
 import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowStageMachine } from "./stage-machine"
+import { WorkflowGraph } from "./graph"
 
 export interface ExecutionInput {
   readonly workflow: Workflow.Info
@@ -168,11 +169,39 @@ export const roleLayer = Layer.effect(
               ),
             ),
           )
-          const hasFutureRoleStage = input.stages.some(
-            (stage) => stage.ordinal > input.stage.ordinal && Schema.is(WorkflowRole.Role)(stage.type),
+          const declaredStages = input.stages.some((stage) => stage.id === input.stage.id)
+            ? input.stages
+            : [input.stage, ...input.stages]
+          const skipped = new Set(
+            yield* Effect.try({
+              try: () => WorkflowGraph.unreachableAfter({ stages: declaredStages, stageID: input.stage.id, outcome }),
+              catch: () =>
+                invalidOutcome(
+                  "Model outcome did not match the declared workflow graph",
+                  result.usage,
+                  result.responseSettlement,
+                ),
+            }),
           )
-          if (!hasFutureRoleStage && nextState.status !== "completed")
+          const nextRoleStage = declaredStages
+            .filter(
+              (stage) =>
+                stage.ordinal > input.stage.ordinal &&
+                stage.status !== "skipped" &&
+                !skipped.has(stage.id) &&
+                Schema.is(WorkflowRole.Role)(stage.type),
+            )
+            .toSorted((left, right) => left.ordinal - right.ordinal)[0]
+          if (nextState.status === "active" && nextRoleStage?.type !== nextState.role)
             return yield* Effect.fail(incompleteRoleWorkflow(nextState.role, result.usage, result.responseSettlement))
+          if (nextState.status === "completed" && nextRoleStage !== undefined)
+            return yield* Effect.fail(
+              invalidOutcome(
+                "Role workflow completed before its declared stages",
+                result.usage,
+                result.responseSettlement,
+              ),
+            )
 
           return {
             checkpoint: result.checkpoint,

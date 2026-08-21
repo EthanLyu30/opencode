@@ -17,6 +17,7 @@ import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowRunTable } from "../sql"
 import { WorkflowState } from "../state"
 import { WorkflowStageMachine } from "../stage-machine"
+import { WorkflowGraph } from "../graph"
 import { WorkflowStore } from "../store"
 
 class CancelRequested extends Data.TaggedError("CancelRequested")<{
@@ -600,6 +601,31 @@ export const layerWith = (options: Options) =>
                 ...storedCompletionCandidate,
                 artifacts: [...storedCompletionCandidate.artifacts, ...committedArtifacts],
               }
+        const outcomeArtifacts = committedArtifacts.filter(
+          (artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
+        )
+        const branch =
+          outcomeArtifacts.length !== 1
+            ? undefined
+            : yield* Effect.gen(function* () {
+                const state = yield* WorkflowStageMachine.replay({
+                  stages: initial.stages,
+                  artifacts: initial.artifacts,
+                  beforeOrdinal: stage.ordinal,
+                })
+                yield* WorkflowStageMachine.advance(state, outcomeArtifacts[0])
+                const outcome = yield* WorkflowStageMachine.decodeOutcome(outcomeArtifacts[0])
+                return {
+                  stageIDs: WorkflowGraph.unreachableAfter({ stages: initial.stages, stageID: stage.id, outcome }),
+                  outcomeSha256: outcomeArtifacts[0].sha256,
+                }
+              }).pipe(
+                Effect.match({
+                  onFailure: () => undefined,
+                  onSuccess: (value) => value,
+                }),
+              )
+        const branchStageIDs = new Set(branch?.stageIDs ?? [])
         if (
           completionCandidate &&
           completionCandidate.stages.every(
@@ -714,7 +740,11 @@ export const layerWith = (options: Options) =>
             : (yield* activeResponses(initial)).find((response) => response.id === responseSettlement.responseID)
         const completesWorkflow =
           completionCandidate?.stages.every(
-            (item) => item.id === stage.id || item.status === "succeeded" || item.status === "skipped",
+            (item) =>
+              item.id === stage.id ||
+              branchStageIDs.has(item.id) ||
+              item.status === "succeeded" ||
+              item.status === "skipped",
           ) === true
         yield* Effect.uninterruptible(
           Effect.gen(function* () {
@@ -740,6 +770,16 @@ export const layerWith = (options: Options) =>
                       artifact,
                     },
                   })),
+                  ...(branch?.stageIDs.map((stageID) => ({
+                    definition: WorkflowEvent.Stage.Skipped,
+                    data: {
+                      workflowID: stage.workflowID,
+                      stageID,
+                      sourceStageID: stage.id,
+                      outcomeSha256: branch.outcomeSha256,
+                      timestamp: completedAt,
+                    },
+                  })) ?? []),
                   ...(completesWorkflow
                     ? [
                         {

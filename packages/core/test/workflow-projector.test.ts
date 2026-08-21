@@ -12,6 +12,7 @@ import { Location } from "@opencode-ai/schema/location"
 import { Session } from "@opencode-ai/schema/session"
 import { AbsolutePath } from "@opencode-ai/schema/schema"
 import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
+import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
 import { WorkflowRunTable, WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
 import { EventTable } from "@opencode-ai/core/event/sql"
 import { testEffect } from "./lib/effect"
@@ -268,6 +269,120 @@ describe("WorkflowProjector", () => {
         [designStageID, "pending", 0],
         [buildStageID, "pending", 0],
       ])
+    }),
+  )
+
+  it.effect("atomically projects only pending branch targets as skipped", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const sourceStageID = Workflow.StageID.make("wfs_skip_source")
+      const targetStageID = Workflow.StageID.make("wfs_skip_target")
+      const lateTargetStageID = Workflow.StageID.make("wfs_skip_late_target")
+      const metadata = { schemaVersion: 1 as const, role: "test" as const, verdict: "revise" as const, revision: 0 }
+      const body = JSON.stringify(metadata)
+      const outcomeSha256 = new Bun.CryptoHasher("sha256").update(body).digest("hex")
+      yield* events.publish(WorkflowEvent.Created, {
+        ...createdData,
+        stages: [
+          { ...createdData.stages[0], id: sourceStageID, type: "test", ordinal: 0, input: { revision: 0 } },
+          {
+            ...createdData.stages[1],
+            id: targetStageID,
+            type: "visual_review",
+            ordinal: 1,
+            input: { revision: 0 },
+          },
+          {
+            ...createdData.stages[1],
+            id: lateTargetStageID,
+            type: "visual_review",
+            ordinal: 2,
+            idempotencyKey: "wfl_test/visual-review-late",
+            input: { revision: 0 },
+          },
+        ],
+      })
+      yield* events.publish(WorkflowEvent.Stage.Leased, {
+        ...leasedData({ owner: "worker-a", attempt: 1 }),
+        stageID: sourceStageID,
+      })
+      yield* events.publish(WorkflowEvent.Stage.Started, {
+        ...startedData({ owner: "worker-a", attempt: 1 }),
+        stageID: sourceStageID,
+      })
+      yield* events.publish(
+        WorkflowEvent.Stage.Succeeded,
+        {
+          ...succeededData({ owner: "worker-a", attempt: 1 }),
+          stageID: sourceStageID,
+        },
+        {
+          related: [
+            {
+              definition: WorkflowEvent.Artifact.Created,
+              data: {
+                workflowID,
+                stageID: sourceStageID,
+                timestamp: DateTime.makeUnsafe(6_000),
+                artifact: Workflow.Artifact.make({
+                  id: Workflow.ArtifactID.make("wfa_skip_source"),
+                  workflowID,
+                  stageID: sourceStageID,
+                  kind: WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
+                  uri: "workflow://wfl_test/stages/wfs_skip_source/role-outcome.json",
+                  mime: WorkflowStageMachine.OUTCOME_ARTIFACT_MIME,
+                  sha256: outcomeSha256,
+                  size: new TextEncoder().encode(body).byteLength,
+                  metadata,
+                  timeCreated: DateTime.makeUnsafe(6_000),
+                }),
+              },
+            },
+            {
+              definition: WorkflowEvent.Stage.Skipped,
+              data: {
+                workflowID,
+                stageID: targetStageID,
+                sourceStageID,
+                outcomeSha256,
+                timestamp: DateTime.makeUnsafe(6_000),
+              },
+            },
+          ],
+        },
+      )
+
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status, completed: WorkflowStageTable.time_completed })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, targetStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "skipped", completed: 6_000 })
+
+      expect(
+        Exit.isFailure(
+          yield* events
+            .publish(WorkflowEvent.Stage.Skipped, {
+              workflowID,
+              stageID: lateTargetStageID,
+              sourceStageID,
+              outcomeSha256,
+              timestamp: DateTime.makeUnsafe(7_000),
+            })
+            .pipe(Effect.exit),
+        ),
+      ).toBe(true)
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, lateTargetStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "pending" })
     }),
   )
 

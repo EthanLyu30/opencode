@@ -11,6 +11,7 @@ import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { WorkflowBudget } from "./budget"
 import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowState } from "./state"
+import { WorkflowStageMachine } from "./stage-machine"
 import { WorkflowRunTable, WorkflowStageTable, WorkflowArtifactTable } from "./sql"
 import { ResponseTable } from "../responses/sql"
 
@@ -442,6 +443,100 @@ const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
         if (!updated) throw new LifecycleConflict(data.workflowID, data.stageID)
         yield* applyUsage(db, data.workflowID, data.usage, data.timestamp)
+      }),
+    )
+
+    // workflow.stage.skipped
+    yield* events.project(WorkflowEvent.Stage.Skipped, (event) =>
+      Effect.gen(function* () {
+        const data = event.data
+        yield* requireNotCancelled(db, data.workflowID, data.stageID)
+        const related = event.durable?.related ?? []
+        const hasSourceSuccess = related.some((item) => {
+          if (item.type !== WorkflowEvent.Stage.Succeeded.type || typeof item.data !== "object" || item.data === null) {
+            return false
+          }
+          return (
+            "workflowID" in item.data &&
+            "stageID" in item.data &&
+            item.data.workflowID === data.workflowID &&
+            item.data.stageID === data.sourceStageID
+          )
+        })
+        const hasOutcomeArtifact = related.some((item) => {
+          if (
+            item.type !== WorkflowEvent.Artifact.Created.type ||
+            typeof item.data !== "object" ||
+            item.data === null
+          ) {
+            return false
+          }
+          if (
+            !("workflowID" in item.data) ||
+            !("stageID" in item.data) ||
+            !("artifact" in item.data) ||
+            item.data.workflowID !== data.workflowID ||
+            item.data.stageID !== data.sourceStageID ||
+            typeof item.data.artifact !== "object" ||
+            item.data.artifact === null ||
+            !("sha256" in item.data.artifact)
+          ) {
+            return false
+          }
+          return item.data.artifact.sha256 === data.outcomeSha256
+        })
+        if (!hasSourceSuccess || !hasOutcomeArtifact) throw new LifecycleConflict(data.workflowID, data.stageID)
+        const source = yield* requireStage(db, data.workflowID, data.sourceStageID)
+        if (source.status !== "succeeded" || source.id === data.stageID) {
+          throw new LifecycleConflict(data.workflowID, data.stageID)
+        }
+        const artifact = yield* db
+          .select()
+          .from(WorkflowArtifactTable)
+          .where(
+            and(
+              eq(WorkflowArtifactTable.workflow_id, data.workflowID),
+              eq(WorkflowArtifactTable.stage_id, data.sourceStageID),
+              eq(WorkflowArtifactTable.kind, WorkflowStageMachine.OUTCOME_ARTIFACT_KIND),
+              eq(WorkflowArtifactTable.sha256, data.outcomeSha256),
+            ),
+          )
+          .get()
+          .pipe(Effect.orDie)
+        if (!artifact) throw new LifecycleConflict(data.workflowID, data.stageID)
+        const outcome = yield* WorkflowStageMachine.decodeOutcome({
+          kind: artifact.kind,
+          uri: artifact.uri,
+          mime: artifact.mime,
+          sha256: artifact.sha256,
+          size: artifact.size,
+          metadata: artifact.metadata,
+        }).pipe(Effect.orDie)
+        if (
+          outcome.role !== source.stage_type ||
+          (typeof source.input.revision === "number" && outcome.revision !== source.input.revision)
+        ) {
+          throw new LifecycleConflict(data.workflowID, data.stageID)
+        }
+        const row = yield* guardTransition(db, data.workflowID, data.stageID, "skipped")
+        const updated = yield* db
+          .update(WorkflowStageTable)
+          .set({
+            status: "skipped",
+            time_completed: DateTime.toEpochMillis(data.timestamp),
+            time_updated: DateTime.toEpochMillis(data.timestamp),
+          })
+          .where(
+            and(
+              eq(WorkflowStageTable.id, data.stageID),
+              eq(WorkflowStageTable.workflow_id, data.workflowID),
+              eq(WorkflowStageTable.status, row.status),
+            ),
+          )
+          .returning({ id: WorkflowStageTable.id })
+          .get()
+          .pipe(Effect.orDie)
+        if (!updated) throw new LifecycleConflict(data.workflowID, data.stageID)
       }),
     )
 

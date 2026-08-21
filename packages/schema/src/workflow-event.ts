@@ -128,6 +128,18 @@ export namespace Stage {
   })
   export type Succeeded = typeof Succeeded.Type
 
+  export const Skipped = Event.define({
+    type: "workflow.stage.skipped",
+    durable,
+    schema: {
+      ...base,
+      stageID: Workflow.StageID,
+      sourceStageID: Workflow.StageID,
+      outcomeSha256: Workflow.ArtifactCommit.fields.sha256,
+    },
+  })
+  export type Skipped = typeof Skipped.Type
+
   export const Failed = Event.define({
     type: "workflow.stage.failed",
     durable,
@@ -249,6 +261,7 @@ export const DurableDefinitions = Event.inventory(
   Artifact.Created,
   Stage.RetryScheduled,
   Stage.Succeeded,
+  Stage.Skipped,
   Stage.Failed,
   Approval.Requested,
   Approval.Resolved,

@@ -16,8 +16,13 @@ import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { ResponsesProjector } from "@opencode-ai/core/responses/projector"
 import { ResponsesStore } from "@opencode-ai/core/responses/store"
 import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
+import { WorkflowGraph } from "@opencode-ai/core/workflow/graph"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { Location } from "@opencode-ai/schema/location"
+import { AbsolutePath } from "@opencode-ai/schema/schema"
+import { Session } from "@opencode-ai/schema/session"
+import { Agent } from "@opencode-ai/schema/agent"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
@@ -160,6 +165,43 @@ const incompleteRoleHistoryExecutor = Layer.succeed(
 
 const incompleteRoleHistoryIt = makeWorkerIt(incompleteRoleHistoryExecutor)
 
+const branchOutcomeExecutor = Layer.succeed(
+  WorkflowExecutor.Service,
+  WorkflowExecutor.Service.of({
+    execute: ({ stage }) => {
+      const revision =
+        stage.type === "deliver" ? 1 : typeof stage.input.revision === "number" ? stage.input.revision : 0
+      const verdict =
+        stage.type === "test"
+          ? revision === 0
+            ? "revise"
+            : "pass"
+          : stage.type === "visual_review"
+            ? "pass"
+            : stage.type === "deliver"
+              ? "complete"
+              : "ready"
+      const metadata = { schemaVersion: 1 as const, role: stage.type, verdict, revision }
+      const body = JSON.stringify(metadata)
+      return Effect.succeed({
+        usage: { tokens: 1, turns: 1, toolCalls: 0, attempts: 0 },
+        artifacts: [
+          {
+            kind: WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
+            uri: `workflow://${stage.workflowID}/stages/${stage.id}/role-outcome.json`,
+            mime: WorkflowStageMachine.OUTCOME_ARTIFACT_MIME,
+            sha256: new Bun.CryptoHasher("sha256").update(body).digest("hex"),
+            size: new TextEncoder().encode(body).byteLength,
+            metadata,
+          },
+        ],
+      })
+    },
+  }),
+)
+
+const branchOutcomeIt = makeWorkerIt(branchOutcomeExecutor)
+
 const classifiedFailureExecutor = Layer.succeed(
   WorkflowExecutor.Service,
   WorkflowExecutor.Service.of({
@@ -298,6 +340,14 @@ const createInput = (suffix: string): Workflow.CreateInput => ({
   ],
 })
 
+const admit = (workflow: WorkflowV2.Interface, input: Workflow.CreateInput) =>
+  workflow.admit({
+    ...input,
+    location: Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit") }),
+    sessionID: Session.ID.make("ses_workflow_execution"),
+    agent: Agent.ID.make("build"),
+  })
+
 describe("Workflow lease acquisition", () => {
   it.effect("workflow cancellation atomically cancels every active explicit Response", () =>
     Effect.gen(function* () {
@@ -331,7 +381,7 @@ describe("Workflow lease acquisition", () => {
           },
         ],
       }
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
       for (const responseID of [first, second]) {
         yield* responses.create({
           id: responseID,
@@ -360,7 +410,7 @@ describe("Workflow lease acquisition", () => {
         ...base,
         stages: [{ ...base.stages[0], input: { responseID: "resp_not_admitted_claim" } }],
       }
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
 
       expect(Option.isNone(yield* store.claim({ owner: "worker-a", now: 1_000, leaseDurationMs: 30_000 }))).toBe(true)
       expect((yield* store.stage(input.stages[0].id!))?.attempt).toBe(0)
@@ -385,7 +435,7 @@ describe("Workflow lease acquisition", () => {
           },
         ],
       }
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
 
       expect(Option.isNone(yield* store.claim({ owner: "worker-a", now: 1_000, leaseDurationMs: 30_000 }))).toBe(true)
       expect((yield* store.stage(input.stages[0].id!))?.attempt).toBe(0)
@@ -414,7 +464,7 @@ describe("Workflow lease acquisition", () => {
         ...base,
         stages: [{ ...base.stages[0], type: "deliver", maxAttempts: 1, input: {} }],
       }
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
 
       expect(Option.isSome(yield* store.claim({ owner: "worker-a", now: 1_000, leaseDurationMs: 30_000 }))).toBe(true)
       expect((yield* store.stage(input.stages[0].id!))?.attempt).toBe(1)
@@ -426,7 +476,7 @@ describe("Workflow lease acquisition", () => {
       const workflow = yield* WorkflowV2.Service
       const store = yield* WorkflowStore.Service
       const input = createInput("one")
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
 
       const results = yield* Effect.all(
         [
@@ -457,7 +507,7 @@ describe("Workflow lease acquisition", () => {
           Array.from({ length: 100 }, (_, index) => index),
           (index) =>
             Effect.gen(function* () {
-              yield* workflow.create(createInput(`race_${index}`))
+              yield* admit(workflow, createInput(`race_${index}`))
               const results = yield* Effect.all(
                 [
                   store.claim({ owner: `worker-a-${index}`, now: 2_000 + index, leaseDurationMs: 30_000 }),
@@ -480,7 +530,7 @@ describe("Workflow lease acquisition", () => {
       const workflow = yield* WorkflowV2.Service
       const store = yield* WorkflowStore.Service
       const input = createInput("renew")
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
       const claimed = yield* store.claim({ owner: "worker-a", now: 1_000, leaseDurationMs: 30_000 })
       expect(Option.isSome(claimed)).toBe(true)
 
@@ -522,7 +572,7 @@ describe("Workflow executor", () => {
       const store = yield* WorkflowStore.Service
       const executor = yield* WorkflowExecutor.Service
       const input = createInput("unsupported")
-      const run = yield* workflow.create(input)
+      const run = yield* admit(workflow, input)
       const claimed = yield* store.claim({ owner: "worker-a", now: 1_000, leaseDurationMs: 30_000 })
       const stage = Option.getOrThrow(claimed)
 
@@ -554,6 +604,87 @@ describe("Workflow executor", () => {
 })
 
 describe("Workflow local execution", () => {
+  branchOutcomeIt.live("persists branch skips in the winning stage settlement batch", () =>
+    Effect.gen(function* () {
+      const workflow = yield* WorkflowV2.Service
+      const { db } = yield* Database.Service
+      const workflowID = Workflow.ID.make("wfl_worker_branch_skips")
+      const declared = WorkflowGraph.expandVisualBuild({
+        maxRevisions: 2,
+        maxAttempts: 1,
+        responseID: Responses.ID.make("resp_worker_branch_skips"),
+      })
+      const stage = (input: Workflow.RoleStageInput, index: number): Workflow.RoleStageInput => ({
+        ...input,
+        id: Workflow.StageID.make(`wfs_worker_branch_${index}`),
+        input: { revision: input.input.revision },
+      })
+      const stages: [Workflow.RoleStageInput, ...Workflow.RoleStageInput[]] = [
+        stage(declared[0], 0),
+        ...declared.slice(1).map((input, index) => stage(input, index + 1)),
+      ]
+      yield* admit(workflow, {
+        id: workflowID,
+        type: "visual-build",
+        input: { brief: "Exercise both skip branches" },
+        budget: { maxAttempts: 12 },
+        stages,
+      })
+      yield* workflow.events({ workflowID }).pipe(
+        Stream.filter((event) => event.type === "workflow.succeeded" || event.type === "workflow.failed"),
+        Stream.runHead,
+        Effect.timeout("3 seconds"),
+      )
+
+      const detail = yield* workflow.get(workflowID)
+      expect(detail.run.status).toBe("succeeded")
+      expect(detail.stages.map((stage) => [stage.type, stage.input.revision, stage.status])).toEqual([
+        ["design", 0, "succeeded"],
+        ["decompose", 0, "succeeded"],
+        ["implement", 0, "succeeded"],
+        ["test", 0, "succeeded"],
+        ["visual_review", 0, "skipped"],
+        ["repair", 1, "succeeded"],
+        ["test", 1, "succeeded"],
+        ["visual_review", 1, "succeeded"],
+        ["repair", 2, "skipped"],
+        ["test", 2, "skipped"],
+        ["visual_review", 2, "skipped"],
+        ["deliver", 2, "succeeded"],
+      ])
+
+      const rows = yield* db
+        .select({ type: EventTable.type, batchID: EventTable.batch_id, data: EventTable.data })
+        .from(EventTable)
+        .all()
+        .pipe(Effect.orDie)
+      const skipRows = rows.filter((row) => row.type === "workflow.stage.skipped.1")
+      expect(skipRows).toHaveLength(4)
+      for (const row of skipRows) {
+        if (typeof row.data !== "object" || row.data === null || !("sourceStageID" in row.data)) {
+          throw new Error("Skipped event is missing its source stage")
+        }
+        const sourceStageID = row.data.sourceStageID
+        expect(
+          rows.some(
+            (candidate) =>
+              candidate.batchID === row.batchID &&
+              candidate.type === "workflow.stage.succeeded.1" &&
+              typeof candidate.data === "object" &&
+              candidate.data !== null &&
+              "stageID" in candidate.data &&
+              candidate.data.stageID === sourceStageID,
+          ),
+        ).toBe(true)
+        expect(
+          rows.some(
+            (candidate) => candidate.batchID === row.batchID && candidate.type === "workflow.artifact.created.1",
+          ),
+        ).toBe(true)
+      }
+    }),
+  )
+
   checkpointGuardIt.live(
     "rejects secret-bearing and oversized mid-stage checkpoints before durable publication",
     () =>
@@ -562,7 +693,7 @@ describe("Workflow local execution", () => {
         const { db } = yield* Database.Service
         const inputs = [createInput("checkpoint_secret"), createInput("checkpoint_oversized")]
         for (const input of inputs) {
-          yield* workflow.create(input)
+          yield* admit(workflow, input)
           yield* workflow.events({ workflowID: input.id! }).pipe(
             Stream.filter((event) => event.type === "workflow.approval.requested"),
             Stream.runHead,
@@ -595,7 +726,7 @@ describe("Workflow local execution", () => {
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
       const input = createInput("incomplete_role_history")
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
       yield* workflow.events({ workflowID: input.id! }).pipe(
         Stream.filter((event) => event.type === "workflow.failed"),
         Stream.runHead,
@@ -619,7 +750,7 @@ describe("Workflow local execution", () => {
           ...createInput("worker_deadline"),
           budget: { maxAttempts: 3, maxDurationMs: 100 },
         }
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
         yield* workflow.events({ workflowID: input.id! }).pipe(
           Stream.filter(
             (event) => event.type === "workflow.approval.requested" && event.data.reason === "budget_exhausted",
@@ -663,7 +794,7 @@ describe("Workflow local execution", () => {
       Effect.gen(function* () {
         const workflow = yield* WorkflowV2.Service
         const input = createInput("worker_retry")
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
         yield* workflow.events({ workflowID: input.id! }).pipe(
           Stream.filter((event) => event.type === "workflow.succeeded"),
           Stream.runHead,
@@ -686,7 +817,7 @@ describe("Workflow local execution", () => {
       Effect.gen(function* () {
         const workflow = yield* WorkflowV2.Service
         const input = createInput("worker_permanent_failure")
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
         yield* workflow.events({ workflowID: input.id! }).pipe(
           Stream.filter((event) => event.type === "workflow.failed"),
           Stream.runHead,
@@ -736,7 +867,7 @@ describe("Workflow local execution", () => {
             },
           ],
         }
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
         yield* responses.create({
           id: second,
           workflowID: input.id!,
@@ -773,7 +904,7 @@ describe("Workflow local execution", () => {
       Effect.gen(function* () {
         const workflow = yield* WorkflowV2.Service
         const input = createInput("worker_ambiguous_failure")
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
         yield* workflow.events({ workflowID: input.id! }).pipe(
           Stream.filter((event) => event.type === "workflow.approval.requested"),
           Stream.runHead,
@@ -794,7 +925,7 @@ describe("Workflow local execution", () => {
       Effect.gen(function* () {
         const workflow = yield* WorkflowV2.Service
         const input = createInput("worker_success")
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
 
         const completed = yield* workflow.events({ workflowID: input.id! }).pipe(
           Stream.filter((event) => event.type === "workflow.succeeded"),
@@ -818,7 +949,7 @@ describe("Workflow local execution", () => {
         const workflowID = Workflow.ID.make("wfl_worker_order")
         const first = Workflow.StageID.make("wfs_worker_order_first")
         const second = Workflow.StageID.make("wfs_worker_order_second")
-        yield* workflow.create({
+        yield* admit(workflow, {
           id: workflowID,
           type: "development",
           input: { brief: "Build in order" },
@@ -874,7 +1005,7 @@ describe("Workflow local execution", () => {
       Effect.gen(function* () {
         const workflow = yield* WorkflowV2.Service
         const input = createInput("worker_duplicate_artifact")
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
         yield* workflow.events({ workflowID: input.id! }).pipe(
           Stream.filter((event) => event.type === "workflow.succeeded"),
           Stream.runHead,
@@ -896,7 +1027,7 @@ describe("Workflow local execution", () => {
         const execution = yield* WorkflowExecution.Service
         const database = yield* Database.Service
         const input = createInput("worker_lease_loss")
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
         yield* workflow.events({ workflowID: input.id! }).pipe(
           Stream.filter((event) => event.type === "workflow.stage.started"),
           Stream.runHead,
@@ -932,7 +1063,7 @@ describe("Workflow local execution", () => {
           createInput("worker_concurrent_b"),
           createInput("worker_concurrent_c"),
         ]
-        yield* Effect.forEach(inputs, workflow.create, { discard: true })
+        yield* Effect.forEach(inputs, (input) => admit(workflow, input), { discard: true })
         yield* Effect.forEach(
           inputs,
           (input) =>
@@ -956,7 +1087,7 @@ describe("Workflow local execution", () => {
       Effect.gen(function* () {
         const workflow = yield* WorkflowV2.Service
         const input = createInput("worker_cancel")
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
         yield* workflow.events({ workflowID: input.id! }).pipe(
           Stream.filter((event) => event.type === "workflow.stage.started"),
           Stream.runHead,
@@ -996,7 +1127,7 @@ describe("Workflow local execution", () => {
         yield* execution.interrupt(missing)
 
         const input = createInput("worker_interrupt")
-        yield* workflow.create(input)
+        yield* admit(workflow, input)
         yield* waitForActive(execution, input.id!, true).pipe(Effect.timeout("2 seconds"))
         const first = yield* execution.active
         const second = yield* execution.active
