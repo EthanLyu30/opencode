@@ -1,7 +1,7 @@
 # OpenCode Production Visual Workflow Host Design
 
 **Date:** 2026-08-21
-**Status:** Approved in chat; written specification pending user review
+**Status:** Approved and frozen for Task23 implementation
 **Task:** Task23
 **Depends on:** Tasks 2–22, especially the durable Workflow/Responses runtime, Task19 visual artifacts, Task20 conformance runtime, and Task22 model routing
 
