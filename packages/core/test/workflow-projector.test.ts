@@ -13,7 +13,7 @@ import { Session } from "@opencode-ai/schema/session"
 import { AbsolutePath } from "@opencode-ai/schema/schema"
 import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
 import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
-import { WorkflowRunTable, WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
+import { WorkflowArtifactTable, WorkflowRunTable, WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
 import { EventTable } from "@opencode-ai/core/event/sql"
 import { testEffect } from "./lib/effect"
 import { eq } from "drizzle-orm"
@@ -383,6 +383,140 @@ describe("WorkflowProjector", () => {
           .get()
           .pipe(Effect.orDie),
       ).toEqual({ status: "pending" })
+    }),
+  )
+
+  it.effect("rolls back an otherwise-terminal batch with a forged branch skip target", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const sourceStageID = Workflow.StageID.make("wfs_forged_skip_source")
+      const repairStageID = Workflow.StageID.make("wfs_forged_skip_repair")
+      const testStageID = Workflow.StageID.make("wfs_forged_skip_test")
+      const reviewStageID = Workflow.StageID.make("wfs_forged_skip_review")
+      const deliverStageID = Workflow.StageID.make("wfs_forged_skip_deliver")
+      const metadata = {
+        schemaVersion: 1 as const,
+        role: "visual_review" as const,
+        verdict: "pass" as const,
+        revision: 0,
+      }
+      const body = JSON.stringify(metadata)
+      const outcomeSha256 = new Bun.CryptoHasher("sha256").update(body).digest("hex")
+      const stage = (
+        id: Workflow.StageID,
+        type: Workflow.RoleStageInput["type"],
+        ordinal: number,
+        revision: number,
+      ): Workflow.RoleStageInput => ({
+        id,
+        type,
+        ordinal,
+        maxAttempts: 1,
+        recoveryPolicy: "restart_safe",
+        idempotencyKey: `forged/${type}/${revision}`,
+        input: { revision },
+      })
+      yield* events.publish(WorkflowEvent.Created, {
+        ...createdData,
+        type: "visual-build",
+        stages: [
+          stage(sourceStageID, "visual_review", 0, 0),
+          stage(repairStageID, "repair", 1, 1),
+          stage(testStageID, "test", 2, 1),
+          stage(reviewStageID, "visual_review", 3, 1),
+          stage(deliverStageID, "deliver", 4, 1),
+        ],
+      })
+      yield* events.publish(WorkflowEvent.Stage.Leased, {
+        ...leasedData({ owner: "worker-a", attempt: 1 }),
+        stageID: sourceStageID,
+      })
+      yield* events.publish(WorkflowEvent.Stage.Started, {
+        ...startedData({ owner: "worker-a", attempt: 1 }),
+        stageID: sourceStageID,
+      })
+
+      const failed = yield* events
+        .publish(
+          WorkflowEvent.Stage.Succeeded,
+          { ...succeededData({ owner: "worker-a", attempt: 1 }), stageID: sourceStageID },
+          {
+            related: [
+              {
+                definition: WorkflowEvent.Artifact.Created,
+                data: {
+                  workflowID,
+                  stageID: sourceStageID,
+                  timestamp: DateTime.makeUnsafe(6_000),
+                  artifact: Workflow.Artifact.make({
+                    id: Workflow.ArtifactID.make("wfa_forged_skip_source"),
+                    workflowID,
+                    stageID: sourceStageID,
+                    kind: WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
+                    uri: "workflow://wfl_test/stages/wfs_forged_skip_source/role-outcome.json",
+                    mime: WorkflowStageMachine.OUTCOME_ARTIFACT_MIME,
+                    sha256: outcomeSha256,
+                    size: new TextEncoder().encode(body).byteLength,
+                    metadata,
+                    timeCreated: DateTime.makeUnsafe(6_000),
+                  }),
+                },
+              },
+              ...[repairStageID, testStageID, reviewStageID, deliverStageID].map((stageID) => ({
+                definition: WorkflowEvent.Stage.Skipped,
+                data: {
+                  workflowID,
+                  stageID,
+                  sourceStageID,
+                  outcomeSha256,
+                  timestamp: DateTime.makeUnsafe(6_000),
+                },
+              })),
+              {
+                definition: WorkflowEvent.Succeeded,
+                data: {
+                  workflowID,
+                  timestamp: DateTime.makeUnsafe(6_000),
+                  usage: { tokens: 100, turns: 1, toolCalls: 0, attempts: 1 },
+                },
+              },
+            ],
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(failed)).toBe(true)
+      expect(
+        yield* db
+          .select({ id: WorkflowStageTable.id, status: WorkflowStageTable.status })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.workflow_id, workflowID))
+          .all()
+          .pipe(Effect.orDie),
+      ).toEqual([
+        { id: sourceStageID, status: "running" },
+        { id: repairStageID, status: "pending" },
+        { id: testStageID, status: "pending" },
+        { id: reviewStageID, status: "pending" },
+        { id: deliverStageID, status: "pending" },
+      ])
+      expect(
+        yield* db
+          .select({ id: WorkflowArtifactTable.id })
+          .from(WorkflowArtifactTable)
+          .where(eq(WorkflowArtifactTable.workflow_id, workflowID))
+          .all()
+          .pipe(Effect.orDie),
+      ).toEqual([])
+      expect(
+        yield* db
+          .select({ type: EventTable.type })
+          .from(EventTable)
+          .where(eq(EventTable.aggregate_id, workflowID))
+          .all()
+          .pipe(Effect.orDie),
+      ).not.toContainEqual({ type: WorkflowEvent.Stage.Succeeded.type })
     }),
   )
 

@@ -12,6 +12,7 @@ import { WorkflowBudget } from "./budget"
 import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowState } from "./state"
 import { WorkflowStageMachine } from "./stage-machine"
+import { WorkflowGraph } from "./graph"
 import { WorkflowRunTable, WorkflowStageTable, WorkflowArtifactTable } from "./sql"
 import { ResponseTable } from "../responses/sql"
 
@@ -55,6 +56,34 @@ function requireRun(db: DB, workflowID: Workflow.ID) {
     if (!row) throw new LifecycleConflict(workflowID)
     return row
   })
+}
+
+function stageFromRow(row: typeof WorkflowStageTable.$inferSelect): Workflow.Stage {
+  return {
+    id: row.id,
+    workflowID: row.workflow_id,
+    type: row.stage_type,
+    ordinal: row.ordinal,
+    status: row.status,
+    attempt: row.attempt,
+    maxAttempts: row.max_attempts,
+    notBefore: row.not_before === null ? undefined : DateTime.makeUnsafe(row.not_before),
+    leaseOwner: row.lease_owner ?? undefined,
+    leaseExpiresAt: row.lease_expires_at === null ? undefined : DateTime.makeUnsafe(row.lease_expires_at),
+    sessionID: row.session_id ?? undefined,
+    checkpoint: row.checkpoint ?? undefined,
+    recoveryPolicy: row.recovery_policy,
+    recoveryAction: row.recovery_action ?? undefined,
+    idempotencyKey: row.idempotency_key,
+    input: row.input,
+    error: row.error ?? undefined,
+    time: {
+      created: DateTime.makeUnsafe(row.time_created),
+      updated: DateTime.makeUnsafe(row.time_updated),
+      started: row.time_started === null ? undefined : DateTime.makeUnsafe(row.time_started),
+      completed: row.time_completed === null ? undefined : DateTime.makeUnsafe(row.time_completed),
+    },
+  }
 }
 
 function requireNotCancelled(db: DB, workflowID: Workflow.ID, stageID?: Workflow.StageID) {
@@ -515,6 +544,44 @@ const layer = Layer.effectDiscard(
         if (
           outcome.role !== source.stage_type ||
           (typeof source.input.revision === "number" && outcome.revision !== source.input.revision)
+        ) {
+          throw new LifecycleConflict(data.workflowID, data.stageID)
+        }
+        const stages = yield* db
+          .select()
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.workflow_id, data.workflowID))
+          .all()
+          .pipe(Effect.orDie)
+        const authorizedTargets = new Set(
+          WorkflowGraph.unreachableAfter({
+            stages: stages.map(stageFromRow),
+            stageID: data.sourceStageID,
+            outcome,
+          }),
+        )
+        const declaredTargets = related.flatMap((item) => {
+          if (item.type !== WorkflowEvent.Stage.Skipped.type || typeof item.data !== "object" || item.data === null) {
+            return []
+          }
+          if (
+            !("workflowID" in item.data) ||
+            !("stageID" in item.data) ||
+            !("sourceStageID" in item.data) ||
+            !("outcomeSha256" in item.data) ||
+            item.data.workflowID !== data.workflowID ||
+            item.data.sourceStageID !== data.sourceStageID ||
+            item.data.outcomeSha256 !== data.outcomeSha256
+          ) {
+            return []
+          }
+          return [item.data.stageID]
+        })
+        const declaredTargetSet = new Set(declaredTargets)
+        if (
+          declaredTargets.length !== declaredTargetSet.size ||
+          declaredTargetSet.size !== authorizedTargets.size ||
+          [...authorizedTargets].some((stageID) => !declaredTargetSet.has(stageID))
         ) {
           throw new LifecycleConflict(data.workflowID, data.stageID)
         }

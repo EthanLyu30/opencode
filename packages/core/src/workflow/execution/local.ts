@@ -1,8 +1,23 @@
 export * as WorkflowExecutionLocal from "./local"
 
 import { and, inArray, isNotNull } from "drizzle-orm"
-import { Cause, Data, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, PubSub, Semaphore, Stream } from "effect"
+import {
+  Cause,
+  Data,
+  DateTime,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Option,
+  PubSub,
+  Schema,
+  Semaphore,
+  Stream,
+} from "effect"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { Database } from "../../database/database"
@@ -604,9 +619,86 @@ export const layerWith = (options: Options) =>
         const outcomeArtifacts = committedArtifacts.filter(
           (artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
         )
-        const branch =
-          outcomeArtifacts.length !== 1
-            ? undefined
+        const failRoleSettlement = Effect.fnUntraced(function* (failure: Workflow.Failure) {
+          const failedAt = yield* DateTime.now
+          yield* ensureNotCancelled(stage.workflowID)
+          if (!(yield* currentLease(stage, DateTime.toEpochMillis(failedAt)))) return
+          const active = yield* activeResponses(completionCandidate ?? initial)
+          const outcomeSettlement = executionResult.responseSettlement
+          const responseSettlements = active.map((response) => {
+            return {
+              responseID: response.id,
+              requestHash: response.requestHash,
+              store: response.store,
+              error: { type: failure.category, code: failure.code, message: failure.message },
+              usage: outcomeSettlement?.responseID === response.id ? outcomeSettlement.usage : undefined,
+            }
+          })
+          yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* events.publish(
+                WorkflowEvent.Stage.Failed,
+                {
+                  workflowID: stage.workflowID,
+                  stageID: stage.id,
+                  timestamp: failedAt,
+                  attempt: stage.attempt,
+                  leaseOwner: options.ownerID,
+                  failure,
+                  usage: executionResult.usage,
+                  source: "execution",
+                },
+                {
+                  related: [
+                    {
+                      definition: WorkflowEvent.Failed,
+                      data: {
+                        workflowID: stage.workflowID,
+                        timestamp: failedAt,
+                        failure,
+                        usage: addUsage(initial.run.usage, executionResult.usage),
+                      },
+                    },
+                    ...responseSettlements.map((settlement) => ({
+                      definition: ResponseEvent.Failed,
+                      data: {
+                        responseID: settlement.responseID,
+                        timestamp: failedAt,
+                        error: settlement.store ? settlement.error : undefined,
+                        usage: settlement.store ? settlement.usage : undefined,
+                      },
+                    })),
+                  ],
+                },
+              )
+              yield* Effect.forEach(
+                responseSettlements.filter((settlement) => !settlement.store),
+                (settlement) =>
+                  responses.settleTransient({
+                    responseID: settlement.responseID,
+                    requestHash: settlement.requestHash,
+                    status: "failed",
+                    timestamp: failedAt,
+                    error: settlement.error,
+                    usage: settlement.usage,
+                  }),
+                { discard: true },
+              )
+            }),
+          )
+        })
+        const roleStage = Schema.is(WorkflowRole.Role)(stage.type)
+        const branchValidation = !roleStage
+          ? ({ type: "none" } as const)
+          : outcomeArtifacts.length !== 1
+            ? ({
+                type: "invalid" as const,
+                failure: {
+                  category: "schema" as const,
+                  code: "invalid_role_history",
+                  message: `Role stage ${stage.type} must commit exactly one outcome artifact`,
+                },
+              } as const)
             : yield* Effect.gen(function* () {
                 const state = yield* WorkflowStageMachine.replay({
                   stages: initial.stages,
@@ -615,16 +707,33 @@ export const layerWith = (options: Options) =>
                 })
                 yield* WorkflowStageMachine.advance(state, outcomeArtifacts[0])
                 const outcome = yield* WorkflowStageMachine.decodeOutcome(outcomeArtifacts[0])
+                const stageIDs = yield* Effect.try({
+                  try: () => WorkflowGraph.unreachableAfter({ stages: initial.stages, stageID: stage.id, outcome }),
+                  catch: () => undefined,
+                })
                 return {
-                  stageIDs: WorkflowGraph.unreachableAfter({ stages: initial.stages, stageID: stage.id, outcome }),
+                  type: "branch" as const,
+                  stageIDs,
                   outcomeSha256: outcomeArtifacts[0].sha256,
                 }
               }).pipe(
                 Effect.match({
-                  onFailure: () => undefined,
+                  onFailure: () => ({
+                    type: "invalid" as const,
+                    failure: {
+                      category: "schema" as const,
+                      code: "invalid_role_history",
+                      message: "Role workflow history is invalid",
+                    },
+                  }),
                   onSuccess: (value) => value,
                 }),
               )
+        if (branchValidation.type === "invalid") {
+          yield* failRoleSettlement(branchValidation.failure)
+          return
+        }
+        const branch = branchValidation.type === "branch" ? branchValidation : undefined
         const branchStageIDs = new Set(branch?.stageIDs ?? [])
         if (
           completionCandidate &&
@@ -657,72 +766,7 @@ export const layerWith = (options: Options) =>
             }
           }
           if (failure) {
-            const failedAt = yield* DateTime.now
-            yield* ensureNotCancelled(stage.workflowID)
-            if (!(yield* currentLease(stage, DateTime.toEpochMillis(failedAt)))) return
-            const active = yield* activeResponses(completionCandidate)
-            const outcomeSettlement = executionResult.responseSettlement
-            const responseSettlements = active.map((response) => {
-              return {
-                responseID: response.id,
-                requestHash: response.requestHash,
-                store: response.store,
-                error: { type: failure.category, code: failure.code, message: failure.message },
-                usage: outcomeSettlement?.responseID === response.id ? outcomeSettlement.usage : undefined,
-              }
-            })
-            yield* Effect.uninterruptible(
-              Effect.gen(function* () {
-                yield* events.publish(
-                  WorkflowEvent.Stage.Failed,
-                  {
-                    workflowID: stage.workflowID,
-                    stageID: stage.id,
-                    timestamp: failedAt,
-                    attempt: stage.attempt,
-                    leaseOwner: options.ownerID,
-                    failure,
-                    usage: executionResult.usage,
-                    source: "execution",
-                  },
-                  {
-                    related: [
-                      {
-                        definition: WorkflowEvent.Failed,
-                        data: {
-                          workflowID: stage.workflowID,
-                          timestamp: failedAt,
-                          failure,
-                          usage: addUsage(initial.run.usage, executionResult.usage),
-                        },
-                      },
-                      ...responseSettlements.map((settlement) => ({
-                        definition: ResponseEvent.Failed,
-                        data: {
-                          responseID: settlement.responseID,
-                          timestamp: failedAt,
-                          error: settlement.store ? settlement.error : undefined,
-                          usage: settlement.store ? settlement.usage : undefined,
-                        },
-                      })),
-                    ],
-                  },
-                )
-                yield* Effect.forEach(
-                  responseSettlements.filter((settlement) => !settlement.store),
-                  (settlement) =>
-                    responses.settleTransient({
-                      responseID: settlement.responseID,
-                      requestHash: settlement.requestHash,
-                      status: "failed",
-                      timestamp: failedAt,
-                      error: settlement.error,
-                      usage: settlement.usage,
-                    }),
-                  { discard: true },
-                )
-              }),
-            )
+            yield* failRoleSettlement(failure)
             return
           }
         }

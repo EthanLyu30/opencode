@@ -165,6 +165,41 @@ const incompleteRoleHistoryExecutor = Layer.succeed(
 
 const incompleteRoleHistoryIt = makeWorkerIt(incompleteRoleHistoryExecutor)
 
+const invalidBranchOutcomeExecutor = Layer.succeed(
+  WorkflowExecutor.Service,
+  WorkflowExecutor.Service.of({
+    execute: ({ stage }) => {
+      if (stage.type !== "design") {
+        return Effect.fail({
+          failure: {
+            category: "invalid_request" as const,
+            code: "unexpected_followup_stage",
+            message: "Invalid design outcome must stop before the next role stage",
+          },
+          usage: { tokens: 1, turns: 1, toolCalls: 0, attempts: 0 },
+        })
+      }
+      const metadata = { schemaVersion: 1 as const, role: "design" as const, verdict: "ready" as const, revision: 0 }
+      const body = JSON.stringify(metadata)
+      return Effect.succeed({
+        usage: { tokens: 2, turns: 1, toolCalls: 0, attempts: 0 },
+        artifacts: [
+          {
+            kind: WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
+            uri: `workflow://${stage.workflowID}/stages/${stage.id}/role-outcome.json`,
+            mime: WorkflowStageMachine.OUTCOME_ARTIFACT_MIME,
+            sha256: "f".repeat(64),
+            size: new TextEncoder().encode(body).byteLength,
+            metadata,
+          },
+        ],
+      })
+    },
+  }),
+)
+
+const invalidBranchOutcomeIt = makeWorkerIt(invalidBranchOutcomeExecutor)
+
 const branchOutcomeExecutor = Layer.succeed(
   WorkflowExecutor.Service,
   WorkflowExecutor.Service.of({
@@ -195,6 +230,22 @@ const branchOutcomeExecutor = Layer.succeed(
             metadata,
           },
         ],
+        ...(stage.type === "deliver" && typeof stage.input.responseID === "string"
+          ? {
+              responseSettlement: {
+                type: "completed" as const,
+                responseID: Responses.ID.make(stage.input.responseID),
+                output: [
+                  {
+                    type: "message" as const,
+                    role: "assistant" as const,
+                    content: "Visual build completed",
+                  },
+                ],
+                store: true,
+              },
+            }
+          : {}),
       })
     },
   }),
@@ -330,11 +381,11 @@ const createInput = (suffix: string): Workflow.CreateInput => ({
   stages: [
     {
       id: Workflow.StageID.make(`wfs_${suffix}`),
-      type: "design",
+      type: "build",
       ordinal: 0,
       maxAttempts: 3,
       recoveryPolicy: "restart_safe",
-      idempotencyKey: `${suffix}/design`,
+      idempotencyKey: `${suffix}/build`,
       input: {},
     },
   ],
@@ -595,7 +646,7 @@ describe("Workflow executor", () => {
         failure: {
           category: "invalid_request",
           code: "unsupported_stage",
-          message: "No executor is registered for stage type design",
+          message: "No role route is registered for stage type build",
         },
         usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
       })
@@ -607,17 +658,19 @@ describe("Workflow local execution", () => {
   branchOutcomeIt.live("persists branch skips in the winning stage settlement batch", () =>
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
+      const responses = yield* ResponsesV2.Service
       const { db } = yield* Database.Service
       const workflowID = Workflow.ID.make("wfl_worker_branch_skips")
+      const responseID = Responses.ID.make("resp_worker_branch_skips")
       const declared = WorkflowGraph.expandVisualBuild({
         maxRevisions: 2,
         maxAttempts: 1,
-        responseID: Responses.ID.make("resp_worker_branch_skips"),
+        responseID,
       })
       const stage = (input: Workflow.RoleStageInput, index: number): Workflow.RoleStageInput => ({
         ...input,
         id: Workflow.StageID.make(`wfs_worker_branch_${index}`),
-        input: { revision: input.input.revision },
+        input: { ...input.input },
       })
       const stages: [Workflow.RoleStageInput, ...Workflow.RoleStageInput[]] = [
         stage(declared[0], 0),
@@ -630,6 +683,15 @@ describe("Workflow local execution", () => {
         budget: { maxAttempts: 12 },
         stages,
       })
+      yield* responses.create({
+        id: responseID,
+        workflowID,
+        model: "deepseek-v4-flash",
+        background: true,
+        store: true,
+        requestHash: `sha256:${responseID}`,
+        input: [{ type: "message", role: "user", content: "Build and deliver the visual" }],
+      })
       yield* workflow.events({ workflowID }).pipe(
         Stream.filter((event) => event.type === "workflow.succeeded" || event.type === "workflow.failed"),
         Stream.runHead,
@@ -638,6 +700,7 @@ describe("Workflow local execution", () => {
 
       const detail = yield* workflow.get(workflowID)
       expect(detail.run.status).toBe("succeeded")
+      expect(detail.stages.at(-1)?.input.responseID).toBe(responseID)
       expect(detail.stages.map((stage) => [stage.type, stage.input.revision, stage.status])).toEqual([
         ["design", 0, "succeeded"],
         ["decompose", 0, "succeeded"],
@@ -682,6 +745,30 @@ describe("Workflow local execution", () => {
           ),
         ).toBe(true)
       }
+      const terminalWorkflow = rows.find((row) => row.type === "workflow.succeeded.1")
+      const terminalResponse = rows.find(
+        (row) =>
+          row.type === "response.completed.1" &&
+          typeof row.data === "object" &&
+          row.data !== null &&
+          "responseID" in row.data &&
+          row.data.responseID === responseID,
+      )
+      const terminalStage = rows.find(
+        (row) =>
+          row.type === "workflow.stage.succeeded.1" &&
+          typeof row.data === "object" &&
+          row.data !== null &&
+          "stageID" in row.data &&
+          row.data.stageID === detail.stages.at(-1)?.id,
+      )
+      expect(terminalWorkflow?.batchID).toBeDefined()
+      expect(terminalResponse?.batchID).toBe(terminalWorkflow?.batchID)
+      expect(terminalStage?.batchID).toBe(terminalWorkflow?.batchID)
+      expect(yield* responses.get(responseID)).toMatchObject({
+        status: "completed",
+        output: [{ type: "message", role: "assistant", content: "Visual build completed" }],
+      })
     }),
   )
 
@@ -725,7 +812,11 @@ describe("Workflow local execution", () => {
   incompleteRoleHistoryIt.live("fails final role validation before stage success can make the run stick", () =>
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
-      const input = createInput("incomplete_role_history")
+      const base = createInput("incomplete_role_history")
+      const input: Workflow.CreateInput = {
+        ...base,
+        stages: [{ ...base.stages[0], type: "design", idempotencyKey: "incomplete-role-history/design" }],
+      }
       yield* admit(workflow, input)
       yield* workflow.events({ workflowID: input.id! }).pipe(
         Stream.filter((event) => event.type === "workflow.failed"),
@@ -737,6 +828,112 @@ describe("Workflow local execution", () => {
       expect(detail.run.status).toBe("failed")
       expect(detail.stages[0].status).toBe("failed")
       expect(detail.stages[0].error?.code).toBe("incomplete_role_workflow")
+    }),
+  )
+
+  invalidBranchOutcomeIt.live("atomically fails a non-final role stage whose outcome artifact hash is invalid", () =>
+    Effect.gen(function* () {
+      const workflow = yield* WorkflowV2.Service
+      const responses = yield* ResponsesV2.Service
+      const { db } = yield* Database.Service
+      const workflowID = Workflow.ID.make("wfl_invalid_branch_outcome")
+      const responseID = Responses.ID.make("resp_invalid_branch_outcome")
+      const designStageID = Workflow.StageID.make("wfs_invalid_branch_design")
+      const decomposeStageID = Workflow.StageID.make("wfs_invalid_branch_decompose")
+      const deliverStageID = Workflow.StageID.make("wfs_invalid_branch_deliver")
+      yield* admit(workflow, {
+        id: workflowID,
+        type: "visual-build",
+        input: { brief: "Reject invalid branch authority" },
+        budget: { maxAttempts: 2 },
+        stages: [
+          {
+            id: designStageID,
+            type: "design",
+            ordinal: 0,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "invalid-branch/design/r0",
+            input: { revision: 0, responseID },
+          },
+          {
+            id: decomposeStageID,
+            type: "decompose",
+            ordinal: 1,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "invalid-branch/decompose/r0",
+            input: { revision: 0 },
+          },
+          {
+            id: deliverStageID,
+            type: "deliver",
+            ordinal: 2,
+            maxAttempts: 1,
+            recoveryPolicy: "restart_safe",
+            idempotencyKey: "invalid-branch/deliver/r0",
+            input: { revision: 0, responseID },
+          },
+        ],
+      })
+      yield* responses.create({
+        id: responseID,
+        workflowID,
+        model: "deepseek-v4-flash",
+        background: true,
+        store: true,
+        requestHash: `sha256:${responseID}`,
+        input: [{ type: "message", role: "user", content: "Reject an invalid outcome" }],
+      })
+      yield* workflow.events({ workflowID }).pipe(
+        Stream.filter((event) => event.type === "workflow.failed"),
+        Stream.runHead,
+        Effect.timeout("2 seconds"),
+      )
+
+      const detail = yield* workflow.get(workflowID)
+      expect(detail.run.status).toBe("failed")
+      expect(detail.stages.map((stage) => [stage.id, stage.status])).toEqual([
+        [designStageID, "failed"],
+        [decomposeStageID, "pending"],
+        [deliverStageID, "pending"],
+      ])
+      expect(detail.stages[0].error?.code).toBe("invalid_role_history")
+      const rows = yield* db
+        .select({ type: EventTable.type, batchID: EventTable.batch_id, data: EventTable.data })
+        .from(EventTable)
+        .all()
+        .pipe(Effect.orDie)
+      const stageFailure = rows.find(
+        (row) =>
+          row.type === "workflow.stage.failed.1" &&
+          typeof row.data === "object" &&
+          row.data !== null &&
+          "stageID" in row.data &&
+          row.data.stageID === designStageID,
+      )
+      const workflowFailure = rows.find((row) => row.type === "workflow.failed.1")
+      const responseFailure = rows.find(
+        (row) =>
+          row.type === "response.failed.1" &&
+          typeof row.data === "object" &&
+          row.data !== null &&
+          "responseID" in row.data &&
+          row.data.responseID === responseID,
+      )
+      expect(stageFailure?.batchID).toBeDefined()
+      expect(workflowFailure?.batchID).toBe(stageFailure?.batchID)
+      expect(responseFailure?.batchID).toBe(stageFailure?.batchID)
+      expect(rows).not.toContainEqual(
+        expect.objectContaining({
+          type: "workflow.stage.succeeded.1",
+          data: expect.objectContaining({ stageID: designStageID }),
+        }),
+      )
+      expect(yield* responses.get(responseID)).toMatchObject({
+        status: "failed",
+        error: { code: "invalid_role_history" },
+      })
     }),
   )
 
@@ -966,11 +1163,11 @@ describe("Workflow local execution", () => {
             },
             {
               id: first,
-              type: "design",
+              type: "plan",
               ordinal: 0,
               maxAttempts: 2,
               recoveryPolicy: "restart_safe",
-              idempotencyKey: "worker-order/design",
+              idempotencyKey: "worker-order/plan",
               input: {},
             },
           ],
