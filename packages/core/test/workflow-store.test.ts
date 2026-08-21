@@ -6,9 +6,16 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { EventV2 } from "@opencode-ai/core/event"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Location } from "@opencode-ai/schema/location"
+import { Session } from "@opencode-ai/schema/session"
+import { AbsolutePath } from "@opencode-ai/schema/schema"
 import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
+import { WorkflowRunTable } from "@opencode-ai/core/workflow/sql"
+import { EventTable } from "@opencode-ai/core/event/sql"
 import { testEffect } from "./lib/effect"
+import { and, eq } from "drizzle-orm"
 
 const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, WorkflowProjector.node, WorkflowStore.node])),
@@ -19,6 +26,9 @@ const workflowID2 = Workflow.ID.make("wfl_test2")
 const designStageID = Workflow.StageID.make("wfs_d1")
 const buildStageID = Workflow.StageID.make("wfs_b1")
 const reviewStageID = Workflow.StageID.make("wfs_r2")
+const location = Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit") })
+const sessionID = Session.ID.make("ses_store")
+const agent = Agent.ID.make("build")
 
 const createData1: (typeof WorkflowEvent.Created.Type)["data"] = {
   workflowID: workflowID1,
@@ -26,6 +36,9 @@ const createData1: (typeof WorkflowEvent.Created.Type)["data"] = {
   type: "development",
   input: { brief: "Build a page" },
   budget: { maxAttempts: 3 },
+  location,
+  sessionID,
+  agent,
   stages: [
     {
       id: designStageID,
@@ -54,6 +67,9 @@ const createData2: (typeof WorkflowEvent.Created.Type)["data"] = {
   type: "review",
   input: { pr: 42 },
   budget: { maxTokens: 5000 },
+  location,
+  sessionID: Session.ID.make("ses_store_review"),
+  agent,
   stages: [
     {
       id: reviewStageID,
@@ -138,6 +154,57 @@ describe("WorkflowStore", () => {
       const candidates = yield* store.claimCandidates({ now: 1_000, limit: 10 })
       expect(candidates).toHaveLength(1)
       expect(candidates[0].id).toBe(designStageID)
+    }),
+  )
+
+  it.effect("never claims an active legacy workflow without placement and durably requests configuration", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const store = yield* WorkflowStore.Service
+      const { db } = yield* Database.Service
+      const legacyWorkflowID = Workflow.ID.make("wfl_legacy_unbound")
+      yield* events.publish(WorkflowEvent.Created, {
+        ...createData1,
+        workflowID: legacyWorkflowID,
+        location: undefined,
+        sessionID: undefined,
+        agent: undefined,
+        stages: [
+          {
+            ...createData1.stages[0],
+            id: Workflow.StageID.make("wfs_legacy_unbound"),
+            idempotencyKey: "wfl_legacy_unbound/design",
+          },
+        ],
+      })
+
+      expect(yield* store.claimCandidates({ now: 2_000, limit: 10 })).toEqual([])
+      expect(
+        yield* db
+          .select({ status: WorkflowRunTable.status })
+          .from(WorkflowRunTable)
+          .where(eq(WorkflowRunTable.id, legacyWorkflowID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "waiting_approval" })
+      expect(
+        yield* db
+          .select({ data: EventTable.data })
+          .from(EventTable)
+          .where(
+            and(
+              eq(EventTable.aggregate_id, legacyWorkflowID),
+              eq(EventTable.type, EventV2.versionedType(WorkflowEvent.Approval.Requested.type, 1)),
+            ),
+          )
+          .get()
+          .pipe(Effect.orDie),
+      ).toMatchObject({
+        data: {
+          reason: "workflow_location_required",
+          failure: { code: "workflow_location_required" },
+        },
+      })
     }),
   )
 })

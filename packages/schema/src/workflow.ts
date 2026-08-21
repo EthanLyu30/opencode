@@ -1,8 +1,11 @@
 export * as Workflow from "./workflow"
 
 import { Schema } from "effect"
+import { Agent } from "./agent"
 import { ascending } from "./identifier"
+import { Location } from "./location"
 import { DateTimeUtcFromMillis, NonNegativeInt, optional, PositiveInt, statics } from "./schema"
+import { Session } from "./session"
 import { SessionID } from "./session-id"
 import { WorkflowRole } from "./workflow-role"
 
@@ -119,6 +122,14 @@ export const CreateInput = Schema.Struct({
 }).annotate({ identifier: "Workflow.CreateInput" })
 export interface CreateInput extends Schema.Schema.Type<typeof CreateInput> {}
 
+export const AdmissionInput = Schema.Struct({
+  ...CreateInput.fields,
+  location: Location.Ref,
+  sessionID: Session.ID,
+  agent: Agent.ID,
+}).annotate({ identifier: "Workflow.AdmissionInput" })
+export interface AdmissionInput extends Schema.Schema.Type<typeof AdmissionInput> {}
+
 // ── Projection DTOs ──────────────────────────────────────────────────────────
 
 export const Info = Schema.Struct({
@@ -129,6 +140,9 @@ export const Info = Schema.Struct({
   input: Schema.Record(Schema.String, Schema.Unknown),
   budget: Budget,
   usage: Usage,
+  location: Location.Ref.pipe(optional),
+  sessionID: Session.ID.pipe(optional),
+  agent: Agent.ID.pipe(optional),
   cancelRequestedAt: DateTimeUtcFromMillis.pipe(optional),
   version: NonNegativeInt,
   time: Schema.Struct({

@@ -30,6 +30,9 @@ export const Created = Event.define({
     input: Schema.Record(Schema.String, Schema.Unknown),
     budget: Workflow.Budget,
     stages: Schema.NonEmptyArray(Workflow.StageInput),
+    location: Workflow.AdmissionInput.fields.location.pipe(optional),
+    sessionID: Workflow.AdmissionInput.fields.sessionID.pipe(optional),
+    agent: Workflow.AdmissionInput.fields.agent.pipe(optional),
   },
 })
 export type Created = typeof Created.Type
@@ -172,7 +175,7 @@ export namespace Approval {
     schema: {
       ...base,
       stageID: Workflow.StageID.pipe(optional),
-      reason: Schema.Literals(["ambiguous_execution", "budget_exhausted"]),
+      reason: Schema.Literals(["ambiguous_execution", "budget_exhausted", "workflow_location_required"]),
       failure: Workflow.Failure.pipe(optional),
       usage: Workflow.Usage.pipe(optional),
     },

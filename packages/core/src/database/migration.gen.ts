@@ -43,5 +43,6 @@ export const migrations = (
     import("./migration/20260730135739_workflow_stage_a"),
     import("./migration/20260811124735_responses_runtime"),
     import("./migration/20260814153555_event_batch_metadata"),
+    import("./migration/20260821143321_workflow_placement"),
   ])
 ).map((module) => module.default) satisfies DatabaseMigration.Migration[]

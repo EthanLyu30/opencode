@@ -6,6 +6,11 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { EventV2 } from "@opencode-ai/core/event"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { Workspace } from "@opencode-ai/schema/workspace"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Location } from "@opencode-ai/schema/location"
+import { Session } from "@opencode-ai/schema/session"
+import { AbsolutePath } from "@opencode-ai/schema/schema"
 import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
 import { WorkflowRunTable, WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
 import { EventTable } from "@opencode-ai/core/event/sql"
@@ -17,6 +22,10 @@ const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, Event
 const workflowID = Workflow.ID.make("wfl_test")
 const designStageID = Workflow.StageID.make("wfs_design")
 const buildStageID = Workflow.StageID.make("wfs_build")
+const workspaceID = Workspace.ID.make("wrk_projector")
+const location = Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit"), workspaceID })
+const sessionID = Session.ID.make("ses_projector")
+const agent = Agent.ID.make("build")
 
 const createdData: (typeof WorkflowEvent.Created.Type)["data"] = {
   workflowID,
@@ -24,6 +33,9 @@ const createdData: (typeof WorkflowEvent.Created.Type)["data"] = {
   type: "development",
   input: { brief: "Build a page" },
   budget: { maxAttempts: 3 },
+  location,
+  sessionID,
+  agent,
   stages: [
     {
       id: designStageID,
@@ -241,7 +253,17 @@ describe("WorkflowProjector", () => {
         .all()
         .pipe(Effect.orDie)
 
-      expect(runs).toMatchObject([{ id: "wfl_test", status: "queued", version: 0 }])
+      expect(runs).toMatchObject([
+        {
+          id: "wfl_test",
+          status: "queued",
+          directory: location.directory,
+          workspace_id: workspaceID,
+          session_id: sessionID,
+          agent,
+          version: 0,
+        },
+      ])
       expect(stages.map((s) => [s.id, s.status, s.attempt])).toEqual([
         [designStageID, "pending", 0],
         [buildStageID, "pending", 0],

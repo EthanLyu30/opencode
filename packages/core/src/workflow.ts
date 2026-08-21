@@ -41,6 +41,9 @@ export { WorkflowSecretGuard }
 // ── Interface ─────────────────────────────────────────────────────────────────
 
 export interface Interface {
+  readonly admit: (
+    input: Workflow.AdmissionInput,
+  ) => Effect.Effect<Workflow.Info, WorkflowSecretGuard.UnsafePersistenceError | ConflictError>
   readonly create: (
     input: Workflow.CreateInput,
   ) => Effect.Effect<Workflow.Info, WorkflowSecretGuard.UnsafePersistenceError | ConflictError>
@@ -114,6 +117,15 @@ function matchesCreateInput(existing: Workflow.Detail, input: Workflow.CreateInp
     })
 }
 
+function matchesAdmissionInput(existing: Workflow.Detail, input: Workflow.AdmissionInput) {
+  return (
+    matchesCreateInput(existing, input) &&
+    isDeepStrictEqual(existing.run.location, input.location) &&
+    existing.run.sessionID === input.sessionID &&
+    existing.run.agent === input.agent
+  )
+}
+
 // ── Layer ─────────────────────────────────────────────────────────────────────
 
 const layer = Layer.effect(
@@ -154,70 +166,88 @@ const layer = Layer.effect(
 
     const isDurableWorkflowEvent = Schema.is(WorkflowEvent.Durable)
 
-    return Service.of({
-      create: Effect.fn("Workflow.create")(function* (input) {
-        yield* guardSafe(input)
+    const create = Effect.fn("Workflow.create")(function* (
+      input: Workflow.CreateInput,
+      admission?: Pick<Workflow.AdmissionInput, "location" | "sessionID" | "agent">,
+    ) {
+      yield* guardSafe(input)
 
-        const workflowID = input.id ?? Workflow.ID.create()
-        const stages: readonly [AdmittedStage, ...AdmittedStage[]] = [
-          {
-            ...input.stages[0],
-            id: input.stages[0].id ?? Workflow.StageID.create(),
-          },
-          ...input.stages.slice(1).map((stage) => ({
-            ...stage,
-            id: stage.id ?? Workflow.StageID.create(),
-          })),
-        ]
+      const workflowID = input.id ?? Workflow.ID.create()
+      const stages: readonly [AdmittedStage, ...AdmittedStage[]] = [
+        {
+          ...input.stages[0],
+          id: input.stages[0].id ?? Workflow.StageID.create(),
+        },
+        ...input.stages.slice(1).map((stage) => ({
+          ...stage,
+          id: stage.id ?? Workflow.StageID.create(),
+        })),
+      ]
 
-        // Validate unique ordinals and idempotency keys
-        const ordinals = new Set<number>()
-        const keys = new Set<string>()
-        for (const stage of stages) {
-          if (ordinals.has(stage.ordinal)) {
-            return yield* new ConflictError({ workflowID, operation: "create" })
-          }
-          ordinals.add(stage.ordinal)
-          if (keys.has(stage.idempotencyKey)) {
-            return yield* new ConflictError({ workflowID, operation: "create" })
-          }
-          keys.add(stage.idempotencyKey)
-        }
-
-        const now = yield* DateTime.now
-        const timestamp = DateTime.toEpochMillis(now)
-
-        // Check if an exact byte-equivalent workflow already exists
-        const existing = yield* store.get(workflowID)
-        if (existing) {
-          if (matchesCreateInput(existing, input)) return existing.run
+      // Validate unique ordinals and idempotency keys
+      const ordinals = new Set<number>()
+      const keys = new Set<string>()
+      for (const stage of stages) {
+        if (ordinals.has(stage.ordinal)) {
           return yield* new ConflictError({ workflowID, operation: "create" })
         }
-
-        yield* events.publish(WorkflowEvent.Created, {
-          workflowID,
-          timestamp: DateTime.makeUnsafe(timestamp),
-          type: input.type,
-          input: input.input,
-          budget: input.budget,
-          stages,
-        })
-
-        // Publish stage.queued events for audit visibility
-        for (const stage of stages) {
-          yield* events.publish(WorkflowEvent.Stage.Queued, {
-            workflowID,
-            stageID: stage.id,
-            timestamp: DateTime.makeUnsafe(timestamp),
-          })
+        ordinals.add(stage.ordinal)
+        if (keys.has(stage.idempotencyKey)) {
+          return yield* new ConflictError({ workflowID, operation: "create" })
         }
+        keys.add(stage.idempotencyKey)
+      }
 
-        // Wake execution
-        yield* execution.wake
+      const now = yield* DateTime.now
+      const timestamp = DateTime.toEpochMillis(now)
 
-        const detail = yield* store.get(workflowID)
-        return detail!.run
+      // Check if an exact byte-equivalent workflow already exists
+      const existing = yield* store.get(workflowID)
+      if (existing) {
+        if (
+          admission === undefined
+            ? matchesCreateInput(existing, input)
+            : matchesAdmissionInput(existing, { ...input, ...admission })
+        ) {
+          return existing.run
+        }
+        return yield* new ConflictError({ workflowID, operation: "create" })
+      }
+
+      yield* events.publish(WorkflowEvent.Created, {
+        workflowID,
+        timestamp: DateTime.makeUnsafe(timestamp),
+        type: input.type,
+        input: input.input,
+        budget: input.budget,
+        stages,
+        location: admission?.location,
+        sessionID: admission?.sessionID,
+        agent: admission?.agent,
+      })
+
+      // Publish stage.queued events for audit visibility
+      for (const stage of stages) {
+        yield* events.publish(WorkflowEvent.Stage.Queued, {
+          workflowID,
+          stageID: stage.id,
+          timestamp: DateTime.makeUnsafe(timestamp),
+        })
+      }
+
+      // Wake execution
+      yield* execution.wake
+
+      const detail = yield* store.get(workflowID)
+      return detail!.run
+    })
+
+    return Service.of({
+      admit: Effect.fn("Workflow.admit")(function* (input) {
+        return yield* create(input, input)
       }),
+
+      create,
 
       list: Effect.fn("Workflow.list")(function* (input) {
         return yield* store.list(input)

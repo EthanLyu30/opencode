@@ -1,8 +1,12 @@
 export * as WorkflowSql from "./sql"
 
 import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqlite-core"
+import { absoluteColumn } from "../database/path"
 import { Timestamps } from "../database/schema.sql"
+import type { Agent } from "@opencode-ai/schema/agent"
+import type { Session } from "@opencode-ai/schema/session"
 import type { Workflow } from "@opencode-ai/schema/workflow"
+import type { Workspace } from "@opencode-ai/schema/workspace"
 import type { SessionSchema } from "../session/schema"
 
 export const WorkflowRunTable = sqliteTable(
@@ -15,6 +19,10 @@ export const WorkflowRunTable = sqliteTable(
     input: text({ mode: "json" }).$type<Record<string, unknown>>().notNull(),
     budget: text({ mode: "json" }).$type<Workflow.Budget>().notNull(),
     usage: text({ mode: "json" }).$type<Workflow.Usage>().notNull(),
+    directory: absoluteColumn(),
+    workspace_id: text().$type<Workspace.ID>(),
+    session_id: text().$type<Session.ID>(),
+    agent: text().$type<Agent.ID>(),
     budget_notified: integer().notNull().default(0),
     cancel_requested_at: integer(),
     time_completed: integer(),

@@ -1,6 +1,6 @@
 export * as WorkflowStore from "./store"
 
-import { and, asc, eq, gte, inArray, isNull, lt, lte, or } from "drizzle-orm"
+import { and, asc, eq, gte, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm"
 import { Cause, Context, DateTime, Effect, Layer, Option, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
@@ -52,6 +52,10 @@ function runRow(row: typeof WorkflowRunTable.$inferSelect): Workflow.Info {
     input: row.input,
     budget: row.budget,
     usage: row.usage,
+    location:
+      row.directory === null ? undefined : { directory: row.directory, workspaceID: row.workspace_id ?? undefined },
+    sessionID: row.session_id ?? undefined,
+    agent: row.agent ?? undefined,
     cancelRequestedAt: row.cancel_requested_at === null ? undefined : DateTime.makeUnsafe(row.cancel_requested_at),
     version: row.version,
     time: {
@@ -239,6 +243,34 @@ const layer = Layer.effect(
       gateBudget,
 
       claimCandidates: Effect.fn("WorkflowStore.claimCandidates")(function* (input) {
+        const unbound = yield* db
+          .select({ id: WorkflowRunTable.id })
+          .from(WorkflowRunTable)
+          .where(
+            and(
+              isNull(WorkflowRunTable.directory),
+              inArray(WorkflowRunTable.status, ["queued", "running"]),
+              isNull(WorkflowRunTable.cancel_requested_at),
+            ),
+          )
+          .all()
+          .pipe(Effect.orDie)
+        yield* Effect.forEach(
+          unbound,
+          (run) =>
+            events.publish(WorkflowEvent.Approval.Requested, {
+              workflowID: run.id,
+              timestamp: DateTime.makeUnsafe(input.now),
+              reason: "workflow_location_required",
+              failure: {
+                category: "invalid_request",
+                code: "workflow_location_required",
+                message: "Workflow placement must be configured before execution",
+              },
+            }),
+          { discard: true },
+        )
+
         // Select stages whose status is pending or retry_wait with not_before in the past,
         // and whose workflow is queued or running and not cancelled
         const rows = yield* db
@@ -255,6 +287,7 @@ const layer = Layer.effect(
                 and(eq(WorkflowStageTable.status, "retry_wait"), lte(WorkflowStageTable.not_before, input.now)),
               ),
               inArray(WorkflowRunTable.status, ["queued", "running"]),
+              isNotNull(WorkflowRunTable.directory),
               isNull(WorkflowRunTable.cancel_requested_at),
               lt(WorkflowStageTable.attempt, WorkflowStageTable.max_attempts),
             ),
