@@ -121,6 +121,24 @@ describe("ToolRegistry", () => {
     }),
   )
 
+  it.effect("fingerprints the exact executable catalog snapshot", () =>
+    Effect.gen(function* () {
+      const service = yield* ToolRegistry.Service
+      yield* service.register({ echo: make(), hidden: make("hidden") })
+      const permissions = [
+        { action: "*", resource: "*", effect: "deny" as const },
+        { action: "echo", resource: "*", effect: "allow" as const },
+      ]
+      const first = yield* service.materialize(permissions)
+      const same = yield* service.materialize(permissions)
+      expect(same.fingerprint).toBe(first.fingerprint)
+
+      yield* service.register({ echo: make() })
+      const replaced = yield* service.materialize(permissions)
+      expect(replaced.fingerprint).not.toBe(first.fingerprint)
+    }),
+  )
+
   it.effect("removes a scoped registration", () =>
     Effect.gen(function* () {
       const service = yield* ToolRegistry.Service

@@ -61,6 +61,7 @@ const it = testEffect(
 const modelRequests: LLMRequest[] = []
 const modelResponses: LLMResponse[] = []
 const modelTimeline: string[] = []
+let modelCredentialReads = 0
 const modelClient = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
@@ -78,14 +79,17 @@ const modelClient = Layer.succeed(
 )
 const credentials = Layer.mock(Credential.Service, {
   list: (integrationID) =>
-    Effect.succeed([
-      new Credential.Info({
-        id: Credential.ID.create(),
-        integrationID,
-        label: "offline",
-        value: Credential.Key.make({ type: "key", key: "offline-fixture" }),
-      }),
-    ]),
+    Effect.sync(() => {
+      modelCredentialReads++
+      return [
+        new Credential.Info({
+          id: Credential.ID.create(),
+          integrationID,
+          label: "offline",
+          value: Credential.Key.make({ type: "key", key: "offline-fixture" }),
+        }),
+      ]
+    }),
 })
 const modelIt = testEffect(
   AppNodeBuilder.build(
@@ -96,6 +100,7 @@ const modelIt = testEffect(
       SessionProjector.node,
       SessionStore.node,
       SessionV2.node,
+      LocationServiceMap.node,
       WorkflowModelExecution.node,
     ]),
     [
@@ -155,15 +160,56 @@ const modelInput = (
 const expected = {
   design: ["glob", "grep", "read"],
   decompose: ["glob", "grep", "read"],
-  implement: ["apply_patch", "bash", "edit", "glob", "grep", "read", "write"],
-  repair: ["apply_patch", "bash", "edit", "glob", "grep", "read", "write"],
-  test: ["bash", "glob", "grep", "read"],
+  implement: ["apply_patch", "edit", "glob", "grep", "read", "workflow_command", "write"],
+  repair: ["apply_patch", "edit", "glob", "grep", "read", "workflow_command", "write"],
+  test: ["glob", "grep", "read", "workflow_command"],
   visual_review: ["glob", "grep", "read"],
-  deliver: ["bash", "glob", "grep", "read"],
+  deliver: ["glob", "grep", "read", "workflow_finalize"],
 } satisfies Record<WorkflowRole.Role, readonly string[]>
 
+const expectedActions = {
+  design: ["read", "glob", "grep"],
+  decompose: ["read", "glob", "grep"],
+  implement: ["read", "glob", "grep", "edit", "workflow_command"],
+  repair: ["read", "glob", "grep", "edit", "workflow_command"],
+  test: ["read", "glob", "grep", "workflow_command"],
+  visual_review: ["read", "glob", "grep"],
+  deliver: ["read", "glob", "grep", "workflow_finalize"],
+} satisfies Record<WorkflowRole.Role, readonly string[]>
+
+const expectedRules = (role: WorkflowRole.Role) => [
+  { action: "*", resource: "*", effect: "deny" as const },
+  ...expectedActions[role].map((action) => ({ action, resource: "*", effect: "allow" as const })),
+]
+
 describe("Workflow Location tools", () => {
-  modelIt.live("does not repeat a pending tool call without explicit recovery", () =>
+  modelIt.live("rejects a real Session bound to a foreign Location before credentials or provider access", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
+      ([workspace, foreign]) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          modelTimeline.length = 0
+          modelCredentialReads = 0
+          const location = Location.Ref.make({ directory: AbsolutePath.make(workspace.path) })
+          const foreignLocation = Location.Ref.make({ directory: AbsolutePath.make(foreign.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_foreign_location")
+          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location: foreignLocation }))
+
+          const failure = yield* WorkflowModelExecution.Service.use((models) =>
+            models.execute(modelInput(location, sessionID, () => Effect.void)).pipe(Effect.flip),
+          )
+
+          expect(failure).toMatchObject({ failure: { code: "workflow_session_required" } })
+          expect(modelCredentialReads).toBe(0)
+          expect(modelRequests).toEqual([])
+        }),
+      (dirs) => Effect.promise(() => Promise.all(dirs.map((dir) => dir[Symbol.asyncDispose]())).then(() => undefined)),
+    ),
+  )
+
+  modelIt.live("does not repeat a pending tool call even when retry recovery is requested", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) =>
@@ -180,6 +226,7 @@ describe("Workflow Location tools", () => {
               .execute(
                 modelInput(location, sessionID, () => Effect.void, {
                   checkpoint: continuation({ pendingCallID: "call-ambiguous", results: [] }),
+                  recoveryAction: "retry",
                 }),
               )
               .pipe(Effect.flip),
@@ -248,6 +295,78 @@ describe("Workflow Location tools", () => {
           expect(result.outcome).toMatchObject({ role: "design", verdict: "ready" })
           expect(modelRequests).toHaveLength(1)
           expect(modelTimeline).toEqual(["provider:1"])
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  modelIt.live("fails closed when a recovered active turn cannot prove the original tool catalog", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          modelTimeline.length = 0
+          modelCredentialReads = 0
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_catalog_changed")
+          let remainingExecutions = 0
+          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          const applicationTools = yield* ApplicationTools.Service
+          const probe = (label: string, execute = () => Effect.succeed({})) =>
+            Tool.withPermission(
+              Tool.make({
+                description: label,
+                input: Schema.Struct({}),
+                output: Schema.Struct({}),
+                execute,
+              }),
+              "read",
+            )
+          yield* applicationTools.register({
+            location_probe: probe("Original probe"),
+            location_remaining: probe("Remaining probe", () =>
+              Effect.sync(() => {
+                remainingExecutions++
+                return {}
+              }),
+            ),
+          })
+          const fingerprint = yield* ToolRegistry.Service.use((registry) =>
+            registry
+              .materialize(WorkflowPermissions.forRole("design"))
+              .pipe(Effect.map((materialization) => materialization.fingerprint)),
+          ).pipe(Effect.provide(LocationServiceMap.Service.get(location)), Effect.scoped)
+          yield* applicationTools.register({ location_probe: probe("Replacement probe") })
+          modelCredentialReads = 0
+
+          const failure = yield* WorkflowModelExecution.Service.use((models) =>
+            models
+              .execute(
+                modelInput(location, sessionID, () => Effect.void, {
+                  checkpoint: continuation({
+                    catalogFingerprint: fingerprint,
+                    calls: [
+                      { id: "call-settled", name: "location_probe", input: {} },
+                      { id: "call-remaining", name: "location_remaining", input: {} },
+                    ],
+                    results: [
+                      {
+                        id: "call-settled",
+                        name: "location_probe",
+                        result: { type: "text", value: "already settled" },
+                      },
+                    ],
+                  }),
+                }),
+              )
+              .pipe(Effect.flip),
+          )
+
+          expect(failure).toMatchObject({ failure: { category: "ambiguous", code: "tool_catalog_ambiguous" } })
+          expect(remainingExecutions).toBe(0)
+          expect(modelRequests).toEqual([])
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
@@ -350,7 +469,7 @@ describe("Workflow Location tools", () => {
     ),
   )
 
-  it.live("installs exact hidden role agents and filters each Location tool snapshot", () =>
+  it.live("automatically installs every exact hidden role agent and filters each Location tool snapshot", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) =>
@@ -367,15 +486,17 @@ describe("Workflow Location tools", () => {
             const ids = new Set<AgentV2.ID>()
 
             for (const role of WorkflowRole.Role.literals) {
-              yield* WorkflowRoleAgents.reassert(role)
               const id = WorkflowRoleAgents.agentForRole(role)
               ids.add(id)
-              expect(yield* agents.get(id)).toMatchObject({
+              const profile = yield* agents.get(id)
+              expect(profile).toMatchObject({
                 id,
                 mode: "subagent",
                 hidden: true,
-                permissions: WorkflowPermissions.forRole(role),
+                permissions: expectedRules(role),
               })
+              expect(Object.isFrozen(profile)).toBe(true)
+              expect((yield* agents.select(id)).info).toBeUndefined()
               expect(
                 (yield* registry.materialize(WorkflowPermissions.forRole(role))).definitions
                   .map((definition) => definition.name)
@@ -385,6 +506,55 @@ describe("Workflow Location tools", () => {
 
             expect(ids.size).toBe(WorkflowRole.Role.literals.length)
             expect(yield* agents.resolve("broad-build")).toBeUndefined()
+          }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("keeps all workflow role profiles immutable across user transforms and concurrent turns", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+
+          yield* Effect.gen(function* () {
+            const agents = yield* AgentV2.Service
+            yield* Effect.all(
+              WorkflowRole.Role.literals.map((role) =>
+                agents.transform((editor) =>
+                  editor.update(WorkflowRoleAgents.agentForRole(role), (agent) => {
+                    agent.mode = "primary"
+                    agent.hidden = false
+                    agent.description = "user override"
+                    agent.permissions = [{ action: "*", resource: "*", effect: "allow" }]
+                    const mutable = agent as unknown as Record<string, unknown>
+                    mutable.userOverride = true
+                  }),
+                ),
+              ),
+              { concurrency: "unbounded" },
+            )
+            yield* Effect.all(WorkflowRole.Role.literals.map(WorkflowRoleAgents.reassert), {
+              concurrency: "unbounded",
+            })
+
+            for (const role of WorkflowRole.Role.literals) {
+              const id = WorkflowRoleAgents.agentForRole(role)
+              expect(yield* agents.get(id)).toEqual({
+                id,
+                model: undefined,
+                mode: "subagent",
+                hidden: true,
+                request: { headers: {}, body: {} },
+                system: undefined,
+                description: undefined,
+                color: undefined,
+                steps: undefined,
+                permissions: expectedRules(role),
+              })
+            }
           }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
@@ -455,9 +625,111 @@ describe("Workflow Location tools", () => {
       (dirs) => Effect.promise(() => Promise.all(dirs.map((dir) => dir[Symbol.asyncDispose]())).then(() => undefined)),
     ),
   )
+
+  it.live("denies generic Bash for executable roles and contains strict workflow operations", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
+      ([workspace, outside]) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(workspace.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_location_commands")
+          const escaped = path.join(outside.path, "outside.txt")
+          const relativeEscape = path.relative(workspace.path, escaped)
+          yield* Effect.promise(() => fs.writeFile(escaped, "outside"))
+          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+
+          yield* Effect.gen(function* () {
+            const registry = yield* ToolRegistry.Service
+            const unrestricted = yield* registry.materialize()
+            const identity = (role: "implement" | "test" | "deliver") => ({
+              sessionID,
+              agent: WorkflowRoleAgents.agentForRole(role),
+              assistantMessageID: SessionMessage.ID.make(`msg_workflow_location_${role}`),
+            })
+
+            for (const role of ["implement", "test", "deliver"] as const) {
+              const filtered = yield* registry.materialize(WorkflowPermissions.forRole(role))
+              expect(filtered.definitions.some((definition) => definition.name === "bash")).toBe(false)
+              const denied = yield* unrestricted.settle({
+                ...identity(role),
+                call: {
+                  type: "tool-call",
+                  id: `call-forbidden-bash-${role}`,
+                  name: "bash",
+                  input: { command: `echo escaped > "${relativeEscape}"` },
+                },
+              })
+              expect(denied.result).toMatchObject({ type: "error" })
+              expect(yield* Effect.promise(() => fs.readFile(escaped, "utf8"))).toBe("outside")
+            }
+
+            for (const role of ["implement", "test"] as const) {
+              const tools = yield* registry.materialize(WorkflowPermissions.forRole(role))
+              expect(
+                (
+                  yield* tools.settle({
+                    ...identity(role),
+                    call: {
+                      type: "tool-call",
+                      id: `call-workflow-command-${role}`,
+                      name: "workflow_command",
+                      input: { paths: ["."] },
+                    },
+                  })
+                ).result.type,
+              ).toBe("text")
+              expect(
+                (
+                  yield* tools.settle({
+                    ...identity(role),
+                    call: {
+                      type: "tool-call",
+                      id: `call-workflow-command-outside-${role}`,
+                      name: "workflow_command",
+                      input: { paths: [escaped] },
+                    },
+                  })
+                ).result,
+              ).toMatchObject({ type: "error" })
+            }
+
+            const delivery = yield* registry.materialize(WorkflowPermissions.forRole("deliver"))
+            expect(
+              (
+                yield* delivery.settle({
+                  ...identity("deliver"),
+                  call: {
+                    type: "tool-call",
+                    id: "call-workflow-finalize",
+                    name: "workflow_finalize",
+                    input: { paths: ["."] },
+                  },
+                })
+              ).result.type,
+            ).toBe("text")
+            expect(
+              (
+                yield* delivery.settle({
+                  ...identity("deliver"),
+                  call: {
+                    type: "tool-call",
+                    id: "call-workflow-finalize-outside",
+                    name: "workflow_finalize",
+                    input: { paths: [escaped] },
+                  },
+                })
+              ).result,
+            ).toMatchObject({ type: "error" })
+          }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
+        }),
+      (dirs) => Effect.promise(() => Promise.all(dirs.map((dir) => dir[Symbol.asyncDispose]())).then(() => undefined)),
+    ),
+  )
 })
 
 function continuation(input: {
+  readonly catalogFingerprint?: string
+  readonly calls?: ReadonlyArray<{ readonly id: string; readonly name: string; readonly input: unknown }>
   readonly pendingCallID?: string
   readonly results: ReadonlyArray<{
     readonly id: string
@@ -473,11 +745,17 @@ function continuation(input: {
     completedTurns: 1,
     turns: [],
     activeTurn: {
-      calls: [{ id: "call-ambiguous", name: "location_probe", input: {} }],
+      calls: input.calls ?? [{ id: "call-ambiguous", name: "location_probe", input: {} }],
       results: input.results,
       ...(input.pendingCallID === undefined ? {} : { pendingCallID: input.pendingCallID }),
     },
-    usage: { tokens: 0, turns: 1, toolCalls: 1, attempts: 0 },
+    ...(input.catalogFingerprint === undefined ? {} : { catalogFingerprint: input.catalogFingerprint }),
+    usage: {
+      tokens: 0,
+      turns: 1,
+      toolCalls: input.results.length + (input.pendingCallID === undefined ? 0 : 1),
+      attempts: 0,
+    },
     providerUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
     responseOutput: [],
     artifacts: [],

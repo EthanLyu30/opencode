@@ -7,6 +7,7 @@ import { PermissionV2 } from "../permission"
 import { SessionMessage } from "../session/message"
 import { SessionSchema } from "../session/schema"
 import { ToolOutputStore } from "../tool-output-store"
+import { Hash } from "../util/hash"
 import { Wildcard } from "../util/wildcard"
 import { ApplicationTools } from "./application-tools"
 import { definition, permission, settle, validateName, type AnyTool, type RegistrationError } from "./tool"
@@ -27,6 +28,8 @@ export interface Interface {
 }
 
 export interface Materialization {
+  /** Opaque identity of the exact filtered executable registrations. */
+  readonly fingerprint: string
   readonly definitions: ReadonlyArray<ToolDefinition>
   readonly settle: (input: ExecuteInput) => Effect.Effect<Settlement, ToolOutputStore.Error>
 }
@@ -46,6 +49,14 @@ const registryLayer = Layer.effect(
     const resources = yield* ToolOutputStore.Service
     type Registration = { readonly identity: object; readonly tool: AnyTool }
     const local = new Map<string, Array<{ readonly token: object; readonly registration: Registration }>>()
+    const identities = new WeakMap<object, string>()
+    const fingerprintFor = (identity: object) => {
+      const existing = identities.get(identity)
+      if (existing) return existing
+      const created = crypto.randomUUID()
+      identities.set(identity, created)
+      return created
+    }
 
     const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object) {
       const registration =
@@ -112,6 +123,13 @@ const registryLayer = Layer.effect(
         for (const [name, registration] of registrations)
           if (whollyDisabled(permission(registration.tool, name), permissions)) registrations.delete(name)
         return {
+          fingerprint: Hash.sha256(
+            JSON.stringify(
+              Array.from(registrations, ([name, registration]) => [name, fingerprintFor(registration.identity)]).sort(
+                ([left], [right]) => left.localeCompare(right),
+              ),
+            ),
+          ),
           definitions: Array.from(registrations, ([name, registration]) => definition(name, registration.tool)),
           settle: (input) => {
             const registration = registrations.get(input.call.name)

@@ -4,6 +4,7 @@ import { makeLocationNode } from "./effect/app-node"
 import { Array, Context, Effect, Layer, Types } from "effect"
 import { Agent } from "@opencode-ai/schema/agent"
 import { State } from "./state"
+import { WorkflowRoleAgentProfiles } from "./workflow/role-agent-profiles"
 
 export const ID = Agent.ID
 export type ID = typeof ID.Type
@@ -63,7 +64,9 @@ const layer = Layer.effect(
           draft.agents.delete(id)
         },
       }),
+      finalize: (draft) => Effect.sync(() => WorkflowRoleAgentProfiles.install(draft)),
     })
+    yield* state.reload()
     const selectable = (agent: Info | undefined) =>
       agent && agent.mode !== "subagent" && !agent.hidden ? agent : undefined
     const selectedDefault = () => {
@@ -94,13 +97,18 @@ const layer = Layer.effect(
       select: Effect.fn("AgentV2.select")(function* (id) {
         if (id !== undefined) {
           const selected = ID.make(id)
-          return { id: selected, info: state.get().agents.get(selected) }
+          return {
+            id: selected,
+            info: WorkflowRoleAgentProfiles.isRoleAgent(selected) ? undefined : state.get().agents.get(selected),
+          }
         }
         const info = selectedDefault()
         return { id: info?.id ?? defaultID, info }
       }),
       all: Effect.fn("AgentV2.all")(function* () {
-        return Array.fromIterable(state.get().agents.values())
+        return Array.fromIterable(state.get().agents.values()).filter(
+          (agent) => !WorkflowRoleAgentProfiles.isRoleAgent(agent.id),
+        )
       }),
     })
   }),

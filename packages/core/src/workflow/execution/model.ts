@@ -83,6 +83,7 @@ const ModelContinuation = Schema.Struct({
   completedTurns: Schema.Number,
   turns: Schema.Array(ContinuationTurn),
   activeTurn: Schema.optional(ContinuationActiveTurn),
+  catalogFingerprint: Schema.String.pipe(Schema.optional),
   usage: Workflow.Usage,
   providerUsage: Responses.Usage,
   responseOutput: Schema.Array(Responses.ItemPayload),
@@ -223,7 +224,7 @@ const productionLayer = Layer.effect(
                       ),
                   })
             const continuation = yield* continuationFromStage(input, responseID, responses, route)
-            if (continuation?.activeTurn?.pendingCallID !== undefined && input.stage.recoveryAction !== "retry") {
+            if (continuation?.activeTurn?.pendingCallID !== undefined) {
               return yield* Effect.fail({
                 failure: {
                   category: "ambiguous",
@@ -233,6 +234,29 @@ const productionLayer = Layer.effect(
                 usage: zeroUsage,
               } satisfies ExecutionFailure)
             }
+            const registry = yield* ToolRegistry.Service
+            const recoveryMaterialization =
+              continuation?.activeTurn !== undefined &&
+              continuation.activeTurn.results.length < continuation.activeTurn.calls.length
+                ? yield* Effect.gen(function* () {
+                    yield* WorkflowRoleAgents.reassert(route.role)
+                    const materialization = yield* registry.materialize(WorkflowPermissions.forRole(route.role))
+                    if (
+                      continuation.catalogFingerprint === undefined ||
+                      materialization.fingerprint !== continuation.catalogFingerprint
+                    ) {
+                      return yield* Effect.fail(
+                        executionFailure(
+                          "ambiguous",
+                          "tool_catalog_ambiguous",
+                          "The executable tool catalog no longer matches the recovered provider turn",
+                          0,
+                        ),
+                      )
+                    }
+                    return materialization
+                  })
+                : undefined
             const model = yield* credentialedModel(credentials, route).pipe(
               Effect.mapError((error) => settleExecutionFailure(response, error)),
             )
@@ -249,7 +273,6 @@ const productionLayer = Layer.effect(
                   Effect.mapError((error) => settleExecutionFailure(response, error)),
                 )
             }
-            const registry = yield* ToolRegistry.Service
             let messages = [
               ...(context ?? [Message.user(stagePrompt(input))]),
               ...(continuation?.turns.flatMap(continuationMessages) ?? []),
@@ -265,9 +288,12 @@ const productionLayer = Layer.effect(
             const toolArtifacts: Workflow.ArtifactCommit[] = [...(continuation?.artifacts ?? [])]
             const responseOutput: Responses.ItemPayload[] = [...(continuation?.responseOutput ?? [])]
             let activeTurn = continuation?.activeTurn
+            let catalogFingerprint = continuation?.catalogFingerprint
+            let recoverySnapshot = recoveryMaterialization
             let generated: LLMResponse | undefined
             while (true) {
-              let materialization: ToolRegistry.Materialization | undefined
+              let materialization = recoverySnapshot
+              recoverySnapshot = undefined
               if (activeTurn === undefined) {
                 if (
                   route.budget.maxTurns !== undefined &&
@@ -283,6 +309,7 @@ const productionLayer = Layer.effect(
                   return yield* Effect.fail(budgetFailure("token", WorkflowRetry.usageDelta(usage, checkpointedUsage)))
                 yield* WorkflowRoleAgents.reassert(route.role)
                 materialization = yield* registry.materialize(WorkflowPermissions.forRole(route.role))
+                catalogFingerprint = materialization.fingerprint
                 generated = yield* modelClient
                   .generate(
                     LLM.request({
@@ -394,6 +421,16 @@ const productionLayer = Layer.effect(
               if (remainingCalls.length > 0 && materialization === undefined) {
                 yield* WorkflowRoleAgents.reassert(route.role)
                 materialization = yield* registry.materialize(WorkflowPermissions.forRole(route.role))
+                if (catalogFingerprint === undefined || materialization.fingerprint !== catalogFingerprint) {
+                  return yield* Effect.fail(
+                    executionFailure(
+                      "ambiguous",
+                      "tool_catalog_ambiguous",
+                      "The executable tool catalog no longer matches the recovered provider turn",
+                      0,
+                    ),
+                  )
+                }
               }
               for (const call of remainingCalls) {
                 if (
@@ -414,6 +451,7 @@ const productionLayer = Layer.effect(
                   completedTurns: usage.turns,
                   turns: continuationTurns,
                   activeTurn: { calls: activeTurn.calls, results: settledResults, pendingCallID: call.id },
+                  ...(catalogFingerprint === undefined ? {} : { catalogFingerprint }),
                   usage,
                   providerUsage,
                   responseOutput,
@@ -473,6 +511,7 @@ const productionLayer = Layer.effect(
                   completedTurns: usage.turns,
                   turns: continuationTurns,
                   activeTurn,
+                  ...(catalogFingerprint === undefined ? {} : { catalogFingerprint }),
                   usage,
                   providerUsage,
                   responseOutput,
@@ -486,6 +525,7 @@ const productionLayer = Layer.effect(
               }
               continuationTurns.push(turn)
               activeTurn = undefined
+              catalogFingerprint = undefined
               // Give cancellation/scope finalizers a scheduling point after the
               // durable hand-off and before any next provider request begins.
               yield* Effect.yieldNow
