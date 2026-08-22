@@ -630,7 +630,7 @@ git commit -m "feat(workflow): define secure visual host"
 
 ---
 
-### Task 23.6: Implement the Loopback Preview and Managed Playwright Runtime
+### Task 23.6: Implement the Loopback Preview, Managed Playwright Runtime, and Production Command Sandbox
 
 **Files:**
 
@@ -639,17 +639,20 @@ git commit -m "feat(workflow): define secure visual host"
 - Modify generated lock: `bun.lock`
 - Create: `packages/server/src/workflow/visual-host.ts`
 - Create: `packages/server/src/workflow/playwright.ts`
+- Create: `packages/server/src/workflow/command-sandbox.ts`
+- Create: `packages/server/src/workflow/docker.ts`
 - Modify: `packages/server/src/routes.ts`
 - Create: `packages/server/test/workflow-visual-host.test.ts`
+- Create: `packages/server/test/workflow-command-sandbox.test.ts`
 - Create: `packages/server/test/fixtures/workflow-visual/reference/index.html`
 - Create: `packages/server/test/fixtures/workflow-visual/implementation/index.html`
 
 **Interfaces:**
 
-- Consumes: `WorkflowVisualHost.Service`, frozen `PreviewPlan`, `PLAYWRIGHT_BROWSERS_PATH`, configured host roots.
-- Produces: `WorkflowVisualHostServer.layer` injected in `createRoutes/createEmbeddedRoutes`; managed preview/process/browser lifecycle.
+- Consumes: `WorkflowVisualHost.Service`, `WorkflowCommandSandbox.Service`, frozen `PreviewPlan`, verified workflow tool lineage/policy digest, `PLAYWRIGHT_BROWSERS_PATH`, configured D-drive host roots, Docker CLI, and a pinned sandbox image digest.
+- Produces: `WorkflowVisualHostServer.layer` and `WorkflowCommandSandboxServer.layer` injected in `createRoutes/createEmbeddedRoutes`; managed preview/process/browser/container lifecycle with no workflow fallback to host Bash.
 
-- [ ] **Step 1: Write failing runtime tests against offline fixtures.**
+- [ ] **Step 1: Write failing runtime tests against offline fixtures and a fake Docker engine.**
 
 Tests must prove reference source materialization, a random loopback port/capability, exact viewport PNG, ready-selector and fonts wait, external request abortion, download rejection, empty permissions, no service-worker persistence, process teardown, and cleanup limited to the host temp root.
 
@@ -659,12 +662,14 @@ expect(captured.width).toBe(1440)
 expect(externalRequests).toEqual([])
 ```
 
+Command-sandbox tests must prove provider-selected command text is sent over container stdin rather than interpolated into a host shell; the image is digest-pinned with `--pull never`; networking, capabilities, devices, Docker socket, host home, and host shell are absent; root filesystem is read-only; PID, memory, CPU, timeout, output, and temp limits are present; and only canonical Location/output mounts are admitted. `implement`/`repair` receive the admitted workspace read-write, while `test`/`deliver` receive it read-only plus only persisted policy-declared output/finalization mounts. Missing Docker, a stopped daemon, an unpinned image, a lineage/policy mismatch, a C-drive host/cache root, cancellation, timeout, and crash recovery all fail typed with no host-Bash fallback. Use a fake engine for ordinary tests; do not require or start the local Docker daemon.
+
 - [ ] **Step 2: Run RED.**
 
 Run from `packages/server`:
 
 ```powershell
-bun test test/workflow-visual-host.test.ts
+bun test test/workflow-visual-host.test.ts test/workflow-command-sandbox.test.ts
 ```
 
 Expected: runtime layer and production Playwright dependency do not exist.
@@ -677,7 +682,13 @@ Add `playwright: 1.59.1` to the root catalog and `"playwright": "catalog:"` to `
 
 Decode/revalidate the reference app, write declared files only into a fresh capability directory, and serve on `127.0.0.1`. For script plans spawn the frozen argv/cwd/env, bound stdout/stderr, retain the process-tree handle, wait for the loopback origin, and register a scope finalizer for success/failure/cancellation/lease loss.
 
-- [ ] **Step 5: Implement locked-down Chromium capture.**
+- [ ] **Step 5: Implement the production Docker command-sandbox backend.**
+
+Keep the Core service default unavailable. Replace it only in the Server Location layer. Resolve the real persisted Workflow/Stage/Session/Location and the exact policy digest again before launch; derive role-specific mounts from persisted policy/artifacts, never from model-authored paths. Invoke `docker.exe` directly with argv and pipe the model command to container `/bin/bash -se` over stdin. Require a configured image reference containing `@sha256:` and use `--pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges=true --user 65532:65532 --pids-limit 64`, bounded memory/CPU, and tmpfs-only `/tmp`/home. Never mount the Docker socket, host home, devices, or any path outside canonical D-drive host roots. Give the Docker CLI an explicit D-drive `DOCKER_CONFIG`, `TEMP`, and `TMP`. A missing/stopped daemon or image returns typed `sandbox_unavailable`; it does not start Docker Desktop and never falls back to host Bash.
+
+Assign a deterministic opaque container name/labels from workflow/stage/call identity. Scope finalizers and startup recovery may stop/remove only containers whose exact labels and persisted lease ownership match. Cancellation/timeout kills the tracked container once; an ambiguous pending tool call remains governed by Task 23.4's durable no-replay fence.
+
+- [ ] **Step 6: Implement locked-down Chromium capture.**
 
 ```ts
 const context = await browser.newContext({
@@ -692,15 +703,16 @@ await context.route("**/*", (route) => (allowed(route.request().url()) ? route.c
 
 Use a fresh context per capture; grant no permissions; wait for selector, `document.fonts.ready`, and two stable animation frames; capture PNG; validate dimensions/CRC; enforce 8 MiB and 128 MiB limits.
 
-- [ ] **Step 6: Implement scoped cleanup and startup recovery.**
+- [ ] **Step 7: Implement scoped cleanup and startup recovery.**
 
-Kill only tracked process trees. Remove only a resolved descendant of the configured host root after evidence is durable. Startup recovery removes expired capability directories only when no active durable lease owns them.
+Kill only tracked preview process trees and label-matched sandbox containers. Remove only a resolved descendant of the configured host root after evidence is durable. Startup recovery removes expired capability directories/containers only when no active durable lease owns them.
 
-- [ ] **Step 7: Inject the production layer and run GREEN.**
+- [ ] **Step 8: Inject both production layers and run GREEN.**
 
 ```ts
 const serviceLayer = AppNodeBuilder.build(applicationServices, [
   [WorkflowVisualHost.node, WorkflowVisualHostServer.node],
+  [WorkflowCommandSandbox.node, WorkflowCommandSandboxServer.node],
   [WorkflowExecution.node, WorkflowExecutionLocal.node],
 ])
 ```
@@ -708,7 +720,7 @@ const serviceLayer = AppNodeBuilder.build(applicationServices, [
 Run from `packages/server`:
 
 ```powershell
-bun test test/workflow-visual-host.test.ts
+bun test test/workflow-visual-host.test.ts test/workflow-command-sandbox.test.ts
 bun typecheck
 ```
 
@@ -719,11 +731,11 @@ bun test test/workflow-visual-host.test.ts
 bun typecheck
 ```
 
-- [ ] **Step 8: Commit.**
+- [ ] **Step 9: Commit.**
 
 ```powershell
-git add package.json packages/server/package.json bun.lock packages/server/src/workflow packages/server/src/routes.ts packages/server/test/workflow-visual-host.test.ts packages/server/test/fixtures/workflow-visual
-git commit -m "feat(server): host isolated visual previews"
+git add package.json packages/server/package.json bun.lock packages/server/src/workflow packages/server/src/routes.ts packages/server/test/workflow-visual-host.test.ts packages/server/test/workflow-command-sandbox.test.ts packages/server/test/fixtures/workflow-visual
+git commit -m "feat(server): host isolated workflow runtimes"
 ```
 
 ---
@@ -1170,11 +1182,12 @@ git commit -m "test(workflow): prove production visual recovery"
 - Create/replace deployed: `D:\OpenCode-Local\bin\opencode-local.bak.exe`
 - Modify deployed: `D:\OpenCode-Local\BUILD-INFO.txt`
 - Install runtime: `D:\OpenCode-Local\runtime\playwright`
+- Install runtime manifest/archive: `D:\OpenCode-Local\runtime\sandbox`
 
 **Interfaces:**
 
-- Consumes: verified `dev`, Windows x64 single-file build, D-scoped launcher roots.
-- Produces: reproducible deployment scripts, pushed `fork/dev`, updated launcher/binary, managed Chromium, rollback SHA.
+- Consumes: verified `dev`, Windows x64 single-file build, D-scoped launcher roots, Docker CLI with D-scoped storage, and a verified sandbox-image digest.
+- Produces: reproducible deployment scripts, pushed `fork/dev`, updated launcher/binary, managed Chromium, pinned sandbox image/runtime configuration, rollback SHA.
 
 - [ ] **Step 1: Write failing deployment-script tests before the scripts.**
 
@@ -1232,7 +1245,7 @@ git push fork dev:dev
 
 Record the pushed commit range and GitHub URLs. Confirm `git status --short --branch` reports local `dev` aligned with `fork/dev`.
 
-- [ ] **Step 7: Build and install Chromium on D.**
+- [ ] **Step 7: Build and install Chromium plus the pinned sandbox runtime on D.**
 
 ```powershell
 $env:OPENCODE_VERSION = "0.0.0-dev-$(Get-Date -Format yyyyMMddHHmm)"
@@ -1242,6 +1255,8 @@ $env:PLAYWRIGHT_BROWSERS_PATH = 'D:\OpenCode-Local\runtime\playwright'
 bunx playwright@1.59.1 install chromium
 ```
 
+Build or import the workflow sandbox image from a reviewed Dockerfile/OCI archive without `latest`, record the exact `repo@sha256:` reference, and verify `docker image inspect` resolves that digest. Before starting Docker for the one-time installation/smoke, verify the installed Docker executable and Docker/WSL data roots resolve beneath the explicitly approved D-drive installation roots; refuse setup if Docker would create Task23-owned cache/data on C. The application backend itself never starts Docker Desktop and always uses `--pull never`.
+
 Update the launcher with:
 
 ```text
@@ -1250,6 +1265,10 @@ OPENCODE_WORKFLOW_HOST_RUNTIME=D:\OpenCode-Local\runtime\playwright
 OPENCODE_WORKFLOW_HOST_CACHE=D:\OpenCode-Local\cache\playwright
 OPENCODE_WORKFLOW_HOST_TEMP=D:\OpenCode-Local\tmp\workflow-host
 PLAYWRIGHT_BROWSERS_PATH=D:\OpenCode-Local\runtime\playwright
+OPENCODE_WORKFLOW_SANDBOX_ENGINE=D:\Applications\Docker\resources\bin\docker.exe
+OPENCODE_WORKFLOW_SANDBOX_IMAGE=<repository>@sha256:<verified-digest>
+OPENCODE_WORKFLOW_SANDBOX_CONFIG=D:\OpenCode-Local\config\docker
+OPENCODE_WORKFLOW_SANDBOX_TEMP=D:\OpenCode-Local\tmp\workflow-sandbox
 ```
 
 - [ ] **Step 8: Stage, atomically deploy, smoke, and retain rollback.**
@@ -1263,7 +1282,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\OpenCode-Audit\scripts\de
 & D:\OpenCode-Local\bin\opencode.cmd workflow --help
 ```
 
-Run the offline recorded visual-build smoke through the launcher, verify database/host/cache/temp/browser writes occur only under `D:\OpenCode-Local`, verify the previous executable and SHA remain recoverable, and remove only Task23-created staging files after validation.
+Run the offline recorded visual-build smoke and one real contained command-sandbox smoke through the launcher. Prove the container has no network, cannot read/write outside its admitted mounts, creates only the declared output/finalization files, and is removed after completion/cancellation. Verify database/host/cache/temp/browser/sandbox writes occur only under approved D-drive roots, verify the previous executable and SHA remain recoverable, and remove only Task23-created staging files after validation.
 
 ---
 
@@ -1276,6 +1295,7 @@ Run the offline recorded visual-build smoke through the launcher, verify databas
 - Pass branches durably skip all unreachable preallocated stages in the same atomic settlement batch.
 - Crash, cancellation, approval, replay, and ambiguous side-effect tests meet the frozen failure policy.
 - The real browser host is loopback-only, outbound-deny by default, bounded, scoped, and unable to clean the user workspace.
+- Workflow-role Bash uses only the digest-pinned, network-disabled Docker sandbox with persisted policy mounts; missing Docker/image/policy fails closed with no host-shell fallback.
 - All standard validation is offline and zero-spend.
 - `dev` is pushed to `fork/dev` with no credentials or `.env` files.
 - The rebuilt launcher works from `D:\OpenCode-Local`, all Task23-owned roots are D-scoped, and the previous binary remains a verified rollback point.
