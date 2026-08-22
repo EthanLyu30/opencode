@@ -86,6 +86,8 @@ export interface PreviewPlan {
   readonly kind: "static" | "script"
   readonly entrypoint?: string
   readonly argv?: readonly string[]
+  /** Canonical identity of the admitted Location, included in configSha256. */
+  readonly locationRoot: string
   readonly cwd: string
   readonly env: Readonly<Record<string, string>>
   readonly allowedOrigins: readonly string[]
@@ -141,19 +143,20 @@ export function freeze(input: FreezeInput): PreviewPlan {
 
   if (preview?.kind === "static") {
     const entrypoint = resolveFile(root, cwd, preview.entrypoint)
-    return makePlan({ kind: "static", cwd, entrypoint, env, allowedOrigins, configFiles: [] })
+    return makePlan({ kind: "static", locationRoot: root, cwd, entrypoint, env, allowedOrigins, configFiles: [] })
   }
 
   if (preview?.kind === "script") {
     const argv = freezeArgv(preview.argv)
     const configFiles = configurationFiles(cwd)
-    return makePlan({ kind: "script", cwd, argv, env, allowedOrigins, configFiles })
+    return makePlan({ kind: "script", locationRoot: root, cwd, argv, env, allowedOrigins, configFiles })
   }
 
   const recognized = recognizeProject(root)
   if (recognized !== undefined) {
     return makePlan({
       kind: "script",
+      locationRoot: root,
       cwd: root,
       argv: recognized.argv,
       env,
@@ -166,6 +169,7 @@ export function freeze(input: FreezeInput): PreviewPlan {
   if (staticEntrypoint !== undefined) {
     return makePlan({
       kind: "static",
+      locationRoot: root,
       cwd: root,
       entrypoint: staticEntrypoint,
       env,
@@ -184,11 +188,12 @@ export function freeze(input: FreezeInput): PreviewPlan {
 export function verifyConfiguration(plan: PreviewPlan): void {
   try {
     if (!isFrozen(plan)) changed()
+    const identity = verifyDirectoryIdentity(plan)
     if (plan.kind === "script") {
-      const current = configurationFiles(plan.cwd)
+      const current = configurationFiles(identity.cwd)
       if (!sameConfiguration(current, plan.configFiles)) changed()
     } else {
-      verifyStaticIdentity(plan)
+      verifyStaticIdentity(plan, identity.cwd)
       for (const file of plan.configFiles) {
         const current = hashConfigurationFile(plan.cwd, file.path)
         if (!sameConfiguration([current], [file])) changed()
@@ -196,6 +201,7 @@ export function verifyConfiguration(plan: PreviewPlan): void {
     }
     const recomputed = configHash({
       kind: plan.kind,
+      locationRoot: plan.locationRoot,
       cwd: plan.cwd,
       entrypoint: plan.entrypoint,
       argv: plan.argv,
@@ -217,13 +223,14 @@ export function isFrozen(value: unknown): value is PreviewPlan {
   if (kindDescriptor === undefined || !Object.hasOwn(kindDescriptor, "value")) return false
   const expectedKeys = new Set(
     kindDescriptor.value === "static"
-      ? ["kind", "cwd", "entrypoint", "env", "allowedOrigins", "configFiles", "configSha256"]
-      : ["kind", "cwd", "argv", "env", "allowedOrigins", "configFiles", "configSha256"],
+      ? ["kind", "locationRoot", "cwd", "entrypoint", "env", "allowedOrigins", "configFiles", "configSha256"]
+      : ["kind", "locationRoot", "cwd", "argv", "env", "allowedOrigins", "configFiles", "configSha256"],
   )
   if (!hasExactPlainProperties(value, expectedKeys)) return false
   const plan = value as Partial<PreviewPlan>
   if (
     (plan.kind !== "static" && plan.kind !== "script") ||
+    typeof plan.locationRoot !== "string" ||
     typeof plan.cwd !== "string" ||
     typeof plan.configSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(plan.configSha256) ||
@@ -316,6 +323,7 @@ function makePlan(input: Omit<PreviewPlan, "configSha256">): PreviewPlan {
   const configFiles = freezeArray(input.configFiles.map((file) => Object.freeze({ ...file })))
   const normalized = {
     kind: input.kind,
+    locationRoot: input.locationRoot,
     cwd: input.cwd,
     ...(input.entrypoint === undefined ? {} : { entrypoint: input.entrypoint }),
     ...(input.argv === undefined ? {} : { argv: freezeArray([...input.argv]) }),
@@ -337,16 +345,28 @@ function decodeTrustedPreview(
   }
 }
 
-function verifyStaticIdentity(plan: PreviewPlan): void {
-  if (plan.kind !== "static" || plan.entrypoint === undefined) changed()
+function verifyDirectoryIdentity(plan: PreviewPlan): { readonly locationRoot: string; readonly cwd: string } {
+  if (!path.isAbsolute(plan.locationRoot) || !path.isAbsolute(plan.cwd)) changed()
+  assertNoWindowsDeviceSegments(plan.locationRoot)
+  assertNoWindowsDeviceSegments(plan.cwd)
+  const locationRoot = realpathSync.native(plan.locationRoot)
   const cwd = realpathSync.native(plan.cwd)
-  const entrypoint = realpathSync.native(plan.entrypoint)
   if (
-    comparisonKey(cwd) !== comparisonKey(plan.cwd) ||
-    comparisonKey(entrypoint) !== comparisonKey(plan.entrypoint) ||
-    !statSync(cwd).isDirectory() ||
-    !statSync(entrypoint).isFile()
+    locationRoot !== plan.locationRoot ||
+    cwd !== plan.cwd ||
+    !statSync(locationRoot).isDirectory() ||
+    !statSync(cwd).isDirectory()
   ) {
+    changed()
+  }
+  assertContained(locationRoot, cwd)
+  return { locationRoot, cwd }
+}
+
+function verifyStaticIdentity(plan: PreviewPlan, cwd: string): void {
+  if (plan.kind !== "static" || plan.entrypoint === undefined) changed()
+  const entrypoint = realpathSync.native(plan.entrypoint)
+  if (entrypoint !== plan.entrypoint || !statSync(entrypoint).isFile()) {
     changed()
   }
   assertContained(cwd, entrypoint)

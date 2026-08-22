@@ -41,6 +41,15 @@ function freezePreviewUnknown(directory: string, preview: unknown) {
   return freezeUnknown({ authority: "admission", location: location(directory), preview })
 }
 
+function configurationFailure(plan: PreviewPlan.PreviewPlan): unknown {
+  try {
+    PreviewPlan.verifyConfiguration(plan)
+    return undefined
+  } catch (error) {
+    return error
+  }
+}
+
 describe("WorkflowVisualBuild.CreateInput", () => {
   test("accepts only the user prompt, budgets, trusted preview choice, and delivery mode", () => {
     const decoded = Schema.decodeUnknownSync(WorkflowVisualBuild.CreateInput)({
@@ -206,6 +215,84 @@ describe("PreviewPlan.freeze", () => {
 
     expect(plan.configSha256).toBe(frozenHash)
     expect(() => PreviewPlan.verifyConfiguration(plan)).toThrow(/changed/i)
+  })
+
+  test("binds an empty explicit-script cwd to its admitted Location", async () => {
+    await using root = await tmpdir()
+    await using outside = await tmpdir()
+    const site = path.join(root.path, "site")
+    await fs.mkdir(site)
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.rm(site, { recursive: true, force: true })
+    await fs.symlink(outside.path, site, process.platform === "win32" ? "junction" : "dir")
+
+    const failure = configurationFailure(plan)
+
+    expect(failure).toBeInstanceOf(PreviewPlan.Invalid)
+    expect(failure).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test("rejects an identical configured cwd reached through a replacement alias", async () => {
+    await using root = await tmpdir()
+    await using outside = await tmpdir()
+    const site = path.join(root.path, "site")
+    const packageJson = JSON.stringify({ scripts: { preview: "vite preview" } })
+    await fs.mkdir(site)
+    await fs.writeFile(path.join(site, "package.json"), packageJson)
+    await fs.writeFile(path.join(outside.path, "package.json"), packageJson)
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.rm(site, { recursive: true, force: true })
+    await fs.symlink(outside.path, site, process.platform === "win32" ? "junction" : "dir")
+
+    const failure = configurationFailure(plan)
+
+    expect(failure).toBeInstanceOf(PreviewPlan.Invalid)
+    expect(failure).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test("rejects a case-only cwd identity change", async () => {
+    await using root = await tmpdir()
+    const site = path.join(root.path, "site")
+    const staging = path.join(root.path, "case-staging")
+    const caseAlias = path.join(root.path, "SITE")
+    await fs.mkdir(site)
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.rename(site, staging)
+    await fs.rename(staging, caseAlias)
+
+    const failure = configurationFailure(plan)
+
+    expect(failure).toBeInstanceOf(PreviewPlan.Invalid)
+    expect(failure).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test("reports a deleted explicit-script cwd as a typed configuration change", async () => {
+    await using root = await tmpdir()
+    const site = path.join(root.path, "site")
+    await fs.mkdir(site)
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.rm(site, { recursive: true, force: true })
+
+    const failure = configurationFailure(plan)
+
+    expect(failure).toBeInstanceOf(PreviewPlan.Invalid)
+    expect(failure).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test("freezes deterministic canonical Location identity into the plan digest", async () => {
+    await using root = await tmpdir()
+    await using outside = await tmpdir()
+    const site = path.join(root.path, "site")
+    await fs.mkdir(site)
+    const first = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    const second = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+
+    expect(first.locationRoot).toBe(await fs.realpath(root.path))
+    expect(first.configSha256).toBe(second.configSha256)
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(configurationFailure(Object.freeze({ ...first, locationRoot: outside.path }))).toMatchObject({
+      code: "preview_configuration_changed",
+    })
   })
 
   test("normalizes duplicate local origins into a self-verifying frozen plan", async () => {

@@ -103,6 +103,7 @@ describe("WorkflowVisualHost", () => {
     const forged = Object.freeze({
       kind: "script" as const,
       argv: ["bun", "run", "preview"],
+      locationRoot: "D:\\workspace",
       cwd: "D:\\workspace",
       env: {},
       allowedOrigins: [],
