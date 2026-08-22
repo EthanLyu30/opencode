@@ -486,6 +486,7 @@ function recognizeProject(
 
   if (typeof dependencies.vite === "string") {
     if (scripts.preview === "vite preview") {
+      assertNoAutomaticLifecycleHooks(scripts, "preview")
       return recognizedFrameworkProject(
         "vite",
         "production",
@@ -495,6 +496,7 @@ function recognizeProject(
       )
     }
     if (scripts.dev === "vite" || scripts.dev === "vite dev") {
+      assertNoAutomaticLifecycleHooks(scripts, "dev")
       return recognizedFrameworkProject(
         "vite",
         "development",
@@ -506,6 +508,7 @@ function recognizeProject(
   }
   if (typeof dependencies.next === "string") {
     if (scripts.dev === "next dev") {
+      assertNoAutomaticLifecycleHooks(scripts, "dev")
       return recognizedFrameworkProject(
         "next",
         "development",
@@ -515,6 +518,7 @@ function recognizeProject(
       )
     }
     if (scripts.start === "next start") {
+      assertNoAutomaticLifecycleHooks(scripts, "start")
       return recognizedFrameworkProject(
         "next",
         "production",
@@ -525,6 +529,16 @@ function recognizeProject(
     }
   }
   return undefined
+}
+
+function assertNoAutomaticLifecycleHooks(scripts: Readonly<Record<string, unknown>>, selected: string): void {
+  if (Object.hasOwn(scripts, `pre${selected}`) || Object.hasOwn(scripts, `post${selected}`)) {
+    throw new PreviewConfigurationRequired({
+      code: "preview_configuration_required",
+      message:
+        "Recognized package scripts with pre/post lifecycle hooks require explicit trusted preview configuration",
+    })
+  }
 }
 
 function recognizedFrameworkProject(

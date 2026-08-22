@@ -54,6 +54,38 @@ const recognizedDotenvCases = recognizedFrameworkCases.flatMap(([name, packageJs
   candidates.map((candidate) => [`${name}: ${candidate}`, packageJson, candidate] as const),
 )
 
+const recognizedLifecycleHookCases = [
+  ["Vite dev predev", { scripts: { predev: "bun hook.ts", dev: "vite" }, devDependencies: { vite: "7.0.0" } }],
+  ["Vite dev postdev", { scripts: { dev: "vite", postdev: "bun hook.ts" }, devDependencies: { vite: "7.0.0" } }],
+  [
+    "Vite preview prepreview",
+    { scripts: { prepreview: "bun hook.ts", preview: "vite preview" }, devDependencies: { vite: "7.0.0" } },
+  ],
+  [
+    "Vite preview postpreview",
+    { scripts: { preview: "vite preview", postpreview: "bun hook.ts" }, devDependencies: { vite: "7.0.0" } },
+  ],
+  ["Next dev predev", { scripts: { predev: "bun hook.ts", dev: "next dev" }, dependencies: { next: "16.0.0" } }],
+  ["Next dev postdev", { scripts: { dev: "next dev", postdev: "bun hook.ts" }, dependencies: { next: "16.0.0" } }],
+  [
+    "Next start prestart",
+    { scripts: { prestart: "bun hook.ts", start: "next start" }, dependencies: { next: "16.0.0" } },
+  ],
+  [
+    "Next start poststart",
+    { scripts: { start: "next start", poststart: "bun hook.ts" }, dependencies: { next: "16.0.0" } },
+  ],
+] as const
+
+const weirdLifecycleHookCases = [
+  ["empty pre hook", "predev", ""],
+  ["null post hook", "postdev", null],
+  ["numeric pre hook", "predev", 0],
+  ["boolean post hook", "postdev", false],
+  ["object pre hook", "predev", { command: "bun hook.ts" }],
+  ["array post hook", "postdev", ["bun hook.ts"]],
+] as const
+
 function location(directory: string): Location.Ref {
   return Location.Ref.make({ directory: AbsolutePath.make(directory) })
 }
@@ -172,6 +204,46 @@ describe("PreviewPlan.freeze", () => {
     ]).toEqual([false, false])
   })
 
+  test("observes pinned Bun running lifecycle hooks around a no-env-file package script", async () => {
+    await using root = await tmpdir()
+    const envName = "TASK23_LIFECYCLE_DOTENV_PROBE"
+    await fs.writeFile(
+      path.join(root.path, "package.json"),
+      JSON.stringify({ scripts: { predev: "bun pre.ts", dev: "bun main.ts", postdev: "bun post.ts" } }),
+    )
+    await fs.writeFile(
+      path.join(root.path, "pre.ts"),
+      `await Bun.write(".env.development.local", "${envName}=created-by-pre\\n"); console.log("pre")`,
+    )
+    await fs.writeFile(
+      path.join(root.path, "main.ts"),
+      `console.log("main:" + (process.env["${envName}"] ?? "absent"))`,
+    )
+    await fs.writeFile(path.join(root.path, "post.ts"), 'console.log("post")')
+    const childEnvironment: Record<string, string | undefined> = { ...process.env, NODE_ENV: "development" }
+    delete childEnvironment[envName]
+
+    const child = Bun.spawn([process.execPath, "run", "--no-env-file", "dev"], {
+      cwd: root.path,
+      env: childEnvironment,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+
+    expect({ exitCode, stdout: stdout.trim().split(/\r?\n/) }).toEqual({
+      exitCode: 0,
+      stdout: ["pre", "main:created-by-pre", "post"],
+    })
+    expect(stderr).toContain("$ bun pre.ts")
+    expect(stderr).toContain("$ bun main.ts")
+    expect(stderr).toContain("$ bun post.ts")
+  })
+
   test.each(recognizedFrameworkCases)(
     "recognizes %s only with an exact frozen no-dotenv policy",
     async (_, packageJson, argv, framework, mode, candidates) => {
@@ -198,6 +270,71 @@ describe("PreviewPlan.freeze", () => {
       expect(() => PreviewPlan.verifyConfiguration(plan)).not.toThrow()
     },
   )
+
+  test.each(recognizedLifecycleHookCases)(
+    "requires explicit trusted configuration for recognized %s lifecycle authority",
+    async (_, packageJson) => {
+      await using root = await tmpdir()
+      await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify(packageJson))
+
+      expect(() => freeze(root.path)).toThrow(PreviewPlan.PreviewConfigurationRequired)
+    },
+  )
+
+  test.each(weirdLifecycleHookCases)(
+    "fails closed for an own %s value on a recognized script",
+    async (_, hook, value) => {
+      await using root = await tmpdir()
+      await fs.writeFile(
+        path.join(root.path, "package.json"),
+        JSON.stringify({
+          scripts: { dev: "vite", [hook]: value },
+          devDependencies: { vite: "7.0.0" },
+        }),
+      )
+
+      expect(() => freeze(root.path)).toThrow(PreviewPlan.PreviewConfigurationRequired)
+    },
+  )
+
+  test.each(["predev", "postdev"])("detects later %s addition or change through the frozen manifest", async (hook) => {
+    await using root = await tmpdir()
+    const packageFile = path.join(root.path, "package.json")
+    const packageJson = { scripts: { dev: "vite" }, devDependencies: { vite: "7.0.0" } }
+    await fs.writeFile(packageFile, JSON.stringify(packageJson))
+    const plan = freeze(root.path)
+
+    await fs.writeFile(
+      packageFile,
+      JSON.stringify({ ...packageJson, scripts: { ...packageJson.scripts, [hook]: "bun first-hook.ts" } }),
+    )
+    const added = configurationFailure(plan)
+    await fs.writeFile(
+      packageFile,
+      JSON.stringify({ ...packageJson, scripts: { ...packageJson.scripts, [hook]: "bun changed-hook.ts" } }),
+    )
+    const changed = configurationFailure(plan)
+
+    expect([added, changed]).toEqual([
+      expect.objectContaining({ code: "preview_configuration_changed" }),
+      expect.objectContaining({ code: "preview_configuration_changed" }),
+    ])
+  })
+
+  test("does not treat unrelated lifecycle names as authority for the selected recognized script", async () => {
+    await using root = await tmpdir()
+    await fs.writeFile(
+      path.join(root.path, "package.json"),
+      JSON.stringify({
+        scripts: { prebuild: "bun unrelated.ts", dev: "vite", postbuild: "bun unrelated.ts" },
+        devDependencies: { vite: "7.0.0" },
+      }),
+    )
+
+    const plan = freeze(root.path)
+
+    expect(plan.runtimeEnvPolicy).toMatchObject({ kind: "framework", framework: "vite", mode: "development" })
+  })
 
   test.each(recognizedDotenvCases)(
     "requires explicit trusted configuration when recognized %s exists at admission",
@@ -297,7 +434,14 @@ describe("PreviewPlan.freeze", () => {
     const dotenv = path.join(root.path, ".env.local")
     await fs.writeFile(
       path.join(root.path, "package.json"),
-      JSON.stringify({ scripts: { storybook: "storybook dev" }, devDependencies: { storybook: "10.0.0" } }),
+      JSON.stringify({
+        scripts: {
+          prestorybook: "bun explicit-pre.ts",
+          storybook: "storybook dev",
+          poststorybook: "bun explicit-post.ts",
+        },
+        devDependencies: { storybook: "10.0.0" },
+      }),
     )
     await fs.writeFile(dotenv, "TASK23_EXPLICIT_ENV=synthetic\n")
     const plan = freeze(root.path, {
