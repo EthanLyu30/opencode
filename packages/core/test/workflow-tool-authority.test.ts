@@ -33,6 +33,8 @@ import { testEffect } from "./lib/effect"
 
 let permissionAssertions = 0
 let sandboxRuns = 0
+let sandboxPolicyResolutions = 0
+let processLaunches = 0
 let outputBounds = 0
 
 const projects = Layer.succeed(
@@ -60,6 +62,8 @@ const sandbox = Layer.succeed(
     run: () =>
       Effect.sync(() => {
         sandboxRuns++
+        sandboxPolicyResolutions++
+        processLaunches++
         return { exit: 0, output: "contained", truncated: false }
       }),
   }),
@@ -106,6 +110,8 @@ describe("Workflow tool authority", () => {
         Effect.gen(function* () {
           permissionAssertions = 0
           sandboxRuns = 0
+          sandboxPolicyResolutions = 0
+          processLaunches = 0
           outputBounds = 0
           const location = Location.Ref.make({ directory: AbsolutePath.make(workspace.path) })
           const foreignLocation = Location.Ref.make({ directory: AbsolutePath.make(foreign.path) })
@@ -128,14 +134,24 @@ describe("Workflow tool authority", () => {
             input: { command: "printf contained" },
           })
           expect(allowed.result.type).not.toBe("error")
-          expect({ permissionAssertions, sandboxRuns, outputBounds }).toEqual({
+          expect({
+            permissionAssertions,
+            sandboxRuns,
+            sandboxPolicyResolutions,
+            processLaunches,
+            outputBounds,
+          }).toEqual({
             permissionAssertions: 1,
             sandboxRuns: 1,
+            sandboxPolicyResolutions: 1,
+            processLaunches: 1,
             outputBounds: 1,
           })
 
           permissionAssertions = 0
           sandboxRuns = 0
+          sandboxPolicyResolutions = 0
+          processLaunches = 0
           outputBounds = 0
           const other = yield* admit("implement", location, sessionID, "other")
           const missingSession = yield* admit("implement", location, missingSessionID, "missing_session")
@@ -182,14 +198,118 @@ describe("Workflow tool authority", () => {
             _tag: "ToolRegistry.WorkflowAuthorityError",
             code: "location_mismatch",
           })
-          expect({ permissionAssertions, sandboxRuns, outputBounds }).toEqual({
+          expect({
+            permissionAssertions,
+            sandboxRuns,
+            sandboxPolicyResolutions,
+            processLaunches,
+            outputBounds,
+          }).toEqual({
             permissionAssertions: 0,
             sandboxRuns: 0,
+            sandboxPolicyResolutions: 0,
+            processLaunches: 0,
             outputBounds: 0,
           })
           expect(yield* Effect.promise(() => fs.readFile(path.join(workspace.path, "admitted.txt"), "utf8"))).toBe(
             "before",
           )
+        }),
+      (directories) =>
+        Effect.promise(() =>
+          Promise.all(directories.map((directory) => directory[Symbol.asyncDispose]())).then(() => undefined),
+        ),
+    ),
+  )
+
+  it.live("rejects a materialization captured by another Location before any side effect", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
+      ([workspace, foreign]) =>
+        Effect.gen(function* () {
+          permissionAssertions = 0
+          sandboxRuns = 0
+          sandboxPolicyResolutions = 0
+          processLaunches = 0
+          outputBounds = 0
+          const location = Location.Ref.make({ directory: AbsolutePath.make(workspace.path) })
+          const foreignLocation = Location.Ref.make({ directory: AbsolutePath.make(foreign.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_authority_materialization")
+          yield* Effect.promise(() =>
+            Promise.all([
+              fs.writeFile(path.join(workspace.path, "owned.txt"), "workspace-a"),
+              fs.writeFile(path.join(foreign.path, "owned.txt"), "workspace-b"),
+            ]),
+          )
+          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          const admitted = yield* admit("implement", location, sessionID, "materialization_owner")
+          const foreignMaterialization = yield* materialize(foreignLocation)
+
+          const outcomes = yield* Effect.all(
+            [
+              settle(
+                location,
+                admitted,
+                {
+                  sessionID,
+                  agent: WorkflowRoleAgents.agentForRole("implement"),
+                  name: "edit",
+                  input: { path: "owned.txt", oldString: "workspace-b", newString: "forged" },
+                },
+                foreignMaterialization,
+              ).pipe(
+                Effect.match({
+                  onFailure: (error) => ({ error }),
+                  onSuccess: (settlement) => ({ settlement }),
+                }),
+              ),
+              settle(
+                location,
+                admitted,
+                {
+                  sessionID,
+                  agent: WorkflowRoleAgents.agentForRole("implement"),
+                  name: "bash",
+                  input: { command: "printf forged" },
+                },
+                foreignMaterialization,
+              ).pipe(
+                Effect.match({
+                  onFailure: (error) => ({ error }),
+                  onSuccess: (settlement) => ({ settlement }),
+                }),
+              ),
+            ],
+            { concurrency: 1 },
+          )
+          const files = yield* Effect.promise(() =>
+            Promise.all([
+              fs.readFile(path.join(workspace.path, "owned.txt"), "utf8"),
+              fs.readFile(path.join(foreign.path, "owned.txt"), "utf8"),
+            ]),
+          )
+          expect({
+            materializationErrors: outcomes.map(
+              (outcome) =>
+                "error" in outcome &&
+                outcome.error instanceof ToolRegistry.WorkflowAuthorityError &&
+                outcome.error.code === "materialization_invalid",
+            ),
+            permissionAssertions,
+            sandboxRuns,
+            sandboxPolicyResolutions,
+            processLaunches,
+            outputBounds,
+            files,
+          }).toEqual({
+            materializationErrors: [true, true],
+            permissionAssertions: 0,
+            sandboxRuns: 0,
+            sandboxPolicyResolutions: 0,
+            processLaunches: 0,
+            outputBounds: 0,
+            files: ["workspace-a", "workspace-b"],
+          })
         }),
       (directories) =>
         Effect.promise(() =>
@@ -294,11 +414,12 @@ function settle(
     readonly name: string
     readonly input: unknown
   },
+  captured?: ToolRegistry.Materialization,
 ) {
   return Effect.gen(function* () {
     const registry = yield* ToolRegistry.Service
     const service = yield* ToolRegistry.WorkflowAuthorityService
-    const materialization = yield* registry.materialize(WorkflowPermissions.forRole("implement"))
+    const materialization = captured ?? (yield* registry.materialize(WorkflowPermissions.forRole("implement")))
     return yield* service.settle({
       materialization,
       ...authority,
@@ -308,4 +429,11 @@ function settle(
       call: { type: "tool-call", id: `call-workflow-authority-${ordinal}`, name: call.name, input: call.input },
     })
   }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
+}
+
+function materialize(location: Location.Ref) {
+  return ToolRegistry.Service.use((registry) => registry.materialize(WorkflowPermissions.forRole("implement"))).pipe(
+    Effect.scoped,
+    Effect.provide(LocationServiceMap.Service.get(location)),
+  )
 }

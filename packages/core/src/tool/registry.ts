@@ -49,9 +49,16 @@ export interface Settlement {
   readonly outputPaths?: ReadonlyArray<string>
 }
 
+const registryOwners = new WeakMap<Interface, object>()
 const workflowSettlers = new WeakMap<
   Materialization,
-  (input: ExecuteInput, lineage: WorkflowToolLineage.Descriptor) => Effect.Effect<Settlement, ToolOutputStore.Error>
+  {
+    readonly owner: object
+    readonly settle: (
+      input: ExecuteInput,
+      lineage: WorkflowToolLineage.Descriptor,
+    ) => Effect.Effect<Settlement, ToolOutputStore.Error>
+  }
 >()
 
 export interface WorkflowAuthorityInput extends ExecuteInput {
@@ -97,6 +104,7 @@ const registryLayer = Layer.effect(
   Effect.gen(function* () {
     const applications = yield* ApplicationTools.Service
     const resources = yield* ToolOutputStore.Service
+    const owner = {}
     type Registration = { readonly identity: object; readonly tool: AnyTool }
     const local = new Map<string, Array<{ readonly token: object; readonly registration: Registration }>>()
     const identities = new WeakMap<object, string>()
@@ -147,7 +155,7 @@ const registryLayer = Layer.effect(
         : { result, output: bounded.output }
     })
 
-    return Service.of({
+    const service = Service.of({
       register: Effect.fn("ToolRegistry.register")(function* (tools) {
         const entries = Object.entries(tools)
         if (entries.length === 0) return
@@ -199,14 +207,19 @@ const registryLayer = Layer.effect(
             return Effect.succeed({ result: { type: "error", value: `Unknown tool: ${input.call.name}` } })
           },
         }
-        workflowSettlers.set(materialization, (input, lineage) => {
-          const registration = registrations.get(input.call.name)
-          if (registration) return settleWith(input, registration.identity, lineage)
-          return Effect.succeed({ result: { type: "error", value: `Unknown tool: ${input.call.name}` } })
+        workflowSettlers.set(materialization, {
+          owner,
+          settle: (input, lineage) => {
+            const registration = registrations.get(input.call.name)
+            if (registration) return settleWith(input, registration.identity, lineage)
+            return Effect.succeed({ result: { type: "error", value: `Unknown tool: ${input.call.name}` } })
+          },
         })
         return materialization
       }),
     })
+    registryOwners.set(service, owner)
+    return service
   }),
 )
 
@@ -218,7 +231,7 @@ const layer = Layer.effect(
 const workflowAuthorityLayer = Layer.effect(
   WorkflowAuthorityService,
   Effect.gen(function* () {
-    yield* Service
+    const registry = yield* Service
     const workflows = yield* WorkflowStore.Service
     const sessions = yield* SessionStore.Service
     const location = yield* Location.Service
@@ -258,10 +271,13 @@ const workflowAuthorityLayer = Layer.effect(
         )
         if (policyDigest !== input.policyDigest)
           return yield* fail("policy_mismatch", "Settlement policy does not match persisted Workflow authority")
-        const settle = workflowSettlers.get(input.materialization)
-        if (settle === undefined)
-          return yield* fail("materialization_invalid", "Workflow settlement requires a captured materialization")
-        return yield* settle(input, {
+        const settlement = workflowSettlers.get(input.materialization)
+        if (settlement === undefined || settlement.owner !== registryOwners.get(registry))
+          return yield* fail(
+            "materialization_invalid",
+            "Workflow settlement requires a materialization captured by the active Location registry",
+          )
+        return yield* settlement.settle(input, {
           workflowID: detail.run.id,
           stageID: stage.id,
           sessionID: input.sessionID,
