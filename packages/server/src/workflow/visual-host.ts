@@ -40,6 +40,7 @@ export interface Options {
   readonly hostRoot: string
   readonly browser: PlaywrightCapture.Runtime
   readonly evidenceLedger?: EvidenceLedger.Service
+  readonly evidenceRootPolicy?: EvidenceLedger.OpenOptions["rootPolicy"]
   readonly processOwnership?: ProcessOwnership.Service
   readonly now?: () => number
   readonly startupTimeoutMs?: number
@@ -82,6 +83,7 @@ export const layer = Layer.unwrap(
     return makeLayer({
       hostRoot,
       browser: PlaywrightCapture.productionRuntime({ tempRoot: path.join(hostRoot, "browser") }),
+      evidenceRootPolicy: EvidenceLedger.productionRootPolicyRequired,
     })
   }),
 )
@@ -130,7 +132,9 @@ async function makeState(options: Options): Promise<State> {
     browser: options.browser,
     processOwnership: options.processOwnership ?? ProcessOwnership.unavailable,
     active: new Map(),
-    evidence: options.evidenceLedger ?? EvidenceLedger.open(path.join(root, ".evidence")),
+    evidence:
+      options.evidenceLedger ??
+      EvidenceLedger.open(path.join(root, ".evidence"), { rootPolicy: options.evidenceRootPolicy }),
     captureTails: new Map(),
     now: options.now ?? (() => Date.now()),
     startupTimeoutMs,

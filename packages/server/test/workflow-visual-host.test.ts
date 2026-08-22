@@ -5,7 +5,9 @@ import { WorkflowSchema } from "@opencode-ai/core/workflow"
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { Effect, Fiber } from "effect"
+import { Database } from "bun:sqlite"
 import { createHash } from "node:crypto"
+import fsSync from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { PlaywrightCapture } from "../src/workflow/playwright"
@@ -940,6 +942,77 @@ describe("WorkflowVisualHostServer", () => {
 
     expect(cause).toBeInstanceOf(TypeError)
     expect(await fs.readFile(outsideFile)).toEqual(outsideBytes)
+  })
+
+  test("closes the database when an incompatible durable schema rejects statement preparation", async () => {
+    await using temp = await taskTemp()
+    const ledgerRoot = path.join(temp.path, ".evidence")
+    await fs.mkdir(ledgerRoot)
+    const databasePath = path.join(ledgerRoot, "evidence.sqlite")
+    const incompatible = new Database(databasePath, { create: true, readwrite: true })
+    incompatible.run("CREATE TABLE workflow_evidence (wrong_column TEXT) STRICT")
+    incompatible.close()
+
+    expect(() => EvidenceLedger.open(ledgerRoot)).toThrow()
+    await expect(fs.rename(databasePath, `${databasePath}.released`)).resolves.toBeUndefined()
+  })
+
+  test("runs deployment root policy before creating durable ledger files", async () => {
+    await using temp = await taskTemp()
+    const ledgerRoot = path.join(temp.path, ".evidence")
+
+    expect(() =>
+      EvidenceLedger.open(ledgerRoot, {
+        rootPolicy: () => {
+          throw new TypeError("Host root must be ACL-owned and non-writable by workspace or model code")
+        },
+      }),
+    ).toThrow(/ACL-owned/)
+    expect(await fs.exists(path.join(ledgerRoot, "evidence.sqlite"))).toBe(false)
+  })
+
+  test("revalidates a database-path swap injected between exclusive creation and SQLite open", async () => {
+    await using temp = await taskTemp()
+    await using outside = await taskTemp()
+    const ledgerRoot = path.join(temp.path, ".evidence")
+    const outsideFile = path.join(outside.path, "outside.sqlite")
+    const outsideBytes = Buffer.from("outside-owned")
+    await fs.writeFile(outsideFile, outsideBytes)
+    let swapped = false
+
+    expect(() =>
+      EvidenceLedger.open(ledgerRoot, {
+        onBoundary: ({ operation, phase }) => {
+          if (operation !== "open" || phase !== "before") return
+          const databasePath = path.join(ledgerRoot, "evidence.sqlite")
+          fsSync.renameSync(databasePath, path.join(ledgerRoot, "parked.sqlite"))
+          fsSync.symlinkSync(outsideFile, databasePath, "file")
+          swapped = true
+        },
+      }),
+    ).toThrow(TypeError)
+    expect(swapped).toBe(true)
+    expect(await fs.readFile(outsideFile)).toEqual(outsideBytes)
+  })
+
+  test("fails closed when a runtime boundary hook adds another database owner before select", async () => {
+    await using temp = await taskTemp()
+    await using outside = await taskTemp()
+    const ledgerRoot = path.join(temp.path, ".evidence")
+    let inject = false
+    const ledger = EvidenceLedger.open(ledgerRoot, {
+      onBoundary: ({ operation, phase }) => {
+        if (!inject || operation !== "select-get" || phase !== "before") return
+        fsSync.linkSync(path.join(ledgerRoot, "evidence.sqlite"), path.join(outside.path, "other-owner.sqlite"))
+      },
+    })
+    expect(await ledger.reserve(String(workflowID), 1, WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES)).toBe(true)
+    inject = true
+
+    await expect(ledger.used(String(workflowID))).rejects.toBeInstanceOf(TypeError)
+    await expect(
+      fs.rename(path.join(ledgerRoot, "evidence.sqlite"), path.join(ledgerRoot, "evidence.sqlite.released")),
+    ).resolves.toBeUndefined()
   })
 
   test("recovers only expired host-owned capabilities that are not fenced by an active lease", async () => {

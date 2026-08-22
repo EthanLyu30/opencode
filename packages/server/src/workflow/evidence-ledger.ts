@@ -11,13 +11,48 @@ export interface Service {
   readonly close: () => Promise<void>
 }
 
+export type Operation =
+  | "open"
+  | "pragma-journal"
+  | "pragma-synchronous"
+  | "pragma-busy-timeout"
+  | "pragma-trusted-schema"
+  | "schema"
+  | "quick-check-prepare"
+  | "quick-check-get"
+  | "select-prepare"
+  | "upsert-prepare"
+  | "select-get"
+  | "begin"
+  | "upsert-run"
+  | "commit"
+  | "rollback"
+  | "close"
+
+export interface OpenOptions {
+  readonly rootPolicy?: (canonicalLedgerRoot: string) => void
+  readonly onBoundary?: (boundary: { readonly operation: Operation; readonly phase: "before" | "after" }) => void
+}
+
+/**
+ * Bun SQLite accepts a pathname rather than an already verified no-follow descriptor. Production must replace this
+ * fail-closed policy with an ACL check proving the host root is not writable by workspace or model-controlled code.
+ */
+export const productionRootPolicyRequired = (): never => {
+  throw new TypeError(
+    "Workflow host root must be ACL-owned and non-writable by workspace or model code; configure a deployment root policy",
+  )
+}
+
 const databaseName = "evidence.sqlite"
 const ownedFileNames = [databaseName, `${databaseName}-wal`, `${databaseName}-shm`] as const
 
-export function open(root: string): Service {
+export function open(root: string, options: OpenOptions = {}): Service {
   if (!path.isAbsolute(root)) throw new TypeError("Evidence ledger root must be absolute")
   fs.mkdirSync(root, { recursive: true })
   const canonical = verifyRoot(root)
+  options.rootPolicy?.(canonical)
+  if (!samePath(verifyRoot(canonical), canonical)) throw new TypeError("Evidence ledger root policy changed identity")
   const databasePath = path.join(canonical, databaseName)
   verifyOwnedFiles(canonical)
   if (!fs.existsSync(databasePath)) {
@@ -33,21 +68,73 @@ export function open(root: string): Service {
   }
   verifyOwnedFiles(canonical, true)
 
-  const database = initializeDatabase(databasePath, canonical)
-  const select = database.query<{ readonly evidence_bytes: number }, [string]>(
-    "SELECT evidence_bytes FROM workflow_evidence WHERE workflow_id = ?",
-  )
-  const upsert = database.query<unknown, [string, number]>(`
-    INSERT INTO workflow_evidence (workflow_id, evidence_bytes) VALUES (?, ?)
-    ON CONFLICT(workflow_id) DO UPDATE SET evidence_bytes = excluded.evidence_bytes
-  `)
+  return initializeDatabase(databasePath, canonical, options)
+}
+
+function initializeDatabase(databasePath: string, root: string, options: OpenOptions): Service {
+  const database = checked(root, options, "open", () => new Database(databasePath, { create: false, readwrite: true }))
+  let transferred = false
+  try {
+    checked(root, options, "pragma-journal", () => database.run("PRAGMA journal_mode = WAL"))
+    checked(root, options, "pragma-synchronous", () => database.run("PRAGMA synchronous = FULL"))
+    checked(root, options, "pragma-busy-timeout", () => database.run("PRAGMA busy_timeout = 5000"))
+    checked(root, options, "pragma-trusted-schema", () => database.run("PRAGMA trusted_schema = OFF"))
+    checked(root, options, "schema", () =>
+      database.run(`
+        CREATE TABLE IF NOT EXISTS workflow_evidence (
+          workflow_id TEXT PRIMARY KEY NOT NULL,
+          evidence_bytes INTEGER NOT NULL
+            CHECK(typeof(evidence_bytes) = 'integer')
+            CHECK(evidence_bytes >= 0 AND evidence_bytes <= ${WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES})
+        ) STRICT
+      `),
+    )
+    const quickCheck = checked(root, options, "quick-check-prepare", () =>
+      database.query<{ readonly quick_check: string }, []>("PRAGMA quick_check"),
+    )
+    const integrity = checked(root, options, "quick-check-get", () => quickCheck.get())
+    if (integrity?.quick_check !== "ok") throw new Error("Evidence ledger integrity check failed")
+    const select = checked(root, options, "select-prepare", () =>
+      database.query<{ readonly evidence_bytes: number }, [string]>(
+        "SELECT evidence_bytes FROM workflow_evidence WHERE workflow_id = ?",
+      ),
+    )
+    const upsert = checked(root, options, "upsert-prepare", () =>
+      database.query<unknown, [string, number]>(`
+        INSERT INTO workflow_evidence (workflow_id, evidence_bytes) VALUES (?, ?)
+        ON CONFLICT(workflow_id) DO UPDATE SET evidence_bytes = excluded.evidence_bytes
+      `),
+    )
+    const service = makeService(
+      root,
+      options,
+      database,
+      (workflowID) => select.get(workflowID),
+      (workflowID, evidenceBytes) => upsert.run(workflowID, evidenceBytes),
+    )
+    transferred = true
+    return service
+  } finally {
+    if (!transferred) closeAfterFailure(root, options, database)
+  }
+}
+
+function makeService(
+  root: string,
+  options: OpenOptions,
+  database: Database,
+  select: (workflowID: string) => { readonly evidence_bytes: number } | null,
+  upsert: (workflowID: string, evidenceBytes: number) => unknown,
+): Service {
   let closed = false
 
-  const used = (workflowID: string): number => {
-    if (closed) throw new Error("Evidence ledger is closed")
-    if (typeof workflowID !== "string" || workflowID.length === 0) throw new TypeError("Workflow ID is required")
-    verifyOwnedFiles(canonical, true)
-    const value = select.get(workflowID)?.evidence_bytes ?? 0
+  const closeAfter = (cause: unknown): never => {
+    closed = true
+    closeAfterFailure(root, options, database)
+    throw cause
+  }
+  const selectUsed = (workflowID: string): number => {
+    const value = checked(root, options, "select-get", () => select(workflowID))?.evidence_bytes ?? 0
     if (!Number.isSafeInteger(value) || value < 0 || value > WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
       throw new Error("Evidence ledger contains an invalid total")
     }
@@ -55,64 +142,87 @@ export function open(root: string): Service {
   }
 
   return {
-    used: async (workflowID) => used(workflowID),
-    reserve: async (workflowID, bytes, limit) => {
-      if (!Number.isSafeInteger(bytes) || bytes <= 0 || limit !== WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
-        throw new TypeError("Evidence reservation is not bounded")
-      }
-      verifyOwnedFiles(canonical, true)
-      database.run("BEGIN IMMEDIATE")
+    used: async (workflowID) => {
       try {
-        const next = used(workflowID) + bytes
-        if (next > limit) {
-          database.run("ROLLBACK")
-          verifyOwnedFiles(canonical, true)
-          return false
-        }
-        upsert.run(workflowID, next)
-        database.run("COMMIT")
-        verifyOwnedFiles(canonical, true)
-        return true
+        if (closed) throw new Error("Evidence ledger is closed")
+        if (typeof workflowID !== "string" || workflowID.length === 0) throw new TypeError("Workflow ID is required")
+        return selectUsed(workflowID)
       } catch (cause) {
-        if (database.inTransaction) database.run("ROLLBACK")
-        throw cause
+        return closeAfter(cause)
+      }
+    },
+    reserve: async (workflowID, bytes, limit) => {
+      try {
+        if (closed) throw new Error("Evidence ledger is closed")
+        if (!Number.isSafeInteger(bytes) || bytes <= 0 || limit !== WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
+          throw new TypeError("Evidence reservation is not bounded")
+        }
+        checked(root, options, "begin", () => database.run("BEGIN IMMEDIATE"))
+        try {
+          const next = selectUsed(workflowID) + bytes
+          if (next > limit) {
+            checked(root, options, "rollback", () => database.run("ROLLBACK"))
+            return false
+          }
+          checked(root, options, "upsert-run", () => upsert(workflowID, next))
+          checked(root, options, "commit", () => database.run("COMMIT"))
+          return true
+        } catch (cause) {
+          let failure = cause
+          try {
+            if (database.inTransaction) checked(root, options, "rollback", () => database.run("ROLLBACK"))
+          } catch (rollbackCause) {
+            failure = new AggregateError([cause, rollbackCause], "Evidence transaction and rollback failed")
+          } finally {
+            verifyOwnedFiles(root, true)
+          }
+          throw failure
+        }
+      } catch (cause) {
+        return closeAfter(cause)
       }
     },
     close: async () => {
       if (closed) return
-      verifyOwnedFiles(canonical, true)
       closed = true
-      database.close()
-      verifyOwnedFiles(canonical, true)
+      try {
+        checked(root, options, "close", () => database.close())
+      } catch (cause) {
+        closeAfterFailure(root, options, database)
+        throw cause
+      }
     },
   }
 }
 
-function initializeDatabase(databasePath: string, root: string): Database {
-  const database = new Database(databasePath, { create: false, readwrite: true })
+function checked<A>(root: string, options: OpenOptions, operation: Operation, work: () => A): A {
+  verifyOwnedFiles(root, true)
+  options.onBoundary?.({ operation, phase: "before" })
+  verifyOwnedFiles(root, true)
   try {
+    return work()
+  } finally {
     verifyOwnedFiles(root, true)
-    database.run("PRAGMA journal_mode = WAL")
+    options.onBoundary?.({ operation, phase: "after" })
     verifyOwnedFiles(root, true)
-    database.run("PRAGMA synchronous = FULL")
-    database.run("PRAGMA busy_timeout = 5000")
-    database.run("PRAGMA trusted_schema = OFF")
-    database.run(`
-      CREATE TABLE IF NOT EXISTS workflow_evidence (
-        workflow_id TEXT PRIMARY KEY NOT NULL,
-        evidence_bytes INTEGER NOT NULL
-          CHECK(typeof(evidence_bytes) = 'integer')
-          CHECK(evidence_bytes >= 0 AND evidence_bytes <= ${WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES})
-      ) STRICT
-    `)
-    verifyOwnedFiles(root, true)
-    const integrity = database.query<{ readonly quick_check: string }, []>("PRAGMA quick_check").get()
-    if (integrity?.quick_check !== "ok") throw new Error("Evidence ledger integrity check failed")
-    verifyOwnedFiles(root, true)
-    return database
-  } catch (cause) {
-    database.close()
-    throw cause
+  }
+}
+
+function closeAfterFailure(root: string, options: OpenOptions, database: Database): void {
+  try {
+    checked(root, options, "close", () => database.close())
+  } catch {
+    try {
+      database.close()
+    } catch {
+      // Best effort only: preserve the initiating ownership or SQLite failure.
+    } finally {
+      try {
+        verifyOwnedFiles(root, true)
+      } catch {
+        // The initiating ownership failure remains authoritative.
+      }
+    }
   }
 }
 
