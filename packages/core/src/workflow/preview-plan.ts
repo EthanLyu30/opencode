@@ -71,6 +71,7 @@ const allowedExecutables = new Set([
   "yarn.cmd",
 ])
 const bunExecutables = new Set(["bun", "bun.exe"])
+const nodeExecutables = new Set(["node", "node.exe"])
 const packageManagerExecutables = new Set(["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"])
 const shellExecutables = new Set([
   "bash",
@@ -160,7 +161,8 @@ export function freeze(input: FreezeInput): PreviewPlan {
 
   if (preview?.kind === "script") {
     const argv = freezeArgv(preview.argv)
-    const configFiles = configurationFiles(root, cwd)
+    const configDirectory = scriptConfigurationDirectory(argv, root, cwd)
+    const configFiles = configurationFiles(root, configDirectory)
     validateScriptInvocation(argv, root, configFiles)
     return makePlan({ kind: "script", locationRoot: root, cwd, argv, env, allowedOrigins, configFiles })
   }
@@ -204,7 +206,8 @@ export function verifyConfiguration(plan: PreviewPlan): void {
     const identity = verifyDirectoryIdentity(plan)
     if (plan.kind === "script") {
       if (plan.argv === undefined) changed()
-      const current = configurationFiles(identity.locationRoot, identity.cwd)
+      const configDirectory = scriptConfigurationDirectory(plan.argv, identity.locationRoot, identity.cwd)
+      const current = configurationFiles(identity.locationRoot, configDirectory)
       if (!sameConfiguration(current, plan.configFiles)) changed()
       validateScriptInvocation(plan.argv, identity.locationRoot, current)
     } else {
@@ -465,7 +468,7 @@ function freezeArgv(argv: readonly string[]): readonly string[] {
   if (shellExecutables.has(executable) || !allowedExecutables.has(executable) || /[\\/]/.test(executableName)) {
     throw invalid("invalid_preview_configuration", "Preview argv must use an approved direct runtime, never a shell")
   }
-  packageRunScript(argv)
+  if (directNodeEntrypoint(argv) === undefined) packageRunScript(argv)
   if (
     argv.some((argument) => /^--?(?:api[-_]?key|authorization|credential|password|secret|token)(?:=|$)/i.test(argument))
   ) {
@@ -477,6 +480,25 @@ function freezeArgv(argv: readonly string[]): readonly string[] {
     throw invalid("invalid_preview_configuration", "Preview argv is not safe to persist")
   }
   return freezeArray([...argv])
+}
+
+function directNodeEntrypoint(argv: readonly string[]): string | undefined {
+  const executable = (argv[0] ?? "").toLowerCase()
+  if (!nodeExecutables.has(executable)) return undefined
+  if (argv.length !== 2 || typeof argv[1] !== "string" || !/\.(?:js|mjs|cjs)$/.test(argv[1])) {
+    throw invalid(
+      "invalid_preview_configuration",
+      "Direct Node previews require exactly one canonical .js, .mjs, or .cjs entrypoint",
+    )
+  }
+  assertPortableRelativePath(argv[1], false)
+  return argv[1]
+}
+
+function scriptConfigurationDirectory(argv: readonly string[], locationRoot: string, cwd: string): string {
+  const relativeEntrypoint = directNodeEntrypoint(argv)
+  if (relativeEntrypoint === undefined) return cwd
+  return path.dirname(resolveFile(locationRoot, cwd, relativeEntrypoint))
 }
 
 function packageRunScript(argv: readonly string[]): string | undefined {
@@ -621,7 +643,7 @@ function resolveFile(root: string, cwd: string, value: string): string {
   let canonical: string
   try {
     canonical = realpathSync.native(candidate)
-    if (!statSync(canonical).isFile()) throw new TypeError("not a file")
+    if (canonical !== candidate || !statSync(canonical).isFile()) throw new TypeError("not a canonical file")
   } catch (error) {
     if (error instanceof Invalid) throw error
     throw invalid("invalid_preview_configuration", "Preview entrypoint is unavailable")

@@ -360,6 +360,127 @@ describe("PreviewPlan.freeze", () => {
     expect(configurationFailure(plan)).toMatchObject({ code: "preview_configuration_changed" })
   })
 
+  test("freezes the nested package scope that changes direct Node .js execution", async () => {
+    await using root = await tmpdir()
+    const site = path.join(root.path, "site")
+    const sub = path.join(site, "sub")
+    const packageFile = path.join(sub, "package.json")
+    await fs.mkdir(sub, { recursive: true })
+    await fs.writeFile(path.join(sub, "server.js"), "export {}; console.log('module-mode')")
+    await fs.writeFile(packageFile, JSON.stringify({ type: "module" }))
+
+    const before = Bun.spawn(["node", "sub/server.js"], { cwd: site, stdout: "pipe", stderr: "ignore" })
+    const [beforeExit, beforeOutput] = await Promise.all([before.exited, new Response(before.stdout).text()])
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["node", "sub/server.js"] })
+    await fs.writeFile(packageFile, JSON.stringify({ type: "commonjs" }))
+    const after = Bun.spawn(["node", "sub/server.js"], { cwd: site, stdout: "ignore", stderr: "ignore" })
+
+    expect(beforeExit).toBe(0)
+    expect(beforeOutput).toContain("module-mode")
+    expect(await after.exited).not.toBe(0)
+    expect(plan.configFiles.map((file) => file.path)).toContain("site/sub/package.json")
+    expect(configurationFailure(plan)).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test.each([
+    ["node", "server.js", "export {}"],
+    ["node", "server.mjs", "export {}"],
+    ["node.exe", "server.cjs", "module.exports = {}"],
+  ] as const)("freezes nested configuration for direct %s %s", async (executable, entrypoint, source) => {
+    await using root = await tmpdir()
+    const sub = path.join(root.path, "site", "sub")
+    const packageFile = path.join(sub, "package.json")
+    await fs.mkdir(sub, { recursive: true })
+    await fs.writeFile(path.join(sub, entrypoint), source)
+    await fs.writeFile(packageFile, JSON.stringify({ type: "module" }))
+    const plan = freeze(root.path, {
+      kind: "script",
+      cwd: "site",
+      argv: [executable, `sub/${entrypoint}`],
+    })
+    await fs.writeFile(packageFile, JSON.stringify({ type: "commonjs" }))
+
+    expect(plan.configFiles.map((file) => file.path)).toContain("site/sub/package.json")
+    expect(configurationFailure(plan)).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test.each([
+    ["missing entrypoint", ["node"]],
+    ["eval", ["node", "--eval", "console.log('preview')"]],
+    ["require hook", ["node", "--require", "./register.cjs", "server.js"]],
+    ["runtime flag", ["node", "--inspect", "server.js"]],
+    ["stdin", ["node", "-"]],
+    ["option separator", ["node", "--", "server.js"]],
+    ["trailing application arguments", ["node", "server.js", "--port", "3000"]],
+    ["absolute POSIX path", ["node", "/outside/server.js"]],
+    ["absolute Windows path", ["node", "C:/outside/server.js"]],
+    ["parent traversal", ["node", "../server.js"]],
+    ["file URL", ["node", "file:///outside/server.js"]],
+    ["remote URL", ["node", "https://example.com/server.js"]],
+  ])("rejects unsafe or ambiguous direct Node argv: %s", async (_, argv) => {
+    await using root = await tmpdir()
+
+    expect(() => freezePreviewUnknown(root.path, { kind: "script", argv })).toThrow(PreviewPlan.Invalid)
+  })
+
+  test("requires the direct Node entrypoint to be an existing file", async () => {
+    await using root = await tmpdir()
+
+    expect(() => freeze(root.path, { kind: "script", argv: ["node", "missing.mjs"] })).toThrow(PreviewPlan.Invalid)
+  })
+
+  test("rejects a direct Node entrypoint directory replaced by an outside junction", async () => {
+    await using root = await tmpdir()
+    await using outside = await tmpdir()
+    const site = path.join(root.path, "site")
+    const sub = path.join(site, "sub")
+    const packageJson = JSON.stringify({ type: "module" })
+    await fs.mkdir(sub, { recursive: true })
+    await fs.writeFile(path.join(sub, "package.json"), packageJson)
+    await fs.writeFile(path.join(sub, "server.js"), "export {}")
+    await fs.writeFile(path.join(outside.path, "package.json"), packageJson)
+    await fs.writeFile(path.join(outside.path, "server.js"), "export {}")
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["node", "sub/server.js"] })
+    await fs.rm(sub, { recursive: true, force: true })
+    await fs.symlink(outside.path, sub, process.platform === "win32" ? "junction" : "dir")
+
+    const failure = configurationFailure(plan)
+
+    expect(failure).toBeInstanceOf(PreviewPlan.Invalid)
+    expect(failure).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test("rejects a case-only direct Node entrypoint identity change", async () => {
+    await using root = await tmpdir()
+    const site = path.join(root.path, "site")
+    const entrypoint = path.join(site, "server.mjs")
+    const staging = path.join(site, "server-staging.mjs")
+    const caseAlias = path.join(site, "SERVER.mjs")
+    await fs.mkdir(site)
+    await fs.writeFile(entrypoint, "export {}")
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["node", "server.mjs"] })
+    await fs.rename(entrypoint, staging)
+    await fs.rename(staging, caseAlias)
+
+    const failure = configurationFailure(plan)
+
+    expect(failure).toBeInstanceOf(PreviewPlan.Invalid)
+    expect(failure).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test("reports a deleted direct Node entrypoint as a typed configuration change", async () => {
+    await using root = await tmpdir()
+    const entrypoint = path.join(root.path, "server.cjs")
+    await fs.writeFile(entrypoint, "module.exports = {}")
+    const plan = freeze(root.path, { kind: "script", argv: ["node", "server.cjs"] })
+    await fs.rm(entrypoint)
+
+    const failure = configurationFailure(plan)
+
+    expect(failure).toBeInstanceOf(PreviewPlan.Invalid)
+    expect(failure).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
   test("binds an empty explicit-script cwd to its admitted Location", async () => {
     await using root = await tmpdir()
     await using outside = await tmpdir()
