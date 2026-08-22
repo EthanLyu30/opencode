@@ -93,6 +93,27 @@ describe("workflow business artifact schemas", () => {
     ).toThrow()
   })
 
+  test("allows separate decomposition tasks to reference the same exact path", () => {
+    const tasks = [plan.tasks[0], { ...plan.tasks[0], id: "verify-release-page", files: ["src/app.ts"] }]
+    expect(() => Schema.decodeUnknownSync(WorkflowDecompositionArtifact.Plan)({ ...plan, tasks })).not.toThrow()
+  })
+
+  test("rejects case-insensitive path aliases across decomposition tasks", () => {
+    const tasks = [
+      { ...plan.tasks[0], files: ["src/App.ts"] },
+      { ...plan.tasks[0], id: "verify-release-page", files: ["src/app.ts"] },
+    ]
+    expect(() => Schema.decodeUnknownSync(WorkflowDecompositionArtifact.Plan)({ ...plan, tasks })).toThrow()
+  })
+
+  test("rejects file-directory aliases across decomposition tasks", () => {
+    const tasks = [
+      { ...plan.tasks[0], files: ["src/app"] },
+      { ...plan.tasks[0], id: "verify-release-page", files: ["src/app/index.ts"] },
+    ]
+    expect(() => Schema.decodeUnknownSync(WorkflowDecompositionArtifact.Plan)({ ...plan, tasks })).toThrow()
+  })
+
   test("rejects traversal, absolute, device, case-alias, and topology-conflicting change paths", () => {
     for (const path of ["../app.ts", "/src/app.ts", "C:/src/app.ts", "src/CON.ts", "src\\app.ts"]) {
       expect(() =>

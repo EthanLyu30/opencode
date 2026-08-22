@@ -35,6 +35,8 @@ const internallyConsistent = Schema.makeFilter<Schema.Schema.Type<typeof PlanSha
     const topologyError = DesignArtifact.sourceTopologyError(task.files)
     if (topologyError !== undefined) return topologyError
   }
+  const planTopologyError = DesignArtifact.sourceTopologyError([...new Set(value.tasks.flatMap((task) => task.files))])
+  if (planTopologyError !== undefined) return planTopologyError
   return undefined
 })
 
