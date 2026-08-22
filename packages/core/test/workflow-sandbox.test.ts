@@ -22,8 +22,11 @@ import { WorkflowPermissions } from "@opencode-ai/core/workflow/permissions"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowToolLineage } from "@opencode-ai/core/workflow/tool-lineage"
+import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
+import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 
@@ -40,6 +43,7 @@ const sandboxPolicies = new Map<
   string,
   { readonly workspace: "readonly" | "readwrite"; readonly outputDirectories: readonly string[] }
 >()
+let sandboxPolicyResolutions = 0
 const access = {
   implement: { workspace: "readwrite", outputDirectories: [] },
   repair: { workspace: "readwrite", outputDirectories: [] },
@@ -48,7 +52,10 @@ const access = {
 } as const
 const sandbox = WorkflowCommandSandbox.wslNode({
   distribution: "Ubuntu-24.04",
-  resolvePolicy: (input) => sandboxPolicies.get(policyKey(input)),
+  resolvePolicy: (input) => {
+    sandboxPolicyResolutions++
+    return sandboxPolicies.get(policyKey(input))
+  },
   limits: {
     timeoutMs: 10_000,
     maxOutputBytes: 64 * 1_024,
@@ -66,6 +73,8 @@ const it = testEffect(
       SessionProjector.node,
       SessionStore.node,
       SessionV2.node,
+      WorkflowProjector.node,
+      WorkflowStore.node,
       LocationServiceMap.node,
     ]),
     [
@@ -77,6 +86,48 @@ const it = testEffect(
 )
 
 describe("Workflow command sandbox", () => {
+  it.live("rejects a synthetic lineage before leaf or sandbox authority", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (workspace) =>
+        Effect.gen(function* () {
+          sandboxPolicyResolutions = 0
+          const location = Location.Ref.make({ directory: AbsolutePath.make(workspace.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_sandbox_synthetic_lineage")
+          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+
+          const settled = yield* Effect.gen(function* () {
+            const materialized = yield* (yield* ToolRegistry.Service).materialize(
+              WorkflowPermissions.forRole("implement"),
+            )
+            const synthetic = yield* syntheticAuthority("implement", location, sessionID)
+            return yield* (yield* ToolRegistry.WorkflowAuthorityService)
+              .settle({
+                materialization: materialized,
+                ...synthetic,
+                sessionID,
+                agent: WorkflowRoleAgents.agentForRole("implement"),
+                assistantMessageID: SessionMessage.ID.make("msg_workflow_sandbox_synthetic_lineage"),
+                call: {
+                  type: "tool-call",
+                  id: "call-workflow-sandbox-synthetic-lineage",
+                  name: "bash",
+                  input: { command: "printf forged > forged.txt" },
+                },
+              })
+              .pipe(Effect.flip)
+          }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
+
+          expect(settled).toMatchObject({ _tag: "ToolRegistry.WorkflowAuthorityError", code: "workflow_missing" })
+          expect(sandboxPolicyResolutions).toBe(0)
+          expect(
+            yield* Effect.promise(() => fs.stat(path.join(workspace.path, "forged.txt")).catch(() => undefined)),
+          ).toBeUndefined()
+        }),
+      (workspace) => Effect.promise(() => workspace[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("rejects reserved-agent Bash when generic settlement smuggles forged workflow lineage", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -133,7 +184,7 @@ describe("Workflow command sandbox", () => {
             const materialized = yield* (yield* ToolRegistry.Service).materialize(
               WorkflowPermissions.forRole("implement"),
             )
-            return yield* ToolRegistry.settleWorkflow(
+            return yield* settleAuthorized(
               materialized,
               {
                 sessionID,
@@ -146,7 +197,7 @@ describe("Workflow command sandbox", () => {
                   input: { command: "printf mismatched > mismatched.txt" },
                 },
               },
-              yield* lineage("implement", location, sessionID),
+              yield* admit("implement", location, sessionID),
             )
           }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
 
@@ -177,9 +228,9 @@ describe("Workflow command sandbox", () => {
             const execute = (role: "implement" | "repair" | "test" | "deliver", command: string) =>
               Effect.gen(function* () {
                 const materialized = yield* registry.materialize(WorkflowPermissions.forRole(role))
-                const issued = yield* lineage(role, location, sessionID)
+                const issued = yield* admit(role, location, sessionID)
                 sandboxPolicies.set(policyKey(issued), access[role])
-                return yield* ToolRegistry.settleWorkflow(
+                return yield* settleAuthorized(
                   materialized,
                   {
                     sessionID,
@@ -263,9 +314,9 @@ describe("Workflow command sandbox", () => {
             const execute = (role: "implement" | "test" | "deliver", command: string) =>
               Effect.gen(function* () {
                 const materialized = yield* registry.materialize(WorkflowPermissions.forRole(role))
-                const issued = yield* lineage(role, location, sessionID)
+                const issued = yield* admit(role, location, sessionID)
                 sandboxPolicies.set(policyKey(issued), access[role])
-                return yield* ToolRegistry.settleWorkflow(
+                return yield* settleAuthorized(
                   materialized,
                   {
                     sessionID,
@@ -332,9 +383,9 @@ describe("Workflow command sandbox", () => {
               ["symlink", "printf escaped > outside-link.txt"],
               ["junction", "printf escaped > outside-junction/created.txt"],
             ] as const) {
-              const issued = yield* lineage("implement", location, sessionID)
+              const issued = yield* admit("implement", location, sessionID)
               sandboxPolicies.set(policyKey(issued), access.implement)
-              const settled = yield* ToolRegistry.settleWorkflow(
+              const settled = yield* settleAuthorized(
                 materialized,
                 {
                   sessionID,
@@ -378,39 +429,95 @@ function toWsl(value: string) {
   return `/mnt/${match[1]!.toLowerCase()}/${match[2]!.replaceAll("\\", "/")}`
 }
 
-function lineage(role: WorkflowRole.Role, location: Location.Ref, sessionID: SessionV2.ID) {
+let authorityOrdinal = 0
+
+function syntheticAuthority(role: WorkflowRole.Role, location: Location.Ref, sessionID: SessionV2.ID) {
   const budget: Workflow.Budget = { maxTurns: 4, maxToolCalls: 8, maxAttempts: 2 }
-  const workflowID = Workflow.ID.make(`wfl_sandbox_${role}`)
-  return WorkflowToolLineage.issue({
-    workflow: Workflow.Info.make({
-      id: workflowID,
+  const suffix = `${role}_${++authorityOrdinal}`
+  const workflowID = Workflow.ID.make(`wfl_sandbox_${suffix}`)
+  const stageID = Workflow.StageID.make(`wfs_sandbox_${suffix}`)
+  const workflow = Workflow.Info.make({
+    id: workflowID,
+    type: "development",
+    status: "running",
+    input: { brief: "Exercise the contained command backend" },
+    budget,
+    usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
+    location,
+    sessionID,
+    agent: AgentV2.ID.make("build"),
+    version: 1,
+    time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+  })
+  const stage = Workflow.Stage.make({
+    id: stageID,
+    workflowID,
+    type: role,
+    ordinal: 0,
+    status: "running",
+    attempt: 1,
+    maxAttempts: 2,
+    recoveryPolicy: "restart_safe",
+    idempotencyKey: `sandbox/${role}`,
+    input: { plan: role },
+    time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+  })
+  const route = WorkflowRouting.resolve({ role, budget })
+  return WorkflowToolLineage.policyDigest({
+    workflow,
+    stage,
+    route,
+    agent: WorkflowRoleAgents.agentForRole(role),
+  }).pipe(Effect.map((policyDigest) => ({ workflowID, stageID, role, route, policyDigest })))
+}
+
+function admit(role: WorkflowRole.Role, location: Location.Ref, sessionID: SessionV2.ID) {
+  return Effect.gen(function* () {
+    const synthetic = yield* syntheticAuthority(role, location, sessionID)
+    const events = yield* EventV2.Service
+    yield* events.publish(WorkflowEvent.Created, {
+      workflowID: synthetic.workflowID,
+      timestamp: DateTime.makeUnsafe(authorityOrdinal),
       type: "development",
-      status: "running",
       input: { brief: "Exercise the contained command backend" },
-      budget,
-      usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
+      budget: { maxTurns: 4, maxToolCalls: 8, maxAttempts: 2 },
       location,
       sessionID,
       agent: AgentV2.ID.make("build"),
-      version: 1,
-      time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
-    }),
-    stage: Workflow.Stage.make({
-      id: Workflow.StageID.make(`wfs_sandbox_${role}`),
-      workflowID,
-      type: role,
-      ordinal: 0,
-      status: "running",
-      attempt: 1,
-      maxAttempts: 2,
-      recoveryPolicy: "restart_safe",
-      idempotencyKey: `sandbox/${role}`,
-      input: { plan: role },
-      time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
-    }),
-    route: WorkflowRouting.resolve({ role, budget }),
-    agent: WorkflowRoleAgents.agentForRole(role),
+      stages: [
+        {
+          id: synthetic.stageID,
+          type: role,
+          ordinal: 0,
+          maxAttempts: 2,
+          recoveryPolicy: "restart_safe" as const,
+          idempotencyKey: `sandbox/${role}/${authorityOrdinal}`,
+          input: { plan: role },
+        },
+      ],
+    })
+    const store = yield* WorkflowStore.Service
+    const detail = yield* store.get(synthetic.workflowID)
+    const stage = yield* store.stage(synthetic.stageID)
+    if (!detail || !stage) return yield* Effect.die("persisted workflow authority fixture missing")
+    const policyDigest = yield* WorkflowToolLineage.policyDigest({
+      workflow: detail.run,
+      stage,
+      route: synthetic.route,
+      agent: WorkflowRoleAgents.agentForRole(role),
+    })
+    return { ...synthetic, policyDigest }
   })
+}
+
+function settleAuthorized(
+  materialization: ToolRegistry.Materialization,
+  input: ToolRegistry.ExecuteInput,
+  authority: Pick<ToolRegistry.WorkflowAuthorityInput, "workflowID" | "stageID" | "route" | "policyDigest">,
+) {
+  return ToolRegistry.WorkflowAuthorityService.use((service) =>
+    service.settle({ materialization, ...authority, ...input }),
+  )
 }
 
 function policyKey(input: {

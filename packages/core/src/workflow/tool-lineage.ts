@@ -10,18 +10,6 @@ import { WorkflowRouting } from "./routing"
 
 const domain = "opencode.workflow.tool-policy"
 const version = 1 as const
-const issued = new WeakSet<object>()
-declare const TypeId: unique symbol
-
-export interface Lineage {
-  readonly [TypeId]: true
-  readonly workflowID: Workflow.ID
-  readonly stageID: Workflow.StageID
-  readonly sessionID: SessionSchema.ID
-  readonly agent: AgentV2.ID
-  readonly role: WorkflowRole.Role
-  readonly policyDigest: string
-}
 
 export interface Descriptor {
   readonly workflowID: Workflow.ID
@@ -36,31 +24,14 @@ export class Invalid extends Schema.TaggedErrorClass<Invalid>()("WorkflowToolLin
   message: Schema.String,
 }) {}
 
-export interface IssueInput {
+export interface PolicyInput {
   readonly workflow: Workflow.Info
   readonly stage: Workflow.Stage
   readonly route: WorkflowRouting.Route
   readonly agent: AgentV2.ID
 }
 
-export function issue(input: IssueInput): Effect.Effect<Lineage, Invalid> {
-  return policyDigest(input).pipe(
-    Effect.map((policyDigest) => {
-      const lineage = Object.freeze({
-        workflowID: input.workflow.id,
-        stageID: input.stage.id,
-        sessionID: input.workflow.sessionID!,
-        agent: input.agent,
-        role: input.route.role,
-        policyDigest,
-      }) as Lineage
-      issued.add(lineage)
-      return lineage
-    }),
-  )
-}
-
-export function policyDigest(input: IssueInput): Effect.Effect<string, Invalid> {
+export function policyDigest(input: PolicyInput): Effect.Effect<string, Invalid> {
   if (input.workflow.location === undefined || input.workflow.sessionID === undefined)
     return Effect.fail(new Invalid({ message: "Workflow tool lineage requires persisted placement" }))
   if (input.stage.workflowID !== input.workflow.id)
@@ -106,11 +77,6 @@ export function policyDigest(input: IssueInput): Effect.Effect<string, Invalid> 
     },
     catch: () => new Invalid({ message: "Workflow tool policy contains a non-canonical value" }),
   })
-}
-
-export function inspect(lineage: Lineage | undefined): Descriptor | undefined {
-  if (lineage === undefined || !issued.has(lineage)) return undefined
-  return lineage
 }
 
 function digest(scope: string, value: unknown) {

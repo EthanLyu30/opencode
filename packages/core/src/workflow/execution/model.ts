@@ -22,7 +22,6 @@ import { WorkflowRetry } from "../retry"
 import { WorkflowRoleAgents } from "../role-agents"
 import { WorkflowRouting } from "../routing"
 import { WorkflowSecretGuard } from "../secret-guard"
-import { WorkflowStore } from "../store"
 import { WorkflowToolLineage } from "../tool-lineage"
 
 export interface Input extends ExecutionInput {
@@ -111,7 +110,6 @@ const productionLayer = Layer.effect(
     const modelClient = yield* LLMClient.Service
     const locations = yield* LocationServiceMap.Service
     const sessions = yield* SessionStore.Service
-    const workflows = yield* WorkflowStore.Service
 
     return Service.of({
       execute: (input) => {
@@ -236,46 +234,6 @@ const productionLayer = Layer.effect(
                 executionFailure("invalid_request", "workflow_tool_lineage_invalid", error.message),
               ),
             )
-            const persistedWorkflow = yield* workflows.get(input.workflow.id)
-            const persistedStage = yield* workflows.stage(input.stage.id)
-            if (
-              persistedWorkflow === undefined ||
-              persistedStage === undefined ||
-              persistedStage.workflowID !== persistedWorkflow.run.id
-            ) {
-              return yield* Effect.fail(
-                executionFailure(
-                  "invalid_request",
-                  "workflow_tool_lineage_invalid",
-                  "Workflow tool lineage requires the persisted Workflow and Stage",
-                ),
-              )
-            }
-            const persistedInput = {
-              workflow: persistedWorkflow.run,
-              stage: persistedStage,
-              route,
-              agent: WorkflowRoleAgents.agentForRole(route.role),
-            }
-            const persistedPolicyDigest = yield* WorkflowToolLineage.policyDigest(persistedInput).pipe(
-              Effect.mapError((error) =>
-                executionFailure("invalid_request", "workflow_tool_lineage_invalid", error.message),
-              ),
-            )
-            if (persistedPolicyDigest !== requestedPolicyDigest) {
-              return yield* Effect.fail(
-                executionFailure(
-                  "invalid_request",
-                  "workflow_tool_lineage_invalid",
-                  "Workflow tool lineage does not match the persisted Workflow and Stage policy",
-                ),
-              )
-            }
-            const workflowLineage = yield* WorkflowToolLineage.issue(persistedInput).pipe(
-              Effect.mapError((error) =>
-                executionFailure("invalid_request", "workflow_tool_lineage_invalid", error.message),
-              ),
-            )
             const continuation = yield* continuationFromStage(input, responseID, responses, route)
             if (continuation?.activeTurn?.pendingCallID !== undefined) {
               return yield* Effect.fail({
@@ -288,6 +246,7 @@ const productionLayer = Layer.effect(
               } satisfies ExecutionFailure)
             }
             const registry = yield* ToolRegistry.Service
+            const workflowAuthority = yield* ToolRegistry.WorkflowAuthorityService
             const recoveryMaterialization =
               continuation?.activeTurn !== undefined &&
               continuation.activeTurn.results.length < continuation.activeTurn.calls.length
@@ -513,25 +472,34 @@ const productionLayer = Layer.effect(
 
                 if (materialization === undefined)
                   return yield* Effect.die("Workflow tool snapshot was not materialized")
-                const settlement = yield* ToolRegistry.settleWorkflow(
-                  materialization,
-                  {
+                const settlement = yield* workflowAuthority
+                  .settle({
+                    materialization,
+                    workflowID: input.workflow.id,
+                    stageID: input.stage.id,
+                    route,
+                    policyDigest: requestedPolicyDigest,
                     sessionID,
                     agent: WorkflowRoleAgents.agentForRole(route.role),
                     assistantMessageID: workflowMessageID(input.stage.id, call.id),
                     call: { type: "tool-call", ...call },
-                  },
-                  workflowLineage,
-                ).pipe(
-                  Effect.mapError((error) =>
-                    executionFailure(
-                      "transient",
-                      "tool_output_retention_failed",
-                      WorkflowSecretGuard.sanitizeText(error.message),
-                      0,
+                  })
+                  .pipe(
+                    Effect.mapError((error) =>
+                      error instanceof ToolRegistry.WorkflowAuthorityError
+                        ? executionFailure(
+                            "invalid_request",
+                            "workflow_tool_lineage_invalid",
+                            WorkflowSecretGuard.sanitizeText(error.message),
+                          )
+                        : executionFailure(
+                            "transient",
+                            "tool_output_retention_failed",
+                            WorkflowSecretGuard.sanitizeText(error.message),
+                            0,
+                          ),
                     ),
-                  ),
-                )
+                  )
                 const evidence = JSON.stringify({
                   type: "function_call_output",
                   ...(responseID === undefined ? {} : { responseID }),
@@ -628,7 +596,7 @@ const productionLayer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer: productionLayer,
-  deps: [Credential.node, ResponsesV2.node, LocationServiceMap.node, SessionStore.node, WorkflowStore.node, llmClient],
+  deps: [Credential.node, ResponsesV2.node, LocationServiceMap.node, SessionStore.node, llmClient],
 })
 
 function responseIDFromStage(input: Readonly<Record<string, unknown>>) {

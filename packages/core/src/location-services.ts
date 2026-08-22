@@ -66,6 +66,7 @@ export const locationServices = LayerNode.group([
   ToolOutputStore.node,
   ToolRegistry.node,
   ToolRegistry.toolsNode,
+  ToolRegistry.workflowAuthorityNode,
   Image.node,
   SkillGuidance.node,
   ReferenceGuidance.node,

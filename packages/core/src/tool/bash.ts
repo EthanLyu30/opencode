@@ -132,7 +132,7 @@ const layer = Layer.effectDiscard(
               }
               const workflowRole = WorkflowRoleAgents.roleForAgent(context.agent)
               if (workflowRole !== undefined) {
-                const lineage = WorkflowToolLineage.inspect(context.workflowLineage)
+                const lineage = context.workflowLineage
                 if (
                   lineage === undefined ||
                   lineage.sessionID !== context.sessionID ||

@@ -29,7 +29,9 @@ import { WorkflowPermissions } from "@opencode-ai/core/workflow/permissions"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
+import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
@@ -52,6 +54,8 @@ const it = testEffect(
       SessionProjector.node,
       SessionStore.node,
       SessionV2.node,
+      WorkflowProjector.node,
+      WorkflowStore.node,
       LocationServiceMap.node,
     ]),
     [
@@ -65,12 +69,6 @@ const modelRequests: LLMRequest[] = []
 const modelResponses: LLMResponse[] = []
 const modelTimeline: string[] = []
 let modelCredentialReads = 0
-const persistedWorkflows = new Map<Workflow.ID, Workflow.Detail>()
-const persistedStages = new Map<Workflow.StageID, Workflow.Stage>()
-const workflowStore = Layer.mock(WorkflowStore.Service, {
-  get: (workflowID) => Effect.succeed(persistedWorkflows.get(workflowID)),
-  stage: (stageID) => Effect.succeed(persistedStages.get(stageID)),
-})
 const modelClient = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
@@ -109,6 +107,8 @@ const modelIt = testEffect(
       SessionProjector.node,
       SessionStore.node,
       SessionV2.node,
+      WorkflowProjector.node,
+      WorkflowStore.node,
       LocationServiceMap.node,
       WorkflowModelExecution.node,
     ]),
@@ -117,7 +117,6 @@ const modelIt = testEffect(
       [SessionExecution.node, SessionExecution.noopLayer],
       [Credential.node, credentials],
       [llmClient, modelClient],
-      [WorkflowStore.node, workflowStore],
     ],
   ),
 )
@@ -153,6 +152,8 @@ const sandboxModelIt = testEffect(
       SessionProjector.node,
       SessionStore.node,
       SessionV2.node,
+      WorkflowProjector.node,
+      WorkflowStore.node,
       LocationServiceMap.node,
       WorkflowModelExecution.node,
     ]),
@@ -162,7 +163,6 @@ const sandboxModelIt = testEffect(
       [Credential.node, credentials],
       [llmClient, modelClient],
       [WorkflowCommandSandbox.node, modelSandbox],
-      [WorkflowStore.node, workflowStore],
     ],
   ),
 )
@@ -178,7 +178,6 @@ const modelInput = (
     readonly role?: WorkflowRole.Role
     readonly workflowInput?: Readonly<Record<string, unknown>>
     readonly stageInput?: Readonly<Record<string, unknown>>
-    readonly persist?: boolean
   } = {},
 ): WorkflowModelExecution.Input => {
   const budget: Workflow.Budget = { maxTurns: 3, maxToolCalls: 2, maxAttempts: 2 }
@@ -210,10 +209,6 @@ const modelInput = (
     ...stageState,
     time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
   })
-  if (identity.persist !== false) {
-    persistedWorkflows.set(workflow.id, { run: workflow, stages: [stage], artifacts: [] })
-    persistedStages.set(stage.id, stage)
-  }
   return {
     workflow,
     stage,
@@ -223,6 +218,32 @@ const modelInput = (
     saveCheckpoint,
     route: WorkflowRouting.resolve({ role, budget }),
   }
+}
+
+function persistModelInput(input: WorkflowModelExecution.Input) {
+  return EventV2.Service.use((events) =>
+    events.publish(WorkflowEvent.Created, {
+      workflowID: input.workflow.id,
+      timestamp: input.workflow.time.created,
+      type: input.workflow.type,
+      input: input.workflow.input,
+      budget: input.workflow.budget,
+      location: input.workflow.location,
+      sessionID: input.workflow.sessionID,
+      agent: input.workflow.agent,
+      stages: [
+        {
+          id: input.stage.id,
+          type: input.stage.type,
+          ordinal: input.stage.ordinal,
+          maxAttempts: input.stage.maxAttempts,
+          recoveryPolicy: input.stage.recoveryPolicy,
+          idempotencyKey: input.stage.idempotencyKey,
+          input: input.stage.input,
+        },
+      ],
+    }),
+  )
 }
 
 const expected = {
@@ -488,20 +509,18 @@ describe("Workflow Location tools", () => {
             ),
           })
 
-          const result = yield* WorkflowModelExecution.Service.use((models) =>
-            models.execute(
-              modelInput(location, sessionID, (checkpoint) =>
-                Effect.sync(() => {
-                  const active = checkpoint.activeTurn
-                  modelTimeline.push(
-                    typeof active === "object" && active !== null && "pendingCallID" in active
-                      ? "checkpoint:pending"
-                      : "checkpoint:settled",
-                  )
-                }),
-              ),
-            ),
+          const executionInput = modelInput(location, sessionID, (checkpoint) =>
+            Effect.sync(() => {
+              const active = checkpoint.activeTurn
+              modelTimeline.push(
+                typeof active === "object" && active !== null && "pendingCallID" in active
+                  ? "checkpoint:pending"
+                  : "checkpoint:settled",
+              )
+            }),
           )
+          yield* persistModelInput(executionInput)
+          const result = yield* WorkflowModelExecution.Service.use((models) => models.execute(executionInput))
 
           expect(result.outcome).toEqual({ schemaVersion: 1, role: "design", verdict: "ready", revision: 0 })
           expect(modelRequests).toHaveLength(2)
@@ -583,13 +602,15 @@ describe("Workflow Location tools", () => {
               stageInput: { plan: { outputs: ["second"] } },
             },
           )
-          const firstLineage = yield* WorkflowToolLineage.issue({
+          yield* persistModelInput(first)
+          yield* persistModelInput(second)
+          const firstPolicyDigest = yield* WorkflowToolLineage.policyDigest({
             workflow: first.workflow,
             stage: first.stage,
             route: first.route,
             agent: WorkflowRoleAgents.agentForRole("implement"),
           })
-          const secondLineage = yield* WorkflowToolLineage.issue({
+          const secondPolicyDigest = yield* WorkflowToolLineage.policyDigest({
             workflow: second.workflow,
             stage: second.stage,
             route: second.route,
@@ -608,9 +629,9 @@ describe("Workflow Location tools", () => {
               route: first.route,
               agent: WorkflowRoleAgents.agentForRole("implement"),
             }),
-          ).toBe(firstLineage.policyDigest)
-          sandboxPolicies.set(`${first.workflow.id}\0${first.stage.id}`, firstLineage.policyDigest)
-          sandboxPolicies.set(`${second.workflow.id}\0${second.stage.id}`, secondLineage.policyDigest)
+          ).toBe(firstPolicyDigest)
+          sandboxPolicies.set(`${first.workflow.id}\0${first.stage.id}`, firstPolicyDigest)
+          sandboxPolicies.set(`${second.workflow.id}\0${second.stage.id}`, secondPolicyDigest)
 
           const enqueue = (callID: string) => {
             const calls = LLMResponse.fromEvents([
@@ -646,11 +667,11 @@ describe("Workflow Location tools", () => {
           expect(sandboxLaunches).toHaveLength(2)
           expect(sandboxLaunches.map((request) => [request.workflowID, request.stageID, request.policyDigest])).toEqual(
             [
-              [first.workflow.id, first.stage.id, firstLineage.policyDigest],
-              [second.workflow.id, second.stage.id, secondLineage.policyDigest],
+              [first.workflow.id, first.stage.id, firstPolicyDigest],
+              [second.workflow.id, second.stage.id, secondPolicyDigest],
             ],
           )
-          expect(firstLineage.policyDigest).not.toBe(secondLineage.policyDigest)
+          expect(firstPolicyDigest).not.toBe(secondPolicyDigest)
 
           const mismatched = modelInput(
             location,
@@ -663,9 +684,9 @@ describe("Workflow Location tools", () => {
               role: "implement",
               workflowInput: first.workflow.input,
               stageInput: { plan: { outputs: ["changed-after-freeze"] } },
-              persist: false,
             },
           )
+          enqueue("call-shared-policy-mismatch")
           const failure = yield* WorkflowModelExecution.Service.use((models) =>
             models.execute(mismatched).pipe(Effect.flip),
           )
@@ -795,7 +816,7 @@ describe("Workflow Location tools", () => {
             })
             const designLineage = yield* locationLineage("design", location, sessionID)
             const implementLineage = yield* locationLineage("implement", location, sessionID)
-            const forbidden = yield* ToolRegistry.settleWorkflow(
+            const forbidden = yield* settleAuthorized(
               tools,
               {
                 ...identity("design"),
@@ -811,7 +832,7 @@ describe("Workflow Location tools", () => {
             expect(forbidden.result).toMatchObject({ type: "error" })
             expect(yield* Effect.promise(() => fs.readFile(admitted, "utf8"))).toBe("before")
 
-            const edited = yield* ToolRegistry.settleWorkflow(
+            const edited = yield* settleAuthorized(
               tools,
               {
                 ...identity("implement"),
@@ -827,7 +848,7 @@ describe("Workflow Location tools", () => {
             expect(edited.result.type).toBe("text")
             expect(yield* Effect.promise(() => fs.readFile(admitted, "utf8"))).toBe("after")
 
-            const denied = yield* ToolRegistry.settleWorkflow(
+            const denied = yield* settleAuthorized(
               tools,
               {
                 ...identity("implement"),
@@ -870,7 +891,7 @@ describe("Workflow Location tools", () => {
             for (const role of ["implement", "test", "deliver"] as const) {
               const filtered = yield* registry.materialize(WorkflowPermissions.forRole(role))
               expect(filtered.definitions.some((definition) => definition.name === "bash")).toBe(true)
-              const denied = yield* ToolRegistry.settleWorkflow(
+              const denied = yield* settleAuthorized(
                 filtered,
                 {
                   ...identity(role),
@@ -905,12 +926,34 @@ function locationLineage(role: WorkflowRole.Role, location: Location.Ref, sessio
       role,
     },
   )
-  return WorkflowToolLineage.issue({
-    workflow: input.workflow,
-    stage: input.stage,
-    route: input.route,
-    agent: WorkflowRoleAgents.agentForRole(role),
+  return Effect.gen(function* () {
+    yield* persistModelInput(input)
+    const detail = yield* WorkflowStore.Service.use((store) => store.get(input.workflow.id))
+    const stage = yield* WorkflowStore.Service.use((store) => store.stage(input.stage.id))
+    if (!detail || !stage) return yield* Effect.die("persisted workflow tool fixture missing")
+    const policyDigest = yield* WorkflowToolLineage.policyDigest({
+      workflow: detail.run,
+      stage,
+      route: input.route,
+      agent: WorkflowRoleAgents.agentForRole(role),
+    })
+    return {
+      workflowID: input.workflow.id,
+      stageID: input.stage.id,
+      route: input.route,
+      policyDigest,
+    }
   })
+}
+
+function settleAuthorized(
+  materialization: ToolRegistry.Materialization,
+  input: ToolRegistry.ExecuteInput,
+  authority: Pick<ToolRegistry.WorkflowAuthorityInput, "workflowID" | "stageID" | "route" | "policyDigest">,
+) {
+  return ToolRegistry.WorkflowAuthorityService.use((service) =>
+    service.settle({ materialization, ...authority, ...input }),
+  )
 }
 
 function continuation(input: {

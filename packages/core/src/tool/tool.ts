@@ -12,7 +12,7 @@ export interface Context {
   readonly agent: AgentV2.ID
   readonly assistantMessageID: SessionMessage.ID
   readonly toolCallID: string
-  readonly workflowLineage?: WorkflowToolLineage.Lineage
+  readonly workflowLineage?: WorkflowToolLineage.Descriptor
 }
 
 export type SchemaType<A> = Schema.Codec<A, any, never, never>
