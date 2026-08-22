@@ -41,6 +41,16 @@ const relevantConfigurationNames = Object.freeze([
 ])
 const relevantConfigurationKeys = new Set(relevantConfigurationNames.map((name) => name.toLowerCase()))
 const frozenConfigurationKeys = new Set(["path", "sha256", "size"])
+const viteConfigurationNames = new Set([
+  "vite.config.js",
+  "vite.config.mjs",
+  "vite.config.cjs",
+  "vite.config.ts",
+  "vite.config.mts",
+  "vite.config.cts",
+])
+const explicitRuntimeEnvPolicyKeys = new Set(["kind"])
+const frameworkRuntimeEnvPolicyKeys = new Set(["kind", "framework", "mode", "root", "candidates"])
 
 const unsafeEnvironmentName = /(?:^|_)(?:AUTH|COOKIE|CREDENTIAL|KEY|PASSWORD|SECRET|TOKEN)(?:_|$)/i
 const hostAuthorityEnvironmentNames = new Set([
@@ -83,6 +93,23 @@ export interface FrozenConfigurationFile {
   readonly size: number
 }
 
+export interface ExplicitRuntimeEnvPolicy {
+  /** Explicit user-owned scripts are their own reviewed runtime-env boundary. */
+  readonly kind: "explicit"
+}
+
+export interface FrameworkRuntimeEnvPolicy {
+  readonly kind: "framework"
+  readonly framework: "vite" | "next"
+  readonly mode: "development" | "production"
+  /** Canonical directory from which the recognized framework loads dotenv files. */
+  readonly root: string
+  /** Exact absolute candidate paths, in the framework's documented load order. */
+  readonly candidates: readonly string[]
+}
+
+export type RuntimeEnvPolicy = ExplicitRuntimeEnvPolicy | FrameworkRuntimeEnvPolicy
+
 export interface PreviewPlan {
   readonly kind: "static" | "script"
   readonly entrypoint?: string
@@ -93,6 +120,8 @@ export interface PreviewPlan {
   readonly env: Readonly<Record<string, string>>
   readonly allowedOrigins: readonly string[]
   readonly configFiles: readonly FrozenConfigurationFile[]
+  /** Present on every script plan so recognized policy cannot be removed without changing its exact shape. */
+  readonly runtimeEnvPolicy?: RuntimeEnvPolicy
   readonly configSha256: string
 }
 
@@ -152,7 +181,16 @@ export function freeze(input: FreezeInput): PreviewPlan {
     const configDirectory = scriptConfigurationDirectory(argv, root, cwd)
     const configFiles = configurationFiles(root, configDirectory)
     validateScriptInvocation(argv, root, configFiles)
-    return makePlan({ kind: "script", locationRoot: root, cwd, argv, env, allowedOrigins, configFiles })
+    return makePlan({
+      kind: "script",
+      locationRoot: root,
+      cwd,
+      argv,
+      env,
+      allowedOrigins,
+      configFiles,
+      runtimeEnvPolicy: { kind: "explicit" },
+    })
   }
 
   const recognized = recognizeProject(root)
@@ -165,6 +203,7 @@ export function freeze(input: FreezeInput): PreviewPlan {
       env,
       allowedOrigins,
       configFiles: recognized.configFiles,
+      runtimeEnvPolicy: recognized.runtimeEnvPolicy,
     })
   }
 
@@ -198,6 +237,7 @@ export function verifyConfiguration(plan: PreviewPlan): void {
       const current = configurationFiles(identity.locationRoot, configDirectory)
       if (!sameConfiguration(current, plan.configFiles)) changed()
       validateScriptInvocation(plan.argv, identity.locationRoot, current)
+      verifyRuntimeEnvPolicy(plan, identity, current)
     } else {
       verifyStaticIdentity(plan, identity.cwd)
       for (const file of plan.configFiles) {
@@ -214,6 +254,7 @@ export function verifyConfiguration(plan: PreviewPlan): void {
       env: plan.env,
       allowedOrigins: plan.allowedOrigins,
       configFiles: plan.configFiles,
+      runtimeEnvPolicy: plan.runtimeEnvPolicy,
     })
     if (recomputed !== plan.configSha256) changed()
   } catch (error) {
@@ -230,7 +271,17 @@ export function isFrozen(value: unknown): value is PreviewPlan {
   const expectedKeys = new Set(
     kindDescriptor.value === "static"
       ? ["kind", "locationRoot", "cwd", "entrypoint", "env", "allowedOrigins", "configFiles", "configSha256"]
-      : ["kind", "locationRoot", "cwd", "argv", "env", "allowedOrigins", "configFiles", "configSha256"],
+      : [
+          "kind",
+          "locationRoot",
+          "cwd",
+          "argv",
+          "env",
+          "allowedOrigins",
+          "configFiles",
+          "runtimeEnvPolicy",
+          "configSha256",
+        ],
   )
   if (!hasExactPlainProperties(value, expectedKeys)) return false
   const plan = value as Partial<PreviewPlan>
@@ -286,15 +337,31 @@ export function isFrozen(value: unknown): value is PreviewPlan {
     ) {
       return false
     }
-    if (plan.kind === "static") {
-      return typeof plan.entrypoint === "string" && plan.argv === undefined && plan.configFiles.length === 0
-    }
+    const validShape =
+      plan.kind === "static"
+        ? typeof plan.entrypoint === "string" &&
+          plan.argv === undefined &&
+          plan.runtimeEnvPolicy === undefined &&
+          plan.configFiles.length === 0
+        : plan.entrypoint === undefined &&
+          Array.isArray(plan.argv) &&
+          isExactFrozenArray(plan.argv) &&
+          plan.argv.length > 0 &&
+          freezeArgv(plan.argv).every((argument, index) => argument === plan.argv?.[index]) &&
+          isRuntimeEnvPolicy(plan.runtimeEnvPolicy, plan.locationRoot, plan.cwd)
+    if (!validShape) return false
     return (
-      plan.entrypoint === undefined &&
-      Array.isArray(plan.argv) &&
-      isExactFrozenArray(plan.argv) &&
-      plan.argv.length > 0 &&
-      freezeArgv(plan.argv).every((argument, index) => argument === plan.argv?.[index])
+      configHash({
+        kind: plan.kind,
+        locationRoot: plan.locationRoot,
+        cwd: plan.cwd,
+        entrypoint: plan.entrypoint,
+        argv: plan.argv,
+        env: plan.env,
+        allowedOrigins: plan.allowedOrigins,
+        configFiles: plan.configFiles,
+        runtimeEnvPolicy: plan.runtimeEnvPolicy,
+      }) === plan.configSha256
     )
   } catch {
     return false
@@ -325,7 +392,12 @@ export function normalizeLocalOrigin(value: string): string {
 }
 
 function makePlan(input: Omit<PreviewPlan, "configSha256">): PreviewPlan {
+  if ((input.kind === "script") !== (input.runtimeEnvPolicy !== undefined)) {
+    throw invalid("invalid_preview_configuration", "Script preview plans require an exact runtime-env policy")
+  }
   const configFiles = freezeArray(input.configFiles.map((file) => Object.freeze({ ...file })))
+  const runtimeEnvPolicy =
+    input.runtimeEnvPolicy === undefined ? undefined : freezeRuntimeEnvPolicy(input.runtimeEnvPolicy)
   const normalized = {
     kind: input.kind,
     locationRoot: input.locationRoot,
@@ -335,6 +407,7 @@ function makePlan(input: Omit<PreviewPlan, "configSha256">): PreviewPlan {
     env: Object.freeze({ ...input.env }),
     allowedOrigins: freezeArray([...new Set(input.allowedOrigins)]),
     configFiles,
+    ...(runtimeEnvPolicy === undefined ? {} : { runtimeEnvPolicy }),
   }
   return Object.freeze({ ...normalized, configSha256: configHash(normalized) })
 }
@@ -397,8 +470,14 @@ function assertAdmissionAuthority(input: FreezeInput): void {
 
 function recognizeProject(
   root: string,
-): { readonly argv: readonly string[]; readonly configFiles: readonly FrozenConfigurationFile[] } | undefined {
-  const files = configurationFiles(root, root)
+  files: readonly FrozenConfigurationFile[] = configurationFiles(root, root),
+):
+  | {
+      readonly argv: readonly string[]
+      readonly configFiles: readonly FrozenConfigurationFile[]
+      readonly runtimeEnvPolicy: FrameworkRuntimeEnvPolicy
+    }
+  | undefined {
   const packageFile = files.find((file) => file.path === "package.json")
   if (packageFile === undefined) return undefined
   const packageJson = parsePackageJson(configurationAbsolutePath(root, packageFile.path))
@@ -407,21 +486,162 @@ function recognizeProject(
 
   if (typeof dependencies.vite === "string") {
     if (scripts.preview === "vite preview") {
-      return { argv: freezeArray(["bun", "run", "--no-env-file", "preview"]), configFiles: files }
+      return recognizedFrameworkProject(
+        "vite",
+        "production",
+        root,
+        freezeArray(["bun", "run", "--no-env-file", "preview"]),
+        files,
+      )
     }
     if (scripts.dev === "vite" || scripts.dev === "vite dev") {
-      return { argv: freezeArray(["bun", "run", "--no-env-file", "dev"]), configFiles: files }
+      return recognizedFrameworkProject(
+        "vite",
+        "development",
+        root,
+        freezeArray(["bun", "run", "--no-env-file", "dev"]),
+        files,
+      )
     }
   }
   if (typeof dependencies.next === "string") {
     if (scripts.dev === "next dev") {
-      return { argv: freezeArray(["bun", "run", "--no-env-file", "dev"]), configFiles: files }
+      return recognizedFrameworkProject(
+        "next",
+        "development",
+        root,
+        freezeArray(["bun", "run", "--no-env-file", "dev"]),
+        files,
+      )
     }
     if (scripts.start === "next start") {
-      return { argv: freezeArray(["bun", "run", "--no-env-file", "start"]), configFiles: files }
+      return recognizedFrameworkProject(
+        "next",
+        "production",
+        root,
+        freezeArray(["bun", "run", "--no-env-file", "start"]),
+        files,
+      )
     }
   }
   return undefined
+}
+
+function recognizedFrameworkProject(
+  framework: FrameworkRuntimeEnvPolicy["framework"],
+  mode: FrameworkRuntimeEnvPolicy["mode"],
+  root: string,
+  argv: readonly string[],
+  configFiles: readonly FrozenConfigurationFile[],
+): {
+  readonly argv: readonly string[]
+  readonly configFiles: readonly FrozenConfigurationFile[]
+  readonly runtimeEnvPolicy: FrameworkRuntimeEnvPolicy
+} {
+  if (framework === "vite" && configFiles.some((file) => viteConfigurationNames.has(configurationName(file.path)))) {
+    throw new PreviewConfigurationRequired({
+      code: "preview_configuration_required",
+      message: "Vite configuration may redirect root or envDir and requires explicit trusted preview configuration",
+    })
+  }
+  const runtimeEnvPolicy = freezeRuntimeEnvPolicy({
+    kind: "framework",
+    framework,
+    mode,
+    root,
+    candidates: frameworkEnvCandidates(framework, mode, root),
+  })
+  assertNoFrameworkEnvFiles(runtimeEnvPolicy)
+  return { argv, configFiles, runtimeEnvPolicy }
+}
+
+function frameworkEnvCandidates(
+  framework: FrameworkRuntimeEnvPolicy["framework"],
+  mode: FrameworkRuntimeEnvPolicy["mode"],
+  root: string,
+): readonly string[] {
+  const names =
+    framework === "vite"
+      ? [".env", ".env.local", `.env.${mode}`, `.env.${mode}.local`]
+      : [`.env.${mode}.local`, ".env.local", `.env.${mode}`, ".env"]
+  return freezeArray(names.map((name) => path.join(root, name)))
+}
+
+function assertNoFrameworkEnvFiles(policy: FrameworkRuntimeEnvPolicy): void {
+  const candidates = new Set(policy.candidates.map((candidate) => path.basename(candidate).toLowerCase()))
+  const entry = readdirSync(policy.root, { withFileTypes: true }).find((item) =>
+    candidates.has(item.name.toLowerCase()),
+  )
+  if (entry !== undefined) {
+    throw new PreviewConfigurationRequired({
+      code: "preview_configuration_required",
+      message: `${policy.framework} ${policy.mode} dotenv files require explicit trusted preview configuration`,
+    })
+  }
+}
+
+function verifyRuntimeEnvPolicy(
+  plan: PreviewPlan,
+  identity: { readonly locationRoot: string; readonly cwd: string },
+  configFiles: readonly FrozenConfigurationFile[],
+): void {
+  const policy = plan.runtimeEnvPolicy
+  if (policy === undefined) changed()
+  if (policy.kind === "explicit") return
+  if (identity.cwd !== identity.locationRoot) changed()
+  const recognized = recognizeProject(identity.locationRoot, configFiles)
+  if (
+    recognized === undefined ||
+    recognized.argv.length !== plan.argv?.length ||
+    !recognized.argv.every((argument, index) => argument === plan.argv?.[index]) ||
+    !sameRuntimeEnvPolicy(recognized.runtimeEnvPolicy, policy)
+  ) {
+    changed()
+  }
+}
+
+function freezeRuntimeEnvPolicy(policy: ExplicitRuntimeEnvPolicy): ExplicitRuntimeEnvPolicy
+function freezeRuntimeEnvPolicy(policy: FrameworkRuntimeEnvPolicy): FrameworkRuntimeEnvPolicy
+function freezeRuntimeEnvPolicy(policy: RuntimeEnvPolicy): RuntimeEnvPolicy
+function freezeRuntimeEnvPolicy(policy: RuntimeEnvPolicy): RuntimeEnvPolicy {
+  return policy.kind === "explicit"
+    ? Object.freeze({ kind: "explicit" })
+    : Object.freeze({ ...policy, candidates: freezeArray([...policy.candidates]) })
+}
+
+function isRuntimeEnvPolicy(value: unknown, locationRoot: string, cwd: string): value is RuntimeEnvPolicy {
+  if (value === null || typeof value !== "object" || !Object.isFrozen(value)) return false
+  if (!hasExactPlainProperties(value)) return false
+  const policy = value as Partial<RuntimeEnvPolicy>
+  if (policy.kind === "explicit") return hasExactPlainProperties(value, explicitRuntimeEnvPolicyKeys)
+  if (
+    policy.kind !== "framework" ||
+    !hasExactPlainProperties(value, frameworkRuntimeEnvPolicyKeys) ||
+    (policy.framework !== "vite" && policy.framework !== "next") ||
+    (policy.mode !== "development" && policy.mode !== "production") ||
+    policy.root !== locationRoot ||
+    policy.root !== cwd ||
+    !Array.isArray(policy.candidates) ||
+    !isExactFrozenArray(policy.candidates) ||
+    policy.candidates.some((candidate) => typeof candidate !== "string")
+  ) {
+    return false
+  }
+  const expected = frameworkEnvCandidates(policy.framework, policy.mode, policy.root)
+  return (
+    policy.candidates.length === expected.length &&
+    policy.candidates.every((candidate, index) => candidate === expected[index])
+  )
+}
+
+function sameRuntimeEnvPolicy(left: FrameworkRuntimeEnvPolicy, right: FrameworkRuntimeEnvPolicy): boolean {
+  return (
+    left.framework === right.framework &&
+    left.mode === right.mode &&
+    left.root === right.root &&
+    left.candidates.length === right.candidates.length &&
+    left.candidates.every((candidate, index) => candidate === right.candidates[index])
+  )
 }
 
 function parsePackageJson(file: string): Record<string, unknown> {

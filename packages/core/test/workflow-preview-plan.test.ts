@@ -15,6 +15,45 @@ const payload = {
   delivery: "background" as const,
 }
 
+const recognizedFrameworkCases = [
+  [
+    "Vite dev",
+    { scripts: { dev: "vite" }, devDependencies: { vite: "7.0.0" } },
+    ["bun", "run", "--no-env-file", "dev"],
+    "vite",
+    "development",
+    [".env", ".env.local", ".env.development", ".env.development.local"],
+  ],
+  [
+    "Vite preview",
+    { scripts: { preview: "vite preview" }, devDependencies: { vite: "7.0.0" } },
+    ["bun", "run", "--no-env-file", "preview"],
+    "vite",
+    "production",
+    [".env", ".env.local", ".env.production", ".env.production.local"],
+  ],
+  [
+    "Next dev",
+    { scripts: { dev: "next dev" }, dependencies: { next: "16.0.0" } },
+    ["bun", "run", "--no-env-file", "dev"],
+    "next",
+    "development",
+    [".env.development.local", ".env.local", ".env.development", ".env"],
+  ],
+  [
+    "Next start",
+    { scripts: { start: "next start" }, dependencies: { next: "16.0.0" } },
+    ["bun", "run", "--no-env-file", "start"],
+    "next",
+    "production",
+    [".env.production.local", ".env.local", ".env.production", ".env"],
+  ],
+] as const
+
+const recognizedDotenvCases = recognizedFrameworkCases.flatMap(([name, packageJson, , , , candidates]) =>
+  candidates.map((candidate) => [`${name}: ${candidate}`, packageJson, candidate] as const),
+)
+
 function location(directory: string): Location.Ref {
   return Location.Ref.make({ directory: AbsolutePath.make(directory) })
 }
@@ -133,27 +172,142 @@ describe("PreviewPlan.freeze", () => {
     ]).toEqual([false, false])
   })
 
-  test.each([
-    [
-      "Vite",
-      { scripts: { preview: "vite preview" }, devDependencies: { vite: "7.0.0" } },
-      ["bun", "run", "--no-env-file", "preview"],
-    ],
-    [
-      "Next",
-      { scripts: { dev: "next dev" }, dependencies: { next: "16.0.0" } },
-      ["bun", "run", "--no-env-file", "dev"],
-    ],
-  ] as const)("recognizes a shell-free %s package script", async (_, packageJson, argv) => {
+  test.each(recognizedFrameworkCases)(
+    "recognizes %s only with an exact frozen no-dotenv policy",
+    async (_, packageJson, argv, framework, mode, candidates) => {
+      await using root = await tmpdir()
+      await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify(packageJson, null, 2))
+
+      const plan = freeze(root.path)
+      const policy = plan.runtimeEnvPolicy
+
+      expect(plan.kind).toBe("script")
+      expect(plan.argv).toEqual([...argv])
+      expect(policy).toEqual({
+        kind: "framework",
+        framework,
+        mode,
+        root: root.path,
+        candidates: candidates.map((candidate) => path.join(root.path, candidate)),
+      })
+      if (policy?.kind !== "framework") throw new TypeError("recognized plan has no framework policy")
+      expect(Object.isFrozen(policy)).toBe(true)
+      expect(Object.isFrozen(policy.candidates)).toBe(true)
+      expect(plan.configFiles.map((file) => file.path)).toEqual(["package.json"])
+      expect(plan.configFiles[0]?.sha256).toMatch(/^[a-f0-9]{64}$/)
+      expect(() => PreviewPlan.verifyConfiguration(plan)).not.toThrow()
+    },
+  )
+
+  test.each(recognizedDotenvCases)(
+    "requires explicit trusted configuration when recognized %s exists at admission",
+    async (_, packageJson, candidate) => {
+      await using root = await tmpdir()
+      await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify(packageJson))
+      await fs.writeFile(path.join(root.path, candidate), "TASK23_FRAMEWORK_ENV=synthetic\n")
+
+      expect(() => freeze(root.path)).toThrow(PreviewPlan.PreviewConfigurationRequired)
+    },
+  )
+
+  test.each(recognizedFrameworkCases)(
+    "detects a late framework-consumed dotenv file for %s",
+    async (_, packageJson, _argv, _framework, _mode, candidates) => {
+      await using root = await tmpdir()
+      await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify(packageJson))
+      const plan = freeze(root.path)
+      const lateCandidate = candidates.find((candidate) => candidate.endsWith(".local")) ?? candidates[0]
+      await fs.writeFile(path.join(root.path, lateCandidate), "TASK23_FRAMEWORK_ENV=late-synthetic\n")
+
+      expect(configurationFailure(plan)).toMatchObject({ code: "preview_configuration_changed" })
+    },
+  )
+
+  test("detects late case and junction aliases of framework dotenv candidates", async () => {
+    await using viteRoot = await tmpdir()
+    await fs.writeFile(
+      path.join(viteRoot.path, "package.json"),
+      JSON.stringify({ scripts: { dev: "vite" }, devDependencies: { vite: "7.0.0" } }),
+    )
+    const vitePlan = freeze(viteRoot.path)
+    await fs.writeFile(path.join(viteRoot.path, ".ENV.DEVELOPMENT.LOCAL"), "TASK23_FRAMEWORK_ENV=case-alias\n")
+
+    await using nextRoot = await tmpdir()
+    await using outside = await tmpdir()
+    await fs.writeFile(
+      path.join(nextRoot.path, "package.json"),
+      JSON.stringify({ scripts: { start: "next start" }, dependencies: { next: "16.0.0" } }),
+    )
+    const nextPlan = freeze(nextRoot.path)
+    await fs.symlink(
+      outside.path,
+      path.join(nextRoot.path, ".env.production.local"),
+      process.platform === "win32" ? "junction" : "dir",
+    )
+
+    expect([configurationFailure(vitePlan), configurationFailure(nextPlan)]).toEqual([
+      expect.objectContaining({ code: "preview_configuration_changed" }),
+      expect.objectContaining({ code: "preview_configuration_changed" }),
+    ])
+  })
+
+  test("requires explicit trusted configuration when Vite config can redirect envDir", async () => {
     await using root = await tmpdir()
-    await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify(packageJson, null, 2))
+    await fs.writeFile(path.join(root.path, "index.html"), "<!doctype html>")
+    await fs.writeFile(
+      path.join(root.path, "package.json"),
+      JSON.stringify({ scripts: { dev: "vite" }, devDependencies: { vite: "7.0.0" } }),
+    )
+    await fs.writeFile(path.join(root.path, "vite.config.ts"), 'export default { envDir: "../secrets" }\n')
 
+    expect(() => freeze(root.path)).toThrow(PreviewPlan.PreviewConfigurationRequired)
+  })
+
+  test("rejects removal, mutation, and hash-stale forgery of recognized runtime-env policy", async () => {
+    await using root = await tmpdir()
+    await fs.writeFile(
+      path.join(root.path, "package.json"),
+      JSON.stringify({ scripts: { dev: "vite" }, devDependencies: { vite: "7.0.0" } }),
+    )
     const plan = freeze(root.path)
+    const policy = plan.runtimeEnvPolicy
+    expect(policy?.kind).toBe("framework")
+    if (policy?.kind !== "framework") throw new TypeError("recognized plan has no framework policy")
 
-    expect(plan.kind).toBe("script")
-    expect(plan.argv).toEqual([...argv])
-    expect(plan.configFiles.map((file) => file.path)).toEqual(["package.json"])
-    expect(plan.configFiles[0]?.sha256).toMatch(/^[a-f0-9]{64}$/)
+    const { runtimeEnvPolicy: _removed, ...withoutPolicy } = plan
+    const mutableCandidates = [...policy.candidates]
+    const mutablePolicy = Object.freeze({ ...policy, candidates: mutableCandidates })
+    const productionCandidates = Object.freeze([
+      path.join(root.path, ".env"),
+      path.join(root.path, ".env.local"),
+      path.join(root.path, ".env.production"),
+      path.join(root.path, ".env.production.local"),
+    ])
+    const hashStalePolicy = Object.freeze({ ...policy, mode: "production" as const, candidates: productionCandidates })
+    const hashStalePlan = Object.freeze({ ...plan, runtimeEnvPolicy: hashStalePolicy })
+
+    expect(PreviewPlan.isFrozen(Object.freeze(withoutPolicy))).toBe(false)
+    expect(PreviewPlan.isFrozen(Object.freeze({ ...plan, runtimeEnvPolicy: mutablePolicy }))).toBe(false)
+    expect(PreviewPlan.isFrozen(hashStalePlan)).toBe(false)
+    expect(configurationFailure(hashStalePlan)).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test("marks explicit user-owned scripts as the explicit runtime-env trust boundary", async () => {
+    await using root = await tmpdir()
+    const dotenv = path.join(root.path, ".env.local")
+    await fs.writeFile(
+      path.join(root.path, "package.json"),
+      JSON.stringify({ scripts: { storybook: "storybook dev" }, devDependencies: { storybook: "10.0.0" } }),
+    )
+    await fs.writeFile(dotenv, "TASK23_EXPLICIT_ENV=synthetic\n")
+    const plan = freeze(root.path, {
+      kind: "script",
+      argv: ["bun", "run", "--no-env-file", "storybook"],
+    })
+    await fs.writeFile(dotenv, "TASK23_EXPLICIT_ENV=changed-synthetic\n")
+
+    expect(plan.runtimeEnvPolicy).toEqual({ kind: "explicit" })
+    expect(() => PreviewPlan.verifyConfiguration(plan)).not.toThrow()
   })
 
   test("prefers a recognized Vite script over raw static hosting", async () => {
