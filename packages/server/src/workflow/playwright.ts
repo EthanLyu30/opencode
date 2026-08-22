@@ -255,8 +255,12 @@ function settleWithin(work: PromiseLike<unknown>, timeoutMs: number): Promise<vo
   })
 }
 
-export function productionRuntime(input: { readonly tempRoot: string; readonly timeoutMs?: number }): Runtime {
-  requireDirectory(requireBrowserRoot())
+export function productionRuntime(input: {
+  readonly tempRoot: string
+  readonly browserRoot?: string
+  readonly timeoutMs?: number
+}): Runtime {
+  requireDirectory(input.browserRoot ?? requireBrowserRoot())
   return makeRuntime({
     tempRoot: input.tempRoot,
     timeoutMs: input.timeoutMs,

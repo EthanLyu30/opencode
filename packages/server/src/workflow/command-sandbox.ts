@@ -13,33 +13,20 @@ import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { Docker } from "./docker"
+import { DockerConfig } from "./docker-config"
+import { WorkflowRuntimeRecovery } from "./runtime-recovery"
 
 const labelDomain = "io.opencode.workflow"
 const containerIDPattern = /^[a-f0-9]{64}$/
-const pinnedImagePattern = /^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$/
-const executablePattern = /^[A-Za-z]:\\(?:[^<>:"/\\|?*\u0000-\u001f]+\\)*docker\.exe$/i
 const executableRoles = new Set<WorkflowCommandSandbox.Request["role"]>(["implement", "repair", "test", "deliver"])
 
-export interface Config {
-  readonly enginePath: string
-  readonly image: string
-  readonly dockerConfig: string
-  readonly temp: string
-  readonly limits: {
-    readonly timeoutMs: number
-    readonly engineTimeoutMs: number
-    readonly cleanupTimeoutMs: number
-    readonly maxOutputBytes: number
-    readonly memoryBytes: number
-    readonly cpus: number
-    readonly pids: 64
-  }
-}
+export type Config = DockerConfig.Config
 
 export interface Options {
   readonly engine: Docker.Engine
   readonly config: Config
   readonly now?: () => number
+  readonly recoveryReady?: () => boolean
 }
 
 export interface RecoveryAuthority {
@@ -52,6 +39,9 @@ export interface RecoveryAuthority {
   readonly agent: WorkflowCommandSandbox.Request["agent"]
   readonly leaseOwner: string
   readonly attempt: number
+  /** Durable recovery-only lineage; deliberately not added to the reviewed B1 Docker label set. */
+  readonly assistantMessageID?: WorkflowCommandSandbox.Request["assistantMessageID"]
+  readonly callDigest?: string
 }
 
 interface OwnedContainer {
@@ -81,6 +71,8 @@ export function makeLayer(
         run: Effect.fn("WorkflowCommandSandboxServer.run")(function* (request) {
           if (!executableRoles.has(request.role))
             return yield* rejected(`Workflow role ${request.role} cannot use Bash`)
+          if (options.recoveryReady?.() === false)
+            return yield* unavailable("Workflow Docker recovery or configuration is unavailable")
           const authority = yield* reloadAuthority({
             request,
             workflows,
@@ -142,24 +134,11 @@ export function makeLayer(
 }
 
 export const layer = Layer.unwrap(
-  Effect.sync(() =>
+  Effect.map(WorkflowRuntimeRecovery.Service, (recovery) =>
     makeLayer({
       engine: Docker.production,
-      config: {
-        enginePath: process.env.OPENCODE_WORKFLOW_SANDBOX_ENGINE ?? "",
-        image: process.env.OPENCODE_WORKFLOW_SANDBOX_IMAGE ?? "",
-        dockerConfig: process.env.OPENCODE_WORKFLOW_SANDBOX_CONFIG ?? "",
-        temp: process.env.OPENCODE_WORKFLOW_SANDBOX_TEMP ?? "",
-        limits: {
-          timeoutMs: 10 * 60 * 1_000,
-          engineTimeoutMs: 15_000,
-          cleanupTimeoutMs: 5_000,
-          maxOutputBytes: 1024 * 1024,
-          memoryBytes: 1024 * 1024 * 1024,
-          cpus: 1.5,
-          pids: 64,
-        },
-      },
+      config: DockerConfig.fromEnvironment(process.env),
+      recoveryReady: () => recovery.ready,
     }),
   ),
 )
@@ -167,13 +146,14 @@ export const layer = Layer.unwrap(
 export const node = makeLocationNode({
   service: WorkflowCommandSandbox.Service,
   layer,
-  deps: [WorkflowStore.node, SessionStore.node, Location.node],
+  deps: [WorkflowStore.node, SessionStore.node, Location.node, WorkflowRuntimeRecovery.node],
 })
 
 export async function recover(input: {
   readonly engine: Docker.Engine
   readonly config: Config
   readonly authority: RecoveryAuthority
+  readonly finalGate?: () => Promise<boolean>
 }): Promise<number> {
   try {
     return await recoverOwned(input)
@@ -187,6 +167,7 @@ async function recoverOwned(input: {
   readonly engine: Docker.Engine
   readonly config: Config
   readonly authority: RecoveryAuthority
+  readonly finalGate?: () => Promise<boolean>
 }): Promise<number> {
   const config = await validatedConfig(input.config)
   const ownership = ownershipFor(input.authority)
@@ -214,6 +195,7 @@ async function recoverOwned(input: {
       ids.map(async (id) => ((await inspect(input.engine, config, id, ownership, true)) ? id : undefined)),
     )
   ).filter((id): id is string => id !== undefined)
+  if (input.finalGate !== undefined && !(await input.finalGate())) return 0
   let cleanupFailed = false
   for (const id of exact) {
     try {
@@ -480,7 +462,7 @@ async function execute(
   return engine.execute({
     executable: config.enginePath,
     argv: input.argv,
-    env: { DOCKER_CONFIG: config.dockerConfig, TEMP: config.temp, TMP: config.temp },
+    env: DockerConfig.invocationEnvironment(config),
     ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
     timeoutMs: input.timeoutMs,
     maxOutputBytes: input.maxOutputBytes ?? config.limits.maxOutputBytes,
@@ -489,30 +471,7 @@ async function execute(
 }
 
 async function validatedConfig(config: Config): Promise<Config> {
-  if (
-    !pinnedImagePattern.test(config.image) ||
-    !path.win32.isAbsolute(config.enginePath) ||
-    !/^D:\\/i.test(config.enginePath) ||
-    !executablePattern.test(config.enginePath)
-  ) {
-    throw new TypeError("Docker engine and image must be absolute and digest pinned")
-  }
-  if (
-    !positiveSafe(config.limits.timeoutMs) ||
-    !positiveSafe(config.limits.engineTimeoutMs) ||
-    !positiveSafe(config.limits.cleanupTimeoutMs) ||
-    !positiveSafe(config.limits.maxOutputBytes) ||
-    !positiveSafe(config.limits.memoryBytes) ||
-    !Number.isFinite(config.limits.cpus) ||
-    config.limits.cpus <= 0 ||
-    config.limits.pids !== 64
-  ) {
-    throw new TypeError("Docker resource limits are invalid")
-  }
-  const dockerConfig = await canonicalDDirectory(config.dockerConfig)
-  const temp = await canonicalDDirectory(config.temp)
-  if (overlap(dockerConfig, temp)) throw new TypeError("Docker config and temp roots must be separate")
-  return { ...config, dockerConfig, temp }
+  return DockerConfig.validate(config)
 }
 
 async function validatePaths(workspace: string, workdir: string) {
@@ -681,14 +640,6 @@ function samePath(left: string, right: string) {
 function contains(parent: string, child: string) {
   const relative = path.relative(parent, child)
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
-}
-
-function overlap(left: string, right: string) {
-  return contains(left, right) || contains(right, left)
-}
-
-function positiveSafe(value: number) {
-  return Number.isSafeInteger(value) && value > 0
 }
 
 function rejected(message: string) {

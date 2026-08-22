@@ -11,6 +11,10 @@ import { createHash, randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { EvidenceLedger } from "./evidence-ledger"
+import { Docker } from "./docker"
+import { DockerConfig } from "./docker-config"
+import { DockerProcessOwnership } from "./docker-process-ownership"
+import { HostRootPolicy } from "./host-root-policy"
 import { PlaywrightCapture } from "./playwright"
 import { ProcessOwnership } from "./process-ownership"
 
@@ -38,9 +42,11 @@ interface HostRecord {
 
 export interface Options {
   readonly hostRoot: string
+  readonly evidenceRoot?: string
   readonly browser: PlaywrightCapture.Runtime
   readonly evidenceLedger?: EvidenceLedger.Service
   readonly evidenceRootPolicy?: EvidenceLedger.OpenOptions["rootPolicy"]
+  readonly hostRootPolicy?: (canonicalHostRoot: string) => void
   readonly processOwnership?: ProcessOwnership.Service
   readonly now?: () => number
   readonly startupTimeoutMs?: number
@@ -76,22 +82,62 @@ export function makeLayer(options: Options): Layer.Layer<WorkflowVisualHost.Serv
   )
 }
 
-export const layer = Layer.unwrap(
-  Effect.sync(() => {
-    const hostRoot = process.env.OPENCODE_WORKFLOW_HOST_TEMP
-    if (hostRoot === undefined) throw new TypeError("OPENCODE_WORKFLOW_HOST_TEMP is required")
-    return makeLayer({
-      hostRoot,
-      browser: PlaywrightCapture.productionRuntime({ tempRoot: path.join(hostRoot, "browser") }),
-      evidenceRootPolicy: EvidenceLedger.productionRootPolicyRequired,
+export interface ProductionLayerOptions {
+  readonly environment: Readonly<Record<string, string | undefined>>
+  readonly engine?: Docker.Engine
+  readonly aclProbe?: HostRootPolicy.Probe
+  readonly browser?: PlaywrightCapture.Runtime
+}
+
+export function productionLayer(input: ProductionLayerOptions) {
+  try {
+    const configuredRoot = requiredEnvironment(input.environment, "OPENCODE_WORKFLOW_HOST_ROOT")
+    const hostRoot = requiredEnvironment(input.environment, "OPENCODE_WORKFLOW_HOST_TEMP")
+    const evidenceRoot = requiredEnvironment(input.environment, "OPENCODE_WORKFLOW_EVIDENCE_ROOT")
+    const browserRoot = requiredEnvironment(input.environment, "PLAYWRIGHT_BROWSERS_PATH")
+    const probe =
+      input.aclProbe ??
+      HostRootPolicy.productionProbe({
+        tempRoot: hostRoot,
+      })
+    const policy = HostRootPolicy.make({
+      hostRoot: configuredRoot,
+      evidenceRoot,
+      browserRoot,
+      tempRoot: hostRoot,
+      probe,
     })
-  }),
-)
+    const config = DockerConfig.fromEnvironment(input.environment)
+    const configured = makeLayer({
+      hostRoot: policy.roots.tempRoot,
+      evidenceRoot: policy.roots.evidenceRoot,
+      browser:
+        input.browser ??
+        PlaywrightCapture.productionRuntime({
+          browserRoot: policy.roots.browserRoot,
+          tempRoot: path.join(policy.roots.browserRoot, "runtime-temp"),
+        }),
+      evidenceRootPolicy: policy.verifyEvidenceRoot,
+      hostRootPolicy: policy.verifyHostRoot,
+      processOwnership: DockerProcessOwnership.make({
+        engine: input.engine ?? Docker.production,
+        config,
+        hostRoot: policy.roots.tempRoot,
+      }),
+    })
+    return configured.pipe(Layer.catch(() => WorkflowVisualHost.unavailableLayer))
+  } catch {
+    return WorkflowVisualHost.unavailableLayer
+  }
+}
+
+export const layer = Layer.unwrap(Effect.sync(() => productionLayer({ environment: process.env })))
 
 export const node = makeGlobalNode({ service: WorkflowVisualHost.Service, layer, deps: [] })
 
 interface State {
   readonly root: string
+  readonly hostRootPolicy?: (canonicalHostRoot: string) => void
   readonly browser: PlaywrightCapture.Runtime
   readonly processOwnership: ProcessOwnership.Service
   readonly active: Map<WorkflowVisualHost.HostID, HostRecord>
@@ -111,6 +157,7 @@ async function makeState(options: Options): Promise<State> {
   await fs.mkdir(options.hostRoot, { recursive: true })
   const root = await fs.realpath(options.hostRoot)
   if (!(await fs.stat(root)).isDirectory()) throw new TypeError("Workflow host root must be a directory")
+  options.hostRootPolicy?.(root)
   const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
   const finalizerTimeoutMs = options.finalizerTimeoutMs ?? DEFAULT_FINALIZER_TIMEOUT_MS
@@ -129,12 +176,15 @@ async function makeState(options: Options): Promise<State> {
   }
   return {
     root,
+    hostRootPolicy: options.hostRootPolicy,
     browser: options.browser,
     processOwnership: options.processOwnership ?? ProcessOwnership.unavailable,
     active: new Map(),
     evidence:
       options.evidenceLedger ??
-      EvidenceLedger.open(path.join(root, ".evidence"), { rootPolicy: options.evidenceRootPolicy }),
+      EvidenceLedger.open(options.evidenceRoot ?? path.join(root, ".evidence"), {
+        rootPolicy: options.evidenceRootPolicy,
+      }),
     captureTails: new Map(),
     now: options.now ?? (() => Date.now()),
     startupTimeoutMs,
@@ -181,8 +231,10 @@ function materializeReference(
               await fs.writeFile(target, file.content, { encoding: "utf8", flag: "wx" })
             }),
           )
-          await writeManifest(record)
+          await guardHostRoot(state, record.directory)
+          await writeManifest(state, record)
           startStaticServer(record, record.directory, reference.entrypoint, record.directory)
+          await guardHostRoot(state, record.directory)
         },
         catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
       })
@@ -236,8 +288,10 @@ function prepareImplementation(
       }
       yield* Effect.tryPromise({
         try: async () => {
-          await writeManifest(record)
+          await guardHostRoot(state, record.directory)
+          await writeManifest(state, record)
           await fs.mkdir(path.join(record.directory, ".tmp"))
+          await guardHostRoot(state, record.directory)
         },
         catch: () =>
           failure("prepare_implementation", "visual_host_unavailable", "Implementation host could not start"),
@@ -423,7 +477,7 @@ function recoverExpired(
               )
               if (!recovered) throw new Error("Orphan process recovery was not confirmed")
             }
-            await removeCapability(state.root, directory)
+            await removeCapability(state.root, directory, undefined, state.hostRootPolicy)
           }),
       )
     },
@@ -437,7 +491,9 @@ async function createRecord(state: State, workflowID: string, workspace?: string
   if (workspace !== undefined && pathsOverlap(state.root, workspace)) {
     throw new TypeError("Workflow host root overlaps the admitted workspace")
   }
+  await guardHostRoot(state)
   await fs.mkdir(directory)
+  await guardHostRoot(state, directory)
   return {
     hostID,
     workflowID,
@@ -556,14 +612,24 @@ async function release(state: State, record: HostRecord): Promise<boolean> {
   }
   await settleWithin(Promise.all(record.logDrains ?? []), state.finalizerTimeoutMs)
   if (!serverStopped || !processStopped) return false
-  await removeCapability(state.root, record.directory, record.workspace)
+  await removeCapability(state.root, record.directory, record.workspace, state.hostRootPolicy)
   return true
 }
 
-async function removeCapability(root: string, directory: string, workspace?: string): Promise<void> {
+async function removeCapability(
+  root: string,
+  directory: string,
+  workspace?: string,
+  rootPolicy?: (canonicalHostRoot: string) => void,
+): Promise<void> {
   if (!(await fs.exists(directory))) return
+  rootPolicy?.(root)
   const target = WorkflowVisualHost.cleanupTarget({ hostRoots: [root], target: directory, workspace })
-  await fs.rm(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  try {
+    await fs.rm(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  } finally {
+    rootPolicy?.(root)
+  }
 }
 
 async function drainBounded(stream: ReadableStream<Uint8Array>, limit: number): Promise<void> {
@@ -787,7 +853,8 @@ function requireScriptOrigin(origins: readonly string[]): string {
   return origins[0]
 }
 
-async function writeManifest(record: HostRecord): Promise<void> {
+async function writeManifest(state: State, record: HostRecord): Promise<void> {
+  await guardHostRoot(state, record.directory)
   await fs.writeFile(
     path.join(record.directory, manifestName),
     JSON.stringify({
@@ -797,6 +864,32 @@ async function writeManifest(record: HostRecord): Promise<void> {
     }),
     { encoding: "utf8", flag: "wx" },
   )
+  await guardHostRoot(state, record.directory)
+}
+
+async function guardHostRoot(state: State, directory?: string): Promise<void> {
+  const canonicalRoot = await fs.realpath(state.root)
+  if (canonicalRoot !== state.root || !(await fs.lstat(state.root)).isDirectory()) {
+    throw new TypeError("Workflow host root identity changed")
+  }
+  state.hostRootPolicy?.(canonicalRoot)
+  if (directory === undefined) return
+  const canonicalDirectory = await fs.realpath(directory)
+  const stat = await fs.lstat(directory)
+  if (
+    canonicalDirectory !== path.resolve(directory) ||
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    !strictlyContains(canonicalRoot, canonicalDirectory)
+  ) {
+    throw new TypeError("Workflow capability directory identity changed")
+  }
+}
+
+function requiredEnvironment(environment: Readonly<Record<string, string | undefined>>, name: string) {
+  const value = environment[name]
+  if (value === undefined || value === "") throw new TypeError(`${name} is required`)
+  return value
 }
 
 async function readManifest(directory: string): Promise<{

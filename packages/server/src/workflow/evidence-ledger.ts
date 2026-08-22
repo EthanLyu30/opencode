@@ -49,15 +49,16 @@ const ownedFileNames = [databaseName, `${databaseName}-wal`, `${databaseName}-sh
 
 export function open(root: string, options: OpenOptions = {}): Service {
   if (!path.isAbsolute(root)) throw new TypeError("Evidence ledger root must be absolute")
-  fs.mkdirSync(root, { recursive: true })
+  if (options.rootPolicy === undefined) fs.mkdirSync(root, { recursive: true })
+  else options.rootPolicy(path.resolve(root))
   const canonical = verifyRoot(root)
-  options.rootPolicy?.(canonical)
-  if (!samePath(verifyRoot(canonical), canonical)) throw new TypeError("Evidence ledger root policy changed identity")
+  guardRoot(canonical, options)
   const databasePath = path.join(canonical, databaseName)
-  verifyOwnedFiles(canonical)
+  guardRoot(canonical, options)
   if (!fs.existsSync(databasePath)) {
     let descriptor: number | undefined
     try {
+      guardRoot(canonical, options)
       descriptor = fs.openSync(databasePath, "wx", 0o600)
       fs.fsyncSync(descriptor)
     } catch (cause) {
@@ -66,7 +67,7 @@ export function open(root: string, options: OpenOptions = {}): Service {
       if (descriptor !== undefined) fs.closeSync(descriptor)
     }
   }
-  verifyOwnedFiles(canonical, true)
+  guardRoot(canonical, options, true)
 
   return initializeDatabase(databasePath, canonical, options)
 }
@@ -202,16 +203,23 @@ function makeService(
 }
 
 function checked<A>(root: string, options: OpenOptions, operation: Operation, work: () => A): A {
-  verifyOwnedFiles(root, true)
+  guardRoot(root, options, true)
   options.onBoundary?.({ operation, phase: "before" })
-  verifyOwnedFiles(root, true)
+  guardRoot(root, options, true)
   try {
     return work()
   } finally {
-    verifyOwnedFiles(root, true)
+    guardRoot(root, options, true)
     options.onBoundary?.({ operation, phase: "after" })
-    verifyOwnedFiles(root, true)
+    guardRoot(root, options, true)
   }
+}
+
+function guardRoot(root: string, options: OpenOptions, requireDatabase = false): void {
+  verifyOwnedFiles(root, requireDatabase)
+  options.rootPolicy?.(root)
+  if (!samePath(verifyRoot(root), root)) throw new TypeError("Evidence ledger root policy changed identity")
+  verifyOwnedFiles(root, requireDatabase)
 }
 
 function checkedAcquire<A extends object>(

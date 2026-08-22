@@ -14,6 +14,8 @@ import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
+import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
+import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { HttpRouter, HttpServer } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -26,6 +28,9 @@ import { schemaErrorLayer } from "./middleware/schema-error"
 import { PtyEnvironment } from "./pty-environment"
 import { layer as locationLayer } from "./location"
 import { sessionLocationLayer } from "./middleware/session-location"
+import { WorkflowVisualHostServer } from "./workflow/visual-host"
+import { WorkflowCommandSandboxServer } from "./workflow/command-sandbox"
+import { WorkflowRuntimeRecovery } from "./workflow/runtime-recovery"
 
 const applicationServices = LayerNode.group([
   Database.node,
@@ -41,6 +46,8 @@ const applicationServices = LayerNode.group([
   Credential.node,
   PtyEnvironment.node,
   LocationServiceMap.node,
+  WorkflowVisualHost.node,
+  WorkflowRuntimeRecovery.node,
 ])
 
 export function createRoutes(password?: string) {
@@ -59,6 +66,7 @@ function makeRoutes<AuthError, AuthServices>(auth: Layer.Layer<ServerAuth.Config
   const serviceLayer = AppNodeBuilder.build(applicationServices, [
     [SessionExecution.node, SessionExecutionLocal.node],
     [WorkflowExecution.node, WorkflowExecutionLocal.node],
+    ...workflowReplacements(),
   ])
 
   return HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
@@ -70,6 +78,18 @@ function makeRoutes<AuthError, AuthServices>(auth: Layer.Layer<ServerAuth.Config
     Layer.provide(auth),
     Layer.provide(serviceLayer),
   )
+}
+
+export function workflowReplacements(
+  input: {
+    readonly visualHost?: LayerNode.Node<WorkflowVisualHost.Service, any, any>
+    readonly commandSandbox?: LayerNode.Node<WorkflowCommandSandbox.Service, any, any>
+  } = {},
+) {
+  return [
+    [WorkflowVisualHost.node, input.visualHost ?? WorkflowVisualHostServer.node],
+    [WorkflowCommandSandbox.node, input.commandSandbox ?? WorkflowCommandSandboxServer.node],
+  ] as const
 }
 
 export const routes = createRoutes()
