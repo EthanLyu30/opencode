@@ -108,11 +108,16 @@ export class PromptConflictError extends Schema.TaggedErrorClass<PromptConflictE
 export const MessageNotFoundError = SessionRevert.MessageNotFoundError
 export type MessageNotFoundError = SessionRevert.MessageNotFoundError
 
-export type Error = NotFoundError | MessageDecodeError | OperationUnavailableError | PromptConflictError
+export type Error =
+  | NotFoundError
+  | MessageDecodeError
+  | OperationUnavailableError
+  | PromptConflictError
+  | AgentV2.ReservedSelectionError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
-  readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info>
+  readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info, AgentV2.ReservedSelectionError>
   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info, NotFoundError>
   readonly messages: (input: {
     sessionID: SessionSchema.ID
@@ -139,7 +144,10 @@ export interface Interface {
     after?: number
     limit: number
   }) => Effect.Effect<{ events: ReadonlyArray<SessionEvent.DurableEvent>; hasMore: boolean }, NotFoundError>
-  readonly switchAgent: (input: { sessionID: SessionSchema.ID; agent: string }) => Effect.Effect<void, NotFoundError>
+  readonly switchAgent: (input: {
+    sessionID: SessionSchema.ID
+    agent: string
+  }) => Effect.Effect<void, NotFoundError | AgentV2.ReservedSelectionError>
   readonly switchModel: (input: {
     sessionID: SessionSchema.ID
     model: ModelV2.Ref
@@ -206,6 +214,7 @@ const layer = Layer.effect(
 
     const result = Service.of({
       create: Effect.fn("V2Session.create")(function* (input) {
+        if (input.agent !== undefined) yield* AgentV2.requirePublicID(input.agent)
         const sessionID = input.id ?? SessionSchema.ID.create()
         const recorded = yield* store.get(sessionID)
         if (recorded) return recorded
@@ -391,6 +400,7 @@ const layer = Layer.effect(
         return yield* new OperationUnavailableError({ operation: "skill" })
       }),
       switchAgent: Effect.fn("V2Session.switchAgent")(function* (input) {
+        yield* AgentV2.requirePublicID(input.agent)
         yield* result.get(input.sessionID)
         yield* events.publish(SessionEvent.AgentSwitched, {
           sessionID: input.sessionID,

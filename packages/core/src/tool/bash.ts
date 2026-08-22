@@ -13,6 +13,7 @@ import { PermissionV2 } from "../permission"
 import { PositiveInt } from "../schema"
 import { WorkflowCommandSandbox } from "../workflow/command-sandbox"
 import { WorkflowRoleAgents } from "../workflow/role-agents"
+import { WorkflowToolLineage } from "../workflow/tool-lineage"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
@@ -131,6 +132,17 @@ const layer = Layer.effectDiscard(
               }
               const workflowRole = WorkflowRoleAgents.roleForAgent(context.agent)
               if (workflowRole !== undefined) {
+                const lineage = WorkflowToolLineage.inspect(context.workflowLineage)
+                if (
+                  lineage === undefined ||
+                  lineage.sessionID !== context.sessionID ||
+                  lineage.agent !== context.agent ||
+                  lineage.role !== workflowRole
+                ) {
+                  return yield* new ToolFailure({
+                    message: "Workflow Bash requires verified workflow lineage",
+                  })
+                }
                 yield* permission.assert({
                   action: name,
                   resources: [input.command],
@@ -141,6 +153,9 @@ const layer = Layer.effectDiscard(
                 })
                 return yield* sandbox.run({
                   role: workflowRole,
+                  workflowID: lineage.workflowID,
+                  stageID: lineage.stageID,
+                  policyDigest: lineage.policyDigest,
                   sessionID: context.sessionID,
                   agent: context.agent,
                   assistantMessageID: context.assistantMessageID,
@@ -218,14 +233,17 @@ const layer = Layer.effectDiscard(
                 ...(warnings.length ? { warnings } : {}),
               }
             }).pipe(
-              Effect.mapError((error) =>
-                new ToolFailure({
-                  message:
-                    error instanceof WorkflowCommandSandbox.Unavailable ||
-                    error instanceof WorkflowCommandSandbox.Rejected
-                      ? error.message
-                      : `Unable to execute command: ${input.command}`,
-                }),
+              Effect.mapError(
+                (error) =>
+                  new ToolFailure({
+                    message:
+                      error instanceof ToolFailure
+                        ? error.message
+                        : error instanceof WorkflowCommandSandbox.Unavailable ||
+                            error instanceof WorkflowCommandSandbox.Rejected
+                          ? error.message
+                          : `Unable to execute command: ${input.command}`,
+                  }),
               ),
             ),
         }),

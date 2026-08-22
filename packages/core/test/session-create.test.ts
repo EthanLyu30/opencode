@@ -2,6 +2,7 @@ import { describe, expect } from "bun:test"
 import path from "path"
 import { Effect, Layer, Stream } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
+import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { asc, eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -90,6 +91,18 @@ describe("SessionV2.create", () => {
           model,
         }),
       ).toMatchObject({ location: { directory: location.directory, workspaceID }, agent: "build", model })
+    }),
+  )
+
+  it.effect("rejects a reserved workflow role agent before Session creation", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const attempted = yield* Effect.exit(
+        session.create({ location, agent: WorkflowRoleAgents.agentForRole("implement") }),
+      )
+
+      expect(attempted._tag).toBe("Failure")
+      expect(yield* session.list()).toEqual([])
     }),
   )
 
@@ -333,6 +346,23 @@ describe("SessionV2.create", () => {
       expect(
         Array.from(yield* session.events({ sessionID: created.id }).pipe(Stream.take(1), Stream.runCollect)),
       ).toMatchObject([{ type: "session.next.agent.switched", data: { agent: "plan" } }])
+    }),
+  )
+
+  it.effect("rejects a reserved workflow role agent before a Session switch is persisted", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const created = yield* session.create({ location, agent: AgentV2.ID.make("build") })
+      const attempted = yield* Effect.exit(
+        session.switchAgent({ sessionID: created.id, agent: WorkflowRoleAgents.agentForRole("test") }),
+      )
+
+      expect(attempted._tag).toBe("Failure")
+      expect(yield* session.get(created.id)).toMatchObject({ agent: "build" })
+      const { db } = yield* Database.Service
+      expect(
+        yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, created.id)).all().pipe(Effect.orDie),
+      ).toHaveLength(1)
     }),
   )
 

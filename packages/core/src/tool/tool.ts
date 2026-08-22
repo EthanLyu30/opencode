@@ -5,12 +5,14 @@ import { Effect, JsonSchema, Schema } from "effect"
 import type { AgentV2 } from "../agent"
 import type { SessionMessage } from "../session/message"
 import type { SessionSchema } from "../session/schema"
+import type { WorkflowToolLineage } from "../workflow/tool-lineage"
 
 export interface Context {
   readonly sessionID: SessionSchema.ID
   readonly agent: AgentV2.ID
   readonly assistantMessageID: SessionMessage.ID
   readonly toolCallID: string
+  readonly workflowLineage?: WorkflowToolLineage.Lineage
 }
 
 export type SchemaType<A> = Schema.Codec<A, any, never, never>

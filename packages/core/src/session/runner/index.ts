@@ -7,9 +7,11 @@ import type { ContextSnapshotDecodeError, MessageDecodeError } from "../error"
 import { SessionRunnerModel } from "./model"
 import type { SystemContext } from "../../system-context/index"
 import type { ToolOutputStore } from "../../tool-output-store"
+import type { AgentV2 } from "../../agent"
 
 export type RunError =
   | LLMError
+  | AgentV2.ReservedSelectionError
   | SessionRunnerModel.Error
   | MessageDecodeError
   | ContextSnapshotDecodeError

@@ -1,7 +1,7 @@
 export * as AgentV2 from "./agent"
 
 import { makeLocationNode } from "./effect/app-node"
-import { Array, Context, Effect, Layer, Types } from "effect"
+import { Array, Context, Effect, Layer, Schema, Types } from "effect"
 import { Agent } from "@opencode-ai/schema/agent"
 import { State } from "./state"
 import { WorkflowRoleAgentProfiles } from "./workflow/role-agent-profiles"
@@ -18,6 +18,15 @@ export type Info = Agent.Info
 export interface Selection {
   readonly id: ID
   readonly info: Info | undefined
+}
+
+export class ReservedSelectionError extends Schema.TaggedErrorClass<ReservedSelectionError>()(
+  "AgentV2.ReservedSelectionError",
+  { agent: ID },
+) {
+  override get message() {
+    return `Agent ${this.agent} is reserved for internal workflow settlement`
+  }
 }
 
 type Data = {
@@ -37,7 +46,7 @@ export interface Interface extends State.Transformable<Draft> {
   readonly get: (id: ID) => Effect.Effect<Info | undefined>
   readonly default: () => Effect.Effect<Info | undefined>
   readonly resolve: (id?: ID | string) => Effect.Effect<Info | undefined>
-  readonly select: (id?: ID | string) => Effect.Effect<Selection>
+  readonly select: (id?: ID | string) => Effect.Effect<Selection, ReservedSelectionError>
   readonly all: () => Effect.Effect<Info[]>
 }
 
@@ -97,10 +106,8 @@ const layer = Layer.effect(
       select: Effect.fn("AgentV2.select")(function* (id) {
         if (id !== undefined) {
           const selected = ID.make(id)
-          return {
-            id: selected,
-            info: WorkflowRoleAgentProfiles.isRoleAgent(selected) ? undefined : state.get().agents.get(selected),
-          }
+          yield* requirePublicID(selected)
+          return { id: selected, info: state.get().agents.get(selected) }
         }
         const info = selectedDefault()
         return { id: info?.id ?? defaultID, info }
@@ -117,3 +124,10 @@ const layer = Layer.effect(
 export const locationLayer = layer
 
 export const node = makeLocationNode({ service: Service, layer, deps: [] })
+
+export function requirePublicID(id: ID | string) {
+  const selected = ID.make(id)
+  return WorkflowRoleAgentProfiles.isRoleAgent(selected)
+    ? Effect.fail(new ReservedSelectionError({ agent: selected }))
+    : Effect.void
+}

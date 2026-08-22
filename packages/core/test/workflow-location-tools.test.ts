@@ -23,9 +23,12 @@ import { Tool } from "@opencode-ai/core/tool/tool"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { Database } from "@opencode-ai/core/database/database"
 import { WorkflowModelExecution } from "@opencode-ai/core/workflow/execution/model"
+import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
+import { WorkflowToolLineage } from "@opencode-ai/core/workflow/tool-lineage"
 import { WorkflowPermissions } from "@opencode-ai/core/workflow/permissions"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
+import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { tmpdir } from "./fixture/tmpdir"
@@ -62,6 +65,12 @@ const modelRequests: LLMRequest[] = []
 const modelResponses: LLMResponse[] = []
 const modelTimeline: string[] = []
 let modelCredentialReads = 0
+const persistedWorkflows = new Map<Workflow.ID, Workflow.Detail>()
+const persistedStages = new Map<Workflow.StageID, Workflow.Stage>()
+const workflowStore = Layer.mock(WorkflowStore.Service, {
+  get: (workflowID) => Effect.succeed(persistedWorkflows.get(workflowID)),
+  stage: (stageID) => Effect.succeed(persistedStages.get(stageID)),
+})
 const modelClient = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
@@ -108,6 +117,52 @@ const modelIt = testEffect(
       [SessionExecution.node, SessionExecution.noopLayer],
       [Credential.node, credentials],
       [llmClient, modelClient],
+      [WorkflowStore.node, workflowStore],
+    ],
+  ),
+)
+
+const sandboxAttempts: WorkflowCommandSandbox.Request[] = []
+const sandboxLaunches: WorkflowCommandSandbox.Request[] = []
+const sandboxPolicies = new Map<string, string>()
+const modelSandbox = Layer.succeed(
+  WorkflowCommandSandbox.Service,
+  WorkflowCommandSandbox.Service.of({
+    run: (input) =>
+      Effect.sync(() => {
+        sandboxAttempts.push(input)
+        return sandboxPolicies.get(`${input.workflowID}\0${input.stageID}`) === input.policyDigest
+      }).pipe(
+        Effect.flatMap((matches) => {
+          if (!matches)
+            return Effect.fail(
+              new WorkflowCommandSandbox.Rejected({ message: "Frozen workflow sandbox policy mismatch" }),
+            )
+          sandboxLaunches.push(input)
+          return Effect.succeed({ exit: 0, output: "contained", truncated: false })
+        }),
+      ),
+  }),
+)
+const sandboxModelIt = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      ApplicationTools.node,
+      Database.node,
+      EventV2.node,
+      SessionProjector.node,
+      SessionStore.node,
+      SessionV2.node,
+      LocationServiceMap.node,
+      WorkflowModelExecution.node,
+    ]),
+    [
+      [ProjectV2.node, projects],
+      [SessionExecution.node, SessionExecution.noopLayer],
+      [Credential.node, credentials],
+      [llmClient, modelClient],
+      [WorkflowCommandSandbox.node, modelSandbox],
+      [WorkflowStore.node, workflowStore],
     ],
   ),
 )
@@ -117,13 +172,22 @@ const modelInput = (
   sessionID: SessionV2.ID,
   saveCheckpoint: WorkflowModelExecution.Input["saveCheckpoint"],
   stageState: Pick<Workflow.Stage, "checkpoint" | "recoveryAction"> = {},
+  identity: {
+    readonly workflowID?: Workflow.ID
+    readonly stageID?: Workflow.StageID
+    readonly role?: WorkflowRole.Role
+    readonly workflowInput?: Readonly<Record<string, unknown>>
+    readonly stageInput?: Readonly<Record<string, unknown>>
+    readonly persist?: boolean
+  } = {},
 ): WorkflowModelExecution.Input => {
   const budget: Workflow.Budget = { maxTurns: 3, maxToolCalls: 2, maxAttempts: 2 }
+  const role = identity.role ?? "design"
   const workflow = Workflow.Info.make({
-    id: Workflow.ID.make("wfl_location_model"),
+    id: identity.workflowID ?? Workflow.ID.make("wfl_location_model"),
     type: "development",
     status: "running",
-    input: { brief: "Inspect the workspace" },
+    input: identity.workflowInput ?? { brief: "Inspect the workspace" },
     budget,
     usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
     location,
@@ -133,19 +197,23 @@ const modelInput = (
     time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
   })
   const stage = Workflow.Stage.make({
-    id: Workflow.StageID.make("wfs_location_model"),
+    id: identity.stageID ?? Workflow.StageID.make("wfs_location_model"),
     workflowID: workflow.id,
-    type: "design",
+    type: role,
     ordinal: 0,
     status: "running",
     attempt: 1,
     maxAttempts: 2,
     recoveryPolicy: "restart_safe",
     idempotencyKey: "location-model/design",
-    input: {},
+    input: identity.stageInput ?? {},
     ...stageState,
     time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
   })
+  if (identity.persist !== false) {
+    persistedWorkflows.set(workflow.id, { run: workflow, stages: [stage], artifacts: [] })
+    persistedStages.set(stage.id, stage)
+  }
   return {
     workflow,
     stage,
@@ -153,7 +221,7 @@ const modelInput = (
     artifacts: [],
     lease: { owner: "worker", attempt: 1, expiresAt: DateTime.makeUnsafe(60_000) },
     saveCheckpoint,
-    route: WorkflowRouting.resolve({ role: "design", budget }),
+    route: WorkflowRouting.resolve({ role, budget }),
   }
 }
 
@@ -449,14 +517,21 @@ describe("Workflow Location tools", () => {
             "location_probe",
             "read",
           ])
-          expect(contexts).toEqual([
-            {
+          expect(contexts).toHaveLength(1)
+          expect(contexts[0]).toMatchObject({
+            sessionID,
+            agent: WorkflowRoleAgents.agentForRole("design"),
+            assistantMessageID: expect.stringMatching(/^msg_workflow_/),
+            toolCallID: "call-location-probe",
+            workflowLineage: {
+              workflowID: Workflow.ID.make("wfl_location_model"),
+              stageID: Workflow.StageID.make("wfs_location_model"),
               sessionID,
               agent: WorkflowRoleAgents.agentForRole("design"),
-              assistantMessageID: expect.stringMatching(/^msg_workflow_/),
-              toolCallID: "call-location-probe",
+              role: "design",
+              policyDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
             },
-          ])
+          })
           expect(modelTimeline).toEqual([
             "provider:1",
             "checkpoint:pending",
@@ -464,6 +539,139 @@ describe("Workflow Location tools", () => {
             "checkpoint:settled",
             "provider:2",
           ])
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  sandboxModelIt.live("selects exact frozen policies for two workflows sharing one Location and Session", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          sandboxAttempts.length = 0
+          sandboxLaunches.length = 0
+          sandboxPolicies.clear()
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_shared_policy")
+          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          const first = modelInput(
+            location,
+            sessionID,
+            () => Effect.void,
+            {},
+            {
+              workflowID: Workflow.ID.make("wfl_shared_policy_first"),
+              stageID: Workflow.StageID.make("wfs_shared_policy_first"),
+              role: "implement",
+              workflowInput: { flags: { second: 2, first: 1 }, brief: "First implementation" },
+              stageInput: { mode: "strict", plan: { outputs: ["first"], flags: { second: 2, first: 1 } } },
+            },
+          )
+          const second = modelInput(
+            location,
+            sessionID,
+            () => Effect.void,
+            {},
+            {
+              workflowID: Workflow.ID.make("wfl_shared_policy_second"),
+              stageID: Workflow.StageID.make("wfs_shared_policy_second"),
+              role: "implement",
+              workflowInput: { brief: "Second implementation" },
+              stageInput: { plan: { outputs: ["second"] } },
+            },
+          )
+          const firstLineage = yield* WorkflowToolLineage.issue({
+            workflow: first.workflow,
+            stage: first.stage,
+            route: first.route,
+            agent: WorkflowRoleAgents.agentForRole("implement"),
+          })
+          const secondLineage = yield* WorkflowToolLineage.issue({
+            workflow: second.workflow,
+            stage: second.stage,
+            route: second.route,
+            agent: WorkflowRoleAgents.agentForRole("implement"),
+          })
+          expect(
+            yield* WorkflowToolLineage.policyDigest({
+              workflow: Workflow.Info.make({
+                ...first.workflow,
+                input: { brief: "First implementation", flags: { first: 1, second: 2 } },
+              }),
+              stage: Workflow.Stage.make({
+                ...first.stage,
+                input: { plan: { flags: { first: 1, second: 2 }, outputs: ["first"] }, mode: "strict" },
+              }),
+              route: first.route,
+              agent: WorkflowRoleAgents.agentForRole("implement"),
+            }),
+          ).toBe(firstLineage.policyDigest)
+          sandboxPolicies.set(`${first.workflow.id}\0${first.stage.id}`, firstLineage.policyDigest)
+          sandboxPolicies.set(`${second.workflow.id}\0${second.stage.id}`, secondLineage.policyDigest)
+
+          const enqueue = (callID: string) => {
+            const calls = LLMResponse.fromEvents([
+              LLMEvent.toolCall({ id: callID, name: "bash", input: { command: "printf contained" } }),
+              LLMEvent.finish({ reason: "tool-calls" }),
+            ])
+            const outcome = LLMResponse.fromEvents([
+              LLMEvent.textStart({ id: `${callID}-outcome` }),
+              LLMEvent.textDelta({
+                id: `${callID}-outcome`,
+                text: JSON.stringify({ schemaVersion: 1, role: "implement", verdict: "ready", revision: 0 }),
+              }),
+              LLMEvent.textEnd({ id: `${callID}-outcome` }),
+              LLMEvent.finish({ reason: "stop" }),
+            ])
+            if (!calls || !outcome) throw new Error("invalid offline responses")
+            modelResponses.push(calls, outcome)
+          }
+
+          enqueue("call-shared-policy-first")
+          expect((yield* WorkflowModelExecution.Service.use((models) => models.execute(first))).outcome).toMatchObject({
+            role: "implement",
+            verdict: "ready",
+          })
+          enqueue("call-shared-policy-second")
+          expect((yield* WorkflowModelExecution.Service.use((models) => models.execute(second))).outcome).toMatchObject(
+            {
+              role: "implement",
+              verdict: "ready",
+            },
+          )
+
+          expect(sandboxLaunches).toHaveLength(2)
+          expect(sandboxLaunches.map((request) => [request.workflowID, request.stageID, request.policyDigest])).toEqual(
+            [
+              [first.workflow.id, first.stage.id, firstLineage.policyDigest],
+              [second.workflow.id, second.stage.id, secondLineage.policyDigest],
+            ],
+          )
+          expect(firstLineage.policyDigest).not.toBe(secondLineage.policyDigest)
+
+          const mismatched = modelInput(
+            location,
+            sessionID,
+            () => Effect.void,
+            {},
+            {
+              workflowID: first.workflow.id,
+              stageID: first.stage.id,
+              role: "implement",
+              workflowInput: first.workflow.input,
+              stageInput: { plan: { outputs: ["changed-after-freeze"] } },
+              persist: false,
+            },
+          )
+          const failure = yield* WorkflowModelExecution.Service.use((models) =>
+            models.execute(mismatched).pipe(Effect.flip),
+          )
+          expect(failure).toMatchObject({ failure: { code: "workflow_tool_lineage_invalid" } })
+          expect(sandboxAttempts).toHaveLength(2)
+          expect(sandboxLaunches).toHaveLength(2)
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
@@ -496,7 +704,7 @@ describe("Workflow Location tools", () => {
                 permissions: expectedRules(role),
               })
               expect(Object.isFrozen(profile)).toBe(true)
-              expect((yield* agents.select(id)).info).toBeUndefined()
+              expect((yield* Effect.exit(agents.select(id)))._tag).toBe("Failure")
               expect(
                 (yield* registry.materialize(WorkflowPermissions.forRole(role))).definitions
                   .map((definition) => definition.name)
@@ -585,39 +793,53 @@ describe("Workflow Location tools", () => {
               agent: WorkflowRoleAgents.agentForRole(role),
               assistantMessageID: SessionMessage.ID.make("msg_workflow_location_edit"),
             })
-            const forbidden = yield* tools.settle({
-              ...identity("design"),
-              call: {
-                type: "tool-call",
-                id: "call-forbidden-edit",
-                name: "edit",
-                input: { path: "admitted.txt", oldString: "before", newString: "forbidden" },
+            const designLineage = yield* locationLineage("design", location, sessionID)
+            const implementLineage = yield* locationLineage("implement", location, sessionID)
+            const forbidden = yield* ToolRegistry.settleWorkflow(
+              tools,
+              {
+                ...identity("design"),
+                call: {
+                  type: "tool-call",
+                  id: "call-forbidden-edit",
+                  name: "edit",
+                  input: { path: "admitted.txt", oldString: "before", newString: "forbidden" },
+                },
               },
-            })
+              designLineage,
+            )
             expect(forbidden.result).toMatchObject({ type: "error" })
             expect(yield* Effect.promise(() => fs.readFile(admitted, "utf8"))).toBe("before")
 
-            const edited = yield* tools.settle({
-              ...identity("implement"),
-              call: {
-                type: "tool-call",
-                id: "call-admitted-edit",
-                name: "edit",
-                input: { path: "admitted.txt", oldString: "before", newString: "after" },
+            const edited = yield* ToolRegistry.settleWorkflow(
+              tools,
+              {
+                ...identity("implement"),
+                call: {
+                  type: "tool-call",
+                  id: "call-admitted-edit",
+                  name: "edit",
+                  input: { path: "admitted.txt", oldString: "before", newString: "after" },
+                },
               },
-            })
+              implementLineage,
+            )
             expect(edited.result.type).toBe("text")
             expect(yield* Effect.promise(() => fs.readFile(admitted, "utf8"))).toBe("after")
 
-            const denied = yield* tools.settle({
-              ...identity("implement"),
-              call: {
-                type: "tool-call",
-                id: "call-outside-edit",
-                name: "edit",
-                input: { path: escaped, oldString: "outside", newString: "escaped" },
+            const denied = yield* ToolRegistry.settleWorkflow(
+              tools,
+              {
+                ...identity("implement"),
+                call: {
+                  type: "tool-call",
+                  id: "call-outside-edit",
+                  name: "edit",
+                  input: { path: escaped, oldString: "outside", newString: "escaped" },
+                },
               },
-            })
+              implementLineage,
+            )
             expect(denied.result).toMatchObject({ type: "error" })
             expect(yield* Effect.promise(() => fs.readFile(escaped, "utf8"))).toBe("outside")
           }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
@@ -648,15 +870,19 @@ describe("Workflow Location tools", () => {
             for (const role of ["implement", "test", "deliver"] as const) {
               const filtered = yield* registry.materialize(WorkflowPermissions.forRole(role))
               expect(filtered.definitions.some((definition) => definition.name === "bash")).toBe(true)
-              const denied = yield* filtered.settle({
-                ...identity(role),
-                call: {
-                  type: "tool-call",
-                  id: `call-forbidden-bash-${role}`,
-                  name: "bash",
-                  input: { command: `echo escaped > "${escaped}"` },
+              const denied = yield* ToolRegistry.settleWorkflow(
+                filtered,
+                {
+                  ...identity(role),
+                  call: {
+                    type: "tool-call",
+                    id: `call-forbidden-bash-${role}`,
+                    name: "bash",
+                    input: { command: `echo escaped > "${escaped}"` },
+                  },
                 },
-              })
+                yield* locationLineage(role, location, sessionID),
+              )
               expect(denied.result).toMatchObject({ type: "error" })
               expect(yield* Effect.promise(() => fs.readFile(escaped, "utf8"))).toBe("outside")
             }
@@ -666,6 +892,26 @@ describe("Workflow Location tools", () => {
     ),
   )
 })
+
+function locationLineage(role: WorkflowRole.Role, location: Location.Ref, sessionID: SessionV2.ID) {
+  const input = modelInput(
+    location,
+    sessionID,
+    () => Effect.void,
+    {},
+    {
+      workflowID: Workflow.ID.make(`wfl_location_tool_${role}`),
+      stageID: Workflow.StageID.make(`wfs_location_tool_${role}`),
+      role,
+    },
+  )
+  return WorkflowToolLineage.issue({
+    workflow: input.workflow,
+    stage: input.stage,
+    route: input.route,
+    agent: WorkflowRoleAgents.agentForRole(role),
+  })
+}
 
 function continuation(input: {
   readonly catalogFingerprint?: string

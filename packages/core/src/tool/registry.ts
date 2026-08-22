@@ -13,6 +13,8 @@ import { ApplicationTools } from "./application-tools"
 import { definition, permission, settle, validateName, type AnyTool, type RegistrationError } from "./tool"
 import { Tools } from "./tools"
 import { makeLocationNode } from "../effect/app-node"
+import { WorkflowToolLineage } from "../workflow/tool-lineage"
+import { WorkflowRoleAgentProfiles } from "../workflow/role-agent-profiles"
 
 export type ExecuteInput = {
   readonly sessionID: SessionSchema.ID
@@ -40,6 +42,21 @@ export interface Settlement {
   readonly outputPaths?: ReadonlyArray<string>
 }
 
+const workflowSettlers = new WeakMap<
+  Materialization,
+  (input: ExecuteInput, lineage: WorkflowToolLineage.Lineage) => Effect.Effect<Settlement, ToolOutputStore.Error>
+>()
+
+export function settleWorkflow(
+  materialization: Materialization,
+  input: ExecuteInput,
+  lineage: WorkflowToolLineage.Lineage,
+) {
+  const settle = workflowSettlers.get(materialization)
+  if (!settle) return Effect.die("Workflow tool settlement requires the captured materialization")
+  return settle(input, lineage)
+}
+
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/ToolRegistry") {}
 
 const registryLayer = Layer.effect(
@@ -58,7 +75,11 @@ const registryLayer = Layer.effect(
       return created
     }
 
-    const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object) {
+    const settleWith = Effect.fn("ToolRegistry.settle")(function* (
+      input: ExecuteInput,
+      advertised?: object,
+      workflowLineage?: WorkflowToolLineage.Lineage,
+    ) {
       const registration =
         local.get(input.call.name)?.at(-1)?.registration ?? applications.entries().get(input.call.name)
       if (!registration)
@@ -75,6 +96,7 @@ const registryLayer = Layer.effect(
         agent: input.agent,
         assistantMessageID: input.assistantMessageID,
         toolCallID: input.call.id,
+        ...(workflowLineage === undefined ? {} : { workflowLineage }),
       }).pipe(
         Effect.map((output) => ({ output })),
         Effect.catchTag("LLM.ToolFailure", (failure) =>
@@ -122,7 +144,7 @@ const registryLayer = Layer.effect(
         }
         for (const [name, registration] of registrations)
           if (whollyDisabled(permission(registration.tool, name), permissions)) registrations.delete(name)
-        return {
+        const materialization: Materialization = {
           fingerprint: Hash.sha256(
             JSON.stringify(
               Array.from(registrations, ([name, registration]) => [name, fingerprintFor(registration.identity)]).sort(
@@ -132,11 +154,24 @@ const registryLayer = Layer.effect(
           ),
           definitions: Array.from(registrations, ([name, registration]) => definition(name, registration.tool)),
           settle: (input) => {
+            if (WorkflowRoleAgentProfiles.isRoleAgent(input.agent))
+              return Effect.succeed({
+                result: {
+                  type: "error" as const,
+                  value: `Agent ${input.agent} is reserved for internal workflow settlement`,
+                },
+              })
             const registration = registrations.get(input.call.name)
             if (registration) return settleWith(input, registration.identity)
             return Effect.succeed({ result: { type: "error", value: `Unknown tool: ${input.call.name}` } })
           },
         }
+        workflowSettlers.set(materialization, (input, lineage) => {
+          const registration = registrations.get(input.call.name)
+          if (registration) return settleWith(input, registration.identity, lineage)
+          return Effect.succeed({ result: { type: "error", value: `Unknown tool: ${input.call.name}` } })
+        })
+        return materialization
       }),
     })
   }),

@@ -3,6 +3,7 @@ export * as WorkflowCommandSandbox from "./command-sandbox"
 import path from "path"
 import { type ToolCall } from "@opencode-ai/llm"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
+import { Workflow } from "@opencode-ai/schema/workflow"
 import { Context, Duration, Effect, Layer, Schema } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { AgentV2 } from "../agent"
@@ -16,6 +17,9 @@ import { SessionSchema } from "../session/schema"
 
 export interface Request {
   readonly role: WorkflowRole.Role
+  readonly workflowID: Workflow.ID
+  readonly stageID: Workflow.StageID
+  readonly policyDigest: string
   readonly sessionID: SessionSchema.ID
   readonly agent: AgentV2.ID
   readonly assistantMessageID: SessionMessage.ID
@@ -63,17 +67,17 @@ export const node = makeLocationNode({ service: Service, layer: unavailableLayer
 
 export interface WslConfig {
   readonly distribution: string
-  readonly access: Readonly<
-    Partial<
-      Record<
-        WorkflowRole.Role,
-        {
-          readonly workspace: "readonly" | "readwrite"
-          readonly outputDirectories: readonly string[]
-        }
-      >
-    >
-  >
+  readonly resolvePolicy: (input: {
+    readonly workflowID: Workflow.ID
+    readonly stageID: Workflow.StageID
+    readonly role: WorkflowRole.Role
+    readonly policyDigest: string
+  }) =>
+    | {
+        readonly workspace: "readonly" | "readwrite"
+        readonly outputDirectories: readonly string[]
+      }
+    | undefined
   readonly limits: {
     readonly timeoutMs: number
     readonly maxOutputBytes: number
@@ -90,15 +94,6 @@ export interface WslConfig {
  * configuration; until then production uses the unavailable layer above.
  */
 export function wslNode(config: WslConfig) {
-  const access = Object.fromEntries(
-    Object.entries(config.access).map(([role, policy]) => [
-      role,
-      Object.freeze({
-        workspace: policy.workspace,
-        outputDirectories: Object.freeze([...policy.outputDirectories]),
-      }),
-    ]),
-  ) as WslConfig["access"]
   const layer = Layer.effect(
     Service,
     Effect.gen(function* () {
@@ -109,8 +104,12 @@ export function wslNode(config: WslConfig) {
 
       return Service.of({
         run: Effect.fn("WorkflowCommandSandbox.run")(function* (request) {
-          const policy = access[request.role]
-          if (!policy) return yield* reject(`Workflow role ${request.role} has no sandbox command access`)
+          const resolved = config.resolvePolicy(request)
+          if (!resolved) return yield* reject("No exact frozen sandbox policy matches the verified workflow lineage")
+          const policy = {
+            workspace: resolved.workspace,
+            outputDirectories: Object.freeze([...resolved.outputDirectories]),
+          }
           const outputDirectories = policy.outputDirectories
           const workdir = request.workdir ?? "."
           if (!relativePath(workdir) || outputDirectories.some((directory) => !relativePath(directory)))
@@ -123,9 +122,9 @@ export function wslNode(config: WslConfig) {
           if (outputs.some((target) => target.externalDirectory))
             return yield* reject("Workflow output directory escapes the persisted Location")
           yield* Effect.forEach(outputs, (target) =>
-            fs.ensureDir(target.canonical).pipe(
-              Effect.mapError(() => new Rejected({ message: "Unable to prepare workflow output directory" })),
-            ),
+            fs
+              .ensureDir(target.canonical)
+              .pipe(Effect.mapError(() => new Rejected({ message: "Unable to prepare workflow output directory" }))),
           )
           if (
             yield* containsLink(fs, location.directory).pipe(
@@ -219,12 +218,10 @@ const containsLink = Effect.fn("WorkflowCommandSandbox.containsLink")(function* 
 ): Effect.fn.Return<boolean, FSUtil.Error> {
   const entries = yield* fs.readDirectoryEntries(directory)
   if (entries.some((entry) => entry.type === "symlink" || entry.type === "other")) return true
-  return (
-    yield* Effect.forEach(
-      entries.filter((entry) => entry.type === "directory"),
-      (entry) => containsLink(fs, path.join(directory, entry.name)),
-    )
-  ).some(Boolean)
+  return (yield* Effect.forEach(
+    entries.filter((entry) => entry.type === "directory"),
+    (entry) => containsLink(fs, path.join(directory, entry.name)),
+  )).some(Boolean)
 })
 
 function windowsToWsl(value: string) {

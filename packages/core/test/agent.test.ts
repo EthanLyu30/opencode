@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Effect, Exit, Scope } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
+import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Location } from "@opencode-ai/core/location"
 import { AgentPlugin } from "@opencode-ai/core/plugin/agent"
@@ -125,6 +126,17 @@ describe("AgentV2", () => {
       ])
       for (const item of agents) {
         expect(item.permissions.some((rule) => rule.action === "bash" && rule.effect !== "deny")).toBe(false)
+      }
+    }),
+  )
+
+  it.effect("rejects public selection of every reserved workflow role agent", () =>
+    Effect.gen(function* () {
+      const agents = yield* AgentV2.Service
+
+      for (const role of ["design", "decompose", "implement", "test", "visual_review", "repair", "deliver"] as const) {
+        const selected = yield* Effect.exit(agents.select(WorkflowRoleAgents.agentForRole(role)))
+        expect(selected._tag).toBe("Failure")
       }
     }),
   )
