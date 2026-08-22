@@ -10,20 +10,15 @@ import { Effect, Layer, Scope } from "effect"
 import { createHash, randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { EvidenceLedger } from "./evidence-ledger"
 import { PlaywrightCapture } from "./playwright"
+import { ProcessOwnership } from "./process-ownership"
 
 const MAX_PROCESS_LOG_BYTES = 1024 * 1024
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000
 const DEFAULT_POLL_INTERVAL_MS = 50
 const DEFAULT_FINALIZER_TIMEOUT_MS = 5_000
 const manifestName = ".host.json"
-
-interface ProcessHandle {
-  readonly pid: number
-  readonly exited: Promise<number>
-  readonly kill: () => void
-  readonly hasExited: () => boolean
-}
 
 interface HostRecord {
   readonly hostID: WorkflowVisualHost.HostID
@@ -32,7 +27,9 @@ interface HostRecord {
   readonly workspace?: string
   readonly createdAt: number
   allowedOrigins: readonly string[]
-  process?: ProcessHandle
+  captureURL?: string
+  processIdentity?: ProcessOwnership.Identity
+  process?: ProcessOwnership.OwnedProcess
   logDrains?: readonly Promise<void>[]
   preview?: WorkflowVisualHost.PreparedPreview
   server?: ReturnType<typeof Bun.serve>
@@ -42,13 +39,15 @@ interface HostRecord {
 export interface Options {
   readonly hostRoot: string
   readonly browser: PlaywrightCapture.Runtime
+  readonly evidenceLedger?: EvidenceLedger.Service
+  readonly processOwnership?: ProcessOwnership.Service
   readonly now?: () => number
   readonly startupTimeoutMs?: number
   readonly pollIntervalMs?: number
   readonly finalizerTimeoutMs?: number
   readonly maxProcessLogBytes?: number
   readonly onSpawnArgv?: (argv: readonly string[]) => void
-  readonly initialEvidenceBytes?: Readonly<Record<string, number>>
+  readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
 }
 
 export function makeLayer(options: Options): Layer.Layer<WorkflowVisualHost.Service, WorkflowVisualHost.Failure> {
@@ -63,6 +62,7 @@ export function makeLayer(options: Options): Layer.Layer<WorkflowVisualHost.Serv
         Effect.promise(async () => {
           await Promise.all([...state.active.values()].map((record) => release(state, record)))
           await settleWithin(state.browser.close(), state.finalizerTimeoutMs)
+          await settleWithin(state.evidence.close(), state.finalizerTimeoutMs)
         }).pipe(Effect.ignore),
       )
       return WorkflowVisualHost.Service.of({
@@ -91,8 +91,9 @@ export const node = makeGlobalNode({ service: WorkflowVisualHost.Service, layer,
 interface State {
   readonly root: string
   readonly browser: PlaywrightCapture.Runtime
+  readonly processOwnership: ProcessOwnership.Service
   readonly active: Map<WorkflowVisualHost.HostID, HostRecord>
-  readonly evidence: Map<string, number>
+  readonly evidence: EvidenceLedger.Service
   readonly captureTails: Map<string, Promise<void>>
   readonly now: () => number
   readonly startupTimeoutMs: number
@@ -100,6 +101,7 @@ interface State {
   readonly finalizerTimeoutMs: number
   readonly maxProcessLogBytes: number
   readonly onSpawnArgv?: (argv: readonly string[]) => void
+  readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
 }
 
 async function makeState(options: Options): Promise<State> {
@@ -126,15 +128,9 @@ async function makeState(options: Options): Promise<State> {
   return {
     root,
     browser: options.browser,
+    processOwnership: options.processOwnership ?? ProcessOwnership.unavailable,
     active: new Map(),
-    evidence: new Map(
-      Object.entries(options.initialEvidenceBytes ?? {}).map(([workflowID, bytes]) => {
-        if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
-          throw new TypeError("Initial workflow evidence is not bounded")
-        }
-        return [workflowID, bytes]
-      }),
-    ),
+    evidence: options.evidenceLedger ?? EvidenceLedger.open(path.join(root, ".evidence")),
     captureTails: new Map(),
     now: options.now ?? (() => Date.now()),
     startupTimeoutMs,
@@ -142,6 +138,7 @@ async function makeState(options: Options): Promise<State> {
     finalizerTimeoutMs,
     maxProcessLogBytes,
     onSpawnArgv: options.onSpawnArgv,
+    onRecordCreated: options.onRecordCreated,
   }
 }
 
@@ -149,41 +146,52 @@ function materializeReference(
   state: State,
   input: WorkflowVisualHost.MaterializeReferenceInput,
 ): Effect.Effect<WorkflowVisualHost.PreparedPreview, WorkflowVisualHost.Failure, Scope.Scope> {
-  return Effect.gen(function* () {
-    const scope = yield* Scope.Scope
-    const reference = yield* Effect.try({
-      try: () => validateReference(input.referenceApp),
-      catch: () => failure("materialize_reference", "invalid_reference_app", "Reference application is invalid"),
-    })
-    const record = yield* Effect.tryPromise({
-      try: () => createRecord(state, String(input.workflowID)),
-      catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
-    })
-    state.active.set(record.hostID, record)
-    yield* Effect.addFinalizer(() => Effect.promise(() => release(state, record)).pipe(Effect.ignore))
-    yield* Effect.tryPromise({
-      try: async () => {
-        await Promise.all(
-          reference.files.map(async (file) => {
-            const target = materializedPath(record.directory, file.path)
-            await fs.mkdir(path.dirname(target), { recursive: true })
-            await fs.writeFile(target, file.content, { encoding: "utf8", flag: "wx" })
+  return Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const scope = yield* Scope.Scope
+      const reference = yield* Effect.try({
+        try: () => validateReference(input.referenceApp),
+        catch: () => failure("materialize_reference", "invalid_reference_app", "Reference application is invalid"),
+      })
+      const record = yield* Effect.tryPromise({
+        try: () => createRecord(state, String(input.workflowID)),
+        catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
+      })
+      state.active.set(record.hostID, record)
+      yield* Effect.addFinalizer(() => Effect.promise(() => release(state, record)).pipe(Effect.ignore))
+      const onRecordCreated = state.onRecordCreated
+      if (onRecordCreated !== undefined) {
+        yield* restore(
+          Effect.tryPromise({
+            try: (signal) => onRecordCreated(record.directory, signal),
+            catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
           }),
         )
-        await writeManifest(record)
-        startStaticServer(record, record.directory, reference.entrypoint, record.directory)
-      },
-      catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
-    })
-    record.preview = WorkflowVisualHost.preparedPreview({
-      hostID: record.hostID,
-      url: capabilityURL(record),
-      revision: 0,
-      configSha256: reference.configSha256,
-      scope,
-    })
-    return record.preview
-  })
+      }
+      yield* Effect.tryPromise({
+        try: async () => {
+          await Promise.all(
+            reference.files.map(async (file) => {
+              const target = materializedPath(record.directory, file.path)
+              await fs.mkdir(path.dirname(target), { recursive: true })
+              await fs.writeFile(target, file.content, { encoding: "utf8", flag: "wx" })
+            }),
+          )
+          await writeManifest(record)
+          startStaticServer(record, record.directory, reference.entrypoint, record.directory)
+        },
+        catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
+      })
+      record.preview = WorkflowVisualHost.preparedPreview({
+        hostID: record.hostID,
+        url: capabilityURL(record),
+        revision: 0,
+        configSha256: reference.configSha256,
+        scope,
+      })
+      return record.preview
+    }),
+  )
 }
 
 function prepareImplementation(
@@ -199,8 +207,18 @@ function prepareImplementation(
             throw new TypeError("invalid plan")
           }
           PreviewPlan.verifyConfiguration(input.plan)
+          if (input.plan.kind === "script" && !state.processOwnership.available) {
+            throw failure(
+              "prepare_implementation",
+              "visual_host_unavailable",
+              "Authenticated preview process ownership is unavailable",
+            )
+          }
         },
-        catch: () => failure("prepare_implementation", "invalid_preview_plan", "Preview plan is not frozen"),
+        catch: (cause) =>
+          cause instanceof WorkflowVisualHost.Failure
+            ? cause
+            : failure("prepare_implementation", "invalid_preview_plan", "Preview plan is not frozen"),
       })
       const record = yield* Effect.tryPromise({
         try: () => createRecord(state, String(input.workflowID), input.plan.locationRoot),
@@ -209,6 +227,9 @@ function prepareImplementation(
       })
       state.active.set(record.hostID, record)
       yield* Effect.addFinalizer(() => Effect.promise(() => release(state, record)).pipe(Effect.ignore))
+      if (input.plan.kind === "script") {
+        record.processIdentity = { hostID: record.hostID, nonce: randomBytes(32).toString("hex") }
+      }
       yield* Effect.tryPromise({
         try: async () => {
           await writeManifest(record)
@@ -240,7 +261,7 @@ function prepareImplementation(
               "Script preview requires one admission-frozen loopback origin",
             ),
         })
-        yield* Effect.try({
+        yield* Effect.tryPromise({
           try: () => spawnPreviewProcess(state, record, input.plan),
           catch: () => failure("prepare_implementation", "visual_host_unavailable", "Preview process could not start"),
         })
@@ -255,6 +276,7 @@ function prepareImplementation(
           try: () => startProxyServer(record, targetOrigin),
           catch: () => failure("prepare_implementation", "visual_host_unavailable", "Preview proxy could not start"),
         })
+        record.captureURL = targetOrigin
       }
       record.preview = WorkflowVisualHost.preparedPreview({
         hostID: record.hostID,
@@ -273,12 +295,12 @@ function capture(
   input: WorkflowVisualHost.CaptureInput,
 ): Effect.Effect<WorkflowVisualHost.CapturedImage, WorkflowVisualHost.Failure> {
   return Effect.tryPromise({
-    try: async () => {
+    try: async (signal) => {
       const record = state.active.get(input.preview.hostID)
       if (record === undefined || record.released || record.preview !== input.preview) {
         throw failure("capture", "invalid_preview_handle", "Capture requires an active preview handle")
       }
-      return withCaptureLock(state, record.workflowID, async () => {
+      return withCaptureLock(state, record.workflowID, signal, async () => {
         if (record.released || state.active.get(record.hostID) !== record) {
           throw failure("capture", "invalid_preview_handle", "Capture requires an active preview handle")
         }
@@ -286,24 +308,30 @@ function capture(
         if (typeof input.readySelector !== "string" || input.readySelector.length === 0) {
           throw failure("capture", "capture_failed", "Capture requires a ready selector")
         }
-        const used = state.evidence.get(record.workflowID) ?? 0
+        const used = await state.evidence.used(record.workflowID)
         if (used >= WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
           throw failure("capture", "workflow_evidence_limit_exceeded", "Workflow evidence exceeds 128 MiB")
         }
         const bytes = await state.browser.capture({
-          url: input.preview.url,
+          url: record.captureURL ?? input.preview.url,
           viewport,
           readySelector: input.readySelector,
           allowedOrigins: record.allowedOrigins,
+          signal,
         })
         if (bytes.byteLength > WorkflowVisualHost.MAX_IMAGE_BYTES) {
           throw failure("capture", "image_evidence_limit_exceeded", "Screenshot exceeds 8 MiB")
         }
-        if (used + bytes.byteLength > WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
+        validatePng(bytes, viewport)
+        if (
+          !(await state.evidence.reserve(
+            record.workflowID,
+            bytes.byteLength,
+            WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+          ))
+        ) {
           throw failure("capture", "workflow_evidence_limit_exceeded", "Workflow evidence exceeds 128 MiB")
         }
-        validatePng(bytes, viewport)
-        state.evidence.set(record.workflowID, used + bytes.byteLength)
         return Object.freeze({
           bytes,
           viewport: Object.freeze({ ...input.viewport }),
@@ -321,7 +349,12 @@ function capture(
   })
 }
 
-async function withCaptureLock<A>(state: State, workflowID: string, run: () => Promise<A>): Promise<A> {
+async function withCaptureLock<A>(
+  state: State,
+  workflowID: string,
+  signal: AbortSignal,
+  run: () => Promise<A>,
+): Promise<A> {
   const previous = state.captureTails.get(workflowID) ?? Promise.resolve()
   let release: () => void = () => {}
   const gate = new Promise<void>((resolve) => {
@@ -329,13 +362,29 @@ async function withCaptureLock<A>(state: State, workflowID: string, run: () => P
   })
   const tail = previous.then(() => gate)
   state.captureTails.set(workflowID, tail)
-  await previous
   try {
+    await waitForSignal(previous, signal)
     return await run()
   } finally {
     release()
     if (state.captureTails.get(workflowID) === tail) state.captureTails.delete(workflowID)
   }
+}
+
+function waitForSignal(work: PromiseLike<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise((resolve, reject) => {
+    const finish = (callback: () => void) => {
+      signal.removeEventListener("abort", onAbort)
+      callback()
+    }
+    const onAbort = () => finish(() => reject(signal.reason))
+    signal.addEventListener("abort", onAbort, { once: true })
+    void Promise.resolve(work).then(
+      () => finish(resolve),
+      (cause) => finish(() => reject(cause)),
+    )
+  })
 }
 
 function recoverExpired(
@@ -352,12 +401,19 @@ function recoverExpired(
             const hostID = WorkflowVisualHost.HostID.make(entry.name)
             if (input.activeHostIDs.has(hostID)) return
             const directory = path.join(state.root, entry.name)
-            const createdAt = await readCreatedAt(directory)
-            if (createdAt >= input.expiredBefore) return
+            const manifest = await readManifest(directory)
+            if (manifest.createdAt >= input.expiredBefore) return
             const record = state.active.get(hostID)
             if (record !== undefined) {
-              await release(state, record)
+              if (!(await release(state, record))) throw new Error("Active host shutdown was not confirmed")
               return
+            }
+            if (manifest.processNonce !== undefined) {
+              const recovered = await settleWithin(
+                state.processOwnership.recover({ hostID, nonce: manifest.processNonce }),
+                state.finalizerTimeoutMs,
+              )
+              if (!recovered) throw new Error("Orphan process recovery was not confirmed")
             }
             await removeCapability(state.root, directory)
           }),
@@ -432,46 +488,20 @@ function startProxyServer(record: HostRecord, targetOrigin: string): void {
   })
 }
 
-function spawnPreviewProcess(state: State, record: HostRecord, plan: PreviewPlan.PreviewPlan): void {
-  if (plan.argv === undefined) throw new TypeError("Script plan has no argv")
+async function spawnPreviewProcess(state: State, record: HostRecord, plan: PreviewPlan.PreviewPlan): Promise<void> {
+  if (plan.argv === undefined || record.processIdentity === undefined)
+    throw new TypeError("Script plan has no identity")
   state.onSpawnArgv?.(plan.argv)
   const runtimeTemp = path.join(record.directory, ".tmp")
-  const argv = [...plan.argv]
-  const subprocess = Bun.spawn(argv, {
-    cwd: plan.cwd,
-    env: {
-      ...plan.env,
-      CI: "1",
-      NO_COLOR: "1",
-      TEMP: runtimeTemp,
-      TMP: runtimeTemp,
-      ...(process.env.SYSTEMROOT === undefined ? {} : { SYSTEMROOT: process.env.SYSTEMROOT }),
-    },
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    windowsHide: true,
-    detached: process.platform !== "win32",
+  const owned = await state.processOwnership.start({
+    identity: record.processIdentity,
+    plan,
+    tempRoot: runtimeTemp,
   })
-  let exited = false
-  void subprocess.exited.finally(() => {
-    exited = true
-  })
-  record.process = {
-    pid: subprocess.pid,
-    exited: subprocess.exited,
-    hasExited: () => exited,
-    kill: () => {
-      if (process.platform === "win32") {
-        subprocess.kill()
-        return
-      }
-      process.kill(-subprocess.pid, "SIGTERM")
-    },
-  }
+  record.process = owned
   record.logDrains = [
-    drainBounded(subprocess.stdout, state.maxProcessLogBytes),
-    drainBounded(subprocess.stderr, state.maxProcessLogBytes),
+    drainBounded(owned.stdout, state.maxProcessLogBytes),
+    drainBounded(owned.stderr, state.maxProcessLogBytes),
   ]
 }
 
@@ -496,34 +526,22 @@ async function waitForOrigin(state: State, record: HostRecord, origin: string, s
   throw new Error("preview process startup timed out")
 }
 
-async function release(state: State, record: HostRecord): Promise<void> {
-  if (record.released) return
+async function release(state: State, record: HostRecord): Promise<boolean> {
+  if (record.released) return false
   record.released = true
   if (state.active.get(record.hostID) === record) state.active.delete(record.hostID)
-  await settleWithin(record.server?.stop(true), state.finalizerTimeoutMs)
-  if (record.process !== undefined) await killProcessTree(record.process, state.finalizerTimeoutMs)
-  await settleWithin(Promise.all(record.logDrains ?? []), state.finalizerTimeoutMs)
-  await removeCapability(state.root, record.directory, record.workspace)
-}
-
-async function killProcessTree(processHandle: ProcessHandle, timeoutMs: number): Promise<void> {
-  if (processHandle.hasExited()) return
-  if (process.platform === "win32") {
-    const taskkill = Bun.spawn(["taskkill.exe", "/PID", String(processHandle.pid), "/T", "/F"], {
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-      windowsHide: true,
-    })
-    if (!(await settleWithin(taskkill.exited, timeoutMs))) taskkill.kill()
-  } else {
-    try {
-      processHandle.kill()
-    } catch {
-      return
-    }
+  const serverStopped = await settleWithin(record.server?.stop(true), state.finalizerTimeoutMs)
+  let processStopped = true
+  if (record.process !== undefined && record.processIdentity !== undefined) {
+    processStopped = await settleWithin(
+      state.processOwnership.stop({ identity: record.processIdentity, process: record.process }),
+      state.finalizerTimeoutMs,
+    )
   }
-  await settleWithin(processHandle.exited, timeoutMs)
+  await settleWithin(Promise.all(record.logDrains ?? []), state.finalizerTimeoutMs)
+  if (!serverStopped || !processStopped) return false
+  await removeCapability(state.root, record.directory, record.workspace)
+  return true
 }
 
 async function removeCapability(root: string, directory: string, workspace?: string): Promise<void> {
@@ -553,7 +571,7 @@ async function settleWithin(work: PromiseLike<unknown> | undefined, timeoutMs: n
       },
       () => {
         clearTimeout(timer)
-        resolve(true)
+        resolve(false)
       },
     )
   })
@@ -756,24 +774,36 @@ function requireScriptOrigin(origins: readonly string[]): string {
 async function writeManifest(record: HostRecord): Promise<void> {
   await fs.writeFile(
     path.join(record.directory, manifestName),
-    JSON.stringify({ hostID: record.hostID, createdAt: record.createdAt }),
+    JSON.stringify({
+      hostID: record.hostID,
+      createdAt: record.createdAt,
+      ...(record.processIdentity === undefined ? {} : { processNonce: record.processIdentity.nonce }),
+    }),
     { encoding: "utf8", flag: "wx" },
   )
 }
 
-async function readCreatedAt(directory: string): Promise<number> {
+async function readManifest(directory: string): Promise<{
+  readonly createdAt: number
+  readonly processNonce?: string
+}> {
   const value: unknown = await Bun.file(path.join(directory, manifestName)).json()
+  const hasProcessNonce = value !== null && typeof value === "object" && Object.hasOwn(value, "processNonce")
   if (
     value === null ||
     typeof value !== "object" ||
-    !hasExactKeys(value, ["hostID", "createdAt"]) ||
+    !hasExactKeys(value, hasProcessNonce ? ["hostID", "createdAt", "processNonce"] : ["hostID", "createdAt"]) ||
     typeof Reflect.get(value, "hostID") !== "string" ||
     path.basename(directory) !== Reflect.get(value, "hostID") ||
-    typeof Reflect.get(value, "createdAt") !== "number"
+    typeof Reflect.get(value, "createdAt") !== "number" ||
+    (hasProcessNonce && !/^[a-f0-9]{64}$/.test(String(Reflect.get(value, "processNonce"))))
   ) {
     throw new TypeError("invalid host manifest")
   }
-  return Reflect.get(value, "createdAt")
+  return {
+    createdAt: Reflect.get(value, "createdAt"),
+    ...(hasProcessNonce ? { processNonce: String(Reflect.get(value, "processNonce")) } : {}),
+  }
 }
 
 function pathsOverlap(left: string, right: string): boolean {

@@ -4,11 +4,13 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 import { WorkflowSchema } from "@opencode-ai/core/workflow"
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { PlaywrightCapture } from "../src/workflow/playwright"
+import { ProcessOwnership } from "../src/workflow/process-ownership"
+import { EvidenceLedger } from "../src/workflow/evidence-ledger"
 import { WorkflowVisualHostServer } from "../src/workflow/visual-host"
 
 const workflowID = WorkflowSchema.ID.make("wfl_server_visual_host")
@@ -128,6 +130,56 @@ describe("WorkflowVisualHostServer", () => {
     expect(getterCalled).toBe(false)
   })
 
+  test("registers reference cleanup before an interruptible acquisition step can be cancelled", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    let createdDirectory = ""
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const acquisition = yield* host
+            .materializeReference({
+              workflowID,
+              referenceApp: {
+                entrypoint: "index.html",
+                readySelector: "#ready",
+                projectStack: ["HTML"],
+                files: [{ path: "index.html", content: reference }],
+              },
+            })
+            .pipe(Effect.forkChild)
+          const reached = yield* Effect.promise(() =>
+            waitUntil(() => createdDirectory !== "", 200).then(
+              () => true,
+              () => false,
+            ),
+          )
+          expect(reached).toBe(true)
+          yield* Fiber.interrupt(acquisition).pipe(Effect.timeout("200 millis"))
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            onRecordCreated: async (directory, signal) => {
+              createdDirectory = directory
+              await new Promise<void>((_resolve, reject) => {
+                signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+              })
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(createdDirectory).not.toBe("")
+    expect(await fs.exists(createdDirectory)).toBe(false)
+    expect((await fs.readdir(temp.path)).filter((name) => /^[a-f0-9]{64}$/.test(name))).toEqual([])
+  })
+
   test("uses a fresh locked-down browser context, denies non-admitted requests, waits for readiness, and returns exact PNG", async () => {
     await using temp = await taskTemp()
     const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
@@ -185,7 +237,13 @@ describe("WorkflowVisualHostServer", () => {
         permissions: [],
       },
     ])
-    expect(runtime.continued).toEqual([
+    expect(runtime.fetches).toEqual([
+      { url: runtime.requestURLs[0], maxRedirects: 0 },
+      { url: runtime.requestURLs[1], maxRedirects: 0 },
+      { url: runtime.requestURLs[0], maxRedirects: 0 },
+      { url: runtime.requestURLs[1], maxRedirects: 0 },
+    ])
+    expect(runtime.fulfilled).toEqual([
       runtime.requestURLs[0],
       runtime.requestURLs[1],
       runtime.requestURLs[0],
@@ -215,6 +273,86 @@ describe("WorkflowVisualHostServer", () => {
     expect(images.first.sha256).toBe(createHash("sha256").update(images.first.bytes).digest("hex"))
     expect(images.second.width).toBe(390)
     expect(images.second.height).toBe(844)
+  })
+
+  test("fetches admitted HTTP without following redirects and rejects external redirects and WebSockets", async () => {
+    const runtime = browserRuntime()
+    const admitted = "http://127.0.0.1:4317/"
+    const external = "https://example.com/escape"
+    const userinfo = "http://user:pass@127.0.0.1:4317/private"
+    runtime.requestURLs.push(admitted, external, userinfo)
+    runtime.responses.set(admitted, { status: 302, headers: { location: external } })
+    runtime.webSocketURLs.push("ws://127.0.0.1:4317/hmr", "ws://example.com/socket", "wss://example.com/socket")
+
+    await runtime.runtime.capture({
+      url: admitted,
+      viewport: { width: 390, height: 844 },
+      readySelector: "#ready",
+      allowedOrigins: [],
+      signal: new AbortController().signal,
+    })
+
+    expect(runtime.fetches).toEqual([{ url: admitted, maxRedirects: 0 }])
+    expect(runtime.fulfilled).toEqual([])
+    expect(runtime.aborted).toEqual([admitted, external, userinfo])
+    expect(runtime.webSocketsConnected).toEqual(["ws://127.0.0.1:4317/hmr"])
+    expect(runtime.webSocketsClosed).toEqual(["ws://example.com/socket", "wss://example.com/socket"])
+    expect(runtime.launchOptions[0]?.args).toEqual([
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-domain-reliability",
+      "--disable-features=AutofillServerCommunication,CertificateTransparencyComponentUpdater,MediaRouter,OptimizationHints",
+      "--disable-sync",
+      "--metrics-recording-only",
+      "--no-default-browser-check",
+      "--no-first-run",
+      "--safebrowsing-disable-auto-update",
+    ])
+  })
+
+  test("cancels a stalled capture, closes its context once, and releases the workflow capture lock", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const runtime = browserRuntime()
+    runtime.stallNextGoto = true
+
+    const image = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          const first = yield* host
+            .capture({
+              preview,
+              readySelector: "#ready",
+              viewport: { name: "mobile", width: 390, height: 844 },
+            })
+            .pipe(Effect.forkChild)
+          yield* Effect.promise(() => waitUntil(() => runtime.gotoStarted === 1))
+          yield* Fiber.interrupt(first).pipe(Effect.timeout("200 millis"))
+          yield* Effect.promise(() => waitUntil(() => runtime.contextsClosed === 1, 200))
+          expect(runtime.contextsClosed).toBe(1)
+          return yield* host
+            .capture({
+              preview,
+              readySelector: "#ready",
+              viewport: { name: "mobile", width: 390, height: 844 },
+            })
+            .pipe(Effect.timeout("500 millis"))
+        }),
+      ).pipe(Effect.provide(WorkflowVisualHostServer.makeLayer({ hostRoot: temp.path, browser: runtime.runtime }))),
+    )
+
+    expect(image.width).toBe(390)
+    expect(runtime.contextsClosed).toBe(2)
   })
 
   test("spawns only the frozen argv for a script preview and tears down its process tree on scope close", async () => {
@@ -251,6 +389,7 @@ describe("WorkflowVisualHostServer", () => {
       allowedOrigins: [`http://127.0.0.1:${port}`],
     })
     const observed: string[][] = []
+    const ownership = processOwnership()
     let previewURL = ""
 
     await Effect.runPromise(
@@ -276,6 +415,7 @@ describe("WorkflowVisualHostServer", () => {
           WorkflowVisualHostServer.makeLayer({
             hostRoot: temp.path,
             browser: browserRuntime().runtime,
+            processOwnership: ownership.service,
             onSpawnArgv: (argv) => observed.push([...argv]),
           }),
         ),
@@ -283,8 +423,179 @@ describe("WorkflowVisualHostServer", () => {
     )
 
     expect(observed).toEqual([["node", "server.mjs"]])
+    expect(ownership.started).toEqual([{ argv: ["node", "server.mjs"], hostID: expect.any(String) }])
+    expect(ownership.stopped).toHaveLength(1)
     await expect(fetch(`http://127.0.0.1:${port}`)).rejects.toThrow()
     await expect(fetch(previewURL)).rejects.toThrow()
+  })
+
+  test("retains the capability for authenticated recovery when process shutdown is not confirmed", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    const port = await unusedPort()
+    await fs.writeFile(
+      path.join(workspaceTemp.path, "server.mjs"),
+      `import http from "node:http"\nhttp.createServer((_, response) => response.end("still-owned")).listen(${port}, "127.0.0.1")\n`,
+    )
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "script", argv: ["node", "server.mjs"] },
+      allowedOrigins: [`http://127.0.0.1:${port}`],
+    })
+    const ownership = processOwnership()
+    const refusingStop: ProcessOwnership.Service = {
+      ...ownership.service,
+      stop: async () => {
+        throw new Error("shutdown was not confirmed")
+      },
+    }
+    let directory = ""
+    let identity: ProcessOwnership.Identity | undefined
+
+    try {
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            const preview = yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+            directory = path.join(temp.path, preview.hostID)
+            const manifest = JSON.parse(
+              yield* Effect.promise(() => fs.readFile(path.join(directory, ".host.json"), "utf8")),
+            )
+            identity = { hostID: preview.hostID, nonce: manifest.processNonce }
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              processOwnership: refusingStop,
+              finalizerTimeoutMs: 50,
+            }),
+          ),
+        ),
+      )
+
+      expect(await fs.exists(directory)).toBe(true)
+      expect(await fetch(`http://127.0.0.1:${port}`).then((response) => response.text())).toBe("still-owned")
+    } finally {
+      if (identity !== undefined) await ownership.service.recover(identity).catch(() => undefined)
+      if (directory !== "") await fs.rm(directory, { recursive: true, force: true })
+    }
+  }, 10_000)
+
+  test("fails closed before launching a script when no authenticated process ownership backend is installed", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    const marker = path.join(workspaceTemp.path, "launched.txt")
+    const port = await unusedPort()
+    await fs.writeFile(
+      path.join(workspaceTemp.path, "server.mjs"),
+      [
+        'import fs from "node:fs"',
+        'import http from "node:http"',
+        `fs.writeFileSync(${JSON.stringify(marker)}, "launched")`,
+        `http.createServer((_, response) => response.end("ready")).listen(${port}, "127.0.0.1")`,
+      ].join("\n"),
+    )
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "script", argv: ["node", "server.mjs"] },
+      allowedOrigins: [`http://127.0.0.1:${port}`],
+    })
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+        }),
+      ).pipe(
+        Effect.provide(WorkflowVisualHostServer.makeLayer({ hostRoot: temp.path, browser: browserRuntime().runtime })),
+        Effect.match({
+          onFailure: (left) => ({ _tag: "Left" as const, left }),
+          onSuccess: (right) => ({ _tag: "Right" as const, right }),
+        }),
+      ),
+    )
+
+    expect(outcome).toMatchObject({
+      _tag: "Left",
+      left: { operation: "prepare_implementation", code: "visual_host_unavailable" },
+    })
+    expect(await fs.exists(marker)).toBe(false)
+  })
+
+  test("captures a script at its private frozen origin so root redirects and absolute assets remain functional", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    const port = await unusedPort()
+    await fs.writeFile(
+      path.join(workspaceTemp.path, "server.mjs"),
+      [
+        'import http from "node:http"',
+        `http.createServer((request, response) => {`,
+        '  if (request.url === "/") { response.writeHead(302, { location: "/app" }); response.end(); return }',
+        '  if (request.url === "/app") { response.end(\'<!doctype html><main id="ready"></main><script src="/@vite/client"></script><script src="/_next/static/app.js"></script>\'); return }',
+        '  if (request.url === "/@vite/client") { response.end("vite-client-ready"); return }',
+        '  if (request.url === "/_next/static/app.js") { response.end("next-client-ready"); return }',
+        '  response.writeHead(404); response.end("missing")',
+        `}).listen(${port}, "127.0.0.1")`,
+      ].join("\n"),
+    )
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "script", argv: ["node", "server.mjs"] },
+      allowedOrigins: [`http://127.0.0.1:${port}`],
+    })
+    const capturedURLs: string[] = []
+    const ownership = processOwnership()
+    const runtime: PlaywrightCapture.Runtime = {
+      capture: async (input) => {
+        capturedURLs.push(input.url)
+        const page = await fetch(input.url)
+        const html = await page.text()
+        if (!html.includes('src="/@vite/client"')) throw new Error("redirected HTML did not load")
+        const asset = await fetch(new URL("/@vite/client", page.url))
+        if ((await asset.text()) !== "vite-client-ready") throw new Error("root asset did not load")
+        const nextAsset = await fetch(new URL("/_next/static/app.js", page.url))
+        if ((await nextAsset.text()) !== "next-client-ready") throw new Error("Next root asset did not load")
+        return WorkflowVisualHost.deterministicPng({ name: "capture", width: 390, height: 844 })
+      },
+      close: async () => undefined,
+    }
+    let publicURL = ""
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+          publicURL = preview.url
+          expect(preview.url).not.toBe(`http://127.0.0.1:${port}/`)
+          expect(Object.keys(preview)).toEqual(["hostID", "url", "origin", "revision", "configSha256", "scope"])
+          yield* host.capture({
+            preview,
+            readySelector: "#ready",
+            viewport: { name: "mobile", width: 390, height: 844 },
+          })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: runtime,
+            processOwnership: ownership.service,
+          }),
+        ),
+      ),
+    )
+
+    expect(capturedURLs).toEqual([`http://127.0.0.1:${port}`])
+    await expect(fetch(publicURL)).rejects.toThrow()
   })
 
   test("serves a frozen static implementation and admits only its frozen local dependency origin", async () => {
@@ -322,7 +633,8 @@ describe("WorkflowVisualHostServer", () => {
     expect(result.preview.revision).toBe(2)
     expect(result.preview.configSha256).toBe(plan.configSha256)
     expect(result.image.width).toBe(1440)
-    expect(runtime.continued).toEqual([`${dependencyOrigin}/asset.js`])
+    expect(runtime.fetches).toEqual([{ url: `${dependencyOrigin}/asset.js`, maxRedirects: 0 }])
+    expect(runtime.fulfilled).toEqual([`${dependencyOrigin}/asset.js`])
     expect(runtime.aborted).toEqual(["https://example.com/tracker.js"])
   })
 
@@ -391,6 +703,15 @@ describe("WorkflowVisualHostServer", () => {
     const viewport = { name: "mobile", width: 390, height: 844 } as const
     const pngBytes = WorkflowVisualHost.deterministicPng(viewport)
     const runtime = browserRuntime(() => pngBytes)
+    const ledger = EvidenceLedger.open(path.join(temp.path, ".evidence"))
+    expect(
+      await ledger.reserve(
+        String(workflowID),
+        WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES - pngBytes.byteLength,
+        WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+      ),
+    ).toBe(true)
+    await ledger.close()
     const outcomes = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -417,9 +738,6 @@ describe("WorkflowVisualHostServer", () => {
           WorkflowVisualHostServer.makeLayer({
             hostRoot: temp.path,
             browser: runtime.runtime,
-            initialEvidenceBytes: {
-              [workflowID]: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES - pngBytes.byteLength,
-            },
           }),
         ),
       ),
@@ -429,6 +747,77 @@ describe("WorkflowVisualHostServer", () => {
     expect(outcomes.filter((outcome) => "error" in outcome)).toMatchObject([
       { error: { operation: "capture", code: "workflow_evidence_limit_exceeded" } },
     ])
+  })
+
+  test("enforces the durable workflow evidence total after the visual host layer restarts", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const viewport = { name: "mobile", width: 390, height: 844 } as const
+    const pngBytes = WorkflowVisualHost.deterministicPng(viewport)
+    const ledger = EvidenceLedger.open(path.join(temp.path, ".evidence"))
+    expect(
+      await ledger.reserve(
+        String(workflowID),
+        WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES - pngBytes.byteLength * 2 + 1,
+        WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+      ),
+    ).toBe(true)
+    await ledger.close()
+
+    const captureWithFreshLayer = () =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            const preview = yield* host.materializeReference({
+              workflowID,
+              referenceApp: {
+                entrypoint: "index.html",
+                readySelector: "#ready",
+                projectStack: ["HTML"],
+                files: [{ path: "index.html", content: reference }],
+              },
+            })
+            return yield* host.capture({ preview, readySelector: "#ready", viewport })
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime(() => pngBytes).runtime,
+            }),
+          ),
+          Effect.match({
+            onFailure: (error) => ({ error }),
+            onSuccess: (image) => ({ image }),
+          }),
+        ),
+      )
+
+    expect(await captureWithFreshLayer()).toMatchObject({ image: { evidenceBytes: pngBytes.byteLength } })
+    expect(await captureWithFreshLayer()).toMatchObject({
+      error: { operation: "capture", code: "workflow_evidence_limit_exceeded" },
+    })
+  })
+
+  test("rejects an aliased durable evidence root before writing outside host ownership", async () => {
+    await using temp = await taskTemp()
+    await using outside = await taskTemp()
+    const alias = path.join(temp.path, ".evidence")
+    await fs.symlink(outside.path, alias, process.platform === "win32" ? "junction" : "dir")
+
+    let opened: EvidenceLedger.Service | undefined
+    let cause: unknown
+    try {
+      opened = EvidenceLedger.open(alias)
+    } catch (error) {
+      cause = error
+    } finally {
+      await opened?.close()
+    }
+
+    expect(cause).toBeInstanceOf(TypeError)
+    expect(await fs.exists(path.join(outside.path, "evidence.sqlite"))).toBe(false)
   })
 
   test("recovers only expired host-owned capabilities that are not fenced by an active lease", async () => {
@@ -478,6 +867,130 @@ describe("WorkflowVisualHostServer", () => {
     expect(await fs.exists(temp.path)).toBe(true)
   })
 
+  test("recovers an orphan process only through its persisted authenticated ownership identity", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    const port = await unusedPort()
+    await fs.writeFile(
+      path.join(workspaceTemp.path, "server.mjs"),
+      `import http from "node:http"\nhttp.createServer((_, response) => response.end("orphan-ready")).listen(${port}, "127.0.0.1")\n`,
+    )
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "script", argv: ["node", "server.mjs"] },
+      allowedOrigins: [`http://127.0.0.1:${port}`],
+    })
+    const identity: ProcessOwnership.Identity = {
+      hostID: WorkflowVisualHost.HostID.make("a".repeat(64)),
+      nonce: "b".repeat(64),
+    }
+    const directory = path.join(temp.path, identity.hostID)
+    const runtimeTemp = path.join(directory, ".tmp")
+    await fs.mkdir(runtimeTemp, { recursive: true })
+    await fs.writeFile(
+      path.join(directory, ".host.json"),
+      JSON.stringify({ hostID: identity.hostID, createdAt: 10, processNonce: identity.nonce }),
+    )
+    const ownership = processOwnership()
+    await ownership.service.start({ identity, plan, tempRoot: runtimeTemp })
+    await waitUntil(async () =>
+      fetch(`http://127.0.0.1:${port}`).then(
+        () => true,
+        () => false,
+      ),
+    )
+
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          yield* host.recoverExpired({ activeHostIDs: new Set(), expiredBefore: 11 })
+        }).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              processOwnership: ownership.service,
+            }),
+          ),
+          Effect.scoped,
+        ),
+      )
+
+      expect(ownership.recovered).toEqual([identity])
+      expect(await fs.exists(directory)).toBe(false)
+      await expect(fetch(`http://127.0.0.1:${port}`)).rejects.toThrow()
+    } finally {
+      await ownership.service.recover(identity).catch(() => undefined)
+    }
+  })
+
+  test("retains an orphan and never terminates a process when its persisted ownership nonce is forged", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    const port = await unusedPort()
+    await fs.writeFile(
+      path.join(workspaceTemp.path, "server.mjs"),
+      `import http from "node:http"\nhttp.createServer((_, response) => response.end("owned-ready")).listen(${port}, "127.0.0.1")\n`,
+    )
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "script", argv: ["node", "server.mjs"] },
+      allowedOrigins: [`http://127.0.0.1:${port}`],
+    })
+    const identity: ProcessOwnership.Identity = {
+      hostID: WorkflowVisualHost.HostID.make("c".repeat(64)),
+      nonce: "d".repeat(64),
+    }
+    const directory = path.join(temp.path, identity.hostID)
+    const runtimeTemp = path.join(directory, ".tmp")
+    await fs.mkdir(runtimeTemp, { recursive: true })
+    await fs.writeFile(
+      path.join(directory, ".host.json"),
+      JSON.stringify({ hostID: identity.hostID, createdAt: 10, processNonce: "e".repeat(64) }),
+    )
+    const ownership = processOwnership()
+    await ownership.service.start({ identity, plan, tempRoot: runtimeTemp })
+    await waitUntil(async () =>
+      fetch(`http://127.0.0.1:${port}`).then(
+        () => true,
+        () => false,
+      ),
+    )
+
+    try {
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.recoverExpired({ activeHostIDs: new Set(), expiredBefore: 11 })
+        }).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              processOwnership: ownership.service,
+            }),
+          ),
+          Effect.scoped,
+          Effect.match({
+            onFailure: (error) => ({ error }),
+            onSuccess: () => ({ success: true as const }),
+          }),
+        ),
+      )
+
+      expect(outcome).toMatchObject({ error: { operation: "recover_expired", code: "cleanup_target_rejected" } })
+      expect(ownership.recovered).toEqual([])
+      expect(await fs.exists(directory)).toBe(true)
+      expect(await fetch(`http://127.0.0.1:${port}`).then((response) => response.text())).toBe("owned-ready")
+    } finally {
+      await ownership.service.recover(identity).catch(() => undefined)
+      await fs.rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test("bounds layer finalization when a runtime adapter does not finish closing", async () => {
     await using temp = await taskTemp()
     const stalled: PlaywrightCapture.Runtime = {
@@ -505,39 +1018,81 @@ describe("WorkflowVisualHostServer", () => {
 function browserRuntime(captureBytes?: () => Uint8Array) {
   const state = {
     requestURLs: [] as string[],
-    continued: [] as string[],
+    responses: new Map<string, { readonly status: number; readonly headers: Readonly<Record<string, string>> }>(),
+    fetches: [] as { readonly url: string; readonly maxRedirects: number }[],
+    fulfilled: [] as string[],
     aborted: [] as string[],
+    webSocketURLs: [] as string[],
+    webSocketsConnected: [] as string[],
+    webSocketsClosed: [] as string[],
     contextOptions: [] as PlaywrightCapture.ContextOptions[],
     selectors: [] as string[],
     evaluateSources: [] as string[],
     screenshotOptions: [] as PlaywrightCapture.ScreenshotOptions[],
+    launchOptions: [] as PlaywrightCapture.LaunchOptions[],
     contextsClosed: 0,
     closed: 0,
+    stallNextGoto: false,
+    gotoStarted: 0,
   }
   const browserType: PlaywrightCapture.BrowserType = {
-    async launch() {
+    async launch(options) {
+      state.launchOptions.push(options)
       return {
         async newContext(options) {
           state.contextOptions.push(options)
           let handler: PlaywrightCapture.RouteHandler | undefined
+          let webSocketHandler: ((route: PlaywrightCapture.WebSocketRoute) => Promise<void>) | undefined
           return {
             async route(_pattern, value) {
               handler = value
             },
+            async routeWebSocket(_pattern, value) {
+              webSocketHandler = value
+            },
             async newPage() {
               return {
                 async goto() {
+                  state.gotoStarted++
                   if (handler === undefined) throw new Error("route policy missing")
                   for (const url of state.requestURLs) {
-                    await handler({
+                    const configured = state.responses.get(url) ?? { status: 200, headers: {} }
+                    const route: PlaywrightCapture.Route = {
                       request: () => ({ url: () => url }),
-                      continue: async () => {
-                        state.continued.push(url)
+                      fetch: async (options) => {
+                        state.fetches.push({ url, maxRedirects: options.maxRedirects })
+                        return {
+                          status: () => configured.status,
+                          headers: () => configured.headers,
+                          fulfill: async () => {
+                            state.fulfilled.push(url)
+                          },
+                          dispose: async () => undefined,
+                        }
                       },
                       abort: async () => {
                         state.aborted.push(url)
                       },
+                    }
+                    await handler(route)
+                  }
+                  if (state.webSocketURLs.length > 0 && webSocketHandler === undefined) {
+                    throw new Error("websocket route policy missing")
+                  }
+                  for (const url of state.webSocketURLs) {
+                    await webSocketHandler?.({
+                      url: () => url,
+                      connectToServer: () => {
+                        state.webSocketsConnected.push(url)
+                      },
+                      close: async () => {
+                        state.webSocketsClosed.push(url)
+                      },
                     })
+                  }
+                  if (state.stallNextGoto) {
+                    state.stallNextGoto = false
+                    await new Promise(() => undefined)
                   }
                 },
                 async waitForSelector(selector) {
@@ -590,4 +1145,80 @@ async function unusedPort(): Promise<number> {
   using server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
   if (server.port === undefined) throw new Error("Bun did not assign a test port")
   return server.port
+}
+
+function processOwnership() {
+  const processes = new Map<
+    string,
+    { readonly identity: ProcessOwnership.Identity; readonly subprocess: ReturnType<typeof Bun.spawn> }
+  >()
+  const state = {
+    started: [] as { readonly argv: readonly string[]; readonly hostID: string }[],
+    stopped: [] as ProcessOwnership.Identity[],
+    recovered: [] as ProcessOwnership.Identity[],
+  }
+  const key = (identity: ProcessOwnership.Identity) => `${identity.hostID}:${identity.nonce}`
+  const service: ProcessOwnership.Service = {
+    available: true,
+    async start(input) {
+      const subprocess = Bun.spawn([...input.plan.argv!], {
+        cwd: input.plan.cwd,
+        env: {
+          ...input.plan.env,
+          CI: "1",
+          NO_COLOR: "1",
+          TEMP: input.tempRoot,
+          TMP: input.tempRoot,
+          ...(process.env.SYSTEMROOT === undefined ? {} : { SYSTEMROOT: process.env.SYSTEMROOT }),
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        windowsHide: true,
+        detached: process.platform !== "win32",
+      })
+      processes.set(key(input.identity), { identity: input.identity, subprocess })
+      state.started.push({ argv: [...input.plan.argv!], hostID: input.identity.hostID })
+      return { exited: subprocess.exited, stdout: subprocess.stdout, stderr: subprocess.stderr }
+    },
+    async stop(input) {
+      const owned = processes.get(key(input.identity))
+      if (owned === undefined || owned.identity.nonce !== input.identity.nonce) throw new Error("unowned process")
+      await stopTestProcess(owned.subprocess)
+      processes.delete(key(input.identity))
+      state.stopped.push(input.identity)
+    },
+    async recover(identity) {
+      const owned = processes.get(key(identity))
+      if (owned === undefined || owned.identity.nonce !== identity.nonce) throw new Error("unowned process")
+      await stopTestProcess(owned.subprocess)
+      processes.delete(key(identity))
+      state.recovered.push(identity)
+    },
+  }
+  return Object.assign(state, { service })
+}
+
+async function stopTestProcess(subprocess: ReturnType<typeof Bun.spawn>): Promise<void> {
+  if (process.platform === "win32") {
+    const taskkill = Bun.spawn(["taskkill.exe", "/PID", String(subprocess.pid), "/T", "/F"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      windowsHide: true,
+    })
+    await taskkill.exited
+    return
+  } else {
+    process.kill(-subprocess.pid, "SIGTERM")
+  }
+  await Promise.race([subprocess.exited, Bun.sleep(5_000)])
+}
+
+async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!(await check())) {
+    if (Date.now() >= deadline) throw new Error("test condition did not become true")
+    await Bun.sleep(5)
+  }
 }
