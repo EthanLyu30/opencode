@@ -160,21 +160,21 @@ const modelInput = (
 const expected = {
   design: ["glob", "grep", "read"],
   decompose: ["glob", "grep", "read"],
-  implement: ["apply_patch", "edit", "glob", "grep", "read", "workflow_command", "write"],
-  repair: ["apply_patch", "edit", "glob", "grep", "read", "workflow_command", "write"],
-  test: ["glob", "grep", "read", "workflow_command"],
+  implement: ["apply_patch", "bash", "edit", "glob", "grep", "read", "write"],
+  repair: ["apply_patch", "bash", "edit", "glob", "grep", "read", "write"],
+  test: ["bash", "glob", "grep", "read"],
   visual_review: ["glob", "grep", "read"],
-  deliver: ["glob", "grep", "read", "workflow_finalize"],
+  deliver: ["bash", "glob", "grep", "read"],
 } satisfies Record<WorkflowRole.Role, readonly string[]>
 
 const expectedActions = {
   design: ["read", "glob", "grep"],
   decompose: ["read", "glob", "grep"],
-  implement: ["read", "glob", "grep", "edit", "workflow_command"],
-  repair: ["read", "glob", "grep", "edit", "workflow_command"],
-  test: ["read", "glob", "grep", "workflow_command"],
+  implement: ["read", "glob", "grep", "bash", "edit"],
+  repair: ["read", "glob", "grep", "bash", "edit"],
+  test: ["read", "glob", "grep", "bash"],
   visual_review: ["read", "glob", "grep"],
-  deliver: ["read", "glob", "grep", "workflow_finalize"],
+  deliver: ["read", "glob", "grep", "bash"],
 } satisfies Record<WorkflowRole.Role, readonly string[]>
 
 const expectedRules = (role: WorkflowRole.Role) => [
@@ -626,7 +626,7 @@ describe("Workflow Location tools", () => {
     ),
   )
 
-  it.live("denies generic Bash for executable roles and contains strict workflow operations", () =>
+  it.live("advertises workflow Bash but fails closed without a sandbox backend", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([workspace, outside]) =>
@@ -634,13 +634,11 @@ describe("Workflow Location tools", () => {
           const location = Location.Ref.make({ directory: AbsolutePath.make(workspace.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_location_commands")
           const escaped = path.join(outside.path, "outside.txt")
-          const relativeEscape = path.relative(workspace.path, escaped)
           yield* Effect.promise(() => fs.writeFile(escaped, "outside"))
           yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
 
           yield* Effect.gen(function* () {
             const registry = yield* ToolRegistry.Service
-            const unrestricted = yield* registry.materialize()
             const identity = (role: "implement" | "test" | "deliver") => ({
               sessionID,
               agent: WorkflowRoleAgents.agentForRole(role),
@@ -649,77 +647,19 @@ describe("Workflow Location tools", () => {
 
             for (const role of ["implement", "test", "deliver"] as const) {
               const filtered = yield* registry.materialize(WorkflowPermissions.forRole(role))
-              expect(filtered.definitions.some((definition) => definition.name === "bash")).toBe(false)
-              const denied = yield* unrestricted.settle({
+              expect(filtered.definitions.some((definition) => definition.name === "bash")).toBe(true)
+              const denied = yield* filtered.settle({
                 ...identity(role),
                 call: {
                   type: "tool-call",
                   id: `call-forbidden-bash-${role}`,
                   name: "bash",
-                  input: { command: `echo escaped > "${relativeEscape}"` },
+                  input: { command: `echo escaped > "${escaped}"` },
                 },
               })
               expect(denied.result).toMatchObject({ type: "error" })
               expect(yield* Effect.promise(() => fs.readFile(escaped, "utf8"))).toBe("outside")
             }
-
-            for (const role of ["implement", "test"] as const) {
-              const tools = yield* registry.materialize(WorkflowPermissions.forRole(role))
-              expect(
-                (
-                  yield* tools.settle({
-                    ...identity(role),
-                    call: {
-                      type: "tool-call",
-                      id: `call-workflow-command-${role}`,
-                      name: "workflow_command",
-                      input: { paths: ["."] },
-                    },
-                  })
-                ).result.type,
-              ).toBe("text")
-              expect(
-                (
-                  yield* tools.settle({
-                    ...identity(role),
-                    call: {
-                      type: "tool-call",
-                      id: `call-workflow-command-outside-${role}`,
-                      name: "workflow_command",
-                      input: { paths: [escaped] },
-                    },
-                  })
-                ).result,
-              ).toMatchObject({ type: "error" })
-            }
-
-            const delivery = yield* registry.materialize(WorkflowPermissions.forRole("deliver"))
-            expect(
-              (
-                yield* delivery.settle({
-                  ...identity("deliver"),
-                  call: {
-                    type: "tool-call",
-                    id: "call-workflow-finalize",
-                    name: "workflow_finalize",
-                    input: { paths: ["."] },
-                  },
-                })
-              ).result.type,
-            ).toBe("text")
-            expect(
-              (
-                yield* delivery.settle({
-                  ...identity("deliver"),
-                  call: {
-                    type: "tool-call",
-                    id: "call-workflow-finalize-outside",
-                    name: "workflow_finalize",
-                    input: { paths: [escaped] },
-                  },
-                })
-              ).result,
-            ).toMatchObject({ type: "error" })
           }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
         }),
       (dirs) => Effect.promise(() => Promise.all(dirs.map((dir) => dir[Symbol.asyncDispose]())).then(() => undefined)),

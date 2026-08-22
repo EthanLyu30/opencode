@@ -4,17 +4,17 @@ import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { PermissionV2 } from "../permission"
 
 const readable = ["read", "glob", "grep"] as const
-const verifiable = [...readable, "workflow_command"] as const
-const mutable = [...readable, "edit", "workflow_command"] as const
+const executable = [...readable, "bash"] as const
+const mutable = [...executable, "edit"] as const
 
 const allowed = {
   design: readable,
   decompose: readable,
   implement: mutable,
   repair: mutable,
-  test: verifiable,
+  test: executable,
   visual_review: readable,
-  deliver: [...readable, "workflow_finalize"],
+  deliver: executable,
 } satisfies Record<WorkflowRole.Role, readonly string[]>
 
 export function forRole(role: WorkflowRole.Role): PermissionV2.Ruleset {

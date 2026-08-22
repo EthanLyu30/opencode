@@ -40,6 +40,10 @@ export function isRoleAgent(id: Agent.ID) {
   return WorkflowRole.Role.literals.some((role) => agentForRole(role) === id)
 }
 
+export function roleForAgent(id: Agent.ID) {
+  return WorkflowRole.Role.literals.find((role) => agentForRole(role) === id)
+}
+
 /**
  * This finalizer is deliberately separate from Agent configuration transforms:
  * every Location owns all seven profiles, and replayed user configuration is

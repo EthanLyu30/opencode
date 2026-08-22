@@ -3,9 +3,9 @@ export * as WorkflowRoleAgents from "./role-agents"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Effect } from "effect"
 import { AgentV2 } from "../agent"
-import { agentForRole, matches } from "./role-agent-profiles"
+import { agentForRole, matches, roleForAgent } from "./role-agent-profiles"
 
-export { agentForRole }
+export { agentForRole, roleForAgent }
 
 /**
  * Reloads all Location configuration and verifies the final immutable profile

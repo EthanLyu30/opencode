@@ -11,6 +11,8 @@ import { LocationMutation } from "../location-mutation"
 import { AppProcess } from "../process"
 import { PermissionV2 } from "../permission"
 import { PositiveInt } from "../schema"
+import { WorkflowCommandSandbox } from "../workflow/command-sandbox"
+import { WorkflowRoleAgents } from "../workflow/role-agents"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
@@ -102,11 +104,12 @@ const layer = Layer.effectDiscard(
     const appProcess = yield* AppProcess.Service
     const config = yield* Config.Service
     const permission = yield* PermissionV2.Service
+    const sandbox = yield* WorkflowCommandSandbox.Service
 
     yield* tools
       .register({
         [name]: Tool.make({
-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows.`,
+          description: `Execute one command. Workflow role agents run model-selected commands through the configured Location sandbox with role-specific workspace access and never fall back to host execution. Ordinary sessions use the host shell with filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}).`,
           input: Input,
           output: Output,
           structured: StructuredOutput,
@@ -125,6 +128,27 @@ const layer = Layer.effectDiscard(
                 type: "tool" as const,
                 messageID: context.assistantMessageID,
                 callID: context.toolCallID,
+              }
+              const workflowRole = WorkflowRoleAgents.roleForAgent(context.agent)
+              if (workflowRole !== undefined) {
+                yield* permission.assert({
+                  action: name,
+                  resources: [input.command],
+                  save: [input.command],
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source,
+                })
+                return yield* sandbox.run({
+                  role: workflowRole,
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  assistantMessageID: context.assistantMessageID,
+                  toolCallID: context.toolCallID,
+                  command: input.command,
+                  ...(input.workdir === undefined ? {} : { workdir: input.workdir }),
+                  ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
+                })
               }
               const target = yield* mutation.resolve({ path: input.workdir ?? ".", kind: "directory" })
               const external = target.externalDirectory
@@ -193,7 +217,17 @@ const layer = Layer.effectDiscard(
                 truncated: result.outputTruncated === true,
                 ...(warnings.length ? { warnings } : {}),
               }
-            }).pipe(Effect.mapError(() => new ToolFailure({ message: `Unable to execute command: ${input.command}` }))),
+            }).pipe(
+              Effect.mapError((error) =>
+                new ToolFailure({
+                  message:
+                    error instanceof WorkflowCommandSandbox.Unavailable ||
+                    error instanceof WorkflowCommandSandbox.Rejected
+                      ? error.message
+                      : `Unable to execute command: ${input.command}`,
+                }),
+              ),
+            ),
         }),
       })
       .pipe(Effect.orDie)
@@ -203,5 +237,13 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/bash",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node],
+  deps: [
+    ToolRegistry.node,
+    LocationMutation.node,
+    FSUtil.node,
+    AppProcess.node,
+    Config.node,
+    PermissionV2.node,
+    WorkflowCommandSandbox.node,
+  ],
 })
