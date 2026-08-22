@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { DateTime, Effect } from "effect"
+import { DateTime, Effect, Layer } from "effect"
+import { AgentV2 } from "@opencode-ai/core/agent"
+import { Credential } from "@opencode-ai/core/credential"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AbsolutePath } from "@opencode-ai/core/schema"
+import { SessionV2 } from "@opencode-ai/core/session"
+import { WorkflowModelExecution } from "@opencode-ai/core/workflow/execution/model"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
+import { Location } from "@opencode-ai/schema/location"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
+import { testEffect } from "./lib/effect"
 
 const budget: Workflow.Budget = {
   maxTokens: 120_000,
@@ -30,7 +38,87 @@ const outcome = (role: WorkflowRole.Role, verdict: string, revision: number): Wo
   })
 }
 
+let credentialReads = 0
+const placementIt = testEffect(
+  AppNodeBuilder.build(WorkflowModelExecution.node, [
+    [
+      Credential.node,
+      Layer.mock(Credential.Service, {
+        list: () => Effect.sync(() => credentialReads++).pipe(Effect.as([])),
+      }),
+    ],
+  ]),
+)
+
+const modelInput = (placement: Pick<Workflow.Info, "location" | "sessionID"> = {}) => {
+  const workflow = Workflow.Info.make({
+    id: Workflow.ID.make("wfl_model_placement"),
+    type: "development",
+    status: "running",
+    input: { brief: "Check placement" },
+    budget,
+    usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
+    agent: AgentV2.ID.make("build"),
+    ...placement,
+    version: 1,
+    time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+  })
+  const stage = Workflow.Stage.make({
+    id: Workflow.StageID.make("wfs_model_placement"),
+    workflowID: workflow.id,
+    type: "design",
+    ordinal: 0,
+    status: "running",
+    attempt: 1,
+    maxAttempts: 3,
+    recoveryPolicy: "restart_safe",
+    idempotencyKey: "model-placement/design",
+    input: {},
+    time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+  })
+  return {
+    workflow,
+    stage,
+    stages: [stage],
+    artifacts: [],
+    lease: { owner: "worker", attempt: 1, expiresAt: DateTime.makeUnsafe(60_000) },
+    saveCheckpoint: () => Effect.void,
+    route: WorkflowRouting.resolve({ role: "design", budget }),
+  }
+}
+
 describe("workflow model state-machine conformance", () => {
+  placementIt.effect("requires persisted workflow Location before credential or provider work", () =>
+    Effect.gen(function* () {
+      credentialReads = 0
+      const models = yield* WorkflowModelExecution.Service
+      const failure = yield* models.execute(modelInput()).pipe(Effect.flip)
+
+      expect(failure).toMatchObject({
+        failure: { category: "transient", code: "workflow_location_required" },
+        usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+      })
+      expect(credentialReads).toBe(0)
+    }),
+  )
+
+  placementIt.effect("requires a real persisted Session before credential or provider work", () =>
+    Effect.gen(function* () {
+      credentialReads = 0
+      const models = yield* WorkflowModelExecution.Service
+      const location = Location.Ref.make({ directory: AbsolutePath.make("D:\\missing-workflow-session") })
+      const failure = yield* models
+        .execute(modelInput({ location, sessionID: SessionV2.ID.make("ses_workflow_missing") }))
+        .pipe(Effect.flip)
+
+      expect(failure).toMatchObject({
+        failure: { category: "transient", code: "workflow_session_required" },
+        usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+      })
+      expect(credentialReads).toBe(0)
+    }),
+  )
+
   test("the persisted happy path selects only kimi-k3 chat and native DeepSeek Responses routes", async () => {
     const expected: ReadonlyArray<readonly [string, string, string, string]> = [
       ["design", "kimi", "kimi-k3", "openai-chat"],

@@ -1,17 +1,6 @@
 export * as WorkflowModelExecution from "./model"
 
-import {
-  LLM,
-  LLMClient,
-  LLMError,
-  LLMResponse,
-  Message,
-  Model,
-  ToolOutput,
-  ToolResultValue,
-  Usage,
-} from "@opencode-ai/llm"
-import { AgentV2 } from "../../agent"
+import { LLM, LLMClient, LLMError, LLMResponse, Message, Model, ToolResultValue, Usage } from "@opencode-ai/llm"
 import { Auth } from "@opencode-ai/llm/route"
 import { Integration } from "@opencode-ai/schema/integration"
 import { Responses } from "@opencode-ai/schema/responses"
@@ -23,12 +12,14 @@ import { makeGlobalNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
 import { ResponsesV2 } from "../../responses"
 import { SessionMessage } from "../../session/message"
-import { SessionSchema } from "../../session/schema"
-import { ApplicationTools } from "../../tool/application-tools"
-import { Tool } from "../../tool/tool"
+import { SessionStore } from "../../session/store"
+import { ToolRegistry } from "../../tool/registry"
 import { Hash } from "../../util/hash"
+import { LocationServiceMap } from "../../location-service-map"
 import type { Checkpoint, ExecutionFailure, ExecutionInput, Result } from "../executor"
+import { WorkflowPermissions } from "../permissions"
 import { WorkflowRetry } from "../retry"
+import { WorkflowRoleAgents } from "../role-agents"
 import { WorkflowRouting } from "../routing"
 import { WorkflowSecretGuard } from "../secret-guard"
 
@@ -115,378 +106,426 @@ const productionLayer = Layer.effect(
     const credentials = yield* Credential.Service
     const responses = yield* ResponsesV2.Service
     const modelClient = yield* LLMClient.Service
-    const applicationTools = yield* ApplicationTools.Service
+    const locations = yield* LocationServiceMap.Service
+    const sessions = yield* SessionStore.Service
 
     return Service.of({
-      execute: (input) =>
-        Effect.gen(function* () {
-          const requestedResponseID = yield* responseIDFromStage(input.stage.input)
-          const responseBinding = yield* responseBindingFromStage(input.stage.input)
-          if (requestedResponseID !== undefined && responseBinding) {
-            return yield* Effect.fail(
-              executionFailure(
-                "invalid_request",
-                "conflicting_response_binding",
-                "A deliver stage cannot combine responseID with responseBinding",
-              ),
-            )
-          }
-          const implicit =
-            requestedResponseID === undefined && input.route.role === "deliver" && responseBinding
-              ? yield* responses.activeByWorkflowID(input.workflow.id)
-              : []
-          if (implicit.length > 1) {
-            return yield* Effect.fail(
-              executionFailure(
-                "ambiguous",
-                "ambiguous_workflow_response",
-                "The deliver stage has more than one active Response",
-              ),
-            )
-          }
-          const responseID = requestedResponseID ?? implicit[0]?.id
-          const response =
-            responseID === undefined
-              ? undefined
-              : yield* responses
-                  .get(responseID)
-                  .pipe(
-                    Effect.mapError((error) =>
-                      error instanceof ResponsesV2.NotFoundError
-                        ? executionFailure(
-                            "transient",
-                            "response_not_admitted",
-                            "The linked Response has not been admitted yet",
-                            0,
-                          )
-                        : responseFailure(error),
-                    ),
-                  )
-          if (response !== undefined && response.workflowID !== input.workflow.id) {
-            return yield* Effect.fail(
-              executionFailure(
-                "invalid_request",
-                "response_workflow_mismatch",
-                "The linked Response belongs to a different workflow",
-              ),
-            )
-          }
-          if (response !== undefined && response.status !== "queued" && response.status !== "in_progress") {
-            return yield* Effect.fail(
-              executionFailure(
-                "invalid_request",
-                "response_already_terminal",
-                `The linked Response is already ${response.status}`,
-              ),
-            )
-          }
-          const route =
-            response === undefined
-              ? input.route
-              : yield* Effect.try({
-                  try: () => WorkflowRouting.forResponseModel(input.route, response.model),
-                  catch: () =>
-                    executionFailure(
-                      "invalid_request",
-                      "unsupported_response_model",
-                      "The linked Response model is not supported by this workflow route",
-                    ),
-                })
-          const continuation = yield* continuationFromStage(input, responseID, responses, route)
-          if (continuation?.activeTurn?.pendingCallID !== undefined && input.stage.recoveryAction !== "retry") {
-            return yield* Effect.fail({
-              failure: {
-                category: "ambiguous",
-                code: "tool_execution_ambiguous",
-                message: "A local tool may have produced side effects before its result was durably checkpointed.",
-              },
-              usage: zeroUsage,
-            } satisfies ExecutionFailure)
-          }
-          const model = yield* credentialedModel(credentials, route).pipe(
-            Effect.mapError((error) => settleExecutionFailure(response, error)),
+      execute: (input) => {
+        const location = input.workflow.location
+        if (location === undefined) {
+          return Effect.fail(
+            executionFailure(
+              "transient",
+              "workflow_location_required",
+              "Workflow execution requires a persisted Location",
+              0,
+            ),
           )
-          const context =
-            responseID === undefined
-              ? undefined
-              : yield* responseContext(responses, responseID, route).pipe(
-                  Effect.mapError((error) => settleExecutionFailure(response, error)),
-                )
-          if (responseID !== undefined) {
-            if (response?.status === "queued")
-              yield* responses.start(responseID).pipe(
-                Effect.mapError(responseFailure),
-                Effect.mapError((error) => settleExecutionFailure(response, error)),
+        }
+        const sessionID = input.workflow.sessionID
+        if (sessionID === undefined) {
+          return Effect.fail(
+            executionFailure(
+              "transient",
+              "workflow_session_required",
+              "Workflow execution requires a persisted Session",
+              0,
+            ),
+          )
+        }
+        return Effect.gen(function* () {
+          const session = yield* sessions.get(sessionID)
+          if (
+            session === undefined ||
+            session.location.directory !== location.directory ||
+            session.location.workspaceID !== location.workspaceID
+          ) {
+            return yield* Effect.fail(
+              executionFailure(
+                "transient",
+                "workflow_session_required",
+                "Workflow execution requires a Session at its persisted Location",
+                0,
+              ),
+            )
+          }
+          return yield* Effect.gen(function* () {
+            const requestedResponseID = yield* responseIDFromStage(input.stage.input)
+            const responseBinding = yield* responseBindingFromStage(input.stage.input)
+            if (requestedResponseID !== undefined && responseBinding) {
+              return yield* Effect.fail(
+                executionFailure(
+                  "invalid_request",
+                  "conflicting_response_binding",
+                  "A deliver stage cannot combine responseID with responseBinding",
+                ),
               )
-          }
-          const registeredTools = new Map(applicationTools.entries())
-          const definitions = Array.from(registeredTools, ([name, entry]) => Tool.definition(name, entry.tool))
-          let messages = [
-            ...(context ?? [Message.user(stagePrompt(input))]),
-            ...(continuation?.turns.flatMap(continuationMessages) ?? []),
-          ]
-          let usage = continuation?.usage ?? zeroUsage
-          let checkpointedUsage = continuation?.usage ?? zeroUsage
-          let providerUsage: Responses.Usage = continuation?.providerUsage ?? {
-            inputTokens: 0,
-            outputTokens: 0,
-            totalTokens: 0,
-          }
-          const continuationTurns = [...(continuation?.turns ?? [])]
-          const toolArtifacts: Workflow.ArtifactCommit[] = [...(continuation?.artifacts ?? [])]
-          const responseOutput: Responses.ItemPayload[] = [...(continuation?.responseOutput ?? [])]
-          let activeTurn = continuation?.activeTurn
-          let generated: LLMResponse | undefined
-          while (true) {
-            if (activeTurn === undefined) {
-              if (
-                route.budget.maxTurns !== undefined &&
-                input.workflow.usage.turns + usage.turns >= route.budget.maxTurns
-              ) {
-                return yield* Effect.fail(budgetFailure("turn", WorkflowRetry.usageDelta(usage, checkpointedUsage)))
-              }
-              const remainingTokens =
-                route.budget.maxTokens === undefined
-                  ? undefined
-                  : Math.max(0, route.budget.maxTokens - input.workflow.usage.tokens - usage.tokens)
-              if (remainingTokens === 0)
-                return yield* Effect.fail(budgetFailure("token", WorkflowRetry.usageDelta(usage, checkpointedUsage)))
-              generated = yield* modelClient
-                .generate(
-                  LLM.request({
-                    model,
-                    system: "Return the required WorkflowRole.Outcome JSON for this workflow stage.",
-                    messages,
-                    tools: definitions,
-                    responseFormat: { type: "json", schema: outcomeJsonSchema },
-                    ...(remainingTokens === undefined ? {} : { generation: { maxTokens: remainingTokens } }),
-                  }),
-                )
-                .pipe(
-                  Effect.mapError((error) =>
-                    providerFailure(input, response, error, usage, checkpointedUsage, providerUsage),
-                  ),
-                )
-              usage = addWorkflowUsage(usage, generated.usage)
-              providerUsage = addResponseUsage(providerUsage, generated.usage)
-              responseOutput.push(...hostedResponseItems(generated))
-              if (
-                generated.finishReason === "length" ||
-                generated.finishReason === "content-filter" ||
-                generated.finishReason === "unknown"
-              ) {
-                const reason =
-                  generated.finishReason === "length"
-                    ? "max_output_tokens"
-                    : generated.finishReason === "content-filter"
-                      ? "content_filter"
-                      : "provider_incomplete"
-                const partialCalls = generated.toolCalls
-                  .filter((call) => call.providerExecuted !== true)
-                  .map((call) => ({
-                    type: "function_call" as const,
-                    call_id: call.id,
-                    name: call.name,
-                    arguments: JSON.stringify(call.input),
-                  }))
-                const failure: Workflow.Failure = {
-                  category: "unknown",
-                  code: "provider_output_incomplete",
-                  message: "Provider Responses output ended before the workflow role completed",
-                }
-                return yield* Effect.fail({
-                  failure,
-                  usage,
-                  ...(responseID === undefined || response === undefined
-                    ? {}
-                    : {
-                        responseSettlement: {
-                          type: "incomplete" as const,
-                          responseID,
-                          output: [
-                            ...responseOutput,
-                            ...partialCalls,
-                            { type: "message" as const, role: "assistant" as const, content: generated.text },
-                          ],
-                          error: {
-                            type: "incomplete",
-                            code: reason,
-                            message:
-                              reason === "max_output_tokens"
-                                ? "Provider output reached the maximum output token limit"
-                                : reason === "content_filter"
-                                  ? "Provider output was stopped by content filtering"
-                                  : "Provider output ended with an unspecified incomplete reason",
-                          },
-                          usage: providerUsage,
-                          store: response.store,
-                          ...(response.conversationID === undefined ? {} : { conversationID: response.conversationID }),
-                        },
-                      }),
-                } satisfies ExecutionFailure)
-              }
-              if (generated.finishReason === "error") {
-                const failure: Workflow.Failure = {
-                  category: "unknown",
-                  code: "provider_response_failed",
-                  message: "Provider Responses execution failed",
-                }
-                return yield* Effect.fail({
-                  failure,
-                  usage,
-                  ...(responseID === undefined || response === undefined
-                    ? {}
-                    : {
-                        responseSettlement: {
-                          type: "failed" as const,
-                          responseID,
-                          error: { type: failure.category, code: failure.code, message: failure.message },
-                          usage: providerUsage,
-                          store: response.store,
-                        },
-                      }),
-                } satisfies ExecutionFailure)
-              }
-              const calls = generated.toolCalls.filter((call) => call.providerExecuted !== true)
-              if (calls.length === 0) break
-              activeTurn = {
-                calls: calls.map((call) => ({ id: call.id, name: call.name, input: call.input })),
-                results: [],
-              }
             }
-
-            const remainingCalls = activeTurn.calls.slice(activeTurn.results.length)
-            const settledResults = [...activeTurn.results]
-            for (const call of remainingCalls) {
-              if (
-                route.budget.maxToolCalls !== undefined &&
-                input.workflow.usage.toolCalls + usage.toolCalls + 1 > route.budget.maxToolCalls
-              ) {
-                return yield* Effect.fail(
-                  budgetFailure("tool call", WorkflowRetry.usageDelta(usage, checkpointedUsage)),
-                )
-              }
-              usage = { ...usage, toolCalls: usage.toolCalls + 1 }
-              yield* saveContinuation(input, responses, response, {
-                kind: "workflow.model.continuation",
-                version: 1,
-                providerID: route.providerID,
-                modelID: route.modelID,
-                ...(responseID === undefined ? {} : { responseID }),
-                completedTurns: usage.turns,
-                turns: continuationTurns,
-                activeTurn: { calls: activeTurn.calls, results: settledResults, pendingCallID: call.id },
-                usage,
-                providerUsage,
-                responseOutput,
-                artifacts: toolArtifacts,
-              } satisfies ModelContinuation)
-
-              const settlement = yield* Effect.gen(function* () {
-                const registration = registeredTools.get(call.name)
-                return registration
-                  ? yield* Tool.settle(
-                      registration.tool,
-                      { type: "tool-call", ...call },
-                      {
-                        sessionID: workflowSessionID(input.workflow.id),
-                        agent: AgentV2.defaultID,
-                        assistantMessageID: workflowMessageID(input.stage.id, call.id),
-                        toolCallID: call.id,
-                      },
-                    ).pipe(
-                      Effect.map((output) => ({ result: ToolOutput.toResultValue(output), output })),
-                      Effect.catchTag("LLM.ToolFailure", (error) =>
-                        Effect.succeed({ result: { type: "error" as const, value: error.message } }),
+            const implicit =
+              requestedResponseID === undefined && input.route.role === "deliver" && responseBinding
+                ? yield* responses.activeByWorkflowID(input.workflow.id)
+                : []
+            if (implicit.length > 1) {
+              return yield* Effect.fail(
+                executionFailure(
+                  "ambiguous",
+                  "ambiguous_workflow_response",
+                  "The deliver stage has more than one active Response",
+                ),
+              )
+            }
+            const responseID = requestedResponseID ?? implicit[0]?.id
+            const response =
+              responseID === undefined
+                ? undefined
+                : yield* responses
+                    .get(responseID)
+                    .pipe(
+                      Effect.mapError((error) =>
+                        error instanceof ResponsesV2.NotFoundError
+                          ? executionFailure(
+                              "transient",
+                              "response_not_admitted",
+                              "The linked Response has not been admitted yet",
+                              0,
+                            )
+                          : responseFailure(error),
                       ),
                     )
-                  : { result: { type: "error" as const, value: `Unknown tool: ${call.name}` } }
-              })
-              const evidence = JSON.stringify({
-                type: "function_call_output",
-                ...(responseID === undefined ? {} : { responseID }),
-                callID: call.id,
-                name: call.name,
-                input: call.input,
-                result: settlement.result,
-              })
-              WorkflowSecretGuard.assertSafe(evidence)
-              if (response?.store !== false) {
-                toolArtifacts.push({
-                  kind: "tool-continuation",
-                  uri: `workflow-tool://${input.workflow.id}/${input.stage.id}/${encodeURIComponent(call.id)}`,
-                  mime: "application/json",
-                  sha256: Hash.sha256(evidence),
-                  size: Buffer.byteLength(evidence),
-                  metadata: JSON.parse(evidence),
-                })
-              }
-              responseOutput.push(
-                { type: "function_call", call_id: call.id, name: call.name, arguments: JSON.stringify(call.input) },
-                { type: "function_call_output", call_id: call.id, output: JSON.stringify(settlement.result) },
+            if (response !== undefined && response.workflowID !== input.workflow.id) {
+              return yield* Effect.fail(
+                executionFailure(
+                  "invalid_request",
+                  "response_workflow_mismatch",
+                  "The linked Response belongs to a different workflow",
+                ),
               )
-              settledResults.push({ id: call.id, name: call.name, result: settlement.result })
-              activeTurn = { calls: activeTurn.calls, results: settledResults }
-              yield* saveContinuation(input, responses, response, {
-                kind: "workflow.model.continuation",
-                version: 1,
-                providerID: route.providerID,
-                modelID: route.modelID,
-                ...(responseID === undefined ? {} : { responseID }),
-                completedTurns: usage.turns,
-                turns: continuationTurns,
-                activeTurn,
-                usage,
-                providerUsage,
-                responseOutput,
-                artifacts: toolArtifacts,
-              } satisfies ModelContinuation)
-              checkpointedUsage = usage
             }
-            const turn = {
-              calls: activeTurn.calls,
-              results: settledResults,
-            }
-            continuationTurns.push(turn)
-            activeTurn = undefined
-            // Give cancellation/scope finalizers a scheduling point after the
-            // durable hand-off and before any next provider request begins.
-            yield* Effect.yieldNow
-            messages = [...messages, ...continuationMessages(turn)]
-          }
-          if (generated === undefined) return yield* Effect.die("Workflow model turn completed without a response")
-          const outcome = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(WorkflowRole.Outcome))(
-            generated.text,
-          ).pipe(
-            Effect.mapError(() => {
-              const failure = executionFailure(
-                "schema",
-                "invalid_role_outcome",
-                "Model output did not match WorkflowRole.Outcome",
+            if (response !== undefined && response.status !== "queued" && response.status !== "in_progress") {
+              return yield* Effect.fail(
+                executionFailure(
+                  "invalid_request",
+                  "response_already_terminal",
+                  `The linked Response is already ${response.status}`,
+                ),
               )
-              return settleExecutionFailure(response, { ...failure, usage })
-            }),
-          )
-          return {
-            outcome,
-            usage,
-            artifacts: toolArtifacts,
-            responseSettlement:
-              responseID === undefined || response === undefined
+            }
+            const route =
+              response === undefined
+                ? input.route
+                : yield* Effect.try({
+                    try: () => WorkflowRouting.forResponseModel(input.route, response.model),
+                    catch: () =>
+                      executionFailure(
+                        "invalid_request",
+                        "unsupported_response_model",
+                        "The linked Response model is not supported by this workflow route",
+                      ),
+                  })
+            const continuation = yield* continuationFromStage(input, responseID, responses, route)
+            if (continuation?.activeTurn?.pendingCallID !== undefined && input.stage.recoveryAction !== "retry") {
+              return yield* Effect.fail({
+                failure: {
+                  category: "ambiguous",
+                  code: "tool_execution_ambiguous",
+                  message: "A local tool may have produced side effects before its result was durably checkpointed.",
+                },
+                usage: zeroUsage,
+              } satisfies ExecutionFailure)
+            }
+            const model = yield* credentialedModel(credentials, route).pipe(
+              Effect.mapError((error) => settleExecutionFailure(response, error)),
+            )
+            const context =
+              responseID === undefined
                 ? undefined
-                : {
-                    type: "completed" as const,
-                    responseID,
-                    output: [
-                      ...responseOutput,
-                      { type: "message" as const, role: "assistant" as const, content: generated.text },
-                    ],
-                    usage: providerUsage,
-                    store: response.store,
-                    ...(response.conversationID === undefined ? {} : { conversationID: response.conversationID }),
-                  },
-          }
-        }),
+                : yield* responseContext(responses, responseID, route).pipe(
+                    Effect.mapError((error) => settleExecutionFailure(response, error)),
+                  )
+            if (responseID !== undefined) {
+              if (response?.status === "queued")
+                yield* responses.start(responseID).pipe(
+                  Effect.mapError(responseFailure),
+                  Effect.mapError((error) => settleExecutionFailure(response, error)),
+                )
+            }
+            const registry = yield* ToolRegistry.Service
+            let messages = [
+              ...(context ?? [Message.user(stagePrompt(input))]),
+              ...(continuation?.turns.flatMap(continuationMessages) ?? []),
+            ]
+            let usage = continuation?.usage ?? zeroUsage
+            let checkpointedUsage = continuation?.usage ?? zeroUsage
+            let providerUsage: Responses.Usage = continuation?.providerUsage ?? {
+              inputTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+            }
+            const continuationTurns = [...(continuation?.turns ?? [])]
+            const toolArtifacts: Workflow.ArtifactCommit[] = [...(continuation?.artifacts ?? [])]
+            const responseOutput: Responses.ItemPayload[] = [...(continuation?.responseOutput ?? [])]
+            let activeTurn = continuation?.activeTurn
+            let generated: LLMResponse | undefined
+            while (true) {
+              let materialization: ToolRegistry.Materialization | undefined
+              if (activeTurn === undefined) {
+                if (
+                  route.budget.maxTurns !== undefined &&
+                  input.workflow.usage.turns + usage.turns >= route.budget.maxTurns
+                ) {
+                  return yield* Effect.fail(budgetFailure("turn", WorkflowRetry.usageDelta(usage, checkpointedUsage)))
+                }
+                const remainingTokens =
+                  route.budget.maxTokens === undefined
+                    ? undefined
+                    : Math.max(0, route.budget.maxTokens - input.workflow.usage.tokens - usage.tokens)
+                if (remainingTokens === 0)
+                  return yield* Effect.fail(budgetFailure("token", WorkflowRetry.usageDelta(usage, checkpointedUsage)))
+                yield* WorkflowRoleAgents.reassert(route.role)
+                materialization = yield* registry.materialize(WorkflowPermissions.forRole(route.role))
+                generated = yield* modelClient
+                  .generate(
+                    LLM.request({
+                      model,
+                      system: "Return the required WorkflowRole.Outcome JSON for this workflow stage.",
+                      messages,
+                      tools: materialization.definitions,
+                      responseFormat: { type: "json", schema: outcomeJsonSchema },
+                      ...(remainingTokens === undefined ? {} : { generation: { maxTokens: remainingTokens } }),
+                    }),
+                  )
+                  .pipe(
+                    Effect.mapError((error) =>
+                      providerFailure(input, response, error, usage, checkpointedUsage, providerUsage),
+                    ),
+                  )
+                usage = addWorkflowUsage(usage, generated.usage)
+                providerUsage = addResponseUsage(providerUsage, generated.usage)
+                responseOutput.push(...hostedResponseItems(generated))
+                if (
+                  generated.finishReason === "length" ||
+                  generated.finishReason === "content-filter" ||
+                  generated.finishReason === "unknown"
+                ) {
+                  const reason =
+                    generated.finishReason === "length"
+                      ? "max_output_tokens"
+                      : generated.finishReason === "content-filter"
+                        ? "content_filter"
+                        : "provider_incomplete"
+                  const partialCalls = generated.toolCalls
+                    .filter((call) => call.providerExecuted !== true)
+                    .map((call) => ({
+                      type: "function_call" as const,
+                      call_id: call.id,
+                      name: call.name,
+                      arguments: JSON.stringify(call.input),
+                    }))
+                  const failure: Workflow.Failure = {
+                    category: "unknown",
+                    code: "provider_output_incomplete",
+                    message: "Provider Responses output ended before the workflow role completed",
+                  }
+                  return yield* Effect.fail({
+                    failure,
+                    usage,
+                    ...(responseID === undefined || response === undefined
+                      ? {}
+                      : {
+                          responseSettlement: {
+                            type: "incomplete" as const,
+                            responseID,
+                            output: [
+                              ...responseOutput,
+                              ...partialCalls,
+                              { type: "message" as const, role: "assistant" as const, content: generated.text },
+                            ],
+                            error: {
+                              type: "incomplete",
+                              code: reason,
+                              message:
+                                reason === "max_output_tokens"
+                                  ? "Provider output reached the maximum output token limit"
+                                  : reason === "content_filter"
+                                    ? "Provider output was stopped by content filtering"
+                                    : "Provider output ended with an unspecified incomplete reason",
+                            },
+                            usage: providerUsage,
+                            store: response.store,
+                            ...(response.conversationID === undefined
+                              ? {}
+                              : { conversationID: response.conversationID }),
+                          },
+                        }),
+                  } satisfies ExecutionFailure)
+                }
+                if (generated.finishReason === "error") {
+                  const failure: Workflow.Failure = {
+                    category: "unknown",
+                    code: "provider_response_failed",
+                    message: "Provider Responses execution failed",
+                  }
+                  return yield* Effect.fail({
+                    failure,
+                    usage,
+                    ...(responseID === undefined || response === undefined
+                      ? {}
+                      : {
+                          responseSettlement: {
+                            type: "failed" as const,
+                            responseID,
+                            error: { type: failure.category, code: failure.code, message: failure.message },
+                            usage: providerUsage,
+                            store: response.store,
+                          },
+                        }),
+                  } satisfies ExecutionFailure)
+                }
+                const calls = generated.toolCalls.filter((call) => call.providerExecuted !== true)
+                if (calls.length === 0) break
+                activeTurn = {
+                  calls: calls.map((call) => ({ id: call.id, name: call.name, input: call.input })),
+                  results: [],
+                }
+              }
+
+              const remainingCalls = activeTurn.calls.slice(activeTurn.results.length)
+              const settledResults = [...activeTurn.results]
+              if (remainingCalls.length > 0 && materialization === undefined) {
+                yield* WorkflowRoleAgents.reassert(route.role)
+                materialization = yield* registry.materialize(WorkflowPermissions.forRole(route.role))
+              }
+              for (const call of remainingCalls) {
+                if (
+                  route.budget.maxToolCalls !== undefined &&
+                  input.workflow.usage.toolCalls + usage.toolCalls + 1 > route.budget.maxToolCalls
+                ) {
+                  return yield* Effect.fail(
+                    budgetFailure("tool call", WorkflowRetry.usageDelta(usage, checkpointedUsage)),
+                  )
+                }
+                usage = { ...usage, toolCalls: usage.toolCalls + 1 }
+                yield* saveContinuation(input, responses, response, {
+                  kind: "workflow.model.continuation",
+                  version: 1,
+                  providerID: route.providerID,
+                  modelID: route.modelID,
+                  ...(responseID === undefined ? {} : { responseID }),
+                  completedTurns: usage.turns,
+                  turns: continuationTurns,
+                  activeTurn: { calls: activeTurn.calls, results: settledResults, pendingCallID: call.id },
+                  usage,
+                  providerUsage,
+                  responseOutput,
+                  artifacts: toolArtifacts,
+                } satisfies ModelContinuation)
+
+                if (materialization === undefined)
+                  return yield* Effect.die("Workflow tool snapshot was not materialized")
+                const settlement = yield* materialization
+                  .settle({
+                    sessionID,
+                  agent: WorkflowRoleAgents.agentForRole(route.role),
+                    assistantMessageID: workflowMessageID(input.stage.id, call.id),
+                    call: { type: "tool-call", ...call },
+                  })
+                  .pipe(
+                    Effect.mapError((error) =>
+                      executionFailure(
+                        "transient",
+                        "tool_output_retention_failed",
+                        WorkflowSecretGuard.sanitizeText(error.message),
+                        0,
+                      ),
+                    ),
+                  )
+                const evidence = JSON.stringify({
+                  type: "function_call_output",
+                  ...(responseID === undefined ? {} : { responseID }),
+                  callID: call.id,
+                  name: call.name,
+                  input: call.input,
+                  result: settlement.result,
+                })
+                WorkflowSecretGuard.assertSafe(evidence)
+                if (response?.store !== false) {
+                  toolArtifacts.push({
+                    kind: "tool-continuation",
+                    uri: `workflow-tool://${input.workflow.id}/${input.stage.id}/${encodeURIComponent(call.id)}`,
+                    mime: "application/json",
+                    sha256: Hash.sha256(evidence),
+                    size: Buffer.byteLength(evidence),
+                    metadata: JSON.parse(evidence),
+                  })
+                }
+                responseOutput.push(
+                  { type: "function_call", call_id: call.id, name: call.name, arguments: JSON.stringify(call.input) },
+                  { type: "function_call_output", call_id: call.id, output: JSON.stringify(settlement.result) },
+                )
+                settledResults.push({ id: call.id, name: call.name, result: settlement.result })
+                activeTurn = { calls: activeTurn.calls, results: settledResults }
+                yield* saveContinuation(input, responses, response, {
+                  kind: "workflow.model.continuation",
+                  version: 1,
+                  providerID: route.providerID,
+                  modelID: route.modelID,
+                  ...(responseID === undefined ? {} : { responseID }),
+                  completedTurns: usage.turns,
+                  turns: continuationTurns,
+                  activeTurn,
+                  usage,
+                  providerUsage,
+                  responseOutput,
+                  artifacts: toolArtifacts,
+                } satisfies ModelContinuation)
+                checkpointedUsage = usage
+              }
+              const turn = {
+                calls: activeTurn.calls,
+                results: settledResults,
+              }
+              continuationTurns.push(turn)
+              activeTurn = undefined
+              // Give cancellation/scope finalizers a scheduling point after the
+              // durable hand-off and before any next provider request begins.
+              yield* Effect.yieldNow
+              messages = [...messages, ...continuationMessages(turn)]
+            }
+            if (generated === undefined) return yield* Effect.die("Workflow model turn completed without a response")
+            const outcome = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(WorkflowRole.Outcome))(
+              generated.text,
+            ).pipe(
+              Effect.mapError(() => {
+                const failure = executionFailure(
+                  "schema",
+                  "invalid_role_outcome",
+                  "Model output did not match WorkflowRole.Outcome",
+                )
+                return settleExecutionFailure(response, { ...failure, usage })
+              }),
+            )
+            return {
+              outcome,
+              usage,
+              artifacts: toolArtifacts,
+              responseSettlement:
+                responseID === undefined || response === undefined
+                  ? undefined
+                  : {
+                      type: "completed" as const,
+                      responseID,
+                      output: [
+                        ...responseOutput,
+                        { type: "message" as const, role: "assistant" as const, content: generated.text },
+                      ],
+                      usage: providerUsage,
+                      store: response.store,
+                      ...(response.conversationID === undefined ? {} : { conversationID: response.conversationID }),
+                    },
+            }
+          }).pipe(Effect.provide(locations.get(location)), Effect.scoped)
+        })
+      },
     })
   }),
 )
@@ -494,7 +533,7 @@ const productionLayer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer: productionLayer,
-  deps: [Credential.node, ResponsesV2.node, ApplicationTools.node, llmClient],
+  deps: [Credential.node, ResponsesV2.node, LocationServiceMap.node, SessionStore.node, llmClient],
 })
 
 function responseIDFromStage(input: Readonly<Record<string, unknown>>) {
@@ -996,10 +1035,6 @@ function budgetFailure(dimension: string, usage: Workflow.Usage): ExecutionFailu
     },
     usage,
   }
-}
-
-function workflowSessionID(workflowID: Workflow.ID) {
-  return SessionSchema.ID.make(`ses_workflow_${workflowID.slice(4)}`)
 }
 
 function workflowMessageID(stageID: Workflow.StageID, callID: string) {
