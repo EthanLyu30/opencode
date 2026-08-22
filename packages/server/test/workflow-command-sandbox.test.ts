@@ -13,6 +13,7 @@ import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowToolLineage } from "@opencode-ai/core/workflow/tool-lineage"
 import { DateTime, Effect, Layer } from "effect"
+import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { Docker } from "../src/workflow/docker"
@@ -22,6 +23,13 @@ const root = "D:\\OpenCode-Local\\tmp\\workflow-sandbox-tests"
 const image = `opencode/workflow-sandbox@sha256:${"a".repeat(64)}`
 const enginePath = "D:\\Applications\\Docker\\resources\\bin\\docker.exe"
 type PersistedStage = NonNullable<Effect.Success<ReturnType<WorkflowStore.Interface["stage"]>>>
+type MutableFixture = {
+  readonly persisted: {
+    run: WorkflowSchema.Info
+    stage: PersistedStage
+    session: SessionSchema.Info
+  }
+}
 
 afterAll(async () => {
   if (path.resolve(root) !== root) throw new TypeError("Unexpected sandbox test root")
@@ -30,8 +38,8 @@ afterAll(async () => {
 
 describe("WorkflowCommandSandboxServer", () => {
   test("pipes hostile model command only to bash stdin and creates a digest-pinned, least-authority container", async () => {
-    await using fixture = await setup("implement")
     const command = `printf '%s' "$HOME"; touch D:\\host; echo --label=evil`
+    await using fixture = await setup("implement", { callInput: { command } })
 
     const result = await fixture.run({ command })
 
@@ -98,7 +106,7 @@ describe("WorkflowCommandSandboxServer", () => {
   })
 
   test.each(["implement", "repair"] as const)("mounts the persisted workspace read-write for %s", async (role) => {
-    await using fixture = await setup(role)
+    await using fixture = await setup(role, { callInput: { command: "true", workdir: "src" } })
     await fixture.run({ command: "true", workdir: "src" })
 
     const mount = valuesAfter(fixture.engine.one("container", "create").argv, "--mount")
@@ -148,6 +156,257 @@ describe("WorkflowCommandSandboxServer", () => {
     })
     expect(fixture.lookups).toEqual({ workflow: 1, stage: 1, session: 1 })
     expect(fixture.engine.invocations).toEqual([])
+  })
+
+  test.each([
+    [
+      "wrong pending call id",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = {
+          ...fixture.persisted.stage,
+          checkpoint: {
+            ...fixture.persisted.stage.checkpoint!,
+            activeTurn: {
+              calls: [{ id: "call-stale", name: "bash", input: { command: "true" } }],
+              results: [],
+              pendingCallID: "call-stale",
+            },
+          },
+        }
+      },
+    ],
+    [
+      "wrong pending call name",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = {
+          ...fixture.persisted.stage,
+          checkpoint: {
+            ...fixture.persisted.stage.checkpoint!,
+            activeTurn: {
+              calls: [{ id: "call-server-command-sandbox", name: "read", input: { command: "true" } }],
+              results: [],
+              pendingCallID: "call-server-command-sandbox",
+            },
+          },
+        }
+      },
+    ],
+    [
+      "wrong pending call input",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = {
+          ...fixture.persisted.stage,
+          checkpoint: {
+            ...fixture.persisted.stage.checkpoint!,
+            activeTurn: {
+              calls: [{ id: "call-server-command-sandbox", name: "bash", input: { command: "echo forged" } }],
+              results: [],
+              pendingCallID: "call-server-command-sandbox",
+            },
+          },
+        }
+      },
+    ],
+    [
+      "already settled call",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = {
+          ...fixture.persisted.stage,
+          checkpoint: {
+            ...fixture.persisted.stage.checkpoint!,
+            activeTurn: {
+              calls: [{ id: "call-server-command-sandbox", name: "bash", input: { command: "true" } }],
+              results: [
+                {
+                  id: "call-server-command-sandbox",
+                  name: "bash",
+                  result: { type: "text", value: "done" },
+                },
+              ],
+            },
+          },
+        }
+      },
+    ],
+    [
+      "non-pending checkpoint call",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = {
+          ...fixture.persisted.stage,
+          checkpoint: { ...fixture.persisted.stage.checkpoint!, activeTurn: undefined },
+        }
+      },
+    ],
+  ] as const)("rejects %s settlement lineage before Docker", async (_name, mutate) => {
+    await using fixture = await setup("implement")
+    mutate(fixture)
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.engine.invocations).toEqual([])
+  })
+
+  test("rejects command text that differs from the persisted Bash call", async () => {
+    await using fixture = await setup("implement")
+
+    const failure = await fixture.run({ command: "echo forged" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.engine.invocations).toEqual([])
+  })
+
+  test("rejects a fabricated deterministic assistant message id before Docker", async () => {
+    await using fixture = await setup("implement")
+
+    const failure = await fixture
+      .run({ command: "true", assistantMessageID: SessionMessage.ID.make("msg_fabricated") })
+      .catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.engine.invocations).toEqual([])
+  })
+
+  test("rejects a request agent that differs from the persisted role agent", async () => {
+    await using fixture = await setup("implement")
+
+    const failure = await fixture.run({ command: "true", agent: AgentV2.ID.make("build") }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.engine.invocations).toEqual([])
+  })
+
+  test.each([
+    [
+      "workflow session",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.run = { ...fixture.persisted.run, sessionID: SessionSchema.ID.make("ses_changed") }
+      },
+    ],
+    [
+      "current stage",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.run = { ...fixture.persisted.run, currentStageID: WorkflowSchema.StageID.make("wfs_changed") }
+      },
+    ],
+    [
+      "stage session",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = { ...fixture.persisted.stage, sessionID: SessionSchema.ID.make("ses_changed") }
+      },
+    ],
+    [
+      "stage status",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = { ...fixture.persisted.stage, status: "succeeded" }
+      },
+    ],
+    [
+      "lease owner",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = { ...fixture.persisted.stage, leaseOwner: "worker-revoked" }
+      },
+    ],
+    [
+      "lease attempt",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = { ...fixture.persisted.stage, attempt: 2 }
+      },
+    ],
+    [
+      "lease expiry",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = { ...fixture.persisted.stage, leaseExpiresAt: DateTime.makeUnsafe(0) }
+      },
+    ],
+    [
+      "workflow status",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.run = { ...fixture.persisted.run, status: "cancelled" }
+      },
+    ],
+    [
+      "workflow location",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.run = {
+          ...fixture.persisted.run,
+          location: Location.Ref.make({ directory: AbsolutePath.make("D:\\foreign") }),
+        }
+      },
+    ],
+    [
+      "stage workflow",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = { ...fixture.persisted.stage, workflowID: WorkflowSchema.ID.make("wfl_changed") }
+      },
+    ],
+    [
+      "stage role",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = { ...fixture.persisted.stage, type: "test" }
+      },
+    ],
+    [
+      "stage policy",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = { ...fixture.persisted.stage, input: { revision: 2 } }
+      },
+    ],
+    [
+      "session location",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.session = {
+          ...fixture.persisted.session,
+          location: Location.Ref.make({ directory: AbsolutePath.make("D:\\foreign") }),
+        }
+      },
+    ],
+    [
+      "call settlement",
+      (fixture: MutableFixture): void => {
+        fixture.persisted.stage = {
+          ...fixture.persisted.stage,
+          checkpoint: {
+            ...fixture.persisted.stage.checkpoint!,
+            activeTurn: {
+              calls: [{ id: "call-server-command-sandbox", name: "bash", input: { command: "true" } }],
+              results: [
+                {
+                  id: "call-server-command-sandbox",
+                  name: "bash",
+                  result: { type: "text", value: "done" },
+                },
+              ],
+            },
+          },
+        }
+      },
+    ],
+  ] as const)("rechecks changed %s after create and never starts", async (_name, mutate) => {
+    await using fixture = await setup("implement")
+    fixture.engine.onCreate = async () => mutate(fixture)
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.lookups.workflow).toBe(2)
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+  })
+
+  test("uses a fresh clock at the final authority gate", async () => {
+    await using fixture = await setup("implement")
+    fixture.engine.onCreate = async () => {
+      fixture.hooks.onWorkflowLookup = () => {
+        fixture.clock.now += 120_000
+      }
+    }
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
   })
 
   test.each([
@@ -210,11 +469,33 @@ describe("WorkflowCommandSandboxServer", () => {
     await fs.rm(outside, { recursive: true, force: true })
   })
 
+  test("detects a nested junction swap after create at the final recursive gate", async () => {
+    await using fixture = await setup("implement")
+    const nested = path.join(fixture.workspace, "src")
+    const original = `${nested}-original`
+    const outside = path.join(root, `nested-race-outside-${crypto.randomUUID()}`)
+    await fs.mkdir(outside)
+    fixture.engine.onCreate = async () => {
+      await fs.rename(nested, original)
+      await fs.symlink(outside, nested, "junction")
+    }
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+    await fs.unlink(nested)
+    await fs.rm(original, { recursive: true, force: true })
+    await fs.rm(outside, { recursive: true, force: true })
+  })
+
   test.each(["daemon", "image"] as const)(
     "maps a missing %s to typed-unavailable without fallback",
     async (failure) => {
-      await using fixture = await setup("implement", { engineFailure: failure })
-      const result = await fixture.run({ command: "echo host-fallback > fallback.txt" }).catch((error) => error)
+      const command = "echo host-fallback > fallback.txt"
+      await using fixture = await setup("implement", { engineFailure: failure, callInput: { command } })
+      const result = await fixture.run({ command }).catch((error) => error)
 
       expect(result).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
       expect(await fs.exists(path.join(fixture.workspace, "fallback.txt"))).toBe(false)
@@ -225,7 +506,7 @@ describe("WorkflowCommandSandboxServer", () => {
   test.each(["cancelled", "timeout"] as const)(
     "%s execution kills and removes only the verified container once",
     async (mode) => {
-      await using fixture = await setup("implement", { startFailure: mode })
+      await using fixture = await setup("implement", { startFailure: mode, callInput: { command: "sleep 100" } })
       const result = await fixture.run({ command: "sleep 100" }).catch((error) => error)
 
       expect(result).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
@@ -241,6 +522,25 @@ describe("WorkflowCommandSandboxServer", () => {
     },
   )
 
+  test("maps a Docker start failure to unavailable and kills/removes the verified container", async () => {
+    await using fixture = await setup("implement", { startFailure: "engine" })
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(fixture.engine.all("container", "kill")).toHaveLength(1)
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+  })
+
+  test("returns the inspected container command exit rather than the Docker CLI exit", async () => {
+    await using fixture = await setup("implement", { startFailure: "command", callInput: { command: "exit 23" } })
+
+    const result = await fixture.run({ command: "exit 23" })
+
+    expect(result.exit).toBe(23)
+    expect(result.output).toContain("command failed")
+  })
+
   test("does not start or remove a container whose inspected cid/name/labels do not match", async () => {
     await using fixture = await setup("implement", { inspectMismatch: true })
     const result = await fixture.run({ command: "true" }).catch((error) => error)
@@ -249,6 +549,28 @@ describe("WorkflowCommandSandboxServer", () => {
     expect(fixture.engine.all("container", "start")).toEqual([])
     expect(fixture.engine.all("container", "kill")).toEqual([])
     expect(fixture.engine.all("container", "rm")).toEqual([])
+  })
+
+  test.each(["malformed", "truncated"] as const)(
+    "fails closed on a %s ownership inspection without cleaning an unverified cid",
+    async (inspectFailure) => {
+      await using fixture = await setup("implement", { inspectFailure })
+
+      const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+      expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+      expect(fixture.engine.all("container", "start")).toEqual([])
+      expect(fixture.engine.all("container", "rm")).toEqual([])
+    },
+  )
+
+  test("reports verified-container removal failure as typed unavailable", async () => {
+    await using fixture = await setup("implement", { cleanupFailure: "rm" })
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
   })
 
   test("recovery filters by every opaque ownership label and removes only exact cid/name/lease matches", async () => {
@@ -283,6 +605,84 @@ describe("WorkflowCommandSandboxServer", () => {
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
     expect(fixture.engine.one("container", "rm").argv.at(-1)).toBe(fixture.engine.containerID)
   })
+
+  test("recovery attempts rm after kill failure and returns typed unavailable", async () => {
+    await using fixture = await setup("implement", { recoveryFailure: "kill" })
+    await fixture.run({ command: "true" })
+    fixture.engine.invocations.splice(0)
+    fixture.engine.recoveryIDs = [fixture.engine.containerID]
+
+    const failure = await fixture.recover().catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(fixture.engine.all("container", "kill")).toHaveLength(1)
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+  })
+
+  test("recovery reports rm failure as typed unavailable after one exact attempt", async () => {
+    await using fixture = await setup("implement", { recoveryFailure: "rm" })
+    await fixture.run({ command: "true" })
+    fixture.engine.invocations.splice(0)
+    fixture.engine.recoveryIDs = [fixture.engine.containerID]
+
+    const failure = await fixture.recover().catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+  })
+
+  test.each(["list", "listing-junk", "inspect-json"] as const)(
+    "maps recovery %s failure to typed unavailable",
+    async (recoveryFailure) => {
+      await using fixture = await setup("implement", { recoveryFailure })
+      await fixture.run({ command: "true" })
+      fixture.engine.invocations.splice(0)
+      fixture.engine.recoveryIDs = [fixture.engine.containerID]
+
+      const failure = await fixture.recover().catch((error) => error)
+
+      expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    },
+  )
+})
+
+describe("Docker production engine", () => {
+  test("does not miss an abort delivered while the process is being spawned", async () => {
+    const controller = new AbortController()
+    let killed = 0
+    const empty = () =>
+      new ReadableStream<Uint8Array>({
+        start(stream) {
+          stream.close()
+        },
+      })
+    const engine = Docker.makeProduction(() => {
+      controller.abort()
+      return {
+        stdin: { write() {}, end() {} },
+        stdout: empty(),
+        stderr: empty(),
+        exited: new Promise<number>(() => undefined),
+        kill() {
+          killed++
+        },
+      }
+    })
+
+    const failure = await engine
+      .execute({
+        executable: enginePath,
+        argv: ["version"],
+        env: {},
+        timeoutMs: 100,
+        maxOutputBytes: 100,
+        signal: controller.signal,
+      })
+      .catch((error) => error)
+
+    expect(failure).toBeInstanceOf(Docker.Cancelled)
+    expect(killed).toBe(1)
+  })
 })
 
 class FakeEngine implements Docker.Engine {
@@ -296,8 +696,11 @@ class FakeEngine implements Docker.Engine {
   constructor(
     private readonly options: {
       readonly engineFailure?: "daemon" | "image"
-      readonly startFailure?: "cancelled" | "timeout"
+      readonly startFailure?: "cancelled" | "timeout" | "engine" | "command"
       readonly inspectMismatch?: boolean
+      readonly recoveryFailure?: "list" | "listing-junk" | "inspect-json" | "kill" | "rm"
+      readonly inspectFailure?: "malformed" | "truncated"
+      readonly cleanupFailure?: "rm"
     },
   ) {}
 
@@ -318,6 +721,10 @@ class FakeEngine implements Docker.Engine {
     if (input.argv[0] === "container" && input.argv[1] === "inspect") {
       const id = input.argv.at(-1)!
       const exact = id === this.containerID
+      if (this.options.inspectFailure === "malformed") return { exit: 0, stdout: "{", stderr: "", truncated: false }
+      if (this.options.inspectFailure === "truncated") return { exit: 0, stdout: "[]", stderr: "", truncated: true }
+      if (this.options.recoveryFailure === "inspect-json" && this.recoveryIDs.length > 0)
+        return { exit: 0, stdout: "{", stderr: "", truncated: false }
       return {
         exit: 0,
         stdout: JSON.stringify([
@@ -325,6 +732,7 @@ class FakeEngine implements Docker.Engine {
             Id: id,
             Name: `/${exact ? this.name : "foreign"}`,
             Config: { Labels: exact && !this.options.inspectMismatch ? this.labels : { foreign: "true" } },
+            State: { Running: false, ExitCode: this.options.startFailure === "command" ? 23 : 0 },
           },
         ]),
         stderr: "",
@@ -334,11 +742,29 @@ class FakeEngine implements Docker.Engine {
     if (input.argv[0] === "container" && input.argv[1] === "start") {
       if (this.options.startFailure === "cancelled") throw new Docker.Cancelled("cancelled")
       if (this.options.startFailure === "timeout") throw new Docker.Timeout("timeout")
+      if (this.options.startFailure === "engine")
+        return { exit: 1, stdout: "", stderr: "daemon disconnected", truncated: false }
+      if (this.options.startFailure === "command")
+        return { exit: 1, stdout: "", stderr: "command failed", truncated: false }
       return { exit: 0, stdout: "sandbox output", stderr: "", truncated: false }
     }
     if (input.argv[0] === "container" && input.argv[1] === "ls") {
+      if (this.options.recoveryFailure === "list") throw new Error("daemon unavailable")
+      if (this.options.recoveryFailure === "listing-junk")
+        return { exit: 0, stdout: "not-a-container-id", stderr: "", truncated: false }
       return { exit: 0, stdout: this.recoveryIDs.join("\n"), stderr: "", truncated: false }
     }
+    if (input.argv[0] === "container" && input.argv[1] === "kill" && this.options.recoveryFailure === "kill")
+      throw new Error("kill failed")
+    if (input.argv[0] === "container" && input.argv[1] === "rm" && this.options.cleanupFailure === "rm")
+      throw new Error("rm failed")
+    if (
+      input.argv[0] === "container" &&
+      input.argv[1] === "rm" &&
+      this.options.recoveryFailure === "rm" &&
+      this.recoveryIDs.length > 0
+    )
+      throw new Error("recovery rm failed")
     return { exit: 0, stdout: "", stderr: "", truncated: false }
   }
 
@@ -359,8 +785,12 @@ async function setup(
     readonly stageInput?: Readonly<Record<string, unknown>>
     readonly config?: Partial<WorkflowCommandSandboxServer.Config>
     readonly engineFailure?: "daemon" | "image"
-    readonly startFailure?: "cancelled" | "timeout"
+    readonly startFailure?: "cancelled" | "timeout" | "engine" | "command"
     readonly inspectMismatch?: boolean
+    readonly recoveryFailure?: "list" | "listing-junk" | "inspect-json" | "kill" | "rm"
+    readonly inspectFailure?: "malformed" | "truncated"
+    readonly cleanupFailure?: "rm"
+    readonly callInput?: { readonly command: string; readonly workdir?: string; readonly timeout?: number }
   } = {},
 ) {
   await fs.mkdir(root, { recursive: true })
@@ -375,6 +805,7 @@ async function setup(
   const sessionID = SessionSchema.ID.make("ses_server_command_sandbox")
   const agent = WorkflowRoleAgents.agentForRole(role)
   const now = Date.now()
+  const clock = { now }
   const location = Location.Ref.make({ directory: AbsolutePath.make(workspace) })
   const run: WorkflowSchema.Info = {
     id: workflowID,
@@ -403,6 +834,15 @@ async function setup(
     recoveryPolicy: "restart_safe",
     idempotencyKey: `visual-build/${role}/r0`,
     input: options.stageInput ?? { revision: 0 },
+    checkpoint: {
+      kind: "workflow.model.continuation",
+      version: 1,
+      activeTurn: {
+        calls: [{ id: "call-server-command-sandbox", name: "bash", input: options.callInput ?? { command: "true" } }],
+        results: [],
+        pendingCallID: "call-server-command-sandbox",
+      },
+    },
     time: {
       created: DateTime.makeUnsafe(now - 1_000),
       updated: DateTime.makeUnsafe(now),
@@ -418,16 +858,22 @@ async function setup(
     location,
     time: { created: DateTime.makeUnsafe(now), updated: DateTime.makeUnsafe(now) },
   })
-  const persisted: { run: WorkflowSchema.Info; stage: PersistedStage; session: SessionSchema.Info } = {
+  const persisted: {
+    run: WorkflowSchema.Info
+    stage: PersistedStage
+    session: SessionSchema.Info
+  } = {
     run,
     stage,
     session,
   }
+  const hooks: { onWorkflowLookup?: () => void } = {}
   const lookups = { workflow: 0, stage: 0, session: 0 }
   const workflowStore = WorkflowStore.Service.of({
     list: () => Effect.succeed([]),
     get: () => {
       lookups.workflow++
+      hooks.onWorkflowLookup?.()
       return Effect.succeed({ run: persisted.run, stages: [persisted.stage], artifacts: [] })
     },
     stage: () => {
@@ -473,7 +919,7 @@ async function setup(
     stageID,
     sessionID,
     agent,
-    assistantMessageID: SessionMessage.ID.make("msg_server_command_sandbox"),
+    assistantMessageID: workflowMessageID(stageID, "call-server-command-sandbox"),
     toolCallID: "call-server-command-sandbox",
   }
   const authority = async () => {
@@ -488,7 +934,7 @@ async function setup(
     return { workflowID, stageID, route, policyDigest }
   }
   const initial = await authority()
-  const layer = WorkflowCommandSandboxServer.makeLayer({ engine, config, now: () => now }).pipe(
+  const layer = WorkflowCommandSandboxServer.makeLayer({ engine, config, now: () => clock.now }).pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(WorkflowStore.Service, workflowStore),
@@ -509,12 +955,36 @@ async function setup(
     dockerConfig,
     temp,
     engine,
+    clock,
+    hooks,
     config,
     persisted,
     lookups,
     request,
     authority: () => initial,
-    run: (input: { readonly command: string; readonly workdir?: string }) =>
+    recover: async () => {
+      const current = await authority()
+      return WorkflowCommandSandboxServer.recover({
+        engine,
+        config,
+        authority: {
+          workflowID: current.workflowID,
+          stageID: current.stageID,
+          toolCallID: request.toolCallID,
+          role: current.route.role,
+          policyDigest: initial.policyDigest,
+          sessionID: request.sessionID,
+          agent: request.agent,
+          leaseOwner: persisted.stage.leaseOwner!,
+          attempt: persisted.stage.attempt,
+        },
+      })
+    },
+    run: (
+      input: { readonly command: string; readonly workdir?: string } & Partial<
+        Pick<WorkflowCommandSandbox.Request, "agent" | "assistantMessageID" | "toolCallID" | "timeout">
+      >,
+    ) =>
       Effect.runPromise(
         Effect.gen(function* () {
           return yield* (yield* WorkflowCommandSandbox.Service).run({
@@ -546,4 +1016,9 @@ function valueAfter(values: readonly string[], flag: string) {
 
 function count(values: readonly string[], value: string) {
   return values.filter((candidate) => candidate === value).length
+}
+
+function workflowMessageID(stageID: WorkflowSchema.StageID, toolCallID: string) {
+  const digest = createHash("sha256").update(toolCallID).digest("hex").slice(0, 16)
+  return SessionMessage.ID.make(`msg_workflow_${stageID.slice(4)}_${digest}`)
 }

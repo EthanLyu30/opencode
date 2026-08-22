@@ -21,6 +21,25 @@ export interface Engine {
   readonly execute: (input: Invocation) => Promise<Result>
 }
 
+export interface SpawnedProcess {
+  readonly stdin: { readonly write: (value: string) => unknown; readonly end: () => unknown } | number | undefined
+  readonly stdout: ReadableStream<Uint8Array> | number | undefined
+  readonly stderr: ReadableStream<Uint8Array> | number | undefined
+  readonly exited: Promise<number>
+  readonly kill: () => unknown
+}
+
+export type Spawn = (
+  command: readonly string[],
+  options: {
+    readonly env: Readonly<Record<string, string>>
+    readonly stdin: "pipe"
+    readonly stdout: "pipe"
+    readonly stderr: "pipe"
+    readonly windowsHide: true
+  },
+) => SpawnedProcess
+
 export class Unavailable extends Error {
   readonly _tag = "Docker.Unavailable"
 }
@@ -33,13 +52,16 @@ export class Timeout extends Error {
   readonly _tag = "Docker.Timeout"
 }
 
-export const production: Engine = Object.freeze({ execute })
+export const makeProduction = (spawn: Spawn): Engine =>
+  Object.freeze({ execute: (input: Invocation) => execute(input, spawn) })
 
-async function execute(input: Invocation): Promise<Result> {
+export const production: Engine = makeProduction((command, options) => Bun.spawn([...command], options))
+
+async function execute(input: Invocation, spawn: Spawn): Promise<Result> {
   if (input.signal?.aborted) throw new Cancelled("Docker invocation was cancelled")
-  let process: ReturnType<typeof Bun.spawn>
+  let process: SpawnedProcess
   try {
-    process = Bun.spawn([input.executable, ...input.argv], {
+    process = spawn([input.executable, ...input.argv], {
       env: { ...input.env },
       stdin: "pipe",
       stdout: "pipe",
@@ -49,6 +71,20 @@ async function execute(input: Invocation): Promise<Result> {
   } catch (cause) {
     throw new Unavailable("Docker CLI could not be started", { cause })
   }
+  const state = { cancelled: false, timedOut: false, killed: false }
+  const terminate = () => {
+    if (state.killed) return
+    state.killed = true
+    process.kill()
+  }
+  const abort = () => {
+    state.cancelled = true
+    terminate()
+  }
+  input.signal?.addEventListener("abort", abort, { once: true })
+  // An abort may be delivered synchronously by the spawn boundary before the
+  // listener can be registered. Close that window before touching any pipe.
+  if (input.signal?.aborted) abort()
   const stdin = process.stdin
   const stdoutStream = process.stdout
   const stderrStream = process.stderr
@@ -60,19 +96,19 @@ async function execute(input: Invocation): Promise<Result> {
     stderrStream === undefined ||
     typeof stderrStream === "number"
   ) {
-    process.kill()
+    terminate()
+    input.signal?.removeEventListener("abort", abort)
+    if (state.cancelled) throw new Cancelled("Docker invocation was cancelled")
     throw new Unavailable("Docker CLI pipes are unavailable")
   }
 
-  const state = { cancelled: false, timedOut: false }
-  const abort = () => {
-    state.cancelled = true
-    process.kill()
+  if (state.cancelled) {
+    input.signal?.removeEventListener("abort", abort)
+    throw new Cancelled("Docker invocation was cancelled")
   }
-  input.signal?.addEventListener("abort", abort, { once: true })
   const timer = setTimeout(() => {
     state.timedOut = true
-    process.kill()
+    terminate()
   }, input.timeoutMs)
 
   try {
