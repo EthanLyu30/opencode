@@ -180,7 +180,7 @@ describe("Kimi design and visual review loop", () => {
         expect(route).toMatchObject({
           role: "implement",
           providerID: "deepseek",
-          modelID: "deepseek-v4-flash",
+          modelID: "deepseek-v4-pro",
           protocol: "openai-responses",
         })
         return Effect.succeed({ usage: usage(800) })
@@ -190,7 +190,7 @@ describe("Kimi design and visual review loop", () => {
         expect(route).toMatchObject({
           role: "repair",
           providerID: "deepseek",
-          modelID: "deepseek-v4-flash",
+          modelID: "deepseek-v4-pro",
           protocol: "openai-responses",
         })
         return Effect.succeed({ usage: usage(400) })
