@@ -995,6 +995,26 @@ describe("WorkflowVisualHostServer", () => {
     expect(await fs.readFile(outsideFile)).toEqual(outsideBytes)
   })
 
+  test("closes a database acquired before an open post-check rejects a new hardlink owner", async () => {
+    await using temp = await taskTemp()
+    await using outside = await taskTemp()
+    const ledgerRoot = path.join(temp.path, ".evidence")
+    const databasePath = path.join(ledgerRoot, "evidence.sqlite")
+    const outsideLink = path.join(outside.path, "other-owner.sqlite")
+
+    expect(() =>
+      EvidenceLedger.open(ledgerRoot, {
+        onBoundary: ({ operation, phase }) => {
+          if (operation !== "open" || phase !== "after") return
+          fsSync.linkSync(databasePath, outsideLink)
+        },
+      }),
+    ).toThrow(TypeError)
+    expect(await fs.readFile(outsideLink)).toEqual(Buffer.alloc(0))
+    await expect(fs.rename(databasePath, `${databasePath}.released`)).resolves.toBeUndefined()
+    await expect(fs.rm(`${databasePath}.released`)).resolves.toBeUndefined()
+  })
+
   test("fails closed when a runtime boundary hook adds another database owner before select", async () => {
     await using temp = await taskTemp()
     await using outside = await taskTemp()

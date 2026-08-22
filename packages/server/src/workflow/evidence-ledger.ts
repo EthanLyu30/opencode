@@ -72,7 +72,13 @@ export function open(root: string, options: OpenOptions = {}): Service {
 }
 
 function initializeDatabase(databasePath: string, root: string, options: OpenOptions): Service {
-  const database = checked(root, options, "open", () => new Database(databasePath, { create: false, readwrite: true }))
+  const database = checkedAcquire(
+    root,
+    options,
+    "open",
+    () => new Database(databasePath, { create: false, readwrite: true }),
+    (acquired) => acquired.close(),
+  )
   let transferred = false
   try {
     checked(root, options, "pragma-journal", () => database.run("PRAGMA journal_mode = WAL"))
@@ -205,6 +211,38 @@ function checked<A>(root: string, options: OpenOptions, operation: Operation, wo
     verifyOwnedFiles(root, true)
     options.onBoundary?.({ operation, phase: "after" })
     verifyOwnedFiles(root, true)
+  }
+}
+
+function checkedAcquire<A extends object>(
+  root: string,
+  options: OpenOptions,
+  operation: Operation,
+  acquire: () => A,
+  release: (acquired: A) => void,
+): A {
+  const owner: A[] = []
+  try {
+    const value = checked(root, options, operation, () => {
+      const acquired = acquire()
+      owner.push(acquired)
+      return acquired
+    })
+    owner.pop()
+    return value
+  } catch (cause) {
+    const acquired = owner.pop()
+    if (acquired !== undefined) {
+      try {
+        release(acquired)
+      } catch (releaseCause) {
+        const acquireDetail = cause instanceof Error ? cause.message : String(cause)
+        throw new Error(`Evidence ${operation} acquisition failed before release: ${acquireDetail}`, {
+          cause: releaseCause,
+        })
+      }
+    }
+    throw cause
   }
 }
 
