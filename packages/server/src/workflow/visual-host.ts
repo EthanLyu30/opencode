@@ -261,10 +261,14 @@ function prepareImplementation(
               "Script preview requires one admission-frozen loopback origin",
             ),
         })
-        yield* Effect.tryPromise({
-          try: () => spawnPreviewProcess(state, record, input.plan),
-          catch: () => failure("prepare_implementation", "visual_host_unavailable", "Preview process could not start"),
-        })
+        yield* restore(
+          Effect.tryPromise({
+            try: (signal) =>
+              spawnPreviewProcess(state, record, input.plan, signal, Date.now() + state.startupTimeoutMs),
+            catch: () =>
+              failure("prepare_implementation", "visual_host_unavailable", "Preview process could not start"),
+          }),
+        )
         yield* restore(
           Effect.tryPromise({
             try: (signal) => waitForOrigin(state, record, targetOrigin, signal),
@@ -488,7 +492,13 @@ function startProxyServer(record: HostRecord, targetOrigin: string): void {
   })
 }
 
-async function spawnPreviewProcess(state: State, record: HostRecord, plan: PreviewPlan.PreviewPlan): Promise<void> {
+async function spawnPreviewProcess(
+  state: State,
+  record: HostRecord,
+  plan: PreviewPlan.PreviewPlan,
+  signal: AbortSignal,
+  deadline: number,
+): Promise<void> {
   if (plan.argv === undefined || record.processIdentity === undefined)
     throw new TypeError("Script plan has no identity")
   state.onSpawnArgv?.(plan.argv)
@@ -497,6 +507,8 @@ async function spawnPreviewProcess(state: State, record: HostRecord, plan: Previ
     identity: record.processIdentity,
     plan,
     tempRoot: runtimeTemp,
+    signal,
+    deadline,
   })
   record.process = owned
   record.logDrains = [

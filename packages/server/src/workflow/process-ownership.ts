@@ -16,10 +16,16 @@ export interface OwnedProcess {
 
 export interface Service {
   readonly available: boolean
+  /**
+   * Phase-B implementations must authenticate the returned handle, honor the signal, and settle no later than the
+   * absolute deadline without creating a process after cancellation or rejection.
+   */
   readonly start: (input: {
     readonly identity: Identity
     readonly plan: PreviewPlan.PreviewPlan
     readonly tempRoot: string
+    readonly signal: AbortSignal
+    readonly deadline: number
   }) => Promise<OwnedProcess>
   readonly stop: (input: { readonly identity: Identity; readonly process: OwnedProcess }) => Promise<void>
   readonly recover: (identity: Identity) => Promise<void>

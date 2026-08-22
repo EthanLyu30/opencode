@@ -355,6 +355,73 @@ describe("WorkflowVisualHostServer", () => {
     expect(runtime.contextsClosed).toBe(2)
   })
 
+  test("cancels stalled authenticated process acquisition through its bounded start contract", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    const port = await unusedPort()
+    await fs.writeFile(path.join(workspaceTemp.path, "server.mjs"), "setInterval(() => undefined, 60_000)\n")
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "script", argv: ["node", "server.mjs"] },
+      allowedOrigins: [`http://127.0.0.1:${port}`],
+    })
+    let entered = false
+    let contractValid = false
+    let abortObserved = false
+    const ownership: ProcessOwnership.Service = {
+      available: true,
+      start: async (input) => {
+        entered = true
+        const signal = Reflect.get(input, "signal")
+        const deadline = Reflect.get(input, "deadline")
+        contractValid =
+          signal instanceof AbortSignal &&
+          typeof deadline === "number" &&
+          Number.isFinite(deadline) &&
+          deadline > Date.now()
+        if (!contractValid) throw new Error("bounded process start contract missing")
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              abortObserved = true
+              reject(signal.reason)
+            },
+            { once: true },
+          )
+        })
+      },
+      stop: async () => undefined,
+      recover: async () => undefined,
+    }
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const acquisition = yield* host
+            .prepareImplementation({ workflowID, revision: 1, plan })
+            .pipe(Effect.forkChild)
+          yield* Effect.promise(() => waitUntil(() => entered, 200))
+          yield* Fiber.interrupt(acquisition).pipe(Effect.timeout("200 millis"))
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            processOwnership: ownership,
+          }),
+        ),
+      ),
+    )
+
+    expect(contractValid).toBe(true)
+    expect(abortObserved).toBe(true)
+    expect((await fs.readdir(temp.path)).filter((name) => /^[a-f0-9]{64}$/.test(name))).toEqual([])
+  })
+
   test("spawns only the frozen argv for a script preview and tears down its process tree on scope close", async () => {
     await using temp = await taskTemp()
     await using workspaceTemp = await taskTemp()
@@ -820,6 +887,61 @@ describe("WorkflowVisualHostServer", () => {
     expect(await fs.exists(path.join(outside.path, "evidence.sqlite"))).toBe(false)
   })
 
+  for (const name of ["evidence.sqlite", "evidence.sqlite-wal", "evidence.sqlite-shm"] as const) {
+    test(`rejects a pre-existing ${name} file link without writing its outside target`, async () => {
+      await using temp = await taskTemp()
+      await using outside = await taskTemp()
+      const ledgerRoot = path.join(temp.path, ".evidence")
+      await fs.mkdir(ledgerRoot)
+      if (name !== "evidence.sqlite") {
+        const seeded = EvidenceLedger.open(ledgerRoot)
+        expect(await seeded.reserve(String(workflowID), 1, WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES)).toBe(true)
+        await seeded.close()
+      }
+      const outsideFile = path.join(outside.path, name)
+      const outsideBytes = Buffer.from("outside-owned")
+      await fs.writeFile(outsideFile, outsideBytes)
+      await fs.symlink(outsideFile, path.join(ledgerRoot, name), "file")
+
+      let opened: EvidenceLedger.Service | undefined
+      let cause: unknown
+      try {
+        opened = EvidenceLedger.open(ledgerRoot)
+      } catch (error) {
+        cause = error
+      } finally {
+        await opened?.close()
+      }
+
+      expect(cause).toBeInstanceOf(TypeError)
+      expect(await fs.readFile(outsideFile)).toEqual(outsideBytes)
+    })
+  }
+
+  test("rejects a multiply-linked evidence database without modifying the other owner", async () => {
+    await using temp = await taskTemp()
+    await using outside = await taskTemp()
+    const ledgerRoot = path.join(temp.path, ".evidence")
+    await fs.mkdir(ledgerRoot)
+    const outsideFile = path.join(outside.path, "outside.sqlite")
+    const outsideBytes = Buffer.from("outside-owned")
+    await fs.writeFile(outsideFile, outsideBytes)
+    await fs.link(outsideFile, path.join(ledgerRoot, "evidence.sqlite"))
+
+    let opened: EvidenceLedger.Service | undefined
+    let cause: unknown
+    try {
+      opened = EvidenceLedger.open(ledgerRoot)
+    } catch (error) {
+      cause = error
+    } finally {
+      await opened?.close()
+    }
+
+    expect(cause).toBeInstanceOf(TypeError)
+    expect(await fs.readFile(outsideFile)).toEqual(outsideBytes)
+  })
+
   test("recovers only expired host-owned capabilities that are not fenced by an active lease", async () => {
     await using temp = await taskTemp()
     const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
@@ -893,7 +1015,13 @@ describe("WorkflowVisualHostServer", () => {
       JSON.stringify({ hostID: identity.hostID, createdAt: 10, processNonce: identity.nonce }),
     )
     const ownership = processOwnership()
-    await ownership.service.start({ identity, plan, tempRoot: runtimeTemp })
+    await ownership.service.start({
+      identity,
+      plan,
+      tempRoot: runtimeTemp,
+      signal: new AbortController().signal,
+      deadline: Date.now() + 1_000,
+    })
     await waitUntil(async () =>
       fetch(`http://127.0.0.1:${port}`).then(
         () => true,
@@ -952,7 +1080,13 @@ describe("WorkflowVisualHostServer", () => {
       JSON.stringify({ hostID: identity.hostID, createdAt: 10, processNonce: "e".repeat(64) }),
     )
     const ownership = processOwnership()
-    await ownership.service.start({ identity, plan, tempRoot: runtimeTemp })
+    await ownership.service.start({
+      identity,
+      plan,
+      tempRoot: runtimeTemp,
+      signal: new AbortController().signal,
+      deadline: Date.now() + 1_000,
+    })
     await waitUntil(async () =>
       fetch(`http://127.0.0.1:${port}`).then(
         () => true,
