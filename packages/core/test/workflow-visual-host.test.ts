@@ -5,7 +5,7 @@ import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { Location } from "@opencode-ai/schema/location"
 import { AbsolutePath } from "@opencode-ai/schema/schema"
 import { Workflow } from "@opencode-ai/schema/workflow"
-import { Effect } from "effect"
+import { Effect, Scope } from "effect"
 import { createHash } from "node:crypto"
 import fs from "fs/promises"
 import path from "path"
@@ -40,11 +40,71 @@ describe("WorkflowVisualHost", () => {
       `http://127.0.0.1:0/${capability}/`,
       `http://user:pass@127.0.0.1:4173/${capability}/`,
       `http://127.0.0.1:4173/${capability}/?url=https://example.com`,
+      `http://2130706433:4173/${capability}/`,
+      `http://0x7f000001:4173/${capability}/`,
+      `http://017700000001:4173/${capability}/`,
+      `http://127.1:4173/${capability}/`,
+      `http://127.0.0.1.:4173/${capability}/`,
+      `http://127.000.000.001:4173/${capability}/`,
+      `http://127.0.0.1:04173/${capability}/`,
+      `http://127.0.0.1:4173/ignored/../${capability}/`,
+      `http://127.0.0.1:4173/ignored/%2e%2e/${capability}/`,
+      `http://127.0.0.1:4173/${capability}/?`,
+      `http://127.0.0.1:4173/${capability}/#`,
+      `http://127%2e0%2e0%2e1:4173/${capability}/`,
+      `http://127.0.0.1:4173/${"%61".repeat(64)}/`,
+      ` HTTP://127.0.0.1:4173/${capability}/ `,
+      `HTTP://127.0.0.1:4173/${capability}/`,
+      `http://127.0.0.1:4173/${capability.toUpperCase()}/`,
+      `http://127.0.0.1:4173/${capability.slice(1)}/`,
       "file:///D:/workspace/index.html",
       "https://example.com",
     ]) {
       expect(WorkflowVisualHost.validateHandle(value)).toBe(false)
     }
+  })
+
+  test("constructs prepared previews only from exact canonical URL text", async () => {
+    const capability = "a".repeat(64)
+    const hostID = WorkflowVisualHost.HostID.make(capability)
+    const canonicalURL = `http://127.0.0.1:4173/${capability}/`
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scope = yield* Scope.Scope
+          const valid = WorkflowVisualHost.preparedPreview({
+            hostID,
+            url: canonicalURL,
+            revision: 0,
+            configSha256: "b".repeat(64),
+            scope,
+          })
+          const rejected = [
+            `http://127.0.0.1:04173/${capability}/`,
+            `http://127.0.0.1:4173/ignored/../${capability}/`,
+            `http://127.0.0.1:4173/${capability}/?`,
+            ` HTTP://127.0.0.1:4173/${capability}/ `,
+          ].map((url) => {
+            try {
+              return WorkflowVisualHost.preparedPreview({
+                hostID,
+                url,
+                revision: 0,
+                configSha256: "b".repeat(64),
+                scope,
+              })
+            } catch (error) {
+              return error
+            }
+          })
+          return { valid, rejected }
+        }),
+      ),
+    )
+
+    expect(String(result.valid.url)).toBe(canonicalURL)
+    expect(result.valid.origin).toBe("http://127.0.0.1:4173")
+    expect(result.rejected.every((value) => value instanceof WorkflowVisualHost.Failure)).toBe(true)
   })
 
   test("provides a deterministic scoped fake with exact PNG evidence", async () => {

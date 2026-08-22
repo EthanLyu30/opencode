@@ -134,8 +134,16 @@ describe("PreviewPlan.freeze", () => {
   })
 
   test.each([
-    ["Vite", { scripts: { preview: "vite preview" }, devDependencies: { vite: "7.0.0" } }, ["bun", "run", "preview"]],
-    ["Next", { scripts: { dev: "next dev" }, dependencies: { next: "16.0.0" } }, ["bun", "run", "dev"]],
+    [
+      "Vite",
+      { scripts: { preview: "vite preview" }, devDependencies: { vite: "7.0.0" } },
+      ["bun", "run", "--no-env-file", "preview"],
+    ],
+    [
+      "Next",
+      { scripts: { dev: "next dev" }, dependencies: { next: "16.0.0" } },
+      ["bun", "run", "--no-env-file", "dev"],
+    ],
   ] as const)("recognizes a shell-free %s package script", async (_, packageJson, argv) => {
     await using root = await tmpdir()
     await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify(packageJson, null, 2))
@@ -162,7 +170,7 @@ describe("PreviewPlan.freeze", () => {
     const plan = freeze(root.path)
 
     expect(plan.kind).toBe("script")
-    expect(plan.argv).toEqual(["bun", "run", "dev"])
+    expect(plan.argv).toEqual(["bun", "run", "--no-env-file", "dev"])
   })
 
   test("freezes explicit user argv and only allowlisted environment values", async () => {
@@ -174,7 +182,12 @@ describe("PreviewPlan.freeze", () => {
 
     const plan = freeze(
       root.path,
-      { kind: "script", cwd: ".", argv: ["bun", "run", "storybook"], env: { NODE_ENV: "production" } },
+      {
+        kind: "script",
+        cwd: ".",
+        argv: ["bun", "run", "--no-env-file", "storybook"],
+        env: { NODE_ENV: "production" },
+      },
       {
         environment: { CI: "1", UNTRUSTED: "ignored" },
         envAllowlist: ["CI", "NODE_ENV"],
@@ -182,7 +195,7 @@ describe("PreviewPlan.freeze", () => {
     )
 
     expect(plan.kind).toBe("script")
-    expect(plan.argv).toEqual(["bun", "run", "storybook"])
+    expect(plan.argv).toEqual(["bun", "run", "--no-env-file", "storybook"])
     expect(plan.env).toEqual({ CI: "1", NODE_ENV: "production" })
     expect(Object.isFrozen(plan.env)).toBe(true)
   })
@@ -238,13 +251,61 @@ describe("PreviewPlan.freeze", () => {
     expect(stdout).not.toContain("local-entrypoint")
   })
 
+  test("uses pinned Bun's documented no-dotenv form for every accepted package script", async () => {
+    await using root = await tmpdir()
+    const envName = "TASK23_PREVIEW_DOTENV_PROBE"
+    const envLocalName = "TASK23_PREVIEW_DOTENV_LOCAL_PROBE"
+    await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify({ scripts: { probe: "echo preview" } }))
+    await fs.writeFile(
+      path.join(root.path, "probe.ts"),
+      `process.stdout.write((process.env["${envName}"] ?? "absent") + "|" + (process.env["${envLocalName}"] ?? "absent"))`,
+    )
+    await fs.writeFile(path.join(root.path, ".env"), `${envName}=loaded-from-dotenv\n`)
+    await fs.writeFile(path.join(root.path, ".env.local"), `${envLocalName}=loaded-from-dotenv-local\n`)
+    const childEnvironment: Record<string, string | undefined> = { ...process.env, NODE_ENV: "development" }
+    delete childEnvironment[envName]
+    delete childEnvironment[envLocalName]
+    const run = async (argv: readonly string[]) => {
+      const child = Bun.spawn([...argv], {
+        cwd: root.path,
+        env: childEnvironment,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()])
+      return { exitCode, stdout }
+    }
+
+    const defaultRun = await run([process.execPath, "run", "probe.ts"])
+    const isolatedRun = await run([process.execPath, "run", "--no-env-file", "probe.ts"])
+    expect(defaultRun).toEqual({ exitCode: 0, stdout: "loaded-from-dotenv|loaded-from-dotenv-local" })
+    expect(isolatedRun).toEqual({ exitCode: 0, stdout: "absent|absent" })
+
+    const plan = freeze(root.path, {
+      kind: "script",
+      argv: ["bun", "run", "--no-env-file", "probe"],
+    })
+    await fs.writeFile(path.join(root.path, ".env"), `${envName}=changed\n`)
+    await fs.writeFile(path.join(root.path, ".env.local"), `${envLocalName}=changed\n`)
+    const isolatedAfterMutation = await run([process.execPath, "run", "--no-env-file", "probe.ts"])
+
+    expect(plan.argv).toEqual(["bun", "run", "--no-env-file", "probe"])
+    expect(plan.configFiles.some((file) => file.path === ".env" || file.path === ".env.local")).toBe(false)
+    expect(() => PreviewPlan.verifyConfiguration(plan)).not.toThrow()
+    expect(isolatedAfterMutation).toEqual({ exitCode: 0, stdout: "absent|absent" })
+  })
+
   test("detects mutation of the ancestor manifest resolved by Bun run", async () => {
     await using root = await tmpdir()
     const site = path.join(root.path, "site")
     const packageFile = path.join(root.path, "package.json")
     await fs.mkdir(site)
     await fs.writeFile(packageFile, JSON.stringify({ scripts: { preview: "echo admitted" } }))
-    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    const plan = freeze(root.path, {
+      kind: "script",
+      cwd: "site",
+      argv: ["bun", "run", "--no-env-file", "preview"],
+    })
     await fs.writeFile(packageFile, JSON.stringify({ scripts: { preview: "echo changed" } }))
 
     const failure = configurationFailure(plan)
@@ -263,7 +324,11 @@ describe("PreviewPlan.freeze", () => {
     await fs.writeFile(path.join(root.path, "bun.lock"), "{}")
     await fs.writeFile(bunfig, 'logLevel = "warn"')
     await fs.writeFile(path.join(site, "package.json"), JSON.stringify({ scripts: { preview: "echo admitted" } }))
-    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    const plan = freeze(root.path, {
+      kind: "script",
+      cwd: "site",
+      argv: ["bun", "run", "--no-env-file", "preview"],
+    })
     await fs.writeFile(bunfig, 'logLevel = "error"')
 
     const failure = configurationFailure(plan)
@@ -278,6 +343,11 @@ describe("PreviewPlan.freeze", () => {
   })
 
   test.each([
+    ["bun missing no-env-file", ["bun", "run", "preview"]],
+    ["bun no-env-file before run", ["bun", "--no-env-file", "run", "preview"]],
+    ["bun no-env-file after script", ["bun", "run", "preview", "--no-env-file"]],
+    ["bun duplicate no-env-file", ["bun", "run", "--no-env-file", "--no-env-file", "preview"]],
+    ["bun executable case", ["BUN", "run", "--no-env-file", "preview"]],
     ["bun flag before run", ["bun", "--cwd", "..", "run", "preview"]],
     ["bun flag after script", ["bun", "run", "preview", "--cwd", ".."]],
     ["npm prefix", ["npm", "--prefix", "..", "run", "preview"]],
@@ -318,31 +388,45 @@ describe("PreviewPlan.freeze", () => {
     )
   })
 
-  test.each(["bun", "bun.exe", "npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"])(
-    "accepts canonical %s run argv",
+  test.each(["bun", "bun.exe"])("accepts canonical isolated %s run argv", async (executable) => {
+    await using root = await tmpdir()
+    await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify({ scripts: { preview: "echo preview" } }))
+
+    expect(freeze(root.path, { kind: "script", argv: [executable, "run", "--no-env-file", "preview"] }).argv).toEqual([
+      executable,
+      "run",
+      "--no-env-file",
+      "preview",
+    ])
+  })
+
+  test.each(["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"])(
+    "rejects %s until ambient manager configuration can be isolated",
     async (executable) => {
       await using root = await tmpdir()
       await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify({ scripts: { preview: "echo preview" } }))
 
-      expect(freeze(root.path, { kind: "script", argv: [executable, "run", "preview"] }).argv).toEqual([
-        executable,
-        "run",
-        "preview",
-      ])
+      expect(() => freeze(root.path, { kind: "script", argv: [executable, "run", "preview"] })).toThrow(
+        PreviewPlan.Invalid,
+      )
     },
   )
 
   test("rejects a package-manager run with no in-Location manifest", async () => {
     await using root = await tmpdir()
 
-    expect(() => freeze(root.path, { kind: "script", argv: ["bun", "run", "preview"] })).toThrow(PreviewPlan.Invalid)
+    expect(() => freeze(root.path, { kind: "script", argv: ["bun", "run", "--no-env-file", "preview"] })).toThrow(
+      PreviewPlan.Invalid,
+    )
   })
 
   test("rejects a package-manager run absent from its nearest manifest", async () => {
     await using root = await tmpdir()
     await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify({ scripts: { other: "echo other" } }))
 
-    expect(() => freeze(root.path, { kind: "script", argv: ["bun", "run", "preview"] })).toThrow(PreviewPlan.Invalid)
+    expect(() => freeze(root.path, { kind: "script", argv: ["bun", "run", "--no-env-file", "preview"] })).toThrow(
+      PreviewPlan.Invalid,
+    )
   })
 
   test("keeps a direct Node script while freezing its ancestor module configuration", async () => {
@@ -505,7 +589,11 @@ describe("PreviewPlan.freeze", () => {
     await fs.mkdir(site)
     await fs.writeFile(path.join(site, "package.json"), packageJson)
     await fs.writeFile(path.join(outside.path, "package.json"), packageJson)
-    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    const plan = freeze(root.path, {
+      kind: "script",
+      cwd: "site",
+      argv: ["bun", "run", "--no-env-file", "preview"],
+    })
     await fs.rm(site, { recursive: true, force: true })
     await fs.symlink(outside.path, site, process.platform === "win32" ? "junction" : "dir")
 
@@ -633,7 +721,11 @@ describe("PreviewPlan.freeze", () => {
     expect(() =>
       freeze(
         root.path,
-        { kind: "script", argv: ["bun", "run", "dev"], env: { NODE_OPTIONS: "--require=attack.js" } },
+        {
+          kind: "script",
+          argv: ["bun", "run", "--no-env-file", "dev"],
+          env: { NODE_OPTIONS: "--require=attack.js" },
+        },
         { envAllowlist: ["NODE_OPTIONS"] },
       ),
     ).toThrow(/environment/i)
@@ -644,14 +736,18 @@ describe("PreviewPlan.freeze", () => {
     expect(() =>
       freeze(
         root.path,
-        { kind: "script", argv: ["bun", "run", "dev"], env: { SAFE_LABEL: syntheticSecret } },
+        {
+          kind: "script",
+          argv: ["bun", "run", "--no-env-file", "dev"],
+          env: { SAFE_LABEL: syntheticSecret },
+        },
         { envAllowlist: ["SAFE_LABEL"] },
       ),
     ).toThrow(/environment|persist|safe/i)
     expect(() =>
       freeze(
         root.path,
-        { kind: "script", argv: ["bun", "run", "dev"] },
+        { kind: "script", argv: ["bun", "run", "--no-env-file", "dev"] },
         {
           environment: { SAFE_LABEL: "line one\nline two" },
           envAllowlist: ["SAFE_LABEL"],

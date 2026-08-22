@@ -58,21 +58,9 @@ const hostAuthorityEnvironmentNames = new Set([
   "PORT",
   "SHELL",
 ])
-const allowedExecutables = new Set([
-  "bun",
-  "bun.exe",
-  "node",
-  "node.exe",
-  "npm",
-  "npm.cmd",
-  "pnpm",
-  "pnpm.cmd",
-  "yarn",
-  "yarn.cmd",
-])
+const allowedExecutables = new Set(["bun", "bun.exe", "node", "node.exe"])
 const bunExecutables = new Set(["bun", "bun.exe"])
 const nodeExecutables = new Set(["node", "node.exe"])
-const packageManagerExecutables = new Set(["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"])
 const shellExecutables = new Set([
   "bash",
   "bash.exe",
@@ -418,14 +406,20 @@ function recognizeProject(
   const dependencies = { ...record(packageJson.dependencies), ...record(packageJson.devDependencies) }
 
   if (typeof dependencies.vite === "string") {
-    if (scripts.preview === "vite preview") return { argv: freezeArray(["bun", "run", "preview"]), configFiles: files }
+    if (scripts.preview === "vite preview") {
+      return { argv: freezeArray(["bun", "run", "--no-env-file", "preview"]), configFiles: files }
+    }
     if (scripts.dev === "vite" || scripts.dev === "vite dev") {
-      return { argv: freezeArray(["bun", "run", "dev"]), configFiles: files }
+      return { argv: freezeArray(["bun", "run", "--no-env-file", "dev"]), configFiles: files }
     }
   }
   if (typeof dependencies.next === "string") {
-    if (scripts.dev === "next dev") return { argv: freezeArray(["bun", "run", "dev"]), configFiles: files }
-    if (scripts.start === "next start") return { argv: freezeArray(["bun", "run", "start"]), configFiles: files }
+    if (scripts.dev === "next dev") {
+      return { argv: freezeArray(["bun", "run", "--no-env-file", "dev"]), configFiles: files }
+    }
+    if (scripts.start === "next start") {
+      return { argv: freezeArray(["bun", "run", "--no-env-file", "start"]), configFiles: files }
+    }
   }
   return undefined
 }
@@ -465,7 +459,12 @@ function freezeArgv(argv: readonly string[]): readonly string[] {
   }
   const executableName = argv[0]
   const executable = executableName.toLowerCase()
-  if (shellExecutables.has(executable) || !allowedExecutables.has(executable) || /[\\/]/.test(executableName)) {
+  if (
+    executableName !== executable ||
+    shellExecutables.has(executable) ||
+    !allowedExecutables.has(executable) ||
+    /[\\/]/.test(executableName)
+  ) {
     throw invalid("invalid_preview_configuration", "Preview argv must use an approved direct runtime, never a shell")
   }
   if (directNodeEntrypoint(argv) === undefined) packageRunScript(argv)
@@ -503,25 +502,20 @@ function scriptConfigurationDirectory(argv: readonly string[], locationRoot: str
 
 function packageRunScript(argv: readonly string[]): string | undefined {
   const executable = (argv[0] ?? "").toLowerCase()
-  if (bunExecutables.has(executable)) {
-    if (argv[1] !== "run") {
-      throw invalid("invalid_preview_configuration", "Bun previews require an explicit canonical run command")
-    }
-  } else if (!packageManagerExecutables.has(executable)) {
-    return undefined
-  }
+  if (!bunExecutables.has(executable)) return undefined
   if (
-    argv.length !== 3 ||
+    argv.length !== 4 ||
     argv[1] !== "run" ||
-    typeof argv[2] !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9:._-]*$/.test(argv[2])
+    argv[2] !== "--no-env-file" ||
+    typeof argv[3] !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:._-]*$/.test(argv[3])
   ) {
     throw invalid(
       "invalid_preview_configuration",
-      "Package-manager previews require canonical '<manager> run <script>' argv",
+      "Bun previews require canonical 'bun run --no-env-file <script>' argv",
     )
   }
-  return argv[2]
+  return argv[3]
 }
 
 function validateScriptInvocation(

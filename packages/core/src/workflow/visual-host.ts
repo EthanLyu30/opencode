@@ -270,22 +270,7 @@ export const node = makeGlobalNode({ service: Service, layer: unavailableLayer, 
 
 /** Validate the only URL shape a PreparedPreview may expose. */
 export function validateHandle(value: string): boolean {
-  try {
-    const url = new URL(value)
-    return (
-      url.protocol === "http:" &&
-      url.hostname === "127.0.0.1" &&
-      url.port !== "" &&
-      url.port !== "0" &&
-      url.username === "" &&
-      url.password === "" &&
-      url.search === "" &&
-      url.hash === "" &&
-      /^\/[a-f0-9]{64}\/$/.test(url.pathname)
-    )
-  } catch {
-    return false
-  }
+  return canonicalHandle(value) !== undefined
 }
 
 /** Constructor for trusted runtime adapters; capture still verifies ownership. */
@@ -296,15 +281,15 @@ export function preparedPreview(input: {
   readonly configSha256: string
   readonly scope: Scope.Scope
 }): PreparedPreview {
-  if (!validateHandle(input.url)) {
+  const handle = canonicalHandle(input.url)
+  if (handle === undefined) {
     throw new Failure({
       operation: "prepare_implementation",
       code: "invalid_preview_handle",
       message: "Prepared preview URL is not a loopback capability",
     })
   }
-  const url = new URL(input.url)
-  if (url.pathname !== `/${input.hostID}/` || !Number.isSafeInteger(input.revision) || input.revision < 0) {
+  if (handle.hostID !== input.hostID || !Number.isSafeInteger(input.revision) || input.revision < 0) {
     throw new Failure({
       operation: "prepare_implementation",
       code: "invalid_preview_handle",
@@ -314,12 +299,29 @@ export function preparedPreview(input: {
   const configSha256 = Schema.decodeUnknownSync(DesignArtifact.Sha256)(input.configSha256)
   return Object.freeze({
     hostID: input.hostID,
-    url: CapabilityURL.make(input.url),
-    origin: url.origin,
+    url: CapabilityURL.make(handle.url),
+    origin: handle.origin,
     revision: input.revision,
     configSha256,
     scope: input.scope,
   })
+}
+
+function canonicalHandle(
+  value: string,
+): { readonly url: string; readonly origin: string; readonly hostID: string } | undefined {
+  if (typeof value !== "string") return undefined
+  const match = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/([a-f0-9]{64})\/$/.exec(value)
+  if (match === null) return undefined
+  const port = Number(match[1])
+  if (!Number.isSafeInteger(port) || port > 65_535) return undefined
+  try {
+    const parsed = new URL(value)
+    if (parsed.href !== value || parsed.port !== match[1]) return undefined
+    return { url: parsed.href, origin: parsed.origin, hostID: match[2] ?? "" }
+  } catch {
+    return undefined
+  }
 }
 
 /**
