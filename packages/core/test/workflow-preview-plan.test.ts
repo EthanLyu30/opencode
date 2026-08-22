@@ -217,12 +217,156 @@ describe("PreviewPlan.freeze", () => {
     expect(() => PreviewPlan.verifyConfiguration(plan)).toThrow(/changed/i)
   })
 
+  test("observes pinned Bun resolving a package script from a Location ancestor", async () => {
+    await using root = await tmpdir()
+    const site = path.join(root.path, "site")
+    await fs.mkdir(site)
+    await fs.writeFile(
+      path.join(root.path, "package.json"),
+      JSON.stringify({ scripts: { preview: "echo ancestor-manifest" } }),
+    )
+    await fs.writeFile(path.join(site, "preview"), "console.log('local-entrypoint')")
+    const child = Bun.spawn([process.execPath, "run", "preview"], {
+      cwd: site,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()])
+
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("ancestor-manifest")
+    expect(stdout).not.toContain("local-entrypoint")
+  })
+
+  test("detects mutation of the ancestor manifest resolved by Bun run", async () => {
+    await using root = await tmpdir()
+    const site = path.join(root.path, "site")
+    const packageFile = path.join(root.path, "package.json")
+    await fs.mkdir(site)
+    await fs.writeFile(packageFile, JSON.stringify({ scripts: { preview: "echo admitted" } }))
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.writeFile(packageFile, JSON.stringify({ scripts: { preview: "echo changed" } }))
+
+    const failure = configurationFailure(plan)
+
+    expect(plan.configFiles.map((file) => file.path)).toContain("package.json")
+    expect(failure).toBeInstanceOf(PreviewPlan.Invalid)
+    expect(failure).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test("freezes the workspace package-manager configuration chain", async () => {
+    await using root = await tmpdir()
+    const site = path.join(root.path, "site")
+    const bunfig = path.join(root.path, "bunfig.toml")
+    await fs.mkdir(site)
+    await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify({ workspaces: ["site"] }))
+    await fs.writeFile(path.join(root.path, "bun.lock"), "{}")
+    await fs.writeFile(bunfig, 'logLevel = "warn"')
+    await fs.writeFile(path.join(site, "package.json"), JSON.stringify({ scripts: { preview: "echo admitted" } }))
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.writeFile(bunfig, 'logLevel = "error"')
+
+    const failure = configurationFailure(plan)
+
+    expect(plan.configFiles.map((file) => file.path)).toEqual([
+      "package.json",
+      "bun.lock",
+      "bunfig.toml",
+      "site/package.json",
+    ])
+    expect(failure).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
+  test.each([
+    ["bun flag before run", ["bun", "--cwd", "..", "run", "preview"]],
+    ["bun flag after script", ["bun", "run", "preview", "--cwd", ".."]],
+    ["npm prefix", ["npm", "--prefix", "..", "run", "preview"]],
+    ["pnpm directory", ["pnpm", "--dir", "..", "run", "preview"]],
+    ["yarn cwd", ["yarn", "--cwd", "..", "run", "preview"]],
+    ["npm run-script alias", ["npm", "run-script", "preview"]],
+    ["npm lifecycle alias", ["npm", "start"]],
+    ["pnpm implicit run", ["pnpm", "preview"]],
+    ["yarn implicit run", ["yarn", "preview"]],
+  ])("rejects ambiguous package-manager argv: %s", async (_, argv) => {
+    await using root = await tmpdir()
+    await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify({ scripts: { preview: "echo preview" } }))
+
+    expect(() => freezePreviewUnknown(root.path, { kind: "script", argv })).toThrow(PreviewPlan.Invalid)
+  })
+
+  test("rejects Bun's implicit package-script form even when a same-named local file exists", async () => {
+    await using root = await tmpdir()
+    const site = path.join(root.path, "site")
+    await fs.mkdir(site)
+    await fs.writeFile(path.join(site, "preview"), "console.log('local file')")
+    await fs.writeFile(
+      path.join(root.path, "package.json"),
+      JSON.stringify({ scripts: { preview: "echo ancestor script" } }),
+    )
+    const child = Bun.spawn([process.execPath, "preview"], {
+      cwd: site,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()])
+
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain("ancestor script")
+    expect(stdout).not.toContain("local file")
+    expect(() => freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "preview"] })).toThrow(
+      PreviewPlan.Invalid,
+    )
+  })
+
+  test.each(["bun", "bun.exe", "npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"])(
+    "accepts canonical %s run argv",
+    async (executable) => {
+      await using root = await tmpdir()
+      await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify({ scripts: { preview: "echo preview" } }))
+
+      expect(freeze(root.path, { kind: "script", argv: [executable, "run", "preview"] }).argv).toEqual([
+        executable,
+        "run",
+        "preview",
+      ])
+    },
+  )
+
+  test("rejects a package-manager run with no in-Location manifest", async () => {
+    await using root = await tmpdir()
+
+    expect(() => freeze(root.path, { kind: "script", argv: ["bun", "run", "preview"] })).toThrow(PreviewPlan.Invalid)
+  })
+
+  test("rejects a package-manager run absent from its nearest manifest", async () => {
+    await using root = await tmpdir()
+    await fs.writeFile(path.join(root.path, "package.json"), JSON.stringify({ scripts: { other: "echo other" } }))
+
+    expect(() => freeze(root.path, { kind: "script", argv: ["bun", "run", "preview"] })).toThrow(PreviewPlan.Invalid)
+  })
+
+  test("keeps a direct Node script while freezing its ancestor module configuration", async () => {
+    await using root = await tmpdir()
+    const site = path.join(root.path, "site")
+    const packageFile = path.join(root.path, "package.json")
+    await fs.mkdir(site)
+    await fs.writeFile(path.join(site, "server.mjs"), "console.log('preview')")
+    await fs.writeFile(packageFile, JSON.stringify({ type: "module" }))
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["node", "server.mjs"] })
+    await fs.writeFile(packageFile, JSON.stringify({ type: "commonjs" }))
+
+    expect(plan.argv).toEqual(["node", "server.mjs"])
+    expect(plan.configFiles.map((file) => file.path)).toContain("package.json")
+    expect(configurationFailure(plan)).toMatchObject({ code: "preview_configuration_changed" })
+  })
+
   test("binds an empty explicit-script cwd to its admitted Location", async () => {
     await using root = await tmpdir()
     await using outside = await tmpdir()
     const site = path.join(root.path, "site")
     await fs.mkdir(site)
-    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.writeFile(path.join(site, "server.mjs"), "console.log('preview')")
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["node", "server.mjs"] })
     await fs.rm(site, { recursive: true, force: true })
     await fs.symlink(outside.path, site, process.platform === "win32" ? "junction" : "dir")
 
@@ -256,7 +400,8 @@ describe("PreviewPlan.freeze", () => {
     const staging = path.join(root.path, "case-staging")
     const caseAlias = path.join(root.path, "SITE")
     await fs.mkdir(site)
-    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.writeFile(path.join(site, "server.mjs"), "console.log('preview')")
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["node", "server.mjs"] })
     await fs.rename(site, staging)
     await fs.rename(staging, caseAlias)
 
@@ -270,7 +415,8 @@ describe("PreviewPlan.freeze", () => {
     await using root = await tmpdir()
     const site = path.join(root.path, "site")
     await fs.mkdir(site)
-    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.writeFile(path.join(site, "server.mjs"), "console.log('preview')")
+    const plan = freeze(root.path, { kind: "script", cwd: "site", argv: ["node", "server.mjs"] })
     await fs.rm(site, { recursive: true, force: true })
 
     const failure = configurationFailure(plan)
@@ -284,8 +430,9 @@ describe("PreviewPlan.freeze", () => {
     await using outside = await tmpdir()
     const site = path.join(root.path, "site")
     await fs.mkdir(site)
-    const first = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
-    const second = freeze(root.path, { kind: "script", cwd: "site", argv: ["bun", "run", "preview"] })
+    await fs.writeFile(path.join(site, "server.mjs"), "console.log('preview')")
+    const first = freeze(root.path, { kind: "script", cwd: "site", argv: ["node", "server.mjs"] })
+    const second = freeze(root.path, { kind: "script", cwd: "site", argv: ["node", "server.mjs"] })
 
     expect(first.locationRoot).toBe(await fs.realpath(root.path))
     expect(first.configSha256).toBe(second.configSha256)

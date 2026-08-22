@@ -14,10 +14,20 @@ const MAX_CONFIGURATION_BYTES = 64 * 1024 * 1024
 const relevantConfigurationNames = Object.freeze([
   "package.json",
   "bun.lock",
+  "bunfig.toml",
   "bun.lockb",
+  "npm-shrinkwrap.json",
   "package-lock.json",
+  ".npmrc",
   "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "pnpm-workspace.yml",
+  ".pnpmfile.cjs",
   "yarn.lock",
+  ".yarnrc",
+  ".yarnrc.yml",
+  ".pnp.cjs",
+  ".pnp.loader.mjs",
   "vite.config.js",
   "vite.config.mjs",
   "vite.config.cjs",
@@ -60,6 +70,8 @@ const allowedExecutables = new Set([
   "yarn",
   "yarn.cmd",
 ])
+const bunExecutables = new Set(["bun", "bun.exe"])
+const packageManagerExecutables = new Set(["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"])
 const shellExecutables = new Set([
   "bash",
   "bash.exe",
@@ -148,7 +160,8 @@ export function freeze(input: FreezeInput): PreviewPlan {
 
   if (preview?.kind === "script") {
     const argv = freezeArgv(preview.argv)
-    const configFiles = configurationFiles(cwd)
+    const configFiles = configurationFiles(root, cwd)
+    validateScriptInvocation(argv, root, configFiles)
     return makePlan({ kind: "script", locationRoot: root, cwd, argv, env, allowedOrigins, configFiles })
   }
 
@@ -190,12 +203,14 @@ export function verifyConfiguration(plan: PreviewPlan): void {
     if (!isFrozen(plan)) changed()
     const identity = verifyDirectoryIdentity(plan)
     if (plan.kind === "script") {
-      const current = configurationFiles(identity.cwd)
+      if (plan.argv === undefined) changed()
+      const current = configurationFiles(identity.locationRoot, identity.cwd)
       if (!sameConfiguration(current, plan.configFiles)) changed()
+      validateScriptInvocation(plan.argv, identity.locationRoot, current)
     } else {
       verifyStaticIdentity(plan, identity.cwd)
       for (const file of plan.configFiles) {
-        const current = hashConfigurationFile(plan.cwd, file.path)
+        const current = hashConfigurationFile(plan.locationRoot, file.path)
         if (!sameConfiguration([current], [file])) changed()
       }
     }
@@ -271,8 +286,7 @@ export function isFrozen(value: unknown): value is PreviewPlan {
     if (
       plan.configFiles.some(
         (file) =>
-          !relevantConfigurationKeys.has(file.path.toLowerCase()) ||
-          !relevantConfigurationNames.includes(file.path) ||
+          !isConfigurationPath(file.path) ||
           !/^[a-f0-9]{64}$/.test(file.sha256) ||
           !Number.isSafeInteger(file.size) ||
           file.size < 0 ||
@@ -393,10 +407,10 @@ function assertAdmissionAuthority(input: FreezeInput): void {
 function recognizeProject(
   root: string,
 ): { readonly argv: readonly string[]; readonly configFiles: readonly FrozenConfigurationFile[] } | undefined {
-  const files = configurationFiles(root)
+  const files = configurationFiles(root, root)
   const packageFile = files.find((file) => file.path === "package.json")
   if (packageFile === undefined) return undefined
-  const packageJson = parsePackageJson(path.join(root, packageFile.path))
+  const packageJson = parsePackageJson(configurationAbsolutePath(root, packageFile.path))
   const scripts = record(packageJson.scripts)
   const dependencies = { ...record(packageJson.dependencies), ...record(packageJson.devDependencies) }
 
@@ -451,6 +465,7 @@ function freezeArgv(argv: readonly string[]): readonly string[] {
   if (shellExecutables.has(executable) || !allowedExecutables.has(executable) || /[\\/]/.test(executableName)) {
     throw invalid("invalid_preview_configuration", "Preview argv must use an approved direct runtime, never a shell")
   }
+  packageRunScript(argv)
   if (
     argv.some((argument) => /^--?(?:api[-_]?key|authorization|credential|password|secret|token)(?:=|$)/i.test(argument))
   ) {
@@ -462,6 +477,53 @@ function freezeArgv(argv: readonly string[]): readonly string[] {
     throw invalid("invalid_preview_configuration", "Preview argv is not safe to persist")
   }
   return freezeArray([...argv])
+}
+
+function packageRunScript(argv: readonly string[]): string | undefined {
+  const executable = (argv[0] ?? "").toLowerCase()
+  if (bunExecutables.has(executable)) {
+    if (argv[1] !== "run") {
+      throw invalid("invalid_preview_configuration", "Bun previews require an explicit canonical run command")
+    }
+  } else if (!packageManagerExecutables.has(executable)) {
+    return undefined
+  }
+  if (
+    argv.length !== 3 ||
+    argv[1] !== "run" ||
+    typeof argv[2] !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:._-]*$/.test(argv[2])
+  ) {
+    throw invalid(
+      "invalid_preview_configuration",
+      "Package-manager previews require canonical '<manager> run <script>' argv",
+    )
+  }
+  return argv[2]
+}
+
+function validateScriptInvocation(
+  argv: readonly string[],
+  locationRoot: string,
+  configFiles: readonly FrozenConfigurationFile[],
+): void {
+  const script = packageRunScript(argv)
+  if (script === undefined) return
+  const packageFile = [...configFiles].reverse().find((file) => configurationName(file.path) === "package.json")
+  if (packageFile === undefined) {
+    throw invalid(
+      "invalid_preview_configuration",
+      "Package-manager preview script has no frozen package.json in Location",
+    )
+  }
+  const packageJson = parsePackageJson(configurationAbsolutePath(locationRoot, packageFile.path))
+  const configuredScript = record(packageJson.scripts)[script]
+  if (typeof configuredScript !== "string" || configuredScript === "") {
+    throw invalid(
+      "invalid_preview_configuration",
+      "Package-manager preview script is not declared by its nearest package.json",
+    )
+  }
 }
 
 function freezeEnvironment(
@@ -637,52 +699,110 @@ function assertNoAliases(root: string, relative: string): void {
   }
 }
 
-function configurationFiles(cwd: string): readonly FrozenConfigurationFile[] {
-  const entries = readdirSync(cwd, { withFileTypes: true })
-  const aliases = new Map<string, string>()
-  for (const entry of entries) {
-    const key = entry.name.toLowerCase()
-    if (!relevantConfigurationKeys.has(key)) continue
-    const previous = aliases.get(key)
-    if (previous !== undefined && previous !== entry.name) {
-      throw invalid("invalid_preview_configuration", "Preview configuration contains case aliases")
-    }
-    aliases.set(key, entry.name)
-  }
-
+function configurationFiles(locationRoot: string, cwd: string): readonly FrozenConfigurationFile[] {
   let total = 0
   const result: FrozenConfigurationFile[] = []
-  for (const name of relevantConfigurationNames) {
-    const actual = aliases.get(name.toLowerCase())
-    if (actual === undefined) continue
-    if (actual !== name)
-      throw invalid("invalid_preview_configuration", "Preview configuration filename is not canonical")
-    const file = hashConfigurationFile(cwd, name)
-    total += file.size
-    if (total > MAX_CONFIGURATION_BYTES) {
-      throw invalid("invalid_preview_configuration", "Preview configuration exceeds the bounded hash input")
+  for (const directory of configurationDirectories(locationRoot, cwd)) {
+    if (realpathSync.native(directory) !== directory || !statSync(directory).isDirectory()) {
+      throw invalid("invalid_preview_configuration", "Preview configuration directory identity changed")
     }
-    result.push(file)
+    const entries = readdirSync(directory, { withFileTypes: true })
+    const aliases = new Map<string, string>()
+    for (const entry of entries) {
+      const key = entry.name.toLowerCase()
+      if (!relevantConfigurationKeys.has(key)) continue
+      const previous = aliases.get(key)
+      if (previous !== undefined && previous !== entry.name) {
+        throw invalid("invalid_preview_configuration", "Preview configuration contains case aliases")
+      }
+      aliases.set(key, entry.name)
+    }
+    const relativeDirectory = path.relative(locationRoot, directory).split(path.sep).join("/")
+    for (const name of relevantConfigurationNames) {
+      const actual = aliases.get(name.toLowerCase())
+      if (actual === undefined) continue
+      if (actual !== name) {
+        throw invalid("invalid_preview_configuration", "Preview configuration filename is not canonical")
+      }
+      const relative = relativeDirectory === "" ? name : `${relativeDirectory}/${name}`
+      const file = hashConfigurationFile(locationRoot, relative)
+      total += file.size
+      if (total > MAX_CONFIGURATION_BYTES) {
+        throw invalid("invalid_preview_configuration", "Preview configuration exceeds the bounded hash input")
+      }
+      result.push(file)
+    }
   }
   return freezeArray(result)
 }
 
-function hashConfigurationFile(cwd: string, name: string): FrozenConfigurationFile {
-  assertPortableRelativePath(name, false)
-  assertNoAliases(cwd, name)
-  const absolute = path.join(cwd, name)
+function configurationDirectories(locationRoot: string, cwd: string): readonly string[] {
+  assertContained(locationRoot, cwd)
+  const relative = path.relative(locationRoot, cwd)
+  if (relative === "") return [locationRoot]
+  const result = [locationRoot]
+  let current = locationRoot
+  for (const segment of relative.split(path.sep)) {
+    current = path.join(current, segment)
+    result.push(current)
+  }
+  return result
+}
+
+function hashConfigurationFile(locationRoot: string, relative: string): FrozenConfigurationFile {
+  configurationName(relative)
+  assertNoAliases(locationRoot, relative)
+  const absolute = configurationAbsolutePath(locationRoot, relative)
   let canonical: string
   try {
     canonical = realpathSync.native(absolute)
     const info = statSync(canonical)
-    if (!info.isFile() || info.size > MAX_CONFIGURATION_FILE_BYTES) throw new TypeError("not a bounded file")
+    if (canonical !== absolute || !info.isFile() || info.size > MAX_CONFIGURATION_FILE_BYTES) {
+      throw new TypeError("not a canonical bounded file")
+    }
   } catch (error) {
     if (error instanceof Invalid) throw error
-    throw invalid("invalid_preview_configuration", `Preview configuration ${name} is unavailable`)
+    throw invalid("invalid_preview_configuration", `Preview configuration ${relative} is unavailable`)
   }
-  assertContained(cwd, canonical)
+  assertContained(locationRoot, canonical)
   const bytes = readFileSync(canonical)
-  return Object.freeze({ path: name, sha256: sha256(bytes), size: bytes.byteLength })
+  return Object.freeze({ path: relative, sha256: sha256(bytes), size: bytes.byteLength })
+}
+
+function configurationAbsolutePath(locationRoot: string, relative: string): string {
+  configurationName(relative)
+  return path.resolve(locationRoot, ...relative.split("/"))
+}
+
+function configurationName(relative: string): string {
+  if (
+    typeof relative !== "string" ||
+    relative === "" ||
+    relative.includes("\\") ||
+    relative.includes(":") ||
+    relative.includes("%") ||
+    relative !== relative.normalize("NFC") ||
+    relative.startsWith("/") ||
+    /[\u0000-\u001f\u007f]/.test(relative)
+  ) {
+    throw invalid("invalid_preview_configuration", "Preview configuration path is not canonical")
+  }
+  const segments = relative.split("/")
+  const name = segments.pop()
+  if (name === undefined || !relevantConfigurationNames.includes(name)) {
+    throw invalid("invalid_preview_configuration", "Preview configuration filename is not recognized")
+  }
+  if (segments.length > 0) assertPortableRelativePath(segments.join("/"), false)
+  return name
+}
+
+function isConfigurationPath(relative: string): boolean {
+  try {
+    configurationName(relative)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function sameConfiguration(
