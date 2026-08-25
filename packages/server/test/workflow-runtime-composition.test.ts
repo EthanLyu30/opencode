@@ -197,6 +197,11 @@ describe("Workflow route composition", () => {
       materializeReference: () => Effect.die("unused"),
       prepareImplementation: () => Effect.die("unused"),
       capture: () => Effect.die("unused"),
+      lookupEvidence: () => Effect.die("unused"),
+      commitEvidence: () => Effect.die("unused"),
+      releaseEvidence: () => Effect.die("unused"),
+      abandonEvidence: () => Effect.die("unused"),
+      reconcileEvidence: () => Effect.die("unused"),
       recoverExpired: () => Effect.sync(() => (visualRecovered = true)),
     })
     const command = WorkflowCommandSandbox.Service.of({
@@ -418,6 +423,11 @@ function routeReplacementFixture(mode: "normal" | "embedded") {
     materializeReference: () => Effect.die("unused"),
     prepareImplementation: () => Effect.die("unused"),
     capture: () => Effect.die("unused"),
+    lookupEvidence: () => Effect.die("unused"),
+    commitEvidence: () => Effect.die("unused"),
+    releaseEvidence: () => Effect.die("unused"),
+    abandonEvidence: () => Effect.die("unused"),
+    reconcileEvidence: () => Effect.die("unused"),
     recoverExpired: () => Effect.sync(() => (recovered = true)),
   })
   const visualNode = makeGlobalNode({

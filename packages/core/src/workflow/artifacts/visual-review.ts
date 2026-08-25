@@ -8,17 +8,21 @@ import { Workflow } from "@opencode-ai/schema/workflow"
 import { Schema } from "effect"
 import { Hash } from "../../util/hash"
 import { WorkflowSecretGuard } from "../secret-guard"
+import { IMPLEMENTATION_SCREENSHOT_KIND, REFERENCE_SCREENSHOT_KIND, validateEvidenceReceipt } from "../visual-evidence"
+import type { EvidenceReceipt } from "../visual-evidence"
 import { WorkflowDesignArtifact } from "./design"
+
+export { IMPLEMENTATION_SCREENSHOT_KIND, REFERENCE_SCREENSHOT_KIND } from "../visual-evidence"
 
 export const REVIEW_KIND = "workflow.visual-review"
 export const REVIEW_MIME = "application/vnd.opencode.visual-review+json"
-export const REFERENCE_SCREENSHOT_KIND = "workflow.visual.reference-screenshot"
-export const IMPLEMENTATION_SCREENSHOT_KIND = "workflow.visual.implementation-screenshot"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 const ScreenshotPayload = Schema.Struct({
   image: VisualReview.EvidenceImage,
   dataBase64: Schema.String,
+  /** New production captures embed the exact logical host receipt for crash reconciliation. */
+  evidenceReceipt: Schema.optional(Schema.Unknown),
 }).annotate({ identifier: "WorkflowVisualReviewArtifact.ScreenshotPayload", ...exact })
 const ReviewPayload = Schema.Struct({
   workflowID: DesignArtifact.SafeWorkflowID,
@@ -31,9 +35,10 @@ const pngSignature = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 
 
 export interface CapturedImage extends VisualReview.EvidenceImage {
   readonly bytes: Uint8Array
+  readonly evidenceReceipt?: EvidenceReceipt
 }
 
-export function assertPng(bytes: Uint8Array): void {
+export function assertPng(bytes: Uint8Array): { readonly width: number; readonly height: number } {
   if (bytes.byteLength < pngSignature.byteLength + 12) throw new Error("Browser capture is not a complete PNG")
   for (let index = 0; index < pngSignature.byteLength; index++) {
     if (bytes[index] !== pngSignature[index]) throw new Error("Browser capture is not a PNG")
@@ -42,6 +47,8 @@ export function assertPng(bytes: Uint8Array): void {
   let chunkIndex = 0
   let hasIDAT = false
   let hasIEND = false
+  let pngWidth: number | undefined
+  let pngHeight: number | undefined
   while (offset < bytes.byteLength) {
     if (bytes.byteLength - offset < 12) throw new Error("PNG chunk is truncated")
     const view = new DataView(bytes.buffer, bytes.byteOffset + offset, bytes.byteLength - offset)
@@ -74,6 +81,8 @@ export function assertPng(bytes: Uint8Array): void {
       if (data[10] !== 0) throw new Error("PNG IHDR compression method is invalid")
       if (data[11] !== 0) throw new Error("PNG IHDR filter method is invalid")
       if (data[12] !== 0 && data[12] !== 1) throw new Error("PNG IHDR interlace method is invalid")
+      pngWidth = width
+      pngHeight = height
     } else if (type === "IHDR") {
       throw new Error("PNG must contain exactly one leading IHDR chunk")
     }
@@ -88,6 +97,8 @@ export function assertPng(bytes: Uint8Array): void {
   }
   if (!hasIDAT) throw new Error("PNG must contain an IDAT chunk")
   if (!hasIEND) throw new Error("PNG must end with an IEND chunk")
+  if (pngWidth === undefined || pngHeight === undefined) throw new Error("PNG dimensions are missing")
+  return Object.freeze({ width: pngWidth, height: pngHeight })
 }
 
 export function capturedImage(input: {
@@ -96,9 +107,10 @@ export function capturedImage(input: {
   readonly viewport: string
   readonly revision: number
   readonly bytes: Uint8Array
+  readonly evidenceReceipt?: unknown
 }): CapturedImage {
   const workflowID = safeWorkflowID(input.workflowID)
-  assertPng(input.bytes)
+  const dimensions = assertPng(input.bytes)
   if (input.kind === "reference" && input.revision !== 0)
     throw new Error("Reference screenshots must use revision zero")
   const viewport = Schema.decodeUnknownSync(VisualReview.EvidenceImage.fields.viewport)(input.viewport)
@@ -113,21 +125,30 @@ export function capturedImage(input: {
     sha256: Hash.sha256(Buffer.from(input.bytes)),
     size: input.bytes.byteLength,
   })
-  return { ...metadata, bytes: input.bytes }
+  const evidenceReceipt =
+    input.evidenceReceipt === undefined ? undefined : receiptForImage(input.evidenceReceipt, metadata, dimensions)
+  return {
+    ...metadata,
+    bytes: input.bytes,
+    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+  }
 }
 
 export function commitScreenshot(image: CapturedImage): Workflow.ArtifactCommit {
-  assertPng(image.bytes)
-  const { bytes, ...rawMetadata } = image
+  const dimensions = assertPng(image.bytes)
+  const { bytes, evidenceReceipt, ...rawMetadata } = image
   WorkflowSecretGuard.assertSafe(rawMetadata)
   const metadata = Schema.decodeUnknownSync(VisualReview.EvidenceImage)(rawMetadata)
   validateImageIdentity(metadata)
   const sha256 = Hash.sha256(Buffer.from(bytes))
   if (metadata.sha256 !== sha256 || metadata.size !== bytes.byteLength)
     throw new Error("Screenshot metadata does not match its PNG bytes")
+  const normalizedReceipt =
+    evidenceReceipt === undefined ? undefined : receiptForImage(evidenceReceipt, metadata, dimensions)
   const payload = Schema.decodeUnknownSync(ScreenshotPayload)({
     image: metadata,
     dataBase64: Buffer.from(bytes).toString("base64"),
+    ...(normalizedReceipt === undefined ? {} : { evidenceReceipt: normalizedReceipt }),
   })
   const body = WorkflowDesignArtifact.encode(payload)
   const encoded = new TextEncoder().encode(body)
@@ -150,7 +171,7 @@ export function decodeScreenshot(artifact: Workflow.ArtifactCommit, expectedWork
   const bytes = Uint8Array.from(Buffer.from(payload.dataBase64, "base64"))
   if (Buffer.from(bytes).toString("base64") !== payload.dataBase64)
     throw new Error("Screenshot base64 is not canonical")
-  assertPng(bytes)
+  const dimensions = assertPng(bytes)
   const expectedKind = payload.image.kind === "reference" ? REFERENCE_SCREENSHOT_KIND : IMPLEMENTATION_SCREENSHOT_KIND
   const sha256 = Hash.sha256(Buffer.from(bytes))
   const encoded = new TextEncoder().encode(WorkflowDesignArtifact.encode(payload))
@@ -166,7 +187,36 @@ export function decodeScreenshot(artifact: Workflow.ArtifactCommit, expectedWork
   ) {
     throw new Error("Screenshot payload does not match its durable commit")
   }
-  return { ...payload.image, bytes }
+  const evidenceReceipt =
+    payload.evidenceReceipt === undefined
+      ? undefined
+      : receiptForImage(payload.evidenceReceipt, payload.image, dimensions)
+  return {
+    ...payload.image,
+    bytes,
+    ...(evidenceReceipt === undefined ? {} : { evidenceReceipt }),
+  }
+}
+
+function receiptForImage(
+  input: unknown,
+  image: VisualReview.EvidenceImage,
+  dimensions: { readonly width: number; readonly height: number },
+): EvidenceReceipt {
+  const receipt = validateEvidenceReceipt(input)
+  if (
+    receipt.coordinates.workflowID !== image.workflowID ||
+    receipt.coordinates.kind !== image.kind ||
+    receipt.coordinates.viewport.name !== image.viewport ||
+    receipt.coordinates.revision !== image.revision ||
+    receipt.pngSha256 !== image.sha256 ||
+    receipt.evidenceBytes !== image.size ||
+    receipt.width !== dimensions.width ||
+    receipt.height !== dimensions.height
+  ) {
+    throw new Error("Screenshot evidence receipt does not match its image")
+  }
+  return receipt
 }
 
 function validateImageIdentity(image: VisualReview.EvidenceImage): void {
@@ -210,7 +260,7 @@ function crc32(type: Uint8Array, data: Uint8Array): number {
 }
 
 export function reviewMessage(spec: unknown, images: ReadonlyArray<CapturedImage>): Message {
-  const evidence = images.map(({ bytes: _, ...image }) => image)
+  const evidence = images.map(({ bytes: _, evidenceReceipt: __, ...image }) => image)
   Schema.decodeUnknownSync(VisualReview.Artifact)(placeholderReview(evidence))
   return Message.user([
     {

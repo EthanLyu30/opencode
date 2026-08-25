@@ -1,0 +1,115 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-08-21-opencode-production-visual-host.md
+
+Spec: `docs/superpowers/specs/2026-08-21-opencode-production-visual-host-design.md` (approved and frozen)
+
+Start HEAD: `b183b7a67`
+
+## Preflight rulings
+
+- Ruling: Execute in the existing `dev` checkout — the user explicitly directed work to continue on `dev` and previously rejected recurring isolation branches — cost if wrong: Task23 commits are visible on local `dev` before final review, but each task remains independently revertible.
+- Ruling: Treat new admitted Workflow placement/session/agent fields as mandatory in Core admission while keeping wire/event projection fields optional only for historical terminal rows — the spec requires legacy decode compatibility but forbids new unbound active work — cost if wrong: a separate event-version migration may be required.
+- Ruling: Enforce role permissions with immutable hidden role-agent profiles as well as ToolRegistry catalog filtering — existing leaf tools authorize from the invocation agent, so filtering definitions alone is insufficient — cost if wrong: the role-agent installation layer will need redesign without changing the public Workflow contract.
+- Ruling: Put the real preview/process/Playwright implementation in `packages/server` and the provider-independent service contract in Core — `packages/server/src/routes.ts` is the current runtime replacement boundary and avoids Core browser dependencies — cost if wrong: the adapter may need to move to an OpenCode runtime package and route construction must become injectable.
+- Ruling: Use EventV2 cross-aggregate related batches for Session + Workflow + Response admission — the existing event layer commits related durable events and projectors in one transaction — cost if wrong: EventV2 will require a narrower admission transaction primitive before Task23.8 can complete.
+- Ruling: Paid provider smoke remains excluded — the frozen spec requires a separate explicit ceiling; all Task23 standard work uses recorded/fake transports — cost if wrong: live credential/provider drift will remain untested until the user authorizes it.
+
+## Preflight task self-consistency
+
+| Task | Tests versus implementation/files | Result |
+| --- | --- | --- |
+| 23.1 | Placement RED tests map to Schema, SQL, projector, store, migration, and legacy claim behavior. | Consistent after legacy-required ruling above. |
+| 23.2 | Graph/replay/projector/execution tests map to graph expansion, Stage.Skipped, and atomic related settlement. | Consistent. |
+| 23.3 | Hostile codec tests map to four focused Schema/Core artifact modules and chain validation. | Consistent; Schema test is a new file. |
+| 23.4 | Real Location tests cover catalog visibility and leaf authorization; implementation includes role-agent profiles. | Consistent after role-agent ruling above. |
+| 23.5 | Preview-plan/host fake tests cover public payload, frozen command/config, containment, URL, and evidence caps. | Consistent. |
+| 23.6 | Offline runtime tests cover loopback serving, Playwright policy, teardown, and runtime dependency ownership. | Consistent; `packages/server/test` is created by this task. |
+| 23.7 | Role tests cover every required business artifact, snapshot, Kimi paired media, and atomic settlement inputs. | Consistent. |
+| 23.8 | Projector-failure/idempotency tests cover one related EventV2 admission and exact reconciliation. | Consistent under EventV2 ruling above. |
+| 23.9 | Protocol/SDK tests cover a Location-derived payload and deterministic generated clients. | Consistent; generated files are not edited manually. |
+| 23.10 | CLI process tests cover command/help/progress/cancel/JSON/exit status and dedicated implementation files. | Consistent. |
+| 23.11 | Recorded E2E, crash workers, cancellation, replay, host security, and secret scans match the acceptance matrix. | Consistent; source changes are restricted to failures exposed by acceptance. |
+| 23.12 | Deployment tests precede scripts; offline gates precede authorized push/build/atomic D deployment. | Consistent; user already authorized push and local deployment. |
+
+## Shared file/interface scan
+
+| Tasks | Producer → consumer / shared surface | Finding |
+| --- | --- | --- |
+| 23.1 ↔ 23.2 | Persisted stages/projector → skip projection and graph replay. | Compatible; 23.2 builds only after placement migration is green. |
+| 23.1 ↔ 23.4 | `Workflow.Info.location/sessionID/agent` → Location tool execution. | Compatible; missing legacy values fail before providers. |
+| 23.1 ↔ 23.8 | `Workflow.AdmissionInput`/projection → atomic product admission. | Compatible; Task23.8 reuses rather than duplicates normalization. |
+| 23.2 ↔ 23.4 | `executor.ts`/`execution/local.ts` shared by branch and tool settlement. | Compatible; 23.4 preserves 23.2 related skip events. |
+| 23.2 ↔ 23.7 | Graph/outcome authority → role artifacts and final settlement. | Compatible; artifact hash drives `unreachableAfter`. |
+| 23.2 ↔ 23.8 | `expandVisualBuild` → admitted frozen stages. | Compatible. |
+| 23.2 ↔ 23.11 | skip/replay/crash behavior → acceptance workers. | Compatible. |
+| 23.3 ↔ 23.7 | strict codec helpers → role executor required artifacts. | Compatible; no provider adapter owns business codecs. |
+| 23.3 ↔ 23.11 | artifact chain → E2E assertions/hostile fixtures. | Compatible. |
+| 23.4 ↔ 23.7 | `model.ts`/`executor.ts` and role tool policies shared. | Compatible; 23.7 supplies role contract/messages without restoring global tools. |
+| 23.4 ↔ 23.8 | real hidden Session identity → atomic Session admission. | Compatible. |
+| 23.4 ↔ 23.11 | pending intent/result semantics → crash acceptance. | Compatible. |
+| 23.5 ↔ 23.6 | Core `WorkflowVisualHost`/PreviewPlan → Server production layer. | Compatible under runtime ownership ruling. |
+| 23.5 ↔ 23.7 | host fake/contracts → role visual orchestration. | Compatible. |
+| 23.5 ↔ 23.8 | `WorkflowVisualBuild.CreateInput` and frozen plan → request hashing/admission. | Compatible. |
+| 23.5 ↔ 23.9 | public payload schema → Protocol endpoint/client generation. | Compatible; placement remains absent. |
+| 23.6 ↔ 23.7 | managed runtime host → Kimi capture path. | Compatible; production role code sees only the Core service. |
+| 23.6 ↔ 23.9 | `packages/server/src/routes.ts` layer composition and API route wiring. | Compatible; 23.9 must retain VisualHost replacement. |
+| 23.6 ↔ 23.11 | preview/browser security → adversarial runtime tests. | Compatible. |
+| 23.7 ↔ 23.8 | executable complete graph → admission wake. | Compatible; wake occurs only after atomic batch. |
+| 23.7 ↔ 23.11 | role/snapshot/media flow → recorded repair scenario. | Compatible. |
+| 23.8 ↔ 23.9 | `WorkflowAdmission.Service` → Location-aware HTTP handler. | Compatible. |
+| 23.8 ↔ 23.11 | atomic creation/reconciliation → admission crash cases. | Compatible. |
+| 23.9 ↔ 23.10 | generated client operation/SSE → CLI command. | Compatible; CLI does not call Core directly. |
+| 23.9 ↔ 23.11 | embedded API → full SDK acceptance. | Compatible. |
+| 23.10 ↔ 23.12 | CLI command/help/offline flow → deployed launcher smoke. | Compatible. |
+| 23.11 ↔ 23.12 | clean offline acceptance → release gate/deployment authorization. | Compatible; no live API smoke is implied. |
+
+## Task progress
+
+Task 23.1: fix round 1/5 (3 addressed, 0 open — normalized workspace-less retry; reconciled concurrent legacy recovery; added exact/concurrent tests; commits `70b5c462a..3ac563a51`)
+Task 23.1: complete (commits `b183b7a67..3ac563a51`, review clean)
+Task 23.2: Ruling: convert four routing state-authority fixtures from unbound generic create to internal admission — they were meant to exercise routing, not legacy placement recovery, and leaving them unbound made the full file fail before its subject — cost if wrong: tests may need a dedicated admission fixture helper when atomic admission lands.
+Task 23.2: fix round 1/5 (4 addressed, 0 open — exact skip-set authority; invalid outcome atomic failure; Response terminal batch proof; routing fixture admission; commits `9e7787071..0c05eead5`)
+Task 23.2: complete (commits `3ac563a51..0c05eead5`, review clean)
+Task 23.3: fix round 1/5 (1 addressed, 0 open — aggregate decomposition topology rejects cross-task aliases while permitting exact repeats; commits `4ab68c2ea..024f8ed62`)
+Task 23.3: complete (commits `0c05eead5..024f8ed62`, review clean)
+Task 23.4: in progress (base `024f8ed62`)
+Task 23.4: Ruling: keep provider-visible `bash`, but route reserved workflow roles only through a Location-scoped `WorkflowCommandSandbox`; Core has no host fallback and fails typed-unavailable until Server installs the production backend — deleting shell capability would violate the frozen role contract — cost if wrong: Task 23.6/23.12 must supply and deploy the pinned sandbox runtime before production workflows can execute commands.
+Task 23.4: Ruling: Task 23.6 owns the production Docker command-sandbox backend alongside the visual host; Task 23.12 owns pinned-image import/digest verification, D-drive storage verification, and the real local sandbox smoke — runtime ownership belongs in Server/deployment, not Core — cost if wrong: deployment remains intentionally fail-closed and cannot be declared production-ready.
+Task 23.4: fix round 1/5 (generic host Bash denied; immutable Location-owned role profiles; recovery catalog fingerprint; foreign-Location Session preflight; commit `2a06933d7`)
+Task 23.4: fix round 2/5 (provider-visible `bash` restored through injectable sandbox; executable WSL2 test backend; production fail-closed; commit `e9cc2d549`)
+Task 23.4: fix round 3/5 (public reserved-agent rejection; persisted workflow/stage/policy lineage; commit `7538585f5`)
+Task 23.4: fix round 4/5 (removed synthetic mint/settle bypass; store-verified workflow settlement authority; commit `a34f62ccc`)
+Task 23.4: fix round 5/5 (bound materializations to the exact active Location registry; cross-Location zero-side-effect regression; commit `b2a699ec3`)
+Task 23.4: complete (commits `024f8ed62..b2a699ec3`, review clean; 114/114 required tests, 21/21 public Session boundary tests, Core typecheck clean)
+Task 23.5: fix round 1/5 (bound canonical Location root/cwd identity and rejected junction/case/deletion swaps; commit `446308671`)
+Task 23.5: fix round 2/5 (froze the complete root-to-cwd package/config resolution chain and canonical package-manager grammar; commit `66751bc66`)
+Task 23.5: fix round 3/5 (bound direct Node entrypoint identity and nested package scope; commit `0f794d467`)
+Task 23.5: fix round 4/5 (isolated Bun dotenv authority, rejected unisolated managers, and canonicalized capability URLs; commit `882602ee7`)
+Task 23.5: fix round 5/5 (froze recognized Vite/Next dotenv policy and late-file absence; commit `43141d8ac`)
+Task 23.5: post-review security hardening (automatic Bun lifecycle `pre*`/`post*` hooks rejected; explicit scripts remain the user-owned trust boundary; commit `303b33c16`)
+Task 23.5: Ruling: automatic Vite recognition with an unprovable custom `envDir`, package-manager runtimes other than isolated Bun, and recognized projects with lifecycle hooks fail closed into explicit trusted preview configuration — runtime authority must be deterministic at admission — cost if wrong: some existing projects require explicit preview settings until the production host grows a stronger isolated adapter.
+Task 23.5: complete (commits `b2a699ec3..303b33c16`, review clean; 148/148 focused tests, Schema/Core typechecks clean)
+Task 23.6A: Ruling: native bare-PID script preview spawning is not a production ownership boundary; Phase A uses an authenticated `ProcessOwnership` contract and fails closed until Phase B provides label/lease-authenticated Docker ownership — restart recovery must never kill an unverified PID — cost if wrong: script previews remain unavailable until the Docker backend is installed.
+Task 23.6A: Ruling: persistent screenshot evidence uses an ACL-owned host-root SQLite ledger with strict DB/WAL/SHM identity checks; production layer remains fail closed until Phase B validates the deployment ACL/root policy — Bun SQLite exposes a pathname rather than a no-follow file descriptor — cost if wrong: static/reference production capture remains unavailable rather than risking redirected durable writes.
+Task 23.6A: fix rounds 1-4 (redirect/WebSocket default-deny; private script capture origin; cancellation/resource bounds; authenticated process ownership; restart evidence cap; acquisition cleanup; ledger path/handle hardening; commits `63d2ff31c..01010e07e`)
+Task 23.6A: complete (commits `47cbf9b2c..01010e07e`, review clean; Server 32/32 and Core visual-host 148/148 focused tests, typechecks clean; real Chromium deferred to Task 23.12)
+Task 23.6B1: minor (deferred): test fixtures share one fixed suite directory, so concurrent runs could interfere; final review must triage whether per-run isolation is required.
+Task 23.6B1: Ruling: verify command settlement lineage from the persisted Stage `workflow.model.continuation` pending call plus its deterministic assistant-message ID, not from a Session assistant row that Workflow model execution does not persist — this is the durable intent-before-side-effect authority and avoids making every Workflow Bash call fail closed — cost if wrong: Workflow model execution must start projecting equivalent hidden Session tool-message rows and B1 must bind to them before production use.
+Task 23.6B1: fix round 1/5 (7 addressed, 0 open — pending-call/message lineage; fresh pre-start authority; nested junction recheck; container-vs-engine exit; abort race; recovery cleanup/error typing; mutation coverage; commits `9f578447e..14da4abce`)
+Task 23.6B1: complete (commits `01010e07e..14da4abce`, review clean; Server 92/92 and Core 18/18 focused tests, typechecks and lint clean; real Docker deferred to Task 23.12)
+Task 23.6B2: Ruling: Docker-owned script previews use an exact label-owned internal bridge with a single `127.0.0.1` published port, while the command sandbox remains `--network none` — Docker's official contract gives internal networks no external route but still permits host-published service access — cost if wrong: Task 23.12's real Docker Desktop smoke will fail and the preview adapter must move to a reviewed relay/sidecar or stricter host networking mechanism before deployment.
+Task 23.6B2: Ruling: production ACL validation may invoke a fixed absolute Windows system probe with fixed code and a minimal D-temp environment — Node/Bun do not expose a portable DACL API, and a fake path-only policy would not satisfy the frozen root-ownership requirement — cost if wrong: replace the probe with a native FFI helper without changing the EvidenceLedger policy contract.
+Task 23.6B2: Ruling: when cancellation/deadline arrives after Docker has returned an untrusted network/container ID, allow one bounded post-rejection exact ownership inspection before cleanup — without authenticating the returned ID the host must leak it rather than risk killing a foreign resource — cost if wrong: a hostile/stalled daemon can retain an orphan until startup recovery, but cannot expand cleanup authority beyond exact labels.
+Task 23.6B2: Ruling: the post-rejection ownership inspection/cleanup allowed above must be detached from `ProcessOwnership.start` once its absolute deadline fires — the caller deadline is authoritative even when Docker returned an untrusted ID; startup recovery remains the backstop — cost if wrong: a daemon that stalls the detached cleanup may retain a label-owned orphan until the next recovery pass.
+Task 23.6B2: fix round 1/5 (8 addressed, 0 open — caller-bound absolute deadline with detached bounded orphan cleanup; numeric ACL masks with applicable denies, direct-user allow, and descriptor fingerprinting; exact expiry fence; per-write capability guards; bridge authentication; exited-container cleanup; actual normal/embedded route graph proof; two ACL probes per evidence boundary)
+Task 23.6B2: fix round 1 post-review closure (delayed Docker visibility and engine-side rejection now use one hard-expiry exact-name observer; container cleanup preserves the network until authentication; returned route graphs acquired through real WebHandlers; final independent review CLEAN; Server 169/169, Core 18/18)
+Task 23.6B3: Ruling: persist capture bytes in an ACL-owned D-drive SQLite staging state machine keyed by Workflow/Stage/kind/revision/viewport/config/capture contract; stage checkpoints cannot carry up to 128 MiB and the current counter-only ledger loses PNG bytes after a crash — cost if wrong: Task23.7/23.11 cannot satisfy crash-after-PNG exactly-once, quota, or evidence-before-cleanup acceptance.
+Task 23.6B3: Ruling: staging is not a business artifact and never authorizes branching; only the existing atomic EventV2 stage/artifact/skip/Workflow/Response batch can do so, after which exact commit/release may clear the staged BLOB while retaining its accounting tombstone — cost if wrong: a separate atomic artifact-blob store transaction must replace this two-phase handoff.
+Task 23.6B3: Ruling: logical evidence identity binds the validated reference-app hash or a trusted implementation Snapshot/manifest SHA-256 plus ready-selector hash; neither identity field is accepted by `PrepareImplementationInput`/`CaptureInput`, and production requires a `resolveImplementationContract` authority seam or fails typed-unavailable before capability creation — Task23.7 must install the seam from strict durable design+implementation/snapshot owner/revision/Location/source validation; Server does not independently claim that future authority now — cost if wrong: implementation visual capture remains intentionally unavailable rather than accepting caller-controlled stale evidence identity.
+Task 23.6B3: Ruling: evidence commitment requires the complete durable screenshot `Workflow.Artifact` identity (including canonical `timeCreated` epoch) plus PNG/evidence/receipt hashes, and the screenshot payload embeds the exact receipt; artifact SHA alone cannot prove workflow/stage/kind/URI/MIME/size/time ownership after an EventV2-to-release crash — cost if wrong: Task23.7 must reload and bind the projected Artifact before release, retaining staging if projection authority is unavailable.
+Task 23.6B3: Ruling: persist a `capturing` owner intent before browser invocation and retain foreign/orphan intents as typed ambiguous evidence; durable failed/cancelled authority alone may create an `abandoned` tombstone, while an exact in-process owner may clear only its explicitly failed/cancelled pre-byte intent — cost if wrong: crash-after-browser-admission could silently recapture and duplicate non-idempotent visual evidence.
+Task 23.6B3: Ruling: Windows ACL descriptor probes fence each public EvidenceLedger operation/transaction at most before and after, while every SQL boundary keeps cheap root/main-file/sidecar identity guards and hooks; the opened main database device/inode/birth identity is immutable — cost if wrong: per-SQL PowerShell amplification can block the event loop, or a same-path database replacement can split verified path state from the live SQLite handle.
+Task 23.6B3: Ruling: callers provide exact logical evidence coordinates but never a parallel evidence ID; the sole canonical encoder derives ID, while a durable receipt binds ID+coordinates+PNG facts and recovery abandonment requires that receipt plus exact failed/cancelled authority — cost if wrong: caller-controlled or naked IDs could clear/reclassify an unrelated staged BLOB after a hash/key disagreement.
+Task 23.6B3: Ruling: an acquired SQLite handle is owned before the `open` post-check and is closed on any rejected post-boundary identity check; successful transfer occurs only after schema/integrity/root validation — cost if wrong: a rejected hardlink/path mutation can leak a live Windows handle and prevent safe recovery or cleanup.
+Task 23.6B3: Ruling: screenshot artifacts with an embedded evidence receipt strict-validate and normalize that receipt at capture/commit/decode, including exact image identity/hash/size/IHDR dimensions; legacy absent receipt remains compatible — cost if wrong: malformed receipt data could be projected as a self-consistent artifact and only fail during later staging settlement.
+Task 23.6B3: post-review closure (artifact-codec-independent canonical evidence helper; trusted implementation-contract seam with absence fail-close; complete Artifact timestamp binding; fatal post-fence precedence/latch; strict screenshot receipt codec; independent re-review CLEAN; Core 38/38, Server 181/181, typechecks/lint/diff-check clean).
+Task 23.6B3: implementation complete (Core identity/fake; Server durable intent/BLOB/quota/binding/recovery; trusted source/selector contract seam; evidence-ID single-flight; no Task23.7 branching).

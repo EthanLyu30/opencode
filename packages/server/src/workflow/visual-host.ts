@@ -2,7 +2,6 @@ export * as WorkflowVisualHostServer from "./visual-host"
 
 import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { WorkflowDesignArtifact } from "@opencode-ai/core/workflow/artifacts/design"
-import { WorkflowVisualReviewArtifact } from "@opencode-ai/core/workflow/artifacts/visual-review"
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowSecretGuard } from "@opencode-ai/core/workflow/secret-guard"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
@@ -30,6 +29,7 @@ interface HostRecord {
   readonly directory: string
   readonly workspace?: string
   readonly createdAt: number
+  readySelector?: string
   allowedOrigins: readonly string[]
   captureURL?: string
   processIdentity?: ProcessOwnership.Identity
@@ -55,6 +55,11 @@ export interface Options {
   readonly maxProcessLogBytes?: number
   readonly onSpawnArgv?: (argv: readonly string[]) => void
   readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
+  /**
+   * Trusted host seam. Task23.7 supplies a resolver backed by exact durable
+   * design + implementation/snapshot authority; absence fails closed.
+   */
+  readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
 }
 
 export function makeLayer(options: Options): Layer.Layer<WorkflowVisualHost.Service, WorkflowVisualHost.Failure> {
@@ -76,6 +81,11 @@ export function makeLayer(options: Options): Layer.Layer<WorkflowVisualHost.Serv
         materializeReference: (input) => materializeReference(state, input),
         prepareImplementation: (input) => prepareImplementation(state, input),
         capture: (input) => capture(state, input),
+        lookupEvidence: (input) => lookupEvidence(state, input),
+        commitEvidence: (input) => bindEvidence(state, "commit", input),
+        releaseEvidence: (input) => bindEvidence(state, "release", input),
+        abandonEvidence: (input) => abandonEvidence(state, input),
+        reconcileEvidence: (input) => reconcileEvidence(state, input),
         recoverExpired: (input) => recoverExpired(state, input),
       })
     }),
@@ -87,6 +97,7 @@ export interface ProductionLayerOptions {
   readonly engine?: Docker.Engine
   readonly aclProbe?: HostRootPolicy.Probe
   readonly browser?: PlaywrightCapture.Runtime
+  readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
 }
 
 export function productionLayer(input: ProductionLayerOptions) {
@@ -124,6 +135,7 @@ export function productionLayer(input: ProductionLayerOptions) {
         config,
         hostRoot: policy.roots.tempRoot,
       }),
+      resolveImplementationContract: input.resolveImplementationContract,
     })
     return configured.pipe(Layer.catch(() => WorkflowVisualHost.unavailableLayer))
   } catch {
@@ -150,6 +162,7 @@ interface State {
   readonly maxProcessLogBytes: number
   readonly onSpawnArgv?: (argv: readonly string[]) => void
   readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
+  readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
 }
 
 async function makeState(options: Options): Promise<State> {
@@ -193,6 +206,7 @@ async function makeState(options: Options): Promise<State> {
     maxProcessLogBytes,
     onSpawnArgv: options.onSpawnArgv,
     onRecordCreated: options.onRecordCreated,
+    resolveImplementationContract: options.resolveImplementationContract,
   }
 }
 
@@ -235,10 +249,15 @@ function materializeReference(
       record.preview = WorkflowVisualHost.preparedPreview({
         hostID: record.hostID,
         url: capabilityURL(record),
+        workflowID: input.workflowID,
+        kind: "reference",
         revision: 0,
         configSha256: reference.configSha256,
+        sourceSha256: reference.configSha256,
+        readySelectorSha256: createHash("sha256").update(reference.readySelector).digest("hex"),
         scope,
       })
+      record.readySelector = reference.readySelector
       return record.preview
     }),
   )
@@ -253,7 +272,12 @@ function prepareImplementation(
       const scope = yield* Scope.Scope
       yield* Effect.try({
         try: () => {
-          if (!Number.isSafeInteger(input.revision) || input.revision < 0 || !PreviewPlan.isFrozen(input.plan)) {
+          if (
+            !hasExactKeys(input, ["workflowID", "revision", "plan"]) ||
+            !Number.isSafeInteger(input.revision) ||
+            input.revision < 0 ||
+            !PreviewPlan.isFrozen(input.plan)
+          ) {
             throw new TypeError("invalid plan")
           }
           PreviewPlan.verifyConfiguration(input.plan)
@@ -269,6 +293,26 @@ function prepareImplementation(
           cause instanceof WorkflowVisualHost.Failure
             ? cause
             : failure("prepare_implementation", "invalid_preview_plan", "Preview plan is not frozen"),
+      })
+      const resolveImplementationContract = state.resolveImplementationContract
+      if (resolveImplementationContract === undefined) {
+        return yield* failure(
+          "prepare_implementation",
+          "visual_host_unavailable",
+          "Trusted implementation capture authority is unavailable",
+        )
+      }
+      const contract = yield* Effect.tryPromise({
+        try: async () =>
+          WorkflowVisualHost.validateImplementationCaptureContract(await resolveImplementationContract(input)),
+        catch: (cause) =>
+          cause instanceof WorkflowVisualHost.Failure
+            ? cause
+            : failure(
+                "prepare_implementation",
+                "invalid_preview_plan",
+                "Implementation capture authority rejected the durable contract",
+              ),
       })
       const record = yield* Effect.tryPromise({
         try: () => createRecord(state, String(input.workflowID), input.plan.locationRoot),
@@ -337,10 +381,15 @@ function prepareImplementation(
       record.preview = WorkflowVisualHost.preparedPreview({
         hostID: record.hostID,
         url: capabilityURL(record),
+        workflowID: input.workflowID,
+        kind: "implementation",
         revision: input.revision,
         configSha256: input.plan.configSha256,
+        sourceSha256: contract.implementationSha256,
+        readySelectorSha256: createHash("sha256").update(contract.readySelector).digest("hex"),
         scope,
       })
+      record.readySelector = contract.readySelector
       return record.preview
     }),
   )
@@ -356,46 +405,66 @@ function capture(
       if (record === undefined || record.released || record.preview !== input.preview) {
         throw failure("capture", "invalid_preview_handle", "Capture requires an active preview handle")
       }
-      return withCaptureLock(state, record.workflowID, signal, async () => {
+      const coordinates = WorkflowVisualHost.evidenceCoordinates(input)
+      const evidenceID = WorkflowVisualHost.evidenceID(coordinates)
+      return withCaptureLock(state, evidenceID, signal, async () => {
         if (record.released || state.active.get(record.hostID) !== record) {
           throw failure("capture", "invalid_preview_handle", "Capture requires an active preview handle")
         }
-        const viewport = validateViewport(input.viewport)
-        if (typeof input.readySelector !== "string" || input.readySelector.length === 0) {
-          throw failure("capture", "capture_failed", "Capture requires a ready selector")
+        const readySelector = record.readySelector
+        if (readySelector === undefined) {
+          throw failure("capture", "capture_failed", "Prepared preview has no host-minted ready selector")
         }
-        const used = await state.evidence.used(record.workflowID)
-        if (used >= WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
-          throw failure("capture", "workflow_evidence_limit_exceeded", "Workflow evidence exceeds 128 MiB")
+        const ownerNonce = randomBytes(32).toString("hex")
+        const intent = await state.evidence.beginCapture({ coordinates, ownerNonce, now: state.now() })
+        if (intent.status === "existing") return capturedFromLedgerItem(intent.item, "capture")
+        if (intent.status === "terminal") {
+          throw failure(
+            "capture",
+            intent.item.state === "released" ? "evidence_released" : "evidence_abandoned",
+            "Screenshot evidence is already owned by durable terminal authority",
+          )
         }
-        const bytes = await state.browser.capture({
-          url: record.captureURL ?? input.preview.url,
-          viewport,
-          readySelector: input.readySelector,
-          allowedOrigins: record.allowedOrigins,
-          signal,
-        })
-        if (bytes.byteLength > WorkflowVisualHost.MAX_IMAGE_BYTES) {
-          throw failure("capture", "image_evidence_limit_exceeded", "Screenshot exceeds 8 MiB")
+        if (intent.status === "ambiguous") {
+          throw failure(
+            "capture",
+            "evidence_capture_ambiguous",
+            "A durable capture intent belongs to another or crashed owner",
+          )
         }
-        validatePng(bytes, viewport)
-        if (
-          !(await state.evidence.reserve(
-            record.workflowID,
-            bytes.byteLength,
-            WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
-          ))
-        ) {
-          throw failure("capture", "workflow_evidence_limit_exceeded", "Workflow evidence exceeds 128 MiB")
+        let completed = false
+        try {
+          if ((await state.evidence.used(record.workflowID)) >= WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
+            throw failure("capture", "workflow_evidence_limit_exceeded", "Workflow evidence exceeds 128 MiB")
+          }
+          const viewport = validateViewport(input.viewport)
+          const bytes = await state.browser.capture({
+            url: record.captureURL ?? input.preview.url,
+            viewport,
+            readySelector,
+            allowedOrigins: record.allowedOrigins,
+            signal,
+          })
+          const image = WorkflowVisualHost.capturedImage(coordinates, bytes)
+          const item = await state.evidence.completeCapture({
+            receipt: image.receipt,
+            bytes: image.bytes,
+            ownerNonce,
+            now: state.now(),
+            limit: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+          })
+          completed = true
+          return capturedFromLedgerItem(item, "capture")
+        } catch (cause) {
+          if (!completed) {
+            try {
+              await state.evidence.clearCapture({ coordinates, ownerNonce })
+            } catch {
+              throw new Error("Capture failed and its exact durable intent could not be cleared", { cause })
+            }
+          }
+          throw cause
         }
-        return Object.freeze({
-          bytes,
-          viewport: Object.freeze({ ...input.viewport }),
-          width: viewport.width,
-          height: viewport.height,
-          sha256: createHash("sha256").update(bytes).digest("hex"),
-          evidenceBytes: bytes.byteLength,
-        })
       })
     },
     catch: (cause) =>
@@ -405,25 +474,116 @@ function capture(
   })
 }
 
+function lookupEvidence(
+  state: State,
+  input: WorkflowVisualHost.LookupEvidenceInput,
+): Effect.Effect<WorkflowVisualHost.CapturedImage | undefined, WorkflowVisualHost.Failure> {
+  return Effect.tryPromise({
+    try: async () => {
+      const item = await state.evidence.get(input.coordinates)
+      return item === undefined ? undefined : capturedFromLedgerItem(item, "lookup_evidence")
+    },
+    catch: (cause) => evidenceFailure("lookup_evidence", cause),
+  })
+}
+
+function bindEvidence(
+  state: State,
+  operation: "commit" | "release",
+  input: WorkflowVisualHost.BindEvidenceInput,
+): Effect.Effect<WorkflowVisualHost.EvidenceSummary, WorkflowVisualHost.Failure> {
+  return Effect.tryPromise({
+    try: async () =>
+      evidenceSummary(
+        operation === "commit"
+          ? await state.evidence.commit(input, state.now())
+          : await state.evidence.release(input, state.now()),
+      ),
+    catch: (cause) => evidenceFailure(operation === "commit" ? "commit_evidence" : "release_evidence", cause),
+  })
+}
+
+function abandonEvidence(
+  state: State,
+  input: WorkflowVisualHost.AbandonEvidenceInput,
+): Effect.Effect<WorkflowVisualHost.EvidenceSummary, WorkflowVisualHost.Failure> {
+  return Effect.tryPromise({
+    try: async () => evidenceSummary(await state.evidence.abandon(input, state.now())),
+    catch: (cause) => evidenceFailure("abandon_evidence", cause),
+  })
+}
+
+function reconcileEvidence(
+  state: State,
+  input: WorkflowVisualHost.ReconcileEvidenceInput,
+): Effect.Effect<WorkflowVisualHost.ReconcileEvidenceResult, WorkflowVisualHost.Failure> {
+  return Effect.tryPromise({
+    try: () => state.evidence.reconcile(input, state.now()),
+    catch: (cause) => evidenceFailure("reconcile_evidence", cause),
+  })
+}
+
+function capturedFromLedgerItem(
+  item: EvidenceLedger.Item,
+  operation: "capture" | "lookup_evidence",
+): WorkflowVisualHost.CapturedImage {
+  if (item.state === "released") {
+    throw failure(operation, "evidence_released", "Released evidence is owned by its durable artifact")
+  }
+  if (item.state === "abandoned") {
+    throw failure(operation, "evidence_abandoned", "Abandoned evidence is a terminal accounting tombstone")
+  }
+  if (item.state === "capturing") {
+    throw failure(operation, "evidence_capture_ambiguous", "Capture intent has no durable PNG result")
+  }
+  if (item.receipt === undefined || item.bytes === undefined) {
+    throw new TypeError("Active evidence has no exact durable receipt and BLOB")
+  }
+  return WorkflowVisualHost.restoreCapturedImage({ receipt: item.receipt, bytes: item.bytes })
+}
+
+function evidenceSummary(item: EvidenceLedger.Item): WorkflowVisualHost.EvidenceSummary {
+  return Object.freeze({
+    evidenceID: item.evidenceID,
+    coordinates: item.coordinates,
+    ...(item.receipt === undefined ? {} : { receipt: item.receipt }),
+    state: item.state,
+    ...(item.artifact === undefined ? {} : { artifact: item.artifact }),
+    ...(item.abandonment === undefined ? {} : { abandonment: item.abandonment }),
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  })
+}
+
+function evidenceFailure(
+  operation: WorkflowVisualHost.Failure["operation"],
+  cause: unknown,
+): WorkflowVisualHost.Failure {
+  if (cause instanceof WorkflowVisualHost.Failure) {
+    return new WorkflowVisualHost.Failure({ operation, code: cause.code, message: cause.message })
+  }
+  return failure(operation, "invalid_evidence_receipt", "Durable screenshot evidence is invalid or conflicting")
+}
+
 async function withCaptureLock<A>(
   state: State,
-  workflowID: string,
+  evidenceID: string,
   signal: AbortSignal,
   run: () => Promise<A>,
 ): Promise<A> {
-  const previous = state.captureTails.get(workflowID) ?? Promise.resolve()
+  const previous = state.captureTails.get(evidenceID) ?? Promise.resolve()
   let release: () => void = () => {}
   const gate = new Promise<void>((resolve) => {
     release = resolve
   })
   const tail = previous.then(() => gate)
-  state.captureTails.set(workflowID, tail)
+  state.captureTails.set(evidenceID, tail)
   try {
     await waitForSignal(previous, signal)
     return await run()
   } finally {
     release()
-    if (state.captureTails.get(workflowID) === tail) state.captureTails.delete(workflowID)
+    if (state.captureTails.get(evidenceID) === tail) state.captureTails.delete(evidenceID)
   }
 }
 
@@ -655,6 +815,7 @@ async function settleWithin(work: PromiseLike<unknown> | undefined, timeoutMs: n
 
 function validateReference(reference: WorkflowDesignArtifact.ReferenceApp): {
   readonly entrypoint: string
+  readonly readySelector: string
   readonly files: readonly { readonly path: string; readonly content: string }[]
   readonly configSha256: string
 } {
@@ -691,6 +852,7 @@ function validateReference(reference: WorkflowDesignArtifact.ReferenceApp): {
   WorkflowSecretGuard.assertSafe(reference)
   return {
     entrypoint: reference.entrypoint,
+    readySelector: reference.readySelector,
     files,
     configSha256: createHash("sha256")
       .update(
@@ -724,14 +886,6 @@ function validateViewport(viewport: WorkflowVisualHost.CaptureInput["viewport"])
     throw failure("capture", "invalid_viewport", "Viewport is not bounded")
   }
   return { width: viewport.width, height: viewport.height }
-}
-
-function validatePng(bytes: Uint8Array, viewport: { readonly width: number; readonly height: number }): void {
-  WorkflowVisualReviewArtifact.assertPng(bytes)
-  const dimensions = new DataView(bytes.buffer, bytes.byteOffset + 16, 8)
-  if (dimensions.getUint32(0) !== viewport.width || dimensions.getUint32(4) !== viewport.height) {
-    throw new TypeError("PNG dimensions differ from viewport")
-  }
 }
 
 function validSourcePath(value: unknown): value is string {

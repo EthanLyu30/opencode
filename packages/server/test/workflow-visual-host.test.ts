@@ -16,6 +16,12 @@ import { EvidenceLedger } from "../src/workflow/evidence-ledger"
 import { WorkflowVisualHostServer } from "../src/workflow/visual-host"
 
 const workflowID = WorkflowSchema.ID.make("wfl_server_visual_host")
+const captureStageID = WorkflowSchema.StageID.make("wfs_server_visual_capture")
+const implementationSha256 = "c".repeat(64)
+const resolveImplementationContract: WorkflowVisualHost.ResolveImplementationContract = async () => ({
+  implementationSha256,
+  readySelector: "#ready",
+})
 const fixtureRoot = path.join(import.meta.dir, "fixtures", "workflow-visual")
 const testRoot = "D:\\OpenCode-Local\\tmp\\workflow-host-tests"
 
@@ -298,12 +304,12 @@ describe("WorkflowVisualHostServer", () => {
           )
           const first = yield* host.capture({
             preview,
-            readySelector: "#ready",
+            stageID: captureStageID,
             viewport: { name: "desktop", width: 1440, height: 900 },
           })
           const second = yield* host.capture({
             preview,
-            readySelector: "#ready",
+            stageID: captureStageID,
             viewport: { name: "mobile", width: 390, height: 844 },
           })
           return { first, second }
@@ -402,6 +408,110 @@ describe("WorkflowVisualHostServer", () => {
     ])
   })
 
+  test("single-flights one logical key and restores it across host IDs without another browser call or quota charge", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const viewport = { name: "desktop", width: 1440, height: 900 } as const
+    const stageID = WorkflowSchema.StageID.make("wfs_server_visual_same_key")
+    const firstRuntime = browserRuntime()
+    const first = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          const one = host.capture({ preview, stageID, viewport })
+          const images = yield* Effect.all([one, one], { concurrency: "unbounded" })
+          return { hostID: preview.hostID, images }
+        }),
+      ).pipe(
+        Effect.provide(WorkflowVisualHostServer.makeLayer({ hostRoot: temp.path, browser: firstRuntime.runtime })),
+      ),
+    )
+    const restoredRuntime = browserRuntime()
+    const restored = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          const image = yield* host.capture({ preview, stageID, viewport })
+          return { hostID: preview.hostID, image }
+        }),
+      ).pipe(
+        Effect.provide(WorkflowVisualHostServer.makeLayer({ hostRoot: temp.path, browser: restoredRuntime.runtime })),
+      ),
+    )
+    const ledger = EvidenceLedger.open(path.join(temp.path, ".evidence"))
+    const used = await ledger.used(String(workflowID))
+    await ledger.close()
+
+    expect(first.images[0]).toEqual(first.images[1])
+    expect(first.images[0]?.evidenceID).toBe(restored.image.evidenceID)
+    expect(first.hostID).not.toBe(restored.hostID)
+    expect(firstRuntime.contextOptions).toHaveLength(1)
+    expect(restoredRuntime.contextOptions).toHaveLength(0)
+    expect(used).toBe(first.images[0]?.evidenceBytes)
+  })
+
+  test("fails into typed ambiguity without a browser call when a foreign durable capture intent exists", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const runtime = browserRuntime()
+    const ledger = EvidenceLedger.open(path.join(temp.path, ".evidence"))
+    const failure = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          const input = {
+            preview,
+            stageID: WorkflowSchema.StageID.make("wfs_server_visual_foreign_intent"),
+            viewport: { name: "desktop", width: 1440, height: 900 } as const,
+          }
+          yield* Effect.promise(() =>
+            ledger.beginCapture({
+              coordinates: WorkflowVisualHost.evidenceCoordinates(input),
+              ownerNonce: "7".repeat(64),
+              now: 1,
+            }),
+          )
+          return yield* host.capture(input)
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({ hostRoot: temp.path, browser: runtime.runtime, evidenceLedger: ledger }),
+        ),
+        Effect.flip,
+      ),
+    )
+
+    expect(failure).toMatchObject({ operation: "capture", code: "evidence_capture_ambiguous" })
+    expect(runtime.contextOptions).toHaveLength(0)
+  })
+
   test("cancels a stalled capture, closes its context once, and releases the workflow capture lock", async () => {
     await using temp = await taskTemp()
     const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
@@ -424,7 +534,7 @@ describe("WorkflowVisualHostServer", () => {
           const first = yield* host
             .capture({
               preview,
-              readySelector: "#ready",
+              stageID: captureStageID,
               viewport: { name: "mobile", width: 390, height: 844 },
             })
             .pipe(Effect.forkChild)
@@ -435,7 +545,7 @@ describe("WorkflowVisualHostServer", () => {
           return yield* host
             .capture({
               preview,
-              readySelector: "#ready",
+              stageID: captureStageID,
               viewport: { name: "mobile", width: 390, height: 844 },
             })
             .pipe(Effect.timeout("500 millis"))
@@ -445,6 +555,51 @@ describe("WorkflowVisualHostServer", () => {
 
     expect(image.width).toBe(390)
     expect(runtime.contextsClosed).toBe(2)
+  })
+
+  test("fails closed before capability creation without trusted implementation contract authority", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    await fs.writeFile(path.join(workspaceTemp.path, "index.html"), "<!doctype html><main id=ready></main>")
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "static", entrypoint: "index.html" },
+    })
+    const run = (input: WorkflowVisualHost.PrepareImplementationInput, withAuthority: boolean) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            return yield* host.prepareImplementation(input)
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              ...(withAuthority ? { resolveImplementationContract } : {}),
+            }),
+          ),
+          Effect.flip,
+        ),
+      )
+
+    const unavailable = await run({ workflowID, revision: 1, plan }, false)
+    const legacy = await run(
+      {
+        workflowID,
+        revision: 1,
+        plan,
+        implementationSha256: "0".repeat(64),
+        readySelector: "#attacker",
+      } as WorkflowVisualHost.PrepareImplementationInput,
+      true,
+    )
+
+    expect(unavailable).toMatchObject({ code: "visual_host_unavailable" })
+    expect(legacy).toMatchObject({ code: "invalid_preview_plan" })
+    expect((await fs.readdir(temp.path)).filter((name) => /^[a-f0-9]{64}$/.test(name))).toEqual([])
   })
 
   test("cancels stalled authenticated process acquisition through its bounded start contract", async () => {
@@ -504,6 +659,7 @@ describe("WorkflowVisualHostServer", () => {
             hostRoot: temp.path,
             browser: browserRuntime().runtime,
             processOwnership: ownership,
+            resolveImplementationContract,
           }),
         ),
       ),
@@ -555,7 +711,11 @@ describe("WorkflowVisualHostServer", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const host = yield* WorkflowVisualHost.Service
-          const preview = yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+          const preview = yield* host.prepareImplementation({
+            workflowID,
+            revision: 1,
+            plan,
+          })
           previewURL = preview.url
           expect(yield* Effect.promise(() => fetch(preview.url).then((response) => response.text()))).toBe(
             "script-ready",
@@ -576,6 +736,7 @@ describe("WorkflowVisualHostServer", () => {
             browser: browserRuntime().runtime,
             processOwnership: ownership.service,
             onSpawnArgv: (argv) => observed.push([...argv]),
+            resolveImplementationContract,
           }),
         ),
       ),
@@ -617,7 +778,11 @@ describe("WorkflowVisualHostServer", () => {
         Effect.scoped(
           Effect.gen(function* () {
             const host = yield* WorkflowVisualHost.Service
-            const preview = yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+            const preview = yield* host.prepareImplementation({
+              workflowID,
+              revision: 1,
+              plan,
+            })
             directory = path.join(temp.path, preview.hostID)
             const manifest = JSON.parse(
               yield* Effect.promise(() => fs.readFile(path.join(directory, ".host.json"), "utf8")),
@@ -631,6 +796,7 @@ describe("WorkflowVisualHostServer", () => {
               browser: browserRuntime().runtime,
               processOwnership: refusingStop,
               finalizerTimeoutMs: 50,
+              resolveImplementationContract,
             }),
           ),
         ),
@@ -669,10 +835,20 @@ describe("WorkflowVisualHostServer", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const host = yield* WorkflowVisualHost.Service
-          return yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+          return yield* host.prepareImplementation({
+            workflowID,
+            revision: 1,
+            plan,
+          })
         }),
       ).pipe(
-        Effect.provide(WorkflowVisualHostServer.makeLayer({ hostRoot: temp.path, browser: browserRuntime().runtime })),
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolveImplementationContract,
+          }),
+        ),
         Effect.match({
           onFailure: (left) => ({ _tag: "Left" as const, left }),
           onSuccess: (right) => ({ _tag: "Right" as const, right }),
@@ -732,13 +908,25 @@ describe("WorkflowVisualHostServer", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const host = yield* WorkflowVisualHost.Service
-          const preview = yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+          const preview = yield* host.prepareImplementation({
+            workflowID,
+            revision: 1,
+            plan,
+          })
           publicURL = preview.url
           expect(preview.url).not.toBe(`http://127.0.0.1:${port}/`)
-          expect(Object.keys(preview)).toEqual(["hostID", "url", "origin", "revision", "configSha256", "scope"])
+          expect(Object.keys(preview)).toEqual([
+            "hostID",
+            "url",
+            "origin",
+            "revision",
+            "configSha256",
+            "identity",
+            "scope",
+          ])
           yield* host.capture({
             preview,
-            readySelector: "#ready",
+            stageID: captureStageID,
             viewport: { name: "mobile", width: 390, height: 844 },
           })
         }),
@@ -748,6 +936,7 @@ describe("WorkflowVisualHostServer", () => {
             hostRoot: temp.path,
             browser: runtime,
             processOwnership: ownership.service,
+            resolveImplementationContract,
           }),
         ),
       ),
@@ -776,16 +965,28 @@ describe("WorkflowVisualHostServer", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const host = yield* WorkflowVisualHost.Service
-          const preview = yield* host.prepareImplementation({ workflowID, revision: 2, plan })
+          const preview = yield* host.prepareImplementation({
+            workflowID,
+            revision: 2,
+            plan,
+          })
           const html = yield* Effect.promise(() => fetch(preview.url).then((response) => response.text()))
           const image = yield* host.capture({
             preview,
-            readySelector: "#ready",
+            stageID: captureStageID,
             viewport: { name: "desktop", width: 1440, height: 900 },
           })
           return { preview, html, image }
         }),
-      ).pipe(Effect.provide(WorkflowVisualHostServer.makeLayer({ hostRoot: temp.path, browser: runtime.runtime }))),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: runtime.runtime,
+            resolveImplementationContract,
+          }),
+        ),
+      ),
     )
 
     expect(result.html).toBe(implementation)
@@ -812,10 +1013,20 @@ describe("WorkflowVisualHostServer", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const host = yield* WorkflowVisualHost.Service
-          return yield* host.prepareImplementation({ workflowID, revision: 0, plan })
+          return yield* host.prepareImplementation({
+            workflowID,
+            revision: 0,
+            plan,
+          })
         }),
       ).pipe(
-        Effect.provide(WorkflowVisualHostServer.makeLayer({ hostRoot: temp.path, browser: browserRuntime().runtime })),
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolveImplementationContract,
+          }),
+        ),
         Effect.flip,
       ),
     )
@@ -843,7 +1054,7 @@ describe("WorkflowVisualHostServer", () => {
           })
           return yield* host.capture({
             preview,
-            readySelector: "#ready",
+            stageID: captureStageID,
             viewport: { name: "desktop", width: 1440, height: 900 },
           })
         }),
@@ -884,13 +1095,20 @@ describe("WorkflowVisualHostServer", () => {
               files: [{ path: "index.html", content: reference }],
             },
           })
-          const capture = host.capture({ preview, readySelector: "#ready", viewport }).pipe(
-            Effect.match({
-              onFailure: (error) => ({ error }),
-              onSuccess: (image) => ({ image }),
-            }),
+          const capture = (stageID: WorkflowSchema.StageID) =>
+            host.capture({ preview, stageID, viewport }).pipe(
+              Effect.match({
+                onFailure: (error) => ({ error }),
+                onSuccess: (image) => ({ image }),
+              }),
+            )
+          return yield* Effect.all(
+            [
+              capture(WorkflowSchema.StageID.make("wfs_server_visual_quota_a")),
+              capture(WorkflowSchema.StageID.make("wfs_server_visual_quota_b")),
+            ],
+            { concurrency: "unbounded" },
           )
-          return yield* Effect.all([capture, capture], { concurrency: "unbounded" })
         }),
       ).pipe(
         Effect.provide(
@@ -923,6 +1141,7 @@ describe("WorkflowVisualHostServer", () => {
     ).toBe(true)
     await ledger.close()
 
+    let captureAttempt = 0
     const captureWithFreshLayer = () =>
       Effect.runPromise(
         Effect.scoped(
@@ -937,7 +1156,12 @@ describe("WorkflowVisualHostServer", () => {
                 files: [{ path: "index.html", content: reference }],
               },
             })
-            return yield* host.capture({ preview, readySelector: "#ready", viewport })
+            captureAttempt++
+            return yield* host.capture({
+              preview,
+              stageID: WorkflowSchema.StageID.make(`wfs_server_visual_restart_${captureAttempt}`),
+              viewport,
+            })
           }),
         ).pipe(
           Effect.provide(
