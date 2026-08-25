@@ -48,9 +48,14 @@ export async function recoverExpired(input: {
   } catch {
     return { healthy: false, recovered, skipped }
   }
-  for (const snapshot of snapshots) {
+  const captured = snapshots.map((snapshot) => ({
+    snapshot,
+    leaseExpiresAtEpoch:
+      snapshot.leaseExpiresAt === undefined ? undefined : DateTime.toEpochMillis(snapshot.leaseExpiresAt),
+  }))
+  for (const { snapshot, leaseExpiresAtEpoch } of captured) {
     try {
-      const candidate = await currentAuthority(input.store, snapshot, input.now())
+      const candidate = await currentAuthority(input.store, snapshot, leaseExpiresAtEpoch, input.now())
       if (candidate === undefined) {
         skipped++
         continue
@@ -59,7 +64,7 @@ export async function recoverExpired(input: {
       const count = await input.recover({
         authority: candidate.authority,
         finalGate: async () => {
-          const current = await currentAuthority(input.store, snapshot, input.now())
+          const current = await currentAuthority(input.store, snapshot, leaseExpiresAtEpoch, input.now())
           const valid = current !== undefined && sameAuthority(current.authority, candidate.authority)
           if (!valid) fenced = true
           return valid
@@ -114,8 +119,10 @@ async function loadExpired(store: WorkflowStore.Interface, now: number) {
 async function currentAuthority(
   store: WorkflowStore.Interface,
   snapshot: Awaited<ReturnType<typeof loadExpired>>[number],
+  snapshotLeaseExpiresAtEpoch: number | undefined,
   now: number,
 ): Promise<{ readonly authority: WorkflowCommandSandboxServer.RecoveryAuthority } | undefined> {
+  if (snapshotLeaseExpiresAtEpoch === undefined) return undefined
   const [detail, stage, expired] = await Promise.all([
     Effect.runPromise(store.get(snapshot.workflowID)),
     Effect.runPromise(store.stage(snapshot.id)),
@@ -135,13 +142,16 @@ async function currentAuthority(
     stage.leaseOwner !== snapshot.leaseOwner ||
     stage.attempt !== snapshot.attempt ||
     stage.leaseExpiresAt === undefined ||
+    DateTime.toEpochMillis(stage.leaseExpiresAt) !== snapshotLeaseExpiresAtEpoch ||
     DateTime.toEpochMillis(stage.leaseExpiresAt) >= now ||
     !expired.some(
       (candidate) =>
         candidate.id === stage.id &&
         candidate.workflowID === stage.workflowID &&
         candidate.leaseOwner === stage.leaseOwner &&
-        candidate.attempt === stage.attempt,
+        candidate.attempt === stage.attempt &&
+        candidate.leaseExpiresAt !== undefined &&
+        DateTime.toEpochMillis(candidate.leaseExpiresAt) === snapshotLeaseExpiresAtEpoch,
     ) ||
     !isExecutableRole(stage.type) ||
     detail.run.sessionID === undefined ||

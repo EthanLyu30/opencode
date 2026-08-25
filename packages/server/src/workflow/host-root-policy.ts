@@ -1,50 +1,38 @@
 export * as HostRootPolicy from "./host-root-policy"
 
 import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 
 const systemSid = "S-1-5-18"
 const administratorsSid = "S-1-5-32-544"
 const fixedPowerShell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-const dangerousRights = new Set<Right>([
-  "generic_all",
-  "generic_write",
-  "write_data",
-  "append_data",
-  "write_ea",
-  "write_attributes",
-  "delete",
-  "delete_child",
-  "write_dac",
-  "write_owner",
-])
-
-export type Right =
-  | "generic_all"
-  | "generic_write"
-  | "write_data"
-  | "append_data"
-  | "write_ea"
-  | "write_attributes"
-  | "delete"
-  | "delete_child"
-  | "write_dac"
-  | "write_owner"
-  | "read"
-  | "execute"
+const genericAll = 0x10000000
+const genericWrite = 0x40000000
+const concreteWriteMask =
+  0x00000002 | // FILE_WRITE_DATA / FILE_ADD_FILE
+  0x00000004 | // FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+  0x00000010 | // FILE_WRITE_EA
+  0x00000040 | // FILE_DELETE_CHILD
+  0x00000100 | // FILE_WRITE_ATTRIBUTES
+  0x00010000 | // DELETE
+  0x00040000 | // WRITE_DAC
+  0x00080000 // WRITE_OWNER
 
 export interface Ace {
   readonly sid: string
   readonly allow: boolean
   readonly inherited: boolean
-  readonly rights: readonly Right[]
+  readonly mask: number
 }
 
 export interface AclSnapshot {
   readonly currentUserSid: string
+  readonly currentIdentitySids: readonly string[]
   readonly ownerSid: string
   readonly protected: boolean
+  readonly descriptorSddl: string
   readonly aces: readonly Ace[]
 }
 
@@ -61,6 +49,7 @@ export interface Policy {
   readonly roots: Roots
   readonly verifyHostRoot: (canonicalHostRoot: string) => void
   readonly verifyEvidenceRoot: (canonicalEvidenceRoot: string) => void
+  readonly verifyTempRoot: (canonicalTempRoot: string) => void
 }
 
 export interface ProbeInvocation {
@@ -82,26 +71,33 @@ export function make(input: Roots & { readonly workspaceRoots?: readonly string[
     throw new TypeError("Workflow host roots overlap a workspace-controlled path")
   }
 
-  const verifyAll = () => {
-    const current = canonicalRoots(roots)
-    if (Object.entries(roots).some(([name, value]) => Reflect.get(current, name) !== value)) {
-      throw new TypeError("Workflow host root identity changed")
-    }
-    for (const root of Object.values(current)) verifyAcl(root, input.probe(root))
+  const fingerprints = new Map<string, string>()
+  const identities = new Map<string, string>()
+  for (const root of Object.values(roots)) {
+    const snapshot = input.probe(root)
+    verifyAcl(root, snapshot)
+    fingerprints.set(root, fingerprint(snapshot))
+    identities.set(root, rootIdentity(root))
   }
-  verifyAll()
+
+  const verifyOne = (expected: string, actual: string, target: string) => {
+    if (actual !== expected) throw new TypeError(`Workflow ${target} policy target changed`)
+    if (requireCanonical(expected) !== expected || rootIdentity(expected) !== identities.get(expected)) {
+      throw new TypeError(`Workflow ${target} root identity changed`)
+    }
+    const snapshot = input.probe(expected)
+    verifyAcl(expected, snapshot)
+    if (fingerprint(snapshot) !== fingerprints.get(expected)) {
+      throw new TypeError(`Workflow ${target} ACL descriptor changed`)
+    }
+  }
 
   return Object.freeze({
     roots: Object.freeze({ ...roots }),
-    verifyHostRoot: (canonicalHostRoot: string) => {
-      if (canonicalHostRoot !== roots.hostRoot) throw new TypeError("Workflow host root policy target changed")
-      verifyAll()
-    },
-    verifyEvidenceRoot: (canonicalEvidenceRoot: string) => {
-      if (canonicalEvidenceRoot !== roots.evidenceRoot)
-        throw new TypeError("Workflow evidence root policy target changed")
-      verifyAll()
-    },
+    verifyHostRoot: (canonicalHostRoot: string) => verifyOne(roots.hostRoot, canonicalHostRoot, "host"),
+    verifyEvidenceRoot: (canonicalEvidenceRoot: string) =>
+      verifyOne(roots.evidenceRoot, canonicalEvidenceRoot, "evidence"),
+    verifyTempRoot: (canonicalTempRoot: string) => verifyOne(roots.tempRoot, canonicalTempRoot, "temp"),
   })
 }
 
@@ -181,15 +177,24 @@ function requireCanonical(value: string) {
 function verifyAcl(root: string, snapshot: AclSnapshot) {
   if (
     !isSid(snapshot.currentUserSid) ||
+    !Array.isArray(snapshot.currentIdentitySids) ||
+    snapshot.currentIdentitySids.length === 0 ||
+    snapshot.currentIdentitySids.some((sid: unknown) => typeof sid !== "string" || !isSid(sid)) ||
+    !snapshot.currentIdentitySids.includes(snapshot.currentUserSid) ||
     !isSid(snapshot.ownerSid) ||
     !snapshot.protected ||
+    typeof snapshot.descriptorSddl !== "string" ||
+    snapshot.descriptorSddl.length === 0 ||
+    snapshot.descriptorSddl.length > 65_536 ||
     !Array.isArray(snapshot.aces)
   ) {
     throw new TypeError(`Workflow host ACL is unsupported for ${root}`)
   }
   const trusted = new Set([snapshot.currentUserSid, systemSid, administratorsSid])
   if (!trusted.has(snapshot.ownerSid)) throw new TypeError("Workflow host ACL owner is not trusted")
-  let currentWritable = false
+  const identity = new Set(snapshot.currentIdentitySids)
+  let allowed = 0
+  let denied = 0
   for (const ace of snapshot.aces) {
     if (
       ace === null ||
@@ -197,32 +202,38 @@ function verifyAcl(root: string, snapshot: AclSnapshot) {
       !isSid(ace.sid) ||
       typeof ace.allow !== "boolean" ||
       typeof ace.inherited !== "boolean" ||
-      !Array.isArray(ace.rights) ||
-      ace.rights.some((right: unknown) => !isRight(right))
+      !validMask(ace.mask)
     ) {
       throw new TypeError("Workflow host ACL contains an unsupported ACE")
     }
     if (ace.inherited) throw new TypeError("Workflow host ACL must use protected explicit inheritance")
-    const grantsWrite = ace.allow && ace.rights.some(isDangerousRight)
-    if (!grantsWrite) continue
-    if (!trusted.has(ace.sid)) throw new TypeError("Workflow host ACL grants write authority to an untrusted SID")
-    if (ace.sid === snapshot.currentUserSid) currentWritable = true
+    const write = dangerousAccess(ace.mask)
+    if (ace.allow && write !== 0 && !trusted.has(ace.sid)) {
+      throw new TypeError("Workflow host ACL grants write authority to an untrusted SID")
+    }
+    if (write === 0) continue
+    if (!ace.allow && identity.has(ace.sid)) denied = (denied | write) >>> 0
+    if (ace.allow && ace.sid === snapshot.currentUserSid) allowed = (allowed | write) >>> 0
   }
-  if (!currentWritable) throw new TypeError("Workflow host ACL is not writable by the trusted current identity")
+  if ((allowed & ~denied) >>> 0 === 0) {
+    throw new TypeError("Workflow host ACL lacks an effective direct current-user write grant")
+  }
 }
-
-const allRights = new Set<Right>([...dangerousRights, "read", "execute"])
 
 function decodeSnapshot(value: unknown): AclSnapshot {
   if (value === null || typeof value !== "object") throw new TypeError("Workflow ACL snapshot is not an object")
   const currentUserSid = Reflect.get(value, "currentUserSid")
+  const currentIdentitySids = Reflect.get(value, "currentIdentitySids")
   const ownerSid = Reflect.get(value, "ownerSid")
   const protectedAcl = Reflect.get(value, "protected")
+  const descriptorSddl = Reflect.get(value, "descriptorSddl")
   const rawAces = Reflect.get(value, "aces")
   if (
     typeof currentUserSid !== "string" ||
+    !Array.isArray(currentIdentitySids) ||
     typeof ownerSid !== "string" ||
     typeof protectedAcl !== "boolean" ||
+    typeof descriptorSddl !== "string" ||
     !Array.isArray(rawAces)
   ) {
     throw new TypeError("Workflow ACL snapshot has an invalid shape")
@@ -232,59 +243,55 @@ function decodeSnapshot(value: unknown): AclSnapshot {
     const sid = Reflect.get(ace, "sid")
     const allow = Reflect.get(ace, "allow")
     const inherited = Reflect.get(ace, "inherited")
-    const rawRights = Reflect.get(ace, "rights")
     const mask = Reflect.get(ace, "mask")
     if (typeof sid !== "string" || typeof allow !== "boolean" || typeof inherited !== "boolean") {
       throw new TypeError("Workflow ACL ACE has invalid identity fields")
     }
-    const rights = Array.isArray(rawRights)
-      ? rawRights
-      : typeof mask === "number" && Number.isInteger(mask)
-        ? rightsFromMask(mask)
-        : undefined
-    if (rights === undefined) {
-      throw new TypeError("Workflow ACL ACE has invalid rights")
-    }
-    const decodedRights: Right[] = []
-    for (const right of rights) {
-      if (!isRight(right)) throw new TypeError("Workflow ACL ACE has invalid rights")
-      decodedRights.push(right)
-    }
-    return { sid, allow, inherited, rights: decodedRights }
+    if (!validMask(mask)) throw new TypeError("Workflow ACL ACE has invalid mask")
+    return { sid, allow, inherited, mask }
   })
-  return { currentUserSid, ownerSid, protected: protectedAcl, aces }
-}
-
-function rightsFromMask(value: number): Right[] {
-  const mask = value >>> 0
-  const rights: Right[] = []
-  const add = (right: Right, bits: number) => {
-    if ((mask & bits) !== 0) rights.push(right)
+  return {
+    currentUserSid,
+    currentIdentitySids: currentIdentitySids.map(String),
+    ownerSid,
+    protected: protectedAcl,
+    descriptorSddl,
+    aces,
   }
-  add("generic_all", 0x10000000)
-  add("generic_write", 0x40000000)
-  add("write_data", 0x00000002)
-  add("append_data", 0x00000004)
-  add("write_ea", 0x00000010)
-  add("delete_child", 0x00000040)
-  add("write_attributes", 0x00000100)
-  add("delete", 0x00010000)
-  add("write_dac", 0x00040000)
-  add("write_owner", 0x00080000)
-  if ((mask & 0x00020089) !== 0) rights.push("read")
-  if ((mask & 0x00000020) !== 0) rights.push("execute")
-  return rights
 }
 
-function isRight(value: unknown): value is Right {
-  return typeof value === "string" && rightNames.has(value)
+function validMask(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= -0x80000000 && value <= 0xffffffff
 }
 
-function isDangerousRight(value: unknown): value is Right {
-  return isRight(value) && dangerousRights.has(value)
+function dangerousAccess(value: number): number {
+  const mask = value >>> 0
+  let write = mask & concreteWriteMask
+  if ((mask & genericAll) !== 0) write |= concreteWriteMask
+  if ((mask & genericWrite) !== 0) write |= 0x00000002 | 0x00000004 | 0x00000010 | 0x00000100
+  return write >>> 0
 }
 
-const rightNames: ReadonlySet<string> = allRights
+function fingerprint(snapshot: AclSnapshot): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        currentUserSid: snapshot.currentUserSid,
+        currentIdentitySids: [...snapshot.currentIdentitySids].toSorted(),
+        ownerSid: snapshot.ownerSid,
+        protected: snapshot.protected,
+        descriptorSddl: snapshot.descriptorSddl,
+        aces: snapshot.aces.map((ace) => ({ ...ace, mask: ace.mask >>> 0 })),
+      }),
+    )
+    .digest("hex")
+}
+
+function rootIdentity(value: string) {
+  const stat = fs.lstatSync(value, { bigint: true })
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new TypeError("Workflow host root identity changed")
+  return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`
+}
 
 function isSid(value: string) {
   return /^S-1-(?:[0-9]+-)+[0-9]+$/i.test(value)
@@ -314,8 +321,12 @@ function overlap(left: string, right: string) {
 const aclScript = String.raw`$ErrorActionPreference = 'Stop'
 $target = $args[0]
 $acl = Get-Acl -LiteralPath $target
-$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$current = $identity.User.Value
+$currentSids = @($current, 'S-1-1-0') + @($identity.Groups | ForEach-Object { $_.Value }) | Select-Object -Unique
 $owner = (New-Object System.Security.Principal.NTAccount($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+$sections = [System.Security.AccessControl.AccessControlSections]::Access -bor [System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Group
+$descriptor = $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]$sections)
 $aces = @($acl.Access | ForEach-Object {
   [pscustomobject]@{
     sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
@@ -326,7 +337,9 @@ $aces = @($acl.Access | ForEach-Object {
 })
 [pscustomobject]@{
   currentUserSid = $current
+  currentIdentitySids = @($currentSids)
   ownerSid = $owner
   protected = $acl.AreAccessRulesProtected
+  descriptorSddl = $descriptor
   aces = $aces
 } | ConvertTo-Json -Depth 5 -Compress`

@@ -44,16 +44,18 @@ export interface Options {
   readonly config: DockerConfig.Config
   readonly hostRoot: string
   readonly now?: () => number
+  readonly beforePreflight?: (signal: AbortSignal) => Promise<void>
 }
 
 export function make(options: Options): ProcessOwnership.Service {
   const owned = new WeakMap<ProcessOwnership.OwnedProcess, OwnedState>()
   const now = options.now ?? Date.now
 
-  return Object.freeze({
+  const internal = Object.freeze({
     available: true,
     start: async (input: Parameters<ProcessOwnership.Service["start"]>[0]) => {
       rejectCancelledOrExpired(input.signal, input.deadline, now)
+      await options.beforePreflight?.(input.signal)
       const config = await DockerConfig.validate(options.config)
       const admitted = await validateStart(options.hostRoot, config, input)
       const ownership = ownershipFor(input.identity, config)
@@ -61,16 +63,32 @@ export function make(options: Options): ProcessOwnership.Service {
       let containerID: string | undefined
       let networkVerified = false
       let containerVerified = false
+      let containerRunning = false
+      let detachedResourceCleanup = false
       try {
-        const network = await beforeDeadline(options.engine, config, input, now, [
-          "network",
-          "create",
-          "--driver",
-          "bridge",
-          "--internal",
-          ...labelsArgv(ownership.labels),
-          ownership.networkName,
-        ])
+        const network = await beforeDeadline(
+          options.engine,
+          config,
+          input,
+          now,
+          [
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            "--internal",
+            ...labelsArgv(ownership.labels),
+            ownership.networkName,
+          ],
+          config.limits.maxOutputBytes,
+          {
+            timeoutMs: detachedCleanupTimeout(config),
+            detached: () => {
+              detachedResourceCleanup = true
+            },
+            settle: (late, deadline) => cleanupLateNetwork(options.engine, config, ownership, late, deadline),
+          },
+        )
         if (network.exit !== 0 || network.truncated || !opaquePattern.test(network.stdout.trim())) {
           throw new Docker.Unavailable("Preview Docker network could not be created")
         }
@@ -81,72 +99,90 @@ export function make(options: Options): ProcessOwnership.Service {
           networkID,
           ownership,
           false,
-          activeStartBoundary(input, now),
+          startBoundary(input, now),
         )
         if (!networkVerified) throw new Docker.Unavailable("Preview Docker network ownership verification failed")
 
         rejectCancelledOrExpired(input.signal, input.deadline, now)
         await revalidate(options.hostRoot, config, input, admitted)
         const runtime = normalizeRuntime(input.plan.argv ?? [])
-        const create = await beforeDeadline(options.engine, config, input, now, [
-          "container",
-          "create",
-          "--name",
-          ownership.containerName,
-          ...labelsArgv(ownership.labels),
-          "--pull",
-          "never",
-          "--network",
-          ownership.networkName,
-          "--publish",
-          `127.0.0.1:${admitted.port}:${relayPort}/tcp`,
-          "--read-only",
-          "--cap-drop",
-          "ALL",
-          "--security-opt",
-          "no-new-privileges=true",
-          "--user",
-          "65532:65532",
-          "--pids-limit",
-          String(config.limits.pids),
-          "--memory",
-          String(config.limits.memoryBytes),
-          "--cpus",
-          String(config.limits.cpus),
-          "--stop-timeout",
-          "3",
-          "--tmpfs",
-          "/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=1777",
-          "--tmpfs",
-          "/home/sandbox:rw,nosuid,nodev,noexec,size=16777216,mode=700,uid=65532,gid=65532",
-          ...environmentArgv(input.plan.env, admitted.port),
-          "--mount",
-          `type=bind,src=${admitted.workspace},dst=/workspace,readonly`,
-          "--mount",
-          `type=bind,src=${admitted.capabilityTemp},dst=/opencode/tmp`,
-          "--workdir",
-          admitted.relativeCwd === "." ? "/workspace" : `/workspace/${admitted.relativeCwd}`,
-          config.image,
-          supervisor,
-          "--listen",
-          `0.0.0.0:${relayPort}`,
-          "--target",
-          `127.0.0.1:${admitted.port}`,
-          "--",
-          ...runtime,
-        ])
+        const authenticatedNetworkID = networkID
+        const create = await beforeDeadline(
+          options.engine,
+          config,
+          input,
+          now,
+          [
+            "container",
+            "create",
+            "--name",
+            ownership.containerName,
+            ...labelsArgv(ownership.labels),
+            "--pull",
+            "never",
+            "--network",
+            ownership.networkName,
+            "--publish",
+            `127.0.0.1:${admitted.port}:${relayPort}/tcp`,
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges=true",
+            "--user",
+            "65532:65532",
+            "--pids-limit",
+            String(config.limits.pids),
+            "--memory",
+            String(config.limits.memoryBytes),
+            "--cpus",
+            String(config.limits.cpus),
+            "--stop-timeout",
+            "3",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=1777",
+            "--tmpfs",
+            "/home/sandbox:rw,nosuid,nodev,noexec,size=16777216,mode=700,uid=65532,gid=65532",
+            ...environmentArgv(input.plan.env, admitted.port),
+            "--mount",
+            `type=bind,src=${admitted.workspace},dst=/workspace,readonly`,
+            "--mount",
+            `type=bind,src=${admitted.capabilityTemp},dst=/opencode/tmp`,
+            "--workdir",
+            admitted.relativeCwd === "." ? "/workspace" : `/workspace/${admitted.relativeCwd}`,
+            config.image,
+            supervisor,
+            "--listen",
+            `0.0.0.0:${relayPort}`,
+            "--target",
+            `127.0.0.1:${admitted.port}`,
+            "--",
+            ...runtime,
+          ],
+          config.limits.maxOutputBytes,
+          {
+            timeoutMs: detachedCleanupTimeout(config),
+            detached: () => {
+              detachedResourceCleanup = true
+            },
+            settle: (late, deadline) =>
+              cleanupLateContainer(options.engine, config, ownership, authenticatedNetworkID, late, deadline),
+          },
+        )
         if (create.exit !== 0 || create.truncated || !opaquePattern.test(create.stdout.trim())) {
           throw new Docker.Unavailable("Preview Docker container or pinned image is unavailable")
         }
         containerID = create.stdout.trim()
-        containerVerified = await inspectContainer(
+        const createdState = await inspectContainerState(
           options.engine,
           config,
           containerID,
           ownership,
           false,
-          activeStartBoundary(input, now),
+          startBoundary(input, now),
         )
+        containerVerified = createdState !== undefined
+        containerRunning = createdState ?? false
         if (!containerVerified) throw new Docker.Unavailable("Preview Docker container ownership verification failed")
 
         rejectCancelledOrExpired(input.signal, input.deadline, now)
@@ -161,18 +197,18 @@ export function make(options: Options): ProcessOwnership.Service {
         )
         if (started.exit !== 0 || started.truncated)
           throw new Docker.Unavailable("Preview Docker container did not start")
-        if (
-          !(await inspectContainer(
-            options.engine,
-            config,
-            containerID,
-            ownership,
-            true,
-            activeStartBoundary(input, now),
-          ))
-        ) {
+        const startedState = await inspectContainerState(
+          options.engine,
+          config,
+          containerID,
+          ownership,
+          true,
+          startBoundary(input, now),
+        )
+        if (startedState !== true) {
           throw new Docker.Unavailable("Preview Docker container identity changed after start")
         }
+        containerRunning = true
         rejectCancelledOrExpired(input.signal, input.deadline, now)
 
         const completion = settle(options.engine, config, containerID, ownership, input.signal)
@@ -190,13 +226,18 @@ export function make(options: Options): ProcessOwnership.Service {
         })
         return process
       } catch (cause) {
-        if (containerVerified && containerID !== undefined && networkVerified && networkID !== undefined) {
-          const cleanup = await cleanupOwned(options.engine, config, containerID, networkID)
-          if (cleanup !== undefined) {
-            throw new Error(`Preview start cleanup failed: ${cleanup.message}`, { cause })
-          }
-        } else if (networkVerified && networkID !== undefined) {
-          await removeNetwork(options.engine, config, networkID).catch(() => undefined)
+        const cleanup = detachedResourceCleanup
+          ? Promise.resolve(undefined)
+          : cleanupAfterStartFailure(options.engine, config, ownership, {
+              networkID,
+              networkVerified,
+              containerID,
+              containerVerified,
+              containerRunning,
+            })
+        const cleanupResult = await observeCleanupBeforeDeadline(cleanup, input, now)
+        if (cleanupResult !== detachedCleanup && cleanupResult !== undefined) {
+          throw new Error(`Preview start cleanup failed: ${cleanupResult.message}`, { cause })
         }
         throw cause
       }
@@ -204,30 +245,22 @@ export function make(options: Options): ProcessOwnership.Service {
     stop: async (input: Parameters<ProcessOwnership.Service["stop"]>[0]) => {
       const state = owned.get(input.process)
       if (state === undefined || state.stopped) return
+      const config = await DockerConfig.validate(options.config)
+      const running = await inspectContainerState(options.engine, config, state.containerID, state.ownership, true)
       if (
-        !(await inspectContainer(
-          options.engine,
-          await DockerConfig.validate(options.config),
-          state.containerID,
-          state.ownership,
-          true,
-        )) ||
-        !(await inspectNetwork(
-          options.engine,
-          await DockerConfig.validate(options.config),
-          state.networkID,
-          state.ownership,
-          true,
-        ))
+        running === undefined ||
+        !(await inspectNetwork(options.engine, config, state.networkID, state.ownership, true))
       ) {
         throw new Docker.Unavailable("Preview Docker ownership changed before stop")
       }
       state.stopped = true
       const failure = await cleanupOwned(
         options.engine,
-        await DockerConfig.validate(options.config),
+        config,
+        state.ownership,
         state.containerID,
         state.networkID,
+        running,
       )
       if (failure !== undefined) throw failure
     },
@@ -242,16 +275,104 @@ export function make(options: Options): ProcessOwnership.Service {
       }
       const containerID = containerIDs[0]
       const networkID = networkIDs[0]
-      if (
-        !(await inspectContainer(options.engine, config, containerID, ownership, true)) ||
-        !(await inspectNetwork(options.engine, config, networkID, ownership, true))
-      ) {
+      const running = await inspectContainerState(options.engine, config, containerID, ownership, true)
+      if (running === undefined || !(await inspectNetwork(options.engine, config, networkID, ownership, true))) {
         throw new Docker.Unavailable("Preview Docker recovery ownership did not match")
       }
-      const failure = await cleanupOwned(options.engine, config, containerID, networkID)
+      const failure = await cleanupOwned(options.engine, config, ownership, containerID, networkID, running)
       if (failure !== undefined) throw failure
     },
   })
+  return Object.freeze({
+    ...internal,
+    start: (input: Parameters<ProcessOwnership.Service["start"]>[0]) =>
+      startAtCallerBoundary({
+        input,
+        now,
+        run: (signal) => internal.start({ ...input, signal }),
+        cleanup: (process) => internal.stop({ identity: input.identity, process }),
+        detachedTimeoutMs: detachedCleanupTimeout(options.config),
+      }),
+  })
+}
+
+async function startAtCallerBoundary(input: {
+  readonly input: Parameters<ProcessOwnership.Service["start"]>[0]
+  readonly now: () => number
+  readonly run: (signal: AbortSignal) => Promise<ProcessOwnership.OwnedProcess>
+  readonly cleanup: (process: ProcessOwnership.OwnedProcess) => Promise<void>
+  readonly detachedTimeoutMs: number
+}): Promise<ProcessOwnership.OwnedProcess> {
+  rejectCancelledOrExpired(input.input.signal, input.input.deadline, input.now)
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let detached = false
+  let removeAbort: () => void = () => {}
+  const boundary = new Promise<never>((_resolve, reject) => {
+    const detach = (cause: Docker.Cancelled | Docker.Timeout) => {
+      if (detached) return
+      detached = true
+      controller.abort(cause)
+      reject(cause)
+    }
+    const onAbort = () => detach(new Docker.Cancelled("Preview Docker start was cancelled"))
+    input.input.signal.addEventListener("abort", onAbort, { once: true })
+    removeAbort = () => input.input.signal.removeEventListener("abort", onAbort)
+    if (input.input.signal.aborted) {
+      onAbort()
+      return
+    }
+    timer = setTimeout(
+      () => detach(new Docker.Timeout("Preview Docker start deadline elapsed")),
+      input.input.deadline - input.now(),
+    )
+  })
+  const operation = input.run(controller.signal)
+  try {
+    return await Promise.race([operation, boundary])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    removeAbort()
+    if (detached) {
+      void cleanupDetachedStartedProcess(operation, input.cleanup, input.detachedTimeoutMs)
+    }
+  }
+}
+
+async function cleanupDetachedStartedProcess(
+  operation: Promise<ProcessOwnership.OwnedProcess>,
+  cleanup: (process: ProcessOwnership.OwnedProcess) => Promise<void>,
+  timeoutMs: number,
+) {
+  const observed = await boundedOutcome(operation, timeoutMs)
+  if (observed === boundedTimeout || !observed.ok) return
+  await boundedOutcome(cleanup(observed.value), timeoutMs)
+}
+
+const boundedTimeout = Symbol("bounded-timeout")
+
+async function boundedOutcome<A>(
+  operation: Promise<A>,
+  timeoutMs: number,
+): Promise<{ readonly ok: true; readonly value: A } | { readonly ok: false } | typeof boundedTimeout> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<typeof boundedTimeout>((resolve) => {
+    timer = setTimeout(() => resolve(boundedTimeout), timeoutMs)
+  })
+  const result = await Promise.race([
+    operation.then(
+      (value) => ({ ok: true as const, value }),
+      () => ({ ok: false as const }),
+    ),
+    timeout,
+  ])
+  if (timer !== undefined) clearTimeout(timer)
+  return result
+}
+
+function detachedCleanupTimeout(config: DockerConfig.Config) {
+  const total = config.limits.engineTimeoutMs + config.limits.cleanupTimeoutMs * 4
+  return Number.isSafeInteger(total) && total > 0 ? Math.min(total, 60_000) : 60_000
 }
 
 async function validateStart(
@@ -423,6 +544,7 @@ async function beforeDeadline(
   now: () => number,
   argv: readonly string[],
   maxOutputBytes = config.limits.maxOutputBytes,
+  late?: LateResultObserver,
 ) {
   rejectCancelledOrExpired(input.signal, input.deadline, now)
   return execute(engine, config, {
@@ -430,6 +552,7 @@ async function beforeDeadline(
     timeoutMs: Math.min(config.limits.engineTimeoutMs, input.deadline - now()),
     maxOutputBytes,
     signal: input.signal,
+    late,
   })
 }
 
@@ -438,11 +561,11 @@ function rejectCancelledOrExpired(signal: AbortSignal, deadline: number, now: ()
   if (!Number.isFinite(deadline) || deadline <= now()) throw new Docker.Timeout("Preview Docker start deadline elapsed")
 }
 
-function activeStartBoundary(
+function startBoundary(
   input: Pick<Parameters<ProcessOwnership.Service["start"]>[0], "signal" | "deadline">,
   now: () => number,
 ) {
-  return !input.signal.aborted && Number.isFinite(input.deadline) && input.deadline > now() ? { input, now } : undefined
+  return { input, now }
 }
 
 async function inspectContainer(
@@ -456,10 +579,25 @@ async function inspectContainer(
     readonly now: () => number
   },
 ) {
+  return (await inspectContainerState(engine, config, id, ownership, strict, boundary)) !== undefined
+}
+
+async function inspectContainerState(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  id: string,
+  ownership: Ownership,
+  strict = false,
+  boundary?: {
+    readonly input: Pick<Parameters<ProcessOwnership.Service["start"]>[0], "signal" | "deadline">
+    readonly now: () => number
+  },
+  timeoutMs = config.limits.engineTimeoutMs,
+): Promise<boolean | undefined> {
   const argv = ["container", "inspect", id]
   const result =
     boundary === undefined
-      ? await execute(engine, config, { argv, timeoutMs: config.limits.engineTimeoutMs })
+      ? await execute(engine, config, { argv, timeoutMs })
       : await beforeDeadline(engine, config, boundary.input, boundary.now, argv)
   const value = inspectObject(result, strict)
   if (
@@ -467,13 +605,19 @@ async function inspectContainer(
     Reflect.get(value, "Id") !== id ||
     Reflect.get(value, "Name") !== `/${ownership.containerName}`
   )
-    return false
+    return undefined
   const dockerConfig = Reflect.get(value, "Config")
-  return (
-    dockerConfig !== null &&
-    typeof dockerConfig === "object" &&
-    exactLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels)
-  )
+  const state = Reflect.get(value, "State")
+  const running = state !== null && typeof state === "object" ? Reflect.get(state, "Running") : undefined
+  if (
+    dockerConfig === null ||
+    typeof dockerConfig !== "object" ||
+    !exactLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) ||
+    typeof running !== "boolean"
+  ) {
+    return undefined
+  }
+  return running
 }
 
 async function inspectNetwork(
@@ -486,17 +630,22 @@ async function inspectNetwork(
     readonly input: Pick<Parameters<ProcessOwnership.Service["start"]>[0], "signal" | "deadline">
     readonly now: () => number
   },
+  timeoutMs = config.limits.engineTimeoutMs,
 ) {
   const argv = ["network", "inspect", id]
   const result =
     boundary === undefined
-      ? await execute(engine, config, { argv, timeoutMs: config.limits.engineTimeoutMs })
+      ? await execute(engine, config, { argv, timeoutMs })
       : await beforeDeadline(engine, config, boundary.input, boundary.now, argv)
   const value = inspectObject(result, strict)
+  return value !== undefined && exactNetwork(value, id, ownership)
+}
+
+function exactNetwork(value: object, id: string, ownership: Ownership) {
   return (
-    value !== undefined &&
     Reflect.get(value, "Id") === id &&
     Reflect.get(value, "Name") === ownership.networkName &&
+    Reflect.get(value, "Driver") === "bridge" &&
     Reflect.get(value, "Internal") === true &&
     exactLabels(Reflect.get(value, "Labels"), ownership.labels)
   )
@@ -606,19 +755,35 @@ async function listExact(
 async function cleanupOwned(
   engine: Docker.Engine,
   config: DockerConfig.Config,
+  ownership: Ownership,
   containerID: string,
   networkID: string,
+  running: boolean,
+  deadline?: number,
 ): Promise<Error | undefined> {
   const failures: unknown[] = []
   for (const argv of [
-    ["container", "kill", containerID],
+    ...(running ? [["container", "kill", containerID] as const] : []),
     ["container", "rm", "--force", containerID],
     ["network", "rm", networkID],
   ] as const) {
     try {
-      const result = await execute(engine, config, { argv, timeoutMs: config.limits.cleanupTimeoutMs })
-      if (result.exit !== 0)
+      const result = await execute(engine, config, { argv, timeoutMs: cleanupTimeoutBefore(config, deadline) })
+      if (result.exit !== 0) {
+        if (argv[0] === "container" && argv[1] === "kill") {
+          const current = await inspectContainerState(
+            engine,
+            config,
+            containerID,
+            ownership,
+            true,
+            undefined,
+            cleanupTimeoutBefore(config, deadline),
+          ).catch(() => undefined)
+          if (current === false) continue
+        }
         failures.push(new Docker.Unavailable(`Preview Docker cleanup failed: ${argv[0]} ${argv[1]}`))
+      }
     } catch (cause) {
       failures.push(cause)
     }
@@ -626,15 +791,340 @@ async function cleanupOwned(
   return failures.length === 0 ? undefined : new AggregateError(failures, "Preview Docker cleanup failed")
 }
 
-async function removeNetwork(engine: Docker.Engine, config: DockerConfig.Config, networkID: string) {
+async function cleanupLateNetwork(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  late: Readonly<LateResultState>,
+  deadline: number,
+) {
+  const discoveryDeadline = lateDiscoveryDeadline(config, deadline, 1)
+  const networkID = await discoverLateNetwork(engine, config, ownership, late, discoveryDeadline)
+  if (networkID !== undefined) await removeNetwork(engine, config, networkID, deadline)
+}
+
+async function cleanupLateContainer(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  networkID: string | undefined,
+  late: Readonly<LateResultState>,
+  deadline: number,
+) {
+  const discoveryDeadline = lateDiscoveryDeadline(config, deadline, 4)
+  const [authenticatedNetworkID, authenticatedContainer] = await Promise.all([
+    discoverLateNetwork(engine, config, ownership, undefined, discoveryDeadline, networkID),
+    discoverLateContainer(engine, config, ownership, late, discoveryDeadline),
+  ])
+
+  if (authenticatedContainer === undefined) {
+    if (authenticatedNetworkID !== undefined) await removeNetwork(engine, config, authenticatedNetworkID, deadline)
+    return
+  }
+  if (authenticatedNetworkID !== undefined) {
+    const failure = await cleanupOwned(
+      engine,
+      config,
+      ownership,
+      authenticatedContainer.id,
+      authenticatedNetworkID,
+      authenticatedContainer.running,
+      deadline,
+    )
+    if (failure !== undefined) throw failure
+    return
+  }
+  const failure = await cleanupContainer(
+    engine,
+    config,
+    ownership,
+    authenticatedContainer.id,
+    authenticatedContainer.running,
+    deadline,
+  )
+  if (failure !== undefined) throw failure
+}
+
+async function discoverLateNetwork(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  late: Readonly<LateResultState> | undefined,
+  deadline: number,
+  knownID?: string,
+): Promise<string | undefined> {
+  let knownChecked = false
+  let returnedChecked = false
+  while (Date.now() < deadline) {
+    if (!knownChecked && knownID !== undefined) {
+      knownChecked = true
+      const verified = await inspectNetwork(
+        engine,
+        config,
+        knownID,
+        ownership,
+        false,
+        undefined,
+        cleanupTimeoutBefore(config, deadline),
+      ).catch(() => false)
+      if (verified) return knownID
+    }
+    if (!returnedChecked && late?.settled) {
+      returnedChecked = true
+      const returnedID = lateResourceID(late.result)
+      if (returnedID !== undefined) {
+        const verified = await inspectNetwork(
+          engine,
+          config,
+          returnedID,
+          ownership,
+          false,
+          undefined,
+          cleanupTimeoutBefore(config, deadline),
+        ).catch(() => false)
+        if (verified) return returnedID
+      }
+    }
+    const discovered = await inspectNetworkByName(engine, config, ownership, deadline).catch(() => undefined)
+    if (discovered !== undefined) return discovered
+    await pauseLateDiscovery(deadline)
+  }
+  return undefined
+}
+
+async function discoverLateContainer(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  late: Readonly<LateResultState>,
+  deadline: number,
+): Promise<{ readonly id: string; readonly running: boolean } | undefined> {
+  let returnedChecked = false
+  while (Date.now() < deadline) {
+    if (!returnedChecked && late.settled) {
+      returnedChecked = true
+      const returnedID = lateResourceID(late.result)
+      if (returnedID !== undefined) {
+        const running = await inspectContainerState(
+          engine,
+          config,
+          returnedID,
+          ownership,
+          false,
+          undefined,
+          cleanupTimeoutBefore(config, deadline),
+        ).catch(() => undefined)
+        if (running !== undefined) return { id: returnedID, running }
+      }
+    }
+    const discovered = await inspectContainerByName(engine, config, ownership, deadline).catch(() => undefined)
+    if (discovered !== undefined) return discovered
+    await pauseLateDiscovery(deadline)
+  }
+  return undefined
+}
+
+function lateDiscoveryDeadline(config: DockerConfig.Config, hardDeadline: number, reservedCleanupOperations: number) {
+  const now = Date.now()
+  const reserve = Math.min(Number.MAX_SAFE_INTEGER, config.limits.cleanupTimeoutMs * reservedCleanupOperations)
+  const available = Math.max(0, hardDeadline - now - reserve)
+  return now + available
+}
+
+async function pauseLateDiscovery(deadline: number) {
+  const remaining = deadline - Date.now()
+  if (remaining > 0) await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, remaining)))
+}
+
+function cleanupTimeoutBefore(config: DockerConfig.Config, deadline?: number) {
+  return deadline === undefined
+    ? config.limits.cleanupTimeoutMs
+    : Math.min(config.limits.cleanupTimeoutMs, deadline - Date.now())
+}
+
+function lateResourceID(result: Docker.Result | undefined) {
+  if (result === undefined || result.exit !== 0 || result.truncated) return undefined
+  const id = result.stdout.trim()
+  return opaquePattern.test(id) ? id : undefined
+}
+
+async function cleanupContainer(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  containerID: string,
+  running: boolean,
+  deadline?: number,
+): Promise<Error | undefined> {
+  const failures: unknown[] = []
+  for (const argv of [
+    ...(running ? [["container", "kill", containerID] as const] : []),
+    ["container", "rm", "--force", containerID] as const,
+  ]) {
+    try {
+      const result = await execute(engine, config, { argv, timeoutMs: cleanupTimeoutBefore(config, deadline) })
+      if (result.exit === 0) continue
+      if (argv[1] === "kill") {
+        const current = await inspectContainerState(
+          engine,
+          config,
+          containerID,
+          ownership,
+          true,
+          undefined,
+          cleanupTimeoutBefore(config, deadline),
+        ).catch(() => undefined)
+        if (current === false) continue
+      }
+      failures.push(new Docker.Unavailable(`Preview Docker cleanup failed: ${argv[0]} ${argv[1]}`))
+    } catch (cause) {
+      failures.push(cause)
+    }
+  }
+  return failures.length === 0 ? undefined : new AggregateError(failures, "Preview Docker cleanup failed")
+}
+
+async function cleanupAfterStartFailure(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  state: {
+    readonly networkID?: string
+    readonly networkVerified: boolean
+    readonly containerID?: string
+    readonly containerVerified: boolean
+    readonly containerRunning: boolean
+  },
+): Promise<Error | undefined> {
+  try {
+    const discoveredNetwork =
+      state.networkID === undefined
+        ? await inspectNetworkByName(engine, config, ownership).catch(() => undefined)
+        : undefined
+    const networkID = state.networkID ?? discoveredNetwork
+    let networkVerified = state.networkVerified || discoveredNetwork !== undefined
+    if (!networkVerified && networkID !== undefined) {
+      networkVerified = await inspectNetwork(engine, config, networkID, ownership, false).catch(() => false)
+    }
+    const discoveredContainer =
+      state.containerID === undefined
+        ? await inspectContainerByName(engine, config, ownership).catch(() => undefined)
+        : undefined
+    const containerID = state.containerID ?? discoveredContainer?.id
+    let containerRunning = state.containerVerified ? state.containerRunning : discoveredContainer?.running
+    if (containerRunning === undefined && containerID !== undefined) {
+      containerRunning = await inspectContainerState(engine, config, containerID, ownership, false).catch(
+        () => undefined,
+      )
+    }
+    if (networkVerified && networkID !== undefined && containerID !== undefined && containerRunning !== undefined) {
+      return cleanupOwned(engine, config, ownership, containerID, networkID, containerRunning)
+    }
+    if (containerID !== undefined && containerRunning !== undefined) {
+      const failure = await cleanupContainer(engine, config, ownership, containerID, containerRunning)
+      if (failure !== undefined) return failure
+    }
+    if (networkVerified && networkID !== undefined) {
+      await removeNetwork(engine, config, networkID)
+    }
+    return undefined
+  } catch (cause) {
+    return cause instanceof Error ? cause : new Docker.Unavailable("Preview start cleanup failed", { cause })
+  }
+}
+
+async function inspectNetworkByName(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  deadline?: number,
+): Promise<string | undefined> {
+  const result = await execute(engine, config, {
+    argv: ["network", "inspect", ownership.networkName],
+    timeoutMs: cleanupTimeoutBefore(config, deadline),
+  })
+  const value = inspectObject(result, false)
+  if (value === undefined) return undefined
+  const id = Reflect.get(value, "Id")
+  return typeof id === "string" && opaquePattern.test(id) && exactNetwork(value, id, ownership) ? id : undefined
+}
+
+async function inspectContainerByName(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  deadline?: number,
+): Promise<{ readonly id: string; readonly running: boolean } | undefined> {
+  const result = await execute(engine, config, {
+    argv: ["container", "inspect", ownership.containerName],
+    timeoutMs: cleanupTimeoutBefore(config, deadline),
+  })
+  const value = inspectObject(result, false)
+  if (value === undefined) return undefined
+  const id = Reflect.get(value, "Id")
+  if (typeof id !== "string" || !opaquePattern.test(id)) return undefined
+  const state = Reflect.get(value, "State")
+  const running = state !== null && typeof state === "object" ? Reflect.get(state, "Running") : undefined
+  const dockerConfig = Reflect.get(value, "Config")
+  return Reflect.get(value, "Name") === `/${ownership.containerName}` &&
+    dockerConfig !== null &&
+    typeof dockerConfig === "object" &&
+    exactLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) &&
+    typeof running === "boolean"
+    ? { id, running }
+    : undefined
+}
+
+const detachedCleanup = Symbol("detached-cleanup")
+
+async function observeCleanupBeforeDeadline(
+  cleanup: Promise<Error | undefined>,
+  input: Pick<Parameters<ProcessOwnership.Service["start"]>[0], "signal" | "deadline">,
+  now: () => number,
+): Promise<Error | undefined | typeof detachedCleanup> {
+  const remaining = input.deadline - now()
+  if (input.signal.aborted || !Number.isFinite(remaining) || remaining <= 0) {
+    void cleanup.catch(() => undefined)
+    return detachedCleanup
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let removeAbort: () => void = () => {}
+  const timeout = new Promise<typeof detachedCleanup>((resolve) => {
+    timer = setTimeout(() => resolve(detachedCleanup), remaining)
+  })
+  const cancelled = new Promise<typeof detachedCleanup>((resolve) => {
+    const onAbort = () => resolve(detachedCleanup)
+    input.signal.addEventListener("abort", onAbort, { once: true })
+    removeAbort = () => input.signal.removeEventListener("abort", onAbort)
+    if (input.signal.aborted) onAbort()
+  })
+  const result = await Promise.race([cleanup, timeout, cancelled])
+  if (timer !== undefined) clearTimeout(timer)
+  removeAbort()
+  if (result === detachedCleanup) void cleanup.catch(() => undefined)
+  return result
+}
+
+async function removeNetwork(engine: Docker.Engine, config: DockerConfig.Config, networkID: string, deadline?: number) {
   const result = await execute(engine, config, {
     argv: ["network", "rm", networkID],
-    timeoutMs: config.limits.cleanupTimeoutMs,
+    timeoutMs: cleanupTimeoutBefore(config, deadline),
   })
   if (result.exit !== 0) throw new Docker.Unavailable("Preview Docker network cleanup failed")
 }
 
-function execute(
+interface LateResultObserver {
+  readonly timeoutMs: number
+  readonly detached: () => void
+  readonly settle: (late: Readonly<LateResultState>, deadline: number) => Promise<void>
+}
+
+interface LateResultState {
+  settled: boolean
+  result?: Docker.Result
+}
+
+async function execute(
   engine: Docker.Engine,
   config: DockerConfig.Config,
   input: {
@@ -642,16 +1132,87 @@ function execute(
     readonly timeoutMs: number
     readonly maxOutputBytes?: number
     readonly signal?: AbortSignal
+    readonly late?: LateResultObserver
   },
 ) {
-  return engine.execute({
+  if (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0) {
+    throw new Docker.Timeout("Docker invocation deadline elapsed")
+  }
+  if (input.signal?.aborted) throw new Docker.Cancelled("Docker invocation was cancelled")
+  const controller = new AbortController()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  let removeAbort: () => void = () => {}
+  const invocation = engine.execute({
     executable: config.enginePath,
     argv: input.argv,
     env: DockerConfig.invocationEnvironment(config),
     timeoutMs: input.timeoutMs,
     maxOutputBytes: input.maxOutputBytes ?? config.limits.maxOutputBytes,
-    ...(input.signal === undefined ? {} : { signal: input.signal }),
+    signal: controller.signal,
   })
+  const boundary = new Promise<{ readonly kind: "boundary"; readonly cause: Docker.Cancelled | Docker.Timeout }>(
+    (resolve) => {
+      const onAbort = () => {
+        controller.abort(input.signal?.reason)
+        // Give a resource-creating CLI that has already produced its opaque ID one
+        // microtask to settle so the caller can authenticate and clean it up. The
+        // absolute caller boundary is still wall-clock bounded.
+        queueMicrotask(() =>
+          resolve({ kind: "boundary", cause: new Docker.Cancelled("Docker invocation was cancelled") }),
+        )
+      }
+      input.signal?.addEventListener("abort", onAbort, { once: true })
+      removeAbort = () => {
+        input.signal?.removeEventListener("abort", onAbort)
+      }
+      if (input.signal?.aborted) {
+        onAbort()
+        return
+      }
+      timeout = setTimeout(() => {
+        const cause = new Docker.Timeout("Docker invocation timed out")
+        controller.abort(cause)
+        resolve({ kind: "boundary", cause })
+      }, input.timeoutMs)
+    },
+  )
+  try {
+    const outcome = await Promise.race([
+      invocation.then(
+        (result) => ({ kind: "result" as const, result }),
+        (cause) => ({ kind: "failure" as const, cause }),
+      ),
+      boundary,
+    ])
+    if (outcome.kind === "result") return outcome.result
+    if (outcome.kind === "failure") {
+      input.late?.detached()
+      if (input.late !== undefined) void observeLateResult(invocation, input.late)
+      throw outcome.cause
+    }
+    input.late?.detached()
+    if (input.late !== undefined) void observeLateResult(invocation, input.late)
+    throw outcome.cause
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+    removeAbort()
+  }
+}
+
+async function observeLateResult(invocation: Promise<Docker.Result>, observer: LateResultObserver) {
+  const deadline = Date.now() + observer.timeoutMs
+  const late: LateResultState = { settled: false }
+  void invocation.then(
+    (result) => {
+      late.result = result
+      late.settled = true
+    },
+    () => {
+      late.settled = true
+    },
+  )
+  const remaining = deadline - Date.now()
+  if (remaining > 0) await boundedOutcome(observer.settle(late, deadline), remaining)
 }
 
 async function canonicalDDirectory(value: string): Promise<string> {

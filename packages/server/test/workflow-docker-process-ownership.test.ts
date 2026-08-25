@@ -79,7 +79,7 @@ describe("DockerProcessOwnership", () => {
 
     await fixture.service.stop({ identity: fixture.identity, process: owned })
 
-    expect(fixture.engine.all("container", "kill")).toHaveLength(1)
+    expect(fixture.engine.all("container", "kill")).toEqual([])
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
     expect(fixture.engine.all("network", "rm")).toHaveLength(1)
   })
@@ -165,6 +165,7 @@ describe("DockerProcessOwnership", () => {
     await expect(fixture.service.start({ ...fixture.startInput(), signal: controller.signal })).rejects.toThrow()
 
     expect(fixture.engine.all("container", "create")).toEqual([])
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 250)
     expect(fixture.engine.all("network", "rm")).toHaveLength(1)
   })
 
@@ -179,6 +180,246 @@ describe("DockerProcessOwnership", () => {
 
     expect(fixture.engine.all("container", "create")).toEqual([])
     expect(fixture.engine.all("network", "rm")).toHaveLength(1)
+  })
+
+  test("settles at the absolute deadline while stalled ownership authentication cleans up detached", async () => {
+    await using fixture = await setup()
+    const inspection = deferred<void>()
+    fixture.engine.stallFirstNetworkInspect = inspection.promise
+    const startedAt = Date.now()
+    const start = fixture.service.start({ ...fixture.startInput(), deadline: startedAt + 40 })
+
+    const observed = await Promise.race([
+      start.then(
+        () => ({ kind: "resolved" as const, elapsed: Date.now() - startedAt }),
+        (cause) => ({ kind: "rejected" as const, cause, elapsed: Date.now() - startedAt }),
+      ),
+      new Promise<{ readonly kind: "still-pending"; readonly elapsed: number }>((resolve) =>
+        setTimeout(() => resolve({ kind: "still-pending", elapsed: Date.now() - startedAt }), 250),
+      ),
+    ])
+
+    inspection.resolve()
+    await start.catch(() => undefined)
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 250)
+    expect(observed.kind).toBe("rejected")
+    expect(observed.elapsed).toBeLessThan(200)
+    expect(fixture.engine.all("container", "create")).toEqual([])
+  })
+
+  test("settles at the absolute caller boundary while non-Docker preflight remains stalled", async () => {
+    const preflight = deferred<void>()
+    await using fixture = await setup({ beforePreflight: () => preflight.promise })
+    const startedAt = Date.now()
+    const start = fixture.service.start({ ...fixture.startInput(), deadline: startedAt + 40 })
+
+    const observed = await Promise.race([
+      start.then(
+        () => ({ kind: "resolved" as const, elapsed: Date.now() - startedAt }),
+        (cause) => ({ kind: "rejected" as const, cause, elapsed: Date.now() - startedAt }),
+      ),
+      new Promise<{ readonly kind: "still-pending"; readonly elapsed: number }>((resolve) =>
+        setTimeout(() => resolve({ kind: "still-pending", elapsed: Date.now() - startedAt }), 250),
+      ),
+    ])
+
+    preflight.resolve()
+    await start.catch(() => undefined)
+    expect(observed.kind).toBe("rejected")
+    expect(observed.elapsed).toBeLessThan(200)
+    expect(fixture.engine.all("network", "create")).toEqual([])
+  })
+
+  test("authenticates and removes a network whose create promise returns its ID after caller rejection", async () => {
+    await using fixture = await setup()
+    const creation = deferred<void>()
+    fixture.engine.onNetworkCreate = () => creation.promise
+    const startedAt = Date.now()
+    const start = fixture.service.start({ ...fixture.startInput(), deadline: startedAt + 40 })
+
+    const observed = await Promise.race([
+      start.then(
+        () => "resolved" as const,
+        () => "rejected" as const,
+      ),
+      new Promise<"still-pending">((resolve) => setTimeout(() => resolve("still-pending"), 250)),
+    ])
+    creation.resolve()
+    await start.catch(() => undefined)
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 1_000)
+
+    expect(observed).toBe("rejected")
+    expect(fixture.engine.all("container", "create")).toEqual([])
+  })
+
+  test("rediscovers an exact deterministic network when create rejects without returning its ID", async () => {
+    await using fixture = await setup()
+    fixture.engine.onNetworkCreate = async () => {
+      throw new Docker.Cancelled("create was cancelled after the network appeared")
+    }
+
+    await expect(fixture.service.start(fixture.startInput())).rejects.toThrow()
+
+    expect(fixture.engine.all("network", "inspect")).toHaveLength(1)
+    expect(fixture.engine.one("network", "inspect").argv[2]).toMatch(/^ocpn-[a-f0-9]+$/)
+    expect(fixture.engine.all("network", "rm")).toHaveLength(1)
+  })
+
+  test("rediscovers a late network by deterministic name when abort rejection loses its ID", async () => {
+    await using fixture = await setup()
+    fixture.engine.onNetworkCreate = rejectAfterAbort
+    const startedAt = Date.now()
+
+    await expect(fixture.service.start({ ...fixture.startInput(), deadline: startedAt + 40 })).rejects.toBeInstanceOf(
+      Docker.Timeout,
+    )
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 1_000)
+
+    expect(fixture.engine.all("network", "inspect").some((call) => call.argv[2]?.startsWith("ocpn-"))).toBe(true)
+    expect(fixture.engine.all("container", "create")).toEqual([])
+  })
+
+  test("keeps bounded exact-name discovery alive when a rejected network create becomes visible later", async () => {
+    await using fixture = await setup({ engineTimeoutMs: 120, cleanupTimeoutMs: 20 })
+    const invocationRejected = deferred<void>()
+    fixture.engine.networkVisible = false
+    fixture.engine.onNetworkCreate = (signal) => rejectAfterAbort(signal, () => invocationRejected.resolve())
+    const startedAt = Date.now()
+
+    await expect(fixture.service.start({ ...fixture.startInput(), deadline: startedAt + 40 })).rejects.toBeInstanceOf(
+      Docker.Timeout,
+    )
+    await invocationRejected.promise
+    await waitUntil(() => fixture.engine.all("network", "inspect").length >= 1, 500)
+    expect(fixture.engine.all("network", "rm")).toEqual([])
+    await Bun.sleep(35)
+
+    fixture.engine.networkVisible = true
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 1_000)
+
+    expect(fixture.engine.all("network", "inspect").length).toBeGreaterThanOrEqual(2)
+    expect(fixture.engine.all("container", "create")).toEqual([])
+  })
+
+  test("keeps exact-name discovery alive after an engine-side create rejection precedes network visibility", async () => {
+    await using fixture = await setup({ engineTimeoutMs: 120, cleanupTimeoutMs: 20 })
+    fixture.engine.networkVisible = false
+    fixture.engine.onNetworkCreate = async () => {
+      throw new Docker.Cancelled("engine rejected before the network became inspectable")
+    }
+
+    await expect(fixture.service.start(fixture.startInput())).rejects.toThrow()
+    await waitUntil(() => fixture.engine.all("network", "inspect").length >= 1, 500)
+    expect(fixture.engine.all("network", "rm")).toEqual([])
+    await Bun.sleep(35)
+
+    fixture.engine.networkVisible = true
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 1_000)
+
+    expect(fixture.engine.all("network", "inspect").length).toBeGreaterThanOrEqual(2)
+    expect(fixture.engine.all("container", "create")).toEqual([])
+  })
+
+  test("authenticates and removes a container whose create promise returns its ID after caller rejection", async () => {
+    await using fixture = await setup()
+    const creation = deferred<void>()
+    fixture.engine.onContainerCreate = () => creation.promise
+    const startedAt = Date.now()
+    const start = fixture.service.start({ ...fixture.startInput(), deadline: startedAt + 40 })
+
+    const observed = await Promise.race([
+      start.then(
+        () => "resolved" as const,
+        () => "rejected" as const,
+      ),
+      new Promise<"still-pending">((resolve) => setTimeout(() => resolve("still-pending"), 250)),
+    ])
+    creation.resolve()
+    await start.catch(() => undefined)
+    await waitUntil(() => fixture.engine.all("container", "rm").length === 1, 1_000)
+
+    expect(observed).toBe("rejected")
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("network", "rm")).toHaveLength(1)
+  })
+
+  test("rediscovers a late container by deterministic name when abort rejection loses its ID", async () => {
+    await using fixture = await setup()
+    fixture.engine.onContainerCreate = rejectAfterAbort
+    const startedAt = Date.now()
+
+    await expect(fixture.service.start({ ...fixture.startInput(), deadline: startedAt + 40 })).rejects.toBeInstanceOf(
+      Docker.Timeout,
+    )
+    await waitUntil(() => fixture.engine.all("container", "rm").length === 1, 1_000)
+
+    expect(fixture.engine.all("container", "inspect").some((call) => call.argv[2]?.startsWith("ocp-"))).toBe(true)
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("network", "rm")).toHaveLength(1)
+  })
+
+  test("does not remove the network before a rejected container create becomes visible and authenticated", async () => {
+    await using fixture = await setup({ engineTimeoutMs: 120, cleanupTimeoutMs: 20 })
+    const invocationRejected = deferred<void>()
+    fixture.engine.containerVisible = false
+    fixture.engine.onContainerCreate = (signal) => rejectAfterAbort(signal, () => invocationRejected.resolve())
+    const startedAt = Date.now()
+
+    await expect(fixture.service.start({ ...fixture.startInput(), deadline: startedAt + 40 })).rejects.toBeInstanceOf(
+      Docker.Timeout,
+    )
+    await invocationRejected.promise
+    await waitUntil(() => fixture.engine.all("container", "inspect").length >= 1, 500)
+    expect(fixture.engine.all("network", "rm")).toEqual([])
+    await Bun.sleep(35)
+
+    fixture.engine.containerVisible = true
+    await waitUntil(() => fixture.engine.all("container", "rm").length === 1, 1_000)
+
+    expect(fixture.engine.all("container", "inspect").length).toBeGreaterThanOrEqual(2)
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("network", "rm")).toHaveLength(1)
+  })
+
+  test("keeps the network until a container delayed after an engine-side create rejection is authenticated", async () => {
+    await using fixture = await setup({ engineTimeoutMs: 120, cleanupTimeoutMs: 20 })
+    fixture.engine.containerVisible = false
+    fixture.engine.onContainerCreate = async () => {
+      throw new Docker.Cancelled("engine rejected before the container became inspectable")
+    }
+
+    await expect(fixture.service.start(fixture.startInput())).rejects.toThrow()
+    await waitUntil(() => fixture.engine.all("container", "inspect").length >= 1, 500)
+    expect(fixture.engine.all("network", "rm")).toEqual([])
+    await Bun.sleep(35)
+
+    fixture.engine.containerVisible = true
+    await waitUntil(() => fixture.engine.all("container", "rm").length === 1, 1_000)
+
+    expect(fixture.engine.all("container", "inspect").length).toBeGreaterThanOrEqual(2)
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("network", "rm")).toHaveLength(1)
+  })
+
+  test("bounds detached discovery when create never settles and never exposes an authentic network", async () => {
+    await using fixture = await setup({ engineTimeoutMs: 20, cleanupTimeoutMs: 20 })
+    fixture.engine.networkVisible = false
+    fixture.engine.onNetworkCreate = () => new Promise(() => undefined)
+    const startedAt = Date.now()
+
+    await expect(fixture.service.start({ ...fixture.startInput(), deadline: startedAt + 30 })).rejects.toBeInstanceOf(
+      Docker.Timeout,
+    )
+    const callerElapsed = Date.now() - startedAt
+    await waitUntil(() => fixture.engine.all("network", "inspect").length >= 1, 200)
+    await Bun.sleep(120)
+    const inspectionsAfterBudget = fixture.engine.all("network", "inspect").length
+    await Bun.sleep(80)
+
+    expect(callerElapsed).toBeLessThan(150)
+    expect(inspectionsAfterBudget).toBeGreaterThan(0)
+    expect(fixture.engine.all("network", "inspect")).toHaveLength(inspectionsAfterBudget)
+    expect(fixture.engine.all("network", "rm")).toEqual([])
   })
 
   test("bounds every start ownership inspection by the same absolute deadline", async () => {
@@ -197,6 +438,25 @@ describe("DockerProcessOwnership", () => {
     await fixture.service.stop({ identity: fixture.identity, process: owned })
   })
 
+  test("rejects a label-owned internal network whose Docker driver is not bridge", async () => {
+    await using fixture = await setup({ networkDriver: "overlay" })
+    let process: ProcessOwnership.OwnedProcess | undefined
+    let cause: unknown
+
+    try {
+      process = await fixture.service.start(fixture.startInput())
+    } catch (error) {
+      cause = error
+    }
+    if (process !== undefined) await fixture.service.stop({ identity: fixture.identity, process })
+
+    expect(cause).toMatchObject({
+      _tag: "Docker.Unavailable",
+      message: "Preview Docker network ownership verification failed",
+    })
+    expect(fixture.engine.all("container", "create")).toEqual([])
+  })
+
   test("bounds stdout and stderr independently even when a fake engine violates its advertised output bound", async () => {
     await using fixture = await setup({ oversizedLogs: true })
 
@@ -210,16 +470,38 @@ describe("DockerProcessOwnership", () => {
   test.each(["kill", "rm", "network-rm"] as const)(
     "attempts container and network cleanup after %s failure",
     async (cleanupFailure) => {
-      await using fixture = await setup({ cleanupFailure })
+      await using fixture = await setup({ cleanupFailure, holdRunning: cleanupFailure === "kill" })
       const owned = await fixture.service.start(fixture.startInput())
 
       await expect(fixture.service.stop({ identity: fixture.identity, process: owned })).rejects.toThrow()
 
-      expect(fixture.engine.all("container", "kill")).toHaveLength(1)
+      expect(fixture.engine.all("container", "kill")).toHaveLength(cleanupFailure === "kill" ? 1 : 0)
       expect(fixture.engine.all("container", "rm")).toHaveLength(1)
       expect(fixture.engine.all("network", "rm")).toHaveLength(1)
     },
   )
+
+  test("skips kill for an already-exited owned container and still removes its resources", async () => {
+    await using fixture = await setup({ exitedKillFailure: true })
+    const owned = await fixture.service.start(fixture.startInput())
+
+    await expect(fixture.service.stop({ identity: fixture.identity, process: owned })).resolves.toBeUndefined()
+
+    expect(fixture.engine.all("container", "kill")).toEqual([])
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+    expect(fixture.engine.all("network", "rm")).toHaveLength(1)
+  })
+
+  test("accepts a not-running kill result when exact reinspection proves the container exited after the first check", async () => {
+    await using fixture = await setup({ exitBeforeKill: true, holdRunning: true })
+    const owned = await fixture.service.start(fixture.startInput())
+
+    await expect(fixture.service.stop({ identity: fixture.identity, process: owned })).resolves.toBeUndefined()
+
+    expect(fixture.engine.all("container", "kill")).toHaveLength(1)
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+    expect(fixture.engine.all("network", "rm")).toHaveLength(1)
+  })
 
   test("recovery filters by every exact label and removes only exact container and network identities", async () => {
     await using fixture = await setup()
@@ -232,7 +514,7 @@ describe("DockerProcessOwnership", () => {
 
     expect(valuesAfter(fixture.engine.one("container", "ls").argv, "--filter")).toHaveLength(5)
     expect(valuesAfter(fixture.engine.one("network", "ls").argv, "--filter")).toHaveLength(5)
-    expect(fixture.engine.all("container", "kill")).toHaveLength(1)
+    expect(fixture.engine.all("container", "kill")).toEqual([])
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
     expect(fixture.engine.all("network", "rm")).toHaveLength(1)
   })
@@ -261,16 +543,25 @@ class FakeEngine implements Docker.Engine {
   containerName = ""
   networkLabels: Record<string, string> = {}
   containerLabels: Record<string, string> = {}
+  networkVisible = true
+  containerVisible = true
+  containerRunning = false
   recovery = false
   labelFailure?: "missing" | "wrong"
-  onNetworkCreate?: () => Promise<void>
-  onContainerCreate?: () => Promise<void>
+  onNetworkCreate?: (signal: AbortSignal | undefined) => Promise<void>
+  onContainerCreate?: (signal: AbortSignal | undefined) => Promise<void>
+  stallFirstNetworkInspect?: Promise<void>
+  private networkInspections = 0
 
   constructor(
     private readonly options: {
       readonly labelFailure?: "missing" | "wrong"
       readonly oversizedLogs?: boolean
       readonly cleanupFailure?: "kill" | "rm" | "network-rm"
+      readonly networkDriver?: string
+      readonly exitedKillFailure?: boolean
+      readonly exitBeforeKill?: boolean
+      readonly holdRunning?: boolean
     },
   ) {
     this.labelFailure = options.labelFailure
@@ -282,16 +573,20 @@ class FakeEngine implements Docker.Engine {
     if (scope === "network" && action === "create") {
       this.networkName = input.argv.at(-1) ?? ""
       this.networkLabels = labels(input.argv)
-      await this.onNetworkCreate?.()
+      await this.onNetworkCreate?.(input.signal)
       return result({ stdout: `${this.networkID}\n` })
     }
     if (scope === "network" && action === "inspect") {
+      this.networkInspections++
+      if (this.networkInspections === 1) await this.stallFirstNetworkInspect
+      if (!this.networkVisible) return result({ exit: 1, stderr: "network is not visible" })
       return result({
         stdout: JSON.stringify([
           {
             Id: this.networkID,
             Name: this.networkName,
             Internal: true,
+            Driver: this.options.networkDriver ?? "bridge",
             Labels: inspectedLabels(this.networkLabels, this.labelFailure),
           },
         ]),
@@ -303,17 +598,22 @@ class FakeEngine implements Docker.Engine {
     if (scope === "container" && action === "create") {
       this.containerName = valueAfter(input.argv, "--name")
       this.containerLabels = labels(input.argv)
-      await this.onContainerCreate?.()
+      await this.onContainerCreate?.(input.signal)
       return result({ stdout: `${this.containerID}\n` })
     }
+    if (scope === "container" && action === "start") {
+      this.containerRunning = true
+      return result()
+    }
     if (scope === "container" && action === "inspect") {
+      if (!this.containerVisible) return result({ exit: 1, stderr: "container is not visible" })
       return result({
         stdout: JSON.stringify([
           {
             Id: this.containerID,
             Name: `/${this.containerName}`,
             Config: { Labels: inspectedLabels(this.containerLabels, this.labelFailure) },
-            State: { Running: false, ExitCode: 23 },
+            State: { Running: this.containerRunning, ExitCode: this.containerRunning ? 0 : 23 },
           },
         ]),
       })
@@ -321,7 +621,11 @@ class FakeEngine implements Docker.Engine {
     if (scope === "container" && action === "ls") {
       return result({ stdout: this.recovery ? `${this.containerID}\n` : "" })
     }
-    if (scope === "container" && action === "wait") return result({ stdout: "23\n" })
+    if (scope === "container" && action === "wait") {
+      if (this.options.holdRunning) return new Promise(() => undefined)
+      this.containerRunning = false
+      return result({ stdout: "23\n" })
+    }
     if (scope === "container" && action === "logs") {
       const value = this.options.oversizedLogs ? "x".repeat(1_024) : "preview stdout"
       return result({ stdout: value, stderr: this.options.oversizedLogs ? value : "preview stderr", truncated: true })
@@ -329,6 +633,14 @@ class FakeEngine implements Docker.Engine {
     if (scope === "container" && action === "kill" && this.options.cleanupFailure === "kill") {
       throw new Error("kill failed")
     }
+    if (scope === "container" && action === "kill" && this.options.exitedKillFailure) {
+      return result({ exit: 1, stderr: "container is not running" })
+    }
+    if (scope === "container" && action === "kill" && this.options.exitBeforeKill) {
+      this.containerRunning = false
+      return result({ exit: 1, stderr: "container is not running" })
+    }
+    if (scope === "container" && action === "kill") this.containerRunning = false
     if (scope === "container" && action === "rm" && this.options.cleanupFailure === "rm") {
       throw new Error("rm failed")
     }
@@ -354,6 +666,13 @@ async function setup(
     readonly labelFailure?: "missing" | "wrong"
     readonly oversizedLogs?: boolean
     readonly cleanupFailure?: "kill" | "rm" | "network-rm"
+    readonly networkDriver?: string
+    readonly exitedKillFailure?: boolean
+    readonly exitBeforeKill?: boolean
+    readonly holdRunning?: boolean
+    readonly engineTimeoutMs?: number
+    readonly cleanupTimeoutMs?: number
+    readonly beforePreflight?: (signal: AbortSignal) => Promise<void>
     readonly now?: () => number
   } = {},
 ) {
@@ -389,8 +708,8 @@ async function setup(
     temp: dockerTemp,
     limits: {
       timeoutMs: 10_000,
-      engineTimeoutMs: 5_000,
-      cleanupTimeoutMs: 2_000,
+      engineTimeoutMs: options.engineTimeoutMs ?? 5_000,
+      cleanupTimeoutMs: options.cleanupTimeoutMs ?? 2_000,
       maxOutputBytes: 128,
       memoryBytes: 1_073_741_824,
       cpus: 1.5,
@@ -398,7 +717,13 @@ async function setup(
     },
   }
   const engine = new FakeEngine(options)
-  const service = DockerProcessOwnership.make({ engine, config, hostRoot, now: options.now })
+  const service = DockerProcessOwnership.make({
+    engine,
+    config,
+    hostRoot,
+    now: options.now,
+    beforePreflight: options.beforePreflight,
+  })
   const dockerEnv = { DOCKER_CONFIG: dockerConfig, TEMP: dockerTemp, TMP: dockerTemp }
   return {
     caseRoot,
@@ -459,4 +784,36 @@ function count(values: readonly string[], value: string) {
 
 async function readText(stream: ReadableStream<Uint8Array>) {
   return new Response(stream).text()
+}
+
+function deferred<A>() {
+  let resolve!: (value: A) => void
+  let reject!: (cause: unknown) => void
+  const promise = new Promise<A>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+async function waitUntil(check: () => boolean, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs
+  while (!check() && Date.now() < deadline) await Bun.sleep(5)
+  if (!check()) throw new Error("condition was not observed before timeout")
+}
+
+function rejectAfterAbort(signal: AbortSignal | undefined, onReject?: () => void) {
+  return new Promise<void>((_resolve, reject) => {
+    if (signal === undefined) {
+      reject(new Error("expected an invocation abort signal"))
+      return
+    }
+    const rejectLater = () =>
+      setTimeout(() => {
+        onReject?.()
+        reject(new Docker.Cancelled("aborted without stdout"))
+      }, 10)
+    signal.addEventListener("abort", rejectLater, { once: true })
+    if (signal.aborted) rejectLater()
+  })
 }

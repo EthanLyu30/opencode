@@ -1,19 +1,23 @@
 import { describe, expect, test } from "bun:test"
 import { AgentV2 } from "@opencode-ai/core/agent"
+import { Database } from "@opencode-ai/core/database/database"
 import { makeGlobalNode, makeLocationNode } from "@opencode-ai/core/effect/app-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Location } from "@opencode-ai/core/location"
+import { PermissionSaved } from "@opencode-ai/core/permission/saved"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { WorkflowSchema } from "@opencode-ai/core/workflow"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
-import { DateTime, Effect, Layer } from "effect"
-import { createEmbeddedRoutes, createRoutes, workflowReplacements } from "../src/routes"
+import { Context, DateTime, Effect, Layer } from "effect"
+import { HttpRouter, HttpServer } from "effect/unstable/http"
+import { type ApplicationServiceFactory, createEmbeddedRoutes, createRoutes, workflowReplacements } from "../src/routes"
 import { WorkflowCommandSandboxServer } from "../src/workflow/command-sandbox"
 import { WorkflowRuntimeRecovery } from "../src/workflow/runtime-recovery"
 import { WorkflowVisualHostServer } from "../src/workflow/visual-host"
@@ -61,6 +65,44 @@ describe("Workflow runtime recovery", () => {
       now: () => fixture.now,
       recover: async (input) => {
         fixture.stage = { ...fixture.stage, leaseExpiresAt: DateTime.makeUnsafe(fixture.now + 60_000) }
+        if (!(await input.finalGate())) return 0
+        cleaned++
+        return 1
+      },
+    })
+
+    expect(result).toEqual({ healthy: true, recovered: 0, skipped: 1 })
+    expect(cleaned).toBe(0)
+  })
+
+  test("fences a rewritten lease expiry at the final gate even when the replacement is still expired", async () => {
+    const fixture = persistedFixture()
+    let cleaned = 0
+
+    const result = await WorkflowRuntimeRecovery.recoverExpired({
+      store: fixture.store,
+      now: () => fixture.now,
+      recover: async (input) => {
+        fixture.stage = { ...fixture.stage, leaseExpiresAt: DateTime.makeUnsafe(fixture.now - 2) }
+        if (!(await input.finalGate())) return 0
+        cleaned++
+        return 1
+      },
+    })
+
+    expect(result).toEqual({ healthy: true, recovered: 0, skipped: 1 })
+    expect(cleaned).toBe(0)
+  })
+
+  test("fences an in-place lease expiry mutation against the primitive captured by the outer recovery pass", async () => {
+    const fixture = persistedFixture()
+    let cleaned = 0
+
+    const result = await WorkflowRuntimeRecovery.recoverExpired({
+      store: fixture.store,
+      now: () => fixture.now,
+      recover: async (input) => {
+        Reflect.set(fixture.stage, "leaseExpiresAt", DateTime.makeUnsafe(fixture.now - 2))
         if (!(await input.finalGate())) return 0
         cleaned++
         return 1
@@ -198,6 +240,71 @@ describe("Workflow route composition", () => {
     expect(result).toEqual({ exit: 7, output: "server replacement", truncated: false })
   })
 
+  test("runs fake-valid replacements from the actual normal and embedded route service layers", async () => {
+    for (const mode of ["normal", "embedded"] as const) {
+      const fixture = routeReplacementFixture(mode)
+      const buildApplicationLayer = (
+        replacements: Parameters<ApplicationServiceFactory>[1],
+        build: Parameters<ApplicationServiceFactory>[2],
+      ) => build(LayerNode.group([WorkflowVisualHost.node, WorkflowCommandSandbox.node]), replacements)
+      const captured: { current?: ReturnType<typeof buildApplicationLayer> } = {}
+      const buildApplicationServices = (
+        _services: Parameters<ApplicationServiceFactory>[0],
+        replacements: Parameters<ApplicationServiceFactory>[1],
+        build: Parameters<ApplicationServiceFactory>[2],
+      ) => {
+        const layer = buildApplicationLayer(replacements, build)
+        captured.current = layer
+        return layer
+      }
+      const composition = {
+        workflow: { visualHost: fixture.visualNode, commandSandbox: fixture.commandNode },
+        buildApplicationServices,
+      }
+
+      if (mode === "normal") createRoutes(undefined, composition)
+      else createEmbeddedRoutes(composition)
+      const applicationLayer = captured.current
+      if (applicationLayer === undefined) throw new Error(`${mode} route graph did not build application services`)
+
+      const result = await Effect.runPromise(fixture.exercise.pipe(Effect.provide(applicationLayer)))
+      expect(result).toEqual({ exit: 11, output: mode, truncated: false })
+      expect(fixture.visualRecovered()).toBe(true)
+    }
+  })
+
+  test("acquires the actual normal and embedded returned route graphs through their application service layer", async () => {
+    for (const mode of ["normal", "embedded"] as const) {
+      const fixture = routeReplacementFixture(mode)
+      const composition = {
+        workflow: { visualHost: fixture.visualNode, commandSandbox: fixture.commandNode },
+        buildApplicationServices: routeApplicationFactory(),
+      }
+      const routeGraph = mode === "normal" ? createRoutes(undefined, composition) : createEmbeddedRoutes(composition)
+
+      const web = HttpRouter.toWebHandler(routeGraph.pipe(Layer.provide(HttpServer.layerServices)), {
+        disableLogger: true,
+      })
+      // The generated graph retains this request-only marker; the health endpoint does not consume it.
+      const requestServices = Context.make(
+        PermissionSaved.Service,
+        PermissionSaved.Service.of({
+          list: () => Effect.die("unused"),
+          add: () => Effect.die("unused"),
+          remove: () => Effect.die("unused"),
+        }),
+      )
+      try {
+        const response = await web.handler(new Request("http://localhost/api/health"), requestServices)
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ healthy: true })
+        expect(fixture.visualAcquired()).toBe(true)
+      } finally {
+        await web.dispose()
+      }
+    }
+  })
+
   test("builds a typed-unavailable visual host layer when production environment is absent", async () => {
     const failure = await Effect.runPromise(
       Effect.gen(function* () {
@@ -302,4 +409,86 @@ function persistedFixture() {
     },
     store,
   }
+}
+
+function routeReplacementFixture(mode: "normal" | "embedded") {
+  let recovered = false
+  let acquired = false
+  const visual = WorkflowVisualHost.Service.of({
+    materializeReference: () => Effect.die("unused"),
+    prepareImplementation: () => Effect.die("unused"),
+    capture: () => Effect.die("unused"),
+    recoverExpired: () => Effect.sync(() => (recovered = true)),
+  })
+  const visualNode = makeGlobalNode({
+    service: WorkflowVisualHost.Service,
+    layer: Layer.effect(
+      WorkflowVisualHost.Service,
+      Effect.sync(() => {
+        acquired = true
+        return visual
+      }),
+    ),
+    deps: [],
+  })
+  const commandNode = makeLocationNode({
+    service: WorkflowCommandSandbox.Service,
+    layer: Layer.succeed(
+      WorkflowCommandSandbox.Service,
+      WorkflowCommandSandbox.Service.of({
+        run: () => Effect.succeed({ exit: 11, output: mode, truncated: false }),
+      }),
+    ),
+    deps: [],
+  })
+  return {
+    visualNode,
+    commandNode,
+    visualRecovered: () => recovered,
+    visualAcquired: () => acquired,
+    exercise: Effect.gen(function* () {
+      const host = yield* WorkflowVisualHost.Service
+      const command = yield* WorkflowCommandSandbox.Service
+      yield* host.recoverExpired({ activeHostIDs: new Set(), expiredBefore: 0 })
+      return yield* command.run({
+        role: "implement",
+        workflowID: WorkflowSchema.ID.make(`wfl_route_${mode}`),
+        stageID: WorkflowSchema.StageID.make(`wfs_route_${mode}`),
+        policyDigest: "a".repeat(64),
+        sessionID: SessionSchema.ID.make(`ses_route_${mode}`),
+        agent: AgentV2.ID.make("build"),
+        assistantMessageID: SessionMessage.ID.make(`msg_route_${mode}`),
+        toolCallID: `call-route-${mode}`,
+        command: "true",
+      })
+    }),
+  }
+}
+
+function routeApplicationFactory() {
+  const databaseNode = makeGlobalNode({
+    service: Database.Service,
+    layer: Database.layerFromPath(":memory:"),
+    deps: [],
+  })
+  const cleanupNode = makeGlobalNode({
+    name: ToolOutputStore.cleanupNode.name,
+    layer: Layer.empty,
+    deps: [],
+  })
+  const recoveryNode = makeGlobalNode({
+    service: WorkflowRuntimeRecovery.Service,
+    layer: Layer.succeed(
+      WorkflowRuntimeRecovery.Service,
+      WorkflowRuntimeRecovery.Service.of({ healthy: true, recovered: 0, skipped: 0, ready: true }),
+    ),
+    deps: [],
+  })
+  return (services: Parameters<ApplicationServiceFactory>[0], replacements: Parameters<ApplicationServiceFactory>[1]) =>
+    AppNodeBuilder.build(services, [
+      ...replacements,
+      [Database.node, databaseNode],
+      [ToolOutputStore.cleanupNode, cleanupNode],
+      [WorkflowRuntimeRecovery.node, recoveryNode],
+    ])
 }

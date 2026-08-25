@@ -50,25 +50,84 @@ const applicationServices = LayerNode.group([
   WorkflowRuntimeRecovery.node,
 ])
 
-export function createRoutes(password?: string) {
+function applicationReplacements(workflow: Parameters<typeof workflowReplacements>[0] = {}) {
+  return [
+    [SessionExecution.node, SessionExecutionLocal.node],
+    [WorkflowExecution.node, WorkflowExecutionLocal.node],
+    ...workflowReplacements(workflow),
+  ] as const
+}
+
+function defaultApplicationServiceBuilder<A, E>(
+  services: LayerNode.Node<A, E, LayerNode.Tag | undefined>,
+  replacements: ReturnType<typeof applicationReplacements>,
+) {
+  return AppNodeBuilder.build(services, replacements)
+}
+
+export type ApplicationServiceBuilder = typeof defaultApplicationServiceBuilder
+
+type DefaultApplicationServiceOut = LayerNode.Output<typeof applicationServices>
+type DefaultApplicationServiceError = LayerNode.Error<typeof applicationServices>
+
+export type ApplicationServiceFactory<
+  ServiceOut = DefaultApplicationServiceOut,
+  ServiceError = DefaultApplicationServiceError,
+  ServiceIn = never,
+> = (
+  services: typeof applicationServices,
+  replacements: ReturnType<typeof applicationReplacements>,
+  build: ApplicationServiceBuilder,
+) => Layer.Layer<ServiceOut, ServiceError, ServiceIn>
+
+export interface RouteCompositionOptions<
+  ServiceOut = DefaultApplicationServiceOut,
+  ServiceError = DefaultApplicationServiceError,
+  ServiceIn = never,
+> {
+  readonly workflow?: Parameters<typeof workflowReplacements>[0]
+  readonly buildApplicationServices?: ApplicationServiceFactory<ServiceOut, ServiceError, ServiceIn>
+}
+
+export function createRoutes<
+  ServiceOut = DefaultApplicationServiceOut,
+  ServiceError = DefaultApplicationServiceError,
+  ServiceIn = never,
+>(password?: string, composition: RouteCompositionOptions<ServiceOut, ServiceError, ServiceIn> = {}) {
   return makeRoutes(
     password
       ? ServerAuth.Config.configLayer({ username: "opencode", password: Option.some(password) })
       : ServerAuth.Config.layer,
+    composition,
   )
 }
 
-export function createEmbeddedRoutes() {
-  return makeRoutes(ServerAuth.Config.configLayer({ username: "opencode", password: Option.none() }))
+export function createEmbeddedRoutes<
+  ServiceOut = DefaultApplicationServiceOut,
+  ServiceError = DefaultApplicationServiceError,
+  ServiceIn = never,
+>(composition: RouteCompositionOptions<ServiceOut, ServiceError, ServiceIn> = {}) {
+  return makeRoutes(ServerAuth.Config.configLayer({ username: "opencode", password: Option.none() }), composition)
 }
 
-function makeRoutes<AuthError, AuthServices>(auth: Layer.Layer<ServerAuth.Config, AuthError, AuthServices>) {
-  const serviceLayer = AppNodeBuilder.build(applicationServices, [
-    [SessionExecution.node, SessionExecutionLocal.node],
-    [WorkflowExecution.node, WorkflowExecutionLocal.node],
-    ...workflowReplacements(),
-  ])
+function makeRoutes<AuthError, AuthServices, ServiceOut, ServiceError, ServiceIn>(
+  auth: Layer.Layer<ServerAuth.Config, AuthError, AuthServices>,
+  composition: RouteCompositionOptions<ServiceOut, ServiceError, ServiceIn>,
+) {
+  const replacements = applicationReplacements(composition.workflow)
+  if (composition.buildApplicationServices) {
+    return provideApplicationServices(
+      auth,
+      composition.buildApplicationServices(applicationServices, replacements, defaultApplicationServiceBuilder),
+    )
+  }
+  return provideApplicationServices(auth, defaultApplicationServiceBuilder(applicationServices, replacements))
+}
 
+function provideApplicationServices<AuthError, AuthServices, ServiceOut, ServiceError, ServiceIn>(
+  auth: Layer.Layer<ServerAuth.Config, AuthError, AuthServices>,
+  serviceLayer: Layer.Layer<ServiceOut, ServiceError, ServiceIn>,
+) {
   return HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
     Layer.provide(handlers),
     Layer.provide(sessionLocationLayer),

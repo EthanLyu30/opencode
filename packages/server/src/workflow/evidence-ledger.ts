@@ -203,13 +203,11 @@ function makeService(
 }
 
 function checked<A>(root: string, options: OpenOptions, operation: Operation, work: () => A): A {
-  guardRoot(root, options, true)
   options.onBoundary?.({ operation, phase: "before" })
   guardRoot(root, options, true)
   try {
     return work()
   } finally {
-    guardRoot(root, options, true)
     options.onBoundary?.({ operation, phase: "after" })
     guardRoot(root, options, true)
   }

@@ -118,7 +118,7 @@ export function productionLayer(input: ProductionLayerOptions) {
           tempRoot: path.join(policy.roots.browserRoot, "runtime-temp"),
         }),
       evidenceRootPolicy: policy.verifyEvidenceRoot,
-      hostRootPolicy: policy.verifyHostRoot,
+      hostRootPolicy: policy.verifyTempRoot,
       processOwnership: DockerProcessOwnership.make({
         engine: input.engine ?? Docker.production,
         config,
@@ -224,13 +224,7 @@ function materializeReference(
       }
       yield* Effect.tryPromise({
         try: async () => {
-          await Promise.all(
-            reference.files.map(async (file) => {
-              const target = materializedPath(record.directory, file.path)
-              await fs.mkdir(path.dirname(target), { recursive: true })
-              await fs.writeFile(target, file.content, { encoding: "utf8", flag: "wx" })
-            }),
-          )
+          for (const file of reference.files) await writeReferenceFile(state, record, file)
           await guardHostRoot(state, record.directory)
           await writeManifest(state, record)
           startStaticServer(record, record.directory, reference.entrypoint, record.directory)
@@ -865,6 +859,76 @@ async function writeManifest(state: State, record: HostRecord): Promise<void> {
     { encoding: "utf8", flag: "wx" },
   )
   await guardHostRoot(state, record.directory)
+}
+
+async function writeReferenceFile(
+  state: State,
+  record: HostRecord,
+  file: { readonly path: string; readonly content: string },
+): Promise<void> {
+  const target = materializedPath(record.directory, file.path)
+  await ensureMaterializedParent(state, record.directory, target)
+  await guardMaterializedParent(state, record.directory, target)
+  await guardHostRoot(state, record.directory)
+  await fs.writeFile(target, file.content, { encoding: "utf8", flag: "wx" })
+  await guardMaterializedParent(state, record.directory, target)
+  const canonical = await fs.realpath(target)
+  const stat = await fs.lstat(target)
+  if (canonical !== path.resolve(target) || !stat.isFile() || stat.isSymbolicLink()) {
+    throw new TypeError("Workflow reference file identity changed")
+  }
+  await guardHostRoot(state, record.directory)
+}
+
+async function ensureMaterializedParent(state: State, capabilityRoot: string, target: string): Promise<void> {
+  const relative = path.relative(capabilityRoot, path.dirname(target))
+  if (relative === "" || path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
+    if (relative === "") {
+      await guardHostRoot(state, capabilityRoot)
+      return
+    }
+    throw new TypeError("Workflow reference parent escaped capability")
+  }
+  let current = capabilityRoot
+  for (const segment of relative.split(path.sep)) {
+    if (comparisonKey(current) === comparisonKey(capabilityRoot)) await guardHostRoot(state, capabilityRoot)
+    else await guardMaterializedDirectory(state, capabilityRoot, current)
+    const next = path.join(current, segment)
+    try {
+      await fs.mkdir(next)
+    } catch (cause) {
+      if (!isFileSystemError(cause, "EEXIST")) throw cause
+    }
+    await guardMaterializedDirectory(state, capabilityRoot, next)
+    current = next
+  }
+}
+
+async function guardMaterializedParent(state: State, capabilityRoot: string, target: string): Promise<void> {
+  await guardHostRoot(state, capabilityRoot)
+  let current = path.dirname(target)
+  while (comparisonKey(current) !== comparisonKey(capabilityRoot)) {
+    await guardMaterializedDirectory(state, capabilityRoot, current)
+    current = path.dirname(current)
+  }
+}
+
+async function guardMaterializedDirectory(state: State, capabilityRoot: string, directory: string): Promise<void> {
+  await guardHostRoot(state, capabilityRoot)
+  const canonical = await fs.realpath(directory)
+  const stat = await fs.lstat(directory)
+  if (
+    canonical !== path.resolve(directory) ||
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    !strictlyContains(capabilityRoot, canonical)
+  ) {
+    throw new TypeError("Workflow reference parent identity changed")
+  }
+}
+
+function isFileSystemError(cause: unknown, code: string): cause is Error & { readonly code: string } {
+  return cause instanceof Error && Reflect.get(cause, "code") === code
 }
 
 async function guardHostRoot(state: State, directory?: string): Promise<void> {

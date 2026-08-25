@@ -182,6 +182,96 @@ describe("WorkflowVisualHostServer", () => {
     expect((await fs.readdir(temp.path)).filter((name) => /^[a-f0-9]{64}$/.test(name))).toEqual([])
   })
 
+  test("writes zero reference bytes after the capability directory is redirected by the acquisition hook", async () => {
+    await using temp = await taskTemp()
+    await using outside = await taskTemp()
+    let redirected = ""
+    let parked = ""
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [
+                { path: "index.html", content: '<main id="ready"></main>' },
+                { path: "assets/app.js", content: "globalThis.ready = true" },
+              ],
+            },
+          })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            onRecordCreated: async (directory) => {
+              redirected = directory
+              parked = `${directory}-parked`
+              await fs.rename(directory, parked)
+              await fs.symlink(outside.path, directory, process.platform === "win32" ? "junction" : "dir")
+            },
+          }),
+        ),
+      ),
+    ).then(
+      (preview) => ({ preview }),
+      (error) => ({ error }),
+    )
+
+    expect(result).toHaveProperty("error")
+    expect(await fs.readdir(outside.path)).toEqual([])
+    if (redirected !== "" && (await fs.exists(redirected))) await fs.unlink(redirected)
+    if (parked !== "" && (await fs.exists(parked))) await fs.rm(parked, { recursive: true, force: true })
+  })
+
+  test("writes zero external bytes when a nested reference parent is a junction", async () => {
+    await using temp = await taskTemp()
+    await using outside = await taskTemp()
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "assets/deep/index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "assets/deep/index.html", content: '<main id="ready"></main>' }],
+            },
+          })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            onRecordCreated: async (directory) => {
+              await fs.symlink(
+                outside.path,
+                path.join(directory, "assets"),
+                process.platform === "win32" ? "junction" : "dir",
+              )
+            },
+          }),
+        ),
+      ),
+    ).then(
+      (preview) => ({ preview }),
+      (error) => ({ error }),
+    )
+
+    expect(result).toHaveProperty("error")
+    expect(await fs.readdir(outside.path)).toEqual([])
+  })
+
   test("uses a fresh locked-down browser context, denies non-admitted requests, waits for readiness, and returns exact PNG", async () => {
     await using temp = await taskTemp()
     const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
