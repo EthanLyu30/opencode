@@ -668,6 +668,17 @@ describe("WorkflowCommandSandboxServer", () => {
     await waitUntil(() => fixture.engine.all("container", "rm").length === 1)
   })
 
+  test("threads caller cancellation through acquisition ownership inspection", async () => {
+    await using fixture = await setup("implement", { acquisitionFailure: "inspect-cancelled" })
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    const acquisitionInspect = fixture.engine.all("container", "inspect")[0]
+    expect(acquisitionInspect?.signal).toBeInstanceOf(AbortSignal)
+    await waitUntil(() => fixture.engine.all("container", "rm").length === 1)
+  })
+
   test("reports verified-container removal failure as typed unavailable", async () => {
     await using fixture = await setup("implement", { cleanupFailure: "rm" })
 
@@ -713,16 +724,16 @@ describe("WorkflowCommandSandboxServer", () => {
     expect(fixture.engine.one("container", "rm").argv.at(-1)).toBe(fixture.engine.containerID)
   })
 
-  test("recovery attempts rm after kill failure and returns typed unavailable", async () => {
+  test("recovery lets verified removal dominate a thrown kill race", async () => {
     await using fixture = await setup("implement", { recoveryFailure: "kill" })
     await fixture.run({ command: "true" })
     fixture.engine.invocations.splice(0)
     fixture.engine.recoveryIDs = [fixture.engine.containerID]
     fixture.engine.recoveryRunning = true
 
-    const failure = await fixture.recover().catch((error) => error)
+    const recovered = await fixture.recover()
 
-    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(recovered).toBe(1)
     expect(fixture.engine.all("container", "kill")).toHaveLength(1)
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
   })
@@ -738,6 +749,21 @@ describe("WorkflowCommandSandboxServer", () => {
     expect(recovered).toBe(1)
     expect(fixture.engine.all("container", "kill")).toEqual([])
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+  })
+
+  test("recovery accepts a running-to-stopped kill race when rm and final absence are proven", async () => {
+    await using fixture = await setup("implement", { recoveryFailure: "kill-exit" })
+    await fixture.run({ command: "true" })
+    fixture.engine.invocations.splice(0)
+    fixture.engine.recoveryIDs = [fixture.engine.containerID]
+    fixture.engine.recoveryRunning = true
+
+    const recovered = await fixture.recover()
+
+    expect(recovered).toBe(1)
+    expect(fixture.engine.all("container", "kill")).toHaveLength(1)
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+    expect(fixture.engine.recoveryIDs).toEqual([])
   })
 
   test("recovery treats a verified empty ownership listing as already absent", async () => {
@@ -846,10 +872,24 @@ class FakeEngine implements Docker.Engine {
       readonly engineFailure?: "daemon" | "image"
       readonly startFailure?: "cancelled" | "timeout" | "engine" | "command"
       readonly inspectMismatch?: boolean
-      readonly recoveryFailure?: "list" | "listing-junk" | "inspect-json" | "kill" | "rm" | "still-present"
+      readonly recoveryFailure?:
+        | "list"
+        | "listing-junk"
+        | "inspect-json"
+        | "kill"
+        | "kill-exit"
+        | "rm"
+        | "still-present"
       readonly inspectFailure?: "malformed" | "truncated"
       readonly cleanupFailure?: "rm"
-      readonly acquisitionFailure?: "timeout" | "exit" | "cancelled" | "invalid-id" | "inspect-once" | "late-timeout"
+      readonly acquisitionFailure?:
+        | "timeout"
+        | "exit"
+        | "cancelled"
+        | "invalid-id"
+        | "inspect-once"
+        | "inspect-cancelled"
+        | "late-timeout"
     },
   ) {}
 
@@ -883,6 +923,8 @@ class FakeEngine implements Docker.Engine {
       if (!this.containerVisible && id === this.name)
         return { exit: 1, stdout: "", stderr: "not found", truncated: false }
       this.inspectAttempts++
+      if (this.options.acquisitionFailure === "inspect-cancelled" && this.inspectAttempts === 1)
+        throw new Docker.Cancelled("cancelled during inspect")
       if (this.options.acquisitionFailure === "inspect-once" && this.inspectAttempts === 1)
         return { exit: 1, stdout: "", stderr: "transient inspect failure", truncated: false }
       if (this.options.inspectFailure === "malformed") return { exit: 0, stdout: "{", stderr: "", truncated: false }
@@ -923,6 +965,8 @@ class FakeEngine implements Docker.Engine {
     }
     if (input.argv[0] === "container" && input.argv[1] === "kill" && this.options.recoveryFailure === "kill")
       throw new Error("kill failed")
+    if (input.argv[0] === "container" && input.argv[1] === "kill" && this.options.recoveryFailure === "kill-exit")
+      return { exit: 1, stdout: "", stderr: "not running", truncated: false }
     if (input.argv[0] === "container" && input.argv[1] === "rm" && this.options.cleanupFailure === "rm")
       throw new Error("rm failed")
     if (
@@ -965,10 +1009,17 @@ async function setup(
     readonly engineFailure?: "daemon" | "image"
     readonly startFailure?: "cancelled" | "timeout" | "engine" | "command"
     readonly inspectMismatch?: boolean
-    readonly recoveryFailure?: "list" | "listing-junk" | "inspect-json" | "kill" | "rm" | "still-present"
+    readonly recoveryFailure?: "list" | "listing-junk" | "inspect-json" | "kill" | "kill-exit" | "rm" | "still-present"
     readonly inspectFailure?: "malformed" | "truncated"
     readonly cleanupFailure?: "rm"
-    readonly acquisitionFailure?: "timeout" | "exit" | "cancelled" | "invalid-id" | "inspect-once" | "late-timeout"
+    readonly acquisitionFailure?:
+      | "timeout"
+      | "exit"
+      | "cancelled"
+      | "invalid-id"
+      | "inspect-once"
+      | "inspect-cancelled"
+      | "late-timeout"
     readonly callInput?: { readonly command: string; readonly workdir?: string; readonly timeout?: number }
   } = {},
 ) {

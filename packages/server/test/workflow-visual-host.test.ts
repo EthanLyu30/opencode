@@ -998,6 +998,51 @@ describe("WorkflowVisualHostServer", () => {
     expect(runtime.aborted).toEqual(["https://example.com/tracker.js"])
   })
 
+  test("bounds static responses at 32 MiB and rejects oversize or growth before returning bytes", async () => {
+    const serve = async (size: number, grow = false) => {
+      await using temp = await taskTemp()
+      await using workspaceTemp = await taskTemp()
+      const entrypoint = path.join(workspaceTemp.path, "index.html")
+      await fs.writeFile(entrypoint, new Uint8Array(size))
+      const plan = PreviewPlan.freeze({
+        authority: "admission",
+        location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+        preview: { kind: "static", entrypoint: "index.html" },
+      })
+      expect(PreviewPlan.isFrozen(plan)).toBe(true)
+      expect(() => PreviewPlan.verifyConfiguration(plan)).not.toThrow()
+      return await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            const preview = yield* host.prepareImplementation({ workflowID, revision: 2, plan })
+            return yield* Effect.promise(async () => {
+              const response = await fetch(preview.url)
+              return { status: response.status, bytes: (await response.arrayBuffer()).byteLength }
+            })
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              resolveImplementationContract,
+              onStaticFileOpened: grow
+                ? async (file) => {
+                    await fs.appendFile(file, new Uint8Array(1))
+                  }
+                : undefined,
+            }),
+          ),
+        ),
+      )
+    }
+
+    expect(await serve(32 * 1024 * 1024)).toEqual({ status: 200, bytes: 32 * 1024 * 1024 })
+    expect(await serve(32 * 1024 * 1024 + 1)).toMatchObject({ status: 413 })
+    expect(await serve(16, true)).toMatchObject({ status: 413 })
+  })
+
   test("never serves a multiply-linked static implementation file", async () => {
     await using temp = await taskTemp()
     await using workspaceTemp = await taskTemp()

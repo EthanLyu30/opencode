@@ -395,10 +395,15 @@ function completeCapture(
   })
 }
 
-function commitItem(state: State, input: WorkflowVisualHost.BindEvidenceInput, now: number): Item {
+function commitItem(
+  state: State,
+  input: WorkflowVisualHost.BindEvidenceInput,
+  now: number,
+  metadataOnly = false,
+): Item {
   const receipt = WorkflowVisualHost.validateEvidenceReceipt(input.receipt)
   const artifact = WorkflowVisualHost.evidenceArtifactBinding(input)
-  const item = requireItem(state, receipt.evidenceID)
+  const item = metadataOnly ? requireMetadataItem(state, receipt.evidenceID) : requireItem(state, receipt.evidenceID)
   assertReceipt(item, receipt)
   if (item.state === "capturing" || item.state === "abandoned") {
     throw evidenceConflict("commit_evidence", "Evidence cannot be committed from its durable state")
@@ -416,13 +421,18 @@ function commitItem(state: State, input: WorkflowVisualHost.BindEvidenceInput, n
     ),
   )
   if (result.changes !== 1) throw new FatalEvidenceError(new Error("Evidence commit was not exact"))
-  return requireItem(state, receipt.evidenceID)
+  return metadataOnly ? requireMetadataItem(state, receipt.evidenceID) : requireItem(state, receipt.evidenceID)
 }
 
-function releaseItem(state: State, input: WorkflowVisualHost.BindEvidenceInput, now: number): Item {
+function releaseItem(
+  state: State,
+  input: WorkflowVisualHost.BindEvidenceInput,
+  now: number,
+  metadataOnly = false,
+): Item {
   const receipt = WorkflowVisualHost.validateEvidenceReceipt(input.receipt)
   const artifact = WorkflowVisualHost.evidenceArtifactBinding(input)
-  const item = requireItem(state, receipt.evidenceID)
+  const item = metadataOnly ? requireMetadataItem(state, receipt.evidenceID) : requireItem(state, receipt.evidenceID)
   assertReceipt(item, receipt)
   if (item.state === "released") {
     if (!sameJSON(item.artifact, artifact)) {
@@ -440,13 +450,18 @@ function releaseItem(state: State, input: WorkflowVisualHost.BindEvidenceInput, 
     ),
   )
   if (result.changes !== 1) throw new FatalEvidenceError(new Error("Evidence release was not exact"))
-  return requireItem(state, receipt.evidenceID)
+  return metadataOnly ? requireMetadataItem(state, receipt.evidenceID) : requireItem(state, receipt.evidenceID)
 }
 
-function abandonItem(state: State, input: WorkflowVisualHost.AbandonEvidenceInput, now: number): Item {
+function abandonItem(
+  state: State,
+  input: WorkflowVisualHost.AbandonEvidenceInput,
+  now: number,
+  metadataOnly = false,
+): Item {
   const receipt = WorkflowVisualHost.validateEvidenceReceipt(input.receipt)
   const abandonment = WorkflowVisualHost.evidenceAbandonmentBinding(input)
-  const item = requireItem(state, receipt.evidenceID)
+  const item = metadataOnly ? requireMetadataItem(state, receipt.evidenceID) : requireItem(state, receipt.evidenceID)
   assertReceipt(item, receipt)
   if (item.state === "abandoned") {
     if (!sameJSON(item.abandonment, abandonment)) throw new TypeError("Evidence has another terminal authority")
@@ -462,7 +477,7 @@ function abandonItem(state: State, input: WorkflowVisualHost.AbandonEvidenceInpu
     ),
   )
   if (result.changes !== 1) throw new FatalEvidenceError(new Error("Evidence abandonment was not exact"))
-  return requireItem(state, receipt.evidenceID)
+  return metadataOnly ? requireMetadataItem(state, receipt.evidenceID) : requireItem(state, receipt.evidenceID)
 }
 
 function reconcile(
@@ -507,10 +522,10 @@ function reconcile(
     committed.set(receipt.evidenceID, authority)
   }
   return transaction(state, () => {
-    for (const authority of input.abandoned) abandonItem(state, authority, now)
+    for (const authority of input.abandoned) abandonItem(state, authority, now, true)
     for (const authority of committed.values()) {
-      commitItem(state, authority, now)
-      if (authority.release) releaseItem(state, authority, now)
+      commitItem(state, authority, now, true)
+      if (authority.release) releaseItem(state, authority, now, true)
     }
     const result: { [K in keyof WorkflowVisualHost.ReconcileEvidenceResult]: WorkflowVisualHost.EvidenceSummary[] } = {
       active: [],
@@ -551,12 +566,8 @@ function toSummary(item: Item): WorkflowVisualHost.EvidenceSummary {
 }
 
 function readItem(state: State, evidenceID: WorkflowVisualHost.EvidenceID): Item | undefined {
-  const row = sql(state, "select-item", () =>
-    state.database.query<EvidenceRow, [string]>(`${metadataSelect} WHERE evidence_id = ?`).get(evidenceID),
-  )
-  if (row === null) return undefined
-  const item = decodeRow(row)
-  if (item.state !== "staged" && item.state !== "committed") return item
+  const item = readMetadataItem(state, evidenceID)
+  if (item === undefined || (item.state !== "staged" && item.state !== "committed")) return item
   const blob = sql(state, "select-blob", () =>
     state.database
       .query<
@@ -575,8 +586,21 @@ function readItem(state: State, evidenceID: WorkflowVisualHost.EvidenceID): Item
   }
 }
 
+function readMetadataItem(state: State, evidenceID: WorkflowVisualHost.EvidenceID): Item | undefined {
+  const row = sql(state, "select-item", () =>
+    state.database.query<EvidenceRow, [string]>(`${metadataSelect} WHERE evidence_id = ?`).get(evidenceID),
+  )
+  return row === null ? undefined : decodeRow(row)
+}
+
 function requireItem(state: State, evidenceID: WorkflowVisualHost.EvidenceID): Item {
   const item = readItem(state, evidenceID)
+  if (item === undefined) throw new TypeError("Evidence receipt is unknown")
+  return item
+}
+
+function requireMetadataItem(state: State, evidenceID: WorkflowVisualHost.EvidenceID): Item {
+  const item = readMetadataItem(state, evidenceID)
   if (item === undefined) throw new TypeError("Evidence receipt is unknown")
   return item
 }

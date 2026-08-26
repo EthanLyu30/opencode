@@ -18,6 +18,7 @@ import { PlaywrightCapture } from "./playwright"
 import { ProcessOwnership } from "./process-ownership"
 
 const MAX_PROCESS_LOG_BYTES = 1024 * 1024
+const MAX_STATIC_RESPONSE_BYTES = 32 * 1024 * 1024
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000
 const DEFAULT_POLL_INTERVAL_MS = 50
 const DEFAULT_FINALIZER_TIMEOUT_MS = 5_000
@@ -56,6 +57,7 @@ export interface Options {
   readonly maxProcessLogBytes?: number
   readonly onSpawnArgv?: (argv: readonly string[]) => void
   readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
+  readonly onStaticFileOpened?: (file: string) => Promise<void>
   /**
    * Trusted host seam. Task23.7 supplies a resolver backed by exact durable
    * design + implementation/snapshot authority; absence fails closed.
@@ -168,6 +170,7 @@ interface State {
   readonly maxProcessLogBytes: number
   readonly onSpawnArgv?: (argv: readonly string[]) => void
   readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
+  readonly onStaticFileOpened?: (file: string) => Promise<void>
   readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
 }
 
@@ -213,6 +216,7 @@ async function makeState(options: Options): Promise<State> {
     maxProcessLogBytes,
     onSpawnArgv: options.onSpawnArgv,
     onRecordCreated: options.onRecordCreated,
+    onStaticFileOpened: options.onStaticFileOpened,
     resolveImplementationContract: options.resolveImplementationContract,
   }
 }
@@ -248,7 +252,7 @@ function materializeReference(
           for (const file of reference.files) await writeReferenceFile(state, record, file)
           await guardHostRoot(state, record.directory)
           await writeManifest(state, record)
-          startStaticServer(record, record.directory, reference.entrypoint, record.directory)
+          startStaticServer(record, record.directory, reference.entrypoint, record.directory, state.onStaticFileOpened)
           await guardHostRoot(state, record.directory)
         },
         catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
@@ -361,6 +365,7 @@ function prepareImplementation(
               path.dirname(input.plan.entrypoint ?? ""),
               input.plan.entrypoint ?? "",
               input.plan.locationRoot,
+              state.onStaticFileOpened,
             ),
           catch: () =>
             failure("prepare_implementation", "visual_host_unavailable", "Static implementation host could not start"),
@@ -677,7 +682,13 @@ async function createRecord(state: State, workflowID: string, workspace?: string
   }
 }
 
-function startStaticServer(record: HostRecord, root: string, entrypoint: string, containmentRoot: string): void {
+function startStaticServer(
+  record: HostRecord,
+  root: string,
+  entrypoint: string,
+  containmentRoot: string,
+  onStaticFileOpened?: (file: string) => Promise<void>,
+): void {
   record.server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -690,8 +701,9 @@ function startStaticServer(record: HostRecord, root: string, entrypoint: string,
             ? entrypoint
             : path.join(root, ...entrypoint.split("/"))
           : path.join(root, ...relative.split("/"))
-      const file = await readStaticFile(target, containmentRoot)
+      const file = await readStaticFile(target, containmentRoot, onStaticFileOpened)
       if (file === undefined) return new Response("Not found", { status: 404 })
+      if (file.status === "too-large") return new Response("Static response exceeds host limit", { status: 413 })
       return new Response(Uint8Array.from(file.bytes).buffer, { headers: { "content-type": file.contentType } })
     },
   })
@@ -976,7 +988,12 @@ function materializedPath(root: string, value: string): string {
 async function readStaticFile(
   target: string,
   root: string,
-): Promise<{ readonly bytes: Uint8Array; readonly contentType: string } | undefined> {
+  onOpened?: (file: string) => Promise<void>,
+): Promise<
+  | { readonly status: "ok"; readonly bytes: Uint8Array; readonly contentType: string }
+  | { readonly status: "too-large" }
+  | undefined
+> {
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined
   try {
     const lexical = path.resolve(target)
@@ -987,7 +1004,15 @@ async function readStaticFile(
     handle = await fs.open(lexical, "r")
     const opened = await handle.stat({ bigint: true })
     if (!safeStaticFile(opened) || !sameFileIdentity(admitted, opened)) return undefined
-    const bytes = new Uint8Array(await handle.readFile())
+    if (opened.size > BigInt(MAX_STATIC_RESPONSE_BYTES)) return { status: "too-large" }
+    await onOpened?.(lexical)
+    const bytes = new Uint8Array(Number(opened.size))
+    let offset = 0
+    while (offset < bytes.byteLength) {
+      const result = await handle.read(bytes, offset, bytes.byteLength - offset, offset)
+      if (result.bytesRead === 0) return undefined
+      offset += result.bytesRead
+    }
     const settled = await handle.stat({ bigint: true })
     const pathSettled = await fs.lstat(lexical, { bigint: true })
     const canonicalSettled = await fs.realpath(lexical)
@@ -1000,7 +1025,8 @@ async function readStaticFile(
     ) {
       return undefined
     }
-    return { bytes, contentType: Bun.file(lexical).type || "application/octet-stream" }
+    if (settled.size !== opened.size || settled.size > BigInt(MAX_STATIC_RESPONSE_BYTES)) return { status: "too-large" }
+    return { status: "ok", bytes, contentType: Bun.file(lexical).type || "application/octet-stream" }
   } catch {
     return undefined
   } finally {

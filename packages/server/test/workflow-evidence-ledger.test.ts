@@ -424,7 +424,12 @@ describe("EvidenceLedger durable staging", () => {
 
   test("reconciles only full active, terminal, and artifact authority and preserves unknown staging", async () => {
     await using temp = await taskTemp()
-    const ledger = EvidenceLedger.open(temp.path)
+    let blobReads = 0
+    const ledger = EvidenceLedger.open(temp.path, {
+      onBoundary: ({ operation, phase }) => {
+        if (operation === "select-blob" && phase === "before") blobReads++
+      },
+    })
     const staged = async (stage: string, nonce: string) => {
       const coordinates = await evidenceCoordinates(stage)
       const bytes = WorkflowVisualHost.deterministicPng(coordinates.viewport)
@@ -453,6 +458,7 @@ describe("EvidenceLedger durable staging", () => {
       authorityID: "workflow.stage.cancelled:event-2",
     }
 
+    blobReads = 0
     const result = await ledger.reconcile(
       {
         workflowID,
@@ -469,8 +475,10 @@ describe("EvidenceLedger durable staging", () => {
     expect(result.ambiguous.map((item) => item.evidenceID).toSorted()).toEqual(
       [unknown.evidenceID, WorkflowVisualHost.evidenceID(capturing)].toSorted(),
     )
+    expect(blobReads).toBe(0)
     expect(await ledger.get(unknown.receipt.coordinates)).toMatchObject({ state: "staged" })
     expect(await ledger.get(capturing)).toMatchObject({ state: "capturing" })
+    expect(blobReads).toBe(1)
     await ledger.close()
   })
 

@@ -158,3 +158,31 @@ git diff --check: PASS (only Git LF→CRLF notices)
 ```
 
 The repository-wide `bun run lint` was also attempted. It completed in 98 seconds with the pre-existing repository baseline of `4925 warnings and 1 error` across 3213 files; changed-file oxlint is clean. This wave does not modify unrelated baseline findings.
+
+## Task23.6 joint fix round 2
+
+All four independent-review findings were confirmed against `d111972bd`; none was weakened or dismissed.
+
+### RED and root cause
+
+- Acquisition ownership inspection had no caller `AbortSignal`, and its detached discovery launch had no terminal catch. The regression asserts the first acquisition inspect carries the Effect caller signal; the old invocation had `signal === undefined`. The fix also installs a terminal rejection observer on every detached cleanup launch.
+- Recovery's running→stopped race was reproduced with kill exit 1, rm exit 0, and a final exact-label listing proving absence. RED was `0 pass, 1 fail`: `Workflow Docker recovery cleanup failed`. Kill outcome was incorrectly made permanently authoritative before final absence.
+- Reconcile's active-only no-BLOB test was insufficient: committed/release and abandoned authorities called `requireItem()` and selected PNG bytes. The combined active/capturing/staged→released/staged→abandoned reconciliation boundary now asserts zero `select-blob` operations before any later explicit `get`.
+- Static serving used unbounded `handle.readFile()`. Exact 32 MiB, 32 MiB+1, and append-after-open cases define the host-only boundary; the former implementation had no size fence and could allocate the whole workspace-controlled file.
+
+### GREEN
+
+- The acquisition create and exact ownership inspect now share one caller signal and remaining absolute deadline. Detached deterministic-name cleanup is always rejection-observed and retains its prior exact-label authority.
+- Recovery treats kill errors/nonzero as a benign race only when rm succeeds and the final exact-label listing proves absence. rm failure, malformed/ambiguous ownership, and still-present owners remain fatal.
+- Reconcile uses metadata-only require/mutate/return paths for commit, release, and abandon. Only explicit `get` and normal public byte-bearing bindings select one validated BLOB.
+- Static response bodies have a non-public 32 MiB constant. The verified handle size is checked before allocation; reads are capped to the admitted size; handle/path identity and size are rechecked after reading. Oversize and growth return 413 without returning bytes; hardlink/replacement checks remain intact.
+
+### Verification
+
+```text
+Three directly changed suites: 133 pass, 0 fail, 497 expect
+Six-file default-parallel matrix: 211 pass, 0 fail, 719 expect (clean repeated runs)
+Server typecheck: PASS
+```
+
+One deliberately overlapping verification launch (a three-run PowerShell loop was still active when another matrix was started) produced cross-process fixture interference and was discarded; after confirming no Bun process remained, the same default-parallel command returned 211/211 clean. No timeout was increased.

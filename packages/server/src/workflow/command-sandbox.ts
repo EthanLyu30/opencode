@@ -205,14 +205,11 @@ async function recoverOwned(input: {
   for (const owned of exact) {
     try {
       if (owned.running === true) {
-        const killed = await execute(input.engine, config, {
+        await execute(input.engine, config, {
           argv: ["container", "kill", owned.id],
           timeoutMs: config.limits.cleanupTimeoutMs,
-        })
-        if (killed.exit !== 0) cleanupFailed = true
+        }).catch(() => undefined)
       }
-    } catch {
-      cleanupFailed = true
     } finally {
       try {
         const removed = await execute(input.engine, config, {
@@ -375,10 +372,11 @@ async function runOwned(
       ownership,
       false,
       remaining(callerDeadline, config.limits.engineTimeoutMs),
+      signal,
     )
     if (!owned) throw unavailable("Docker container ownership verification failed")
   } catch (cause) {
-    void discoverAndCleanup(engine, config, ownership)
+    void discoverAndCleanup(engine, config, ownership).catch(() => undefined)
     throw cause
   }
 
@@ -498,10 +496,12 @@ async function inspect(
   ownership: ReturnType<typeof ownershipFor>,
   strict = false,
   timeoutMs = config.limits.engineTimeoutMs,
+  signal?: AbortSignal,
 ): Promise<OwnedContainer | undefined> {
   const result = await execute(engine, config, {
     argv: ["container", "inspect", id],
     timeoutMs,
+    signal,
   })
   if (result.exit !== 0 || result.truncated) {
     if (strict) throw new Docker.Unavailable("Docker inspection failed")
