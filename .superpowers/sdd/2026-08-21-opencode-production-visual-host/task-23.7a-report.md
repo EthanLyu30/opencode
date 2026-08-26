@@ -308,3 +308,127 @@ Finished in 2.9s on 10 files with 130 rules using 16 threads.
 ### Remaining concern
 
 No A-scope correctness concern remains. Task 23.7B must provide the trusted message/screenshot extension and production resolver; A continues to perform no real Snapshot/filesystem/preview/capture/evidence settlement/delivery-freshness work.
+
+## Independent review fix round 2 — 2026-08-26
+
+### Status and commit identity
+
+- Review-fix implementation commit: `5117562b2` (`fix(workflow): bind exact provider requests`).
+- This section and the progress-ledger entry are a separate documentation commit; the code SHA above identifies the reviewed implementation exactly.
+- Both scoped reviewer findings were verified against the production paths before editing. No architectural conflict or `NEEDS_CONTEXT` condition was found.
+
+### Focused RED evidence
+
+The first RED command ran from `D:\OpenCode-Audit\packages\core` with pinned Bun, after adding the provider-observed-request and string-media-shape regressions and before production changes:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts test/workflow-location-tools.test.ts
+```
+
+```text
+(fail) Workflow Location tools > resumes a durable provider result without a duplicate provider call and rejects drift
+Expected: true
+Received: false
+at expect(Object.isFrozen(observed)).toBe(true)
+(fail) Workflow role contracts > keeps media typed and rejects screenshot data in generic provider text
+Received function did not throw
+26 pass
+2 fail
+154 expect() calls
+Ran 28 tests across 2 files. [3.71s]
+```
+
+This directly proved that the provider-observed `LLMRequest` was mutable and that a string-backed media-shaped object escaped the generic scanner. The accompanying source trace showed the cause: the durable fingerprint was minted from pre-normalization input and dispatch separately invoked `LLM.request`; the test's subsequent actual-request fingerprint assertion could not exist against that old API.
+
+A self-review RED added collision/separator variants before their production hardening:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts
+```
+
+```text
+(fail) Workflow role contracts > keeps media typed and rejects screenshot data in generic provider text
+Received function did not throw
+14 pass
+1 fail
+66 expect() calls
+Ran 15 tests across 1 file. [954.00ms]
+```
+
+### Fix decisions and compatibility behavior
+
+- `execution/provider-request.ts` now owns one canonical request builder. It invokes `LLM.request` exactly once, freezes the normalized request and its ordered system/message/tool arrays, fingerprints that same object, and dispatches that same object without reconstruction. Recovery invokes the identical builder with the public fixed route model and does not read credentials or reissue an ambiguous provider request.
+- The bounded 256 KiB authority descriptor binds every normalized request field, full response JSON schema, ordered messages and tools, generation/provider/HTTP/cache/metadata options, fixed workflow route facts, non-secret model/endpoint/default/compatibility facts, contract fingerprint, catalog fingerprint, and sequence. Credential material is represented only as host authority; typed media payloads are represented by kind, SHA-256, and byte size rather than raw bytes or base64.
+- The provider-observed integration fixture recomputes the durable fingerprint from the exact request received by `LLMClient.generate`. Schema, generation, tool-order, and message drift each produce a different fingerprint. Existing recovery cases prove contract/schema, context/message, generation, and tool-catalog drift fail closed with no additional provider call.
+- Generic scanning now rejects case-insensitive media/image type tags, duplicate case-variant tags, image/media URL/URI/data/byte fields, MIME/media-type plus payload combinations, image/audio/video content-type payloads, and separator/case variants of `dataBase64`. These rules apply recursively to provider results, continuations, and tool values. Schema-validated top-level `Message` media remains accepted and is the only binary exception.
+- Existing continuation versions and legacy non-visual outcome replay behavior are unchanged. Newly admitted visual settlement retains the strict binding/receipt authority from fix round 1.
+
+### Final GREEN and quality evidence
+
+Focused Core tests, run from `D:\OpenCode-Audit\packages\core` after formatting:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts test/workflow-location-tools.test.ts
+```
+
+```text
+28 pass
+0 fail
+182 expect() calls
+Ran 28 tests across 2 files. [4.95s]
+```
+
+Mandatory Core matrix, run from `D:\OpenCode-Audit\packages\core`:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts test/workflow-design-loop.test.ts test/workflow-model-state-machine.test.ts test/workflow-location-tools.test.ts test/workflow-execution.test.ts test/workflow-business-artifacts.test.ts test/workflow-routing.test.ts
+```
+
+```text
+106 pass
+0 fail
+538 expect() calls
+Ran 106 tests across 7 files. [10.94s]
+```
+
+Core typecheck, run from `D:\OpenCode-Audit\packages\core`:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' typecheck
+```
+
+```text
+$ tsgo --noEmit
+exit 0
+```
+
+Formatting and changed-file lint, run from `D:\OpenCode-Audit` with exact literal file lists:
+
+```powershell
+& '.\node_modules\.bin\prettier.exe' --write 'packages/core/src/workflow/execution/contract.ts' 'packages/core/src/workflow/execution/model.ts' 'packages/core/src/workflow/execution/provider-request.ts' 'packages/core/test/workflow-location-tools.test.ts' 'packages/core/test/workflow-role-execution.test.ts'
+& '.\node_modules\.bin\oxlint.exe' 'packages/core/src/workflow/execution/contract.ts' 'packages/core/src/workflow/execution/model.ts' 'packages/core/src/workflow/execution/provider-request.ts' 'packages/core/test/workflow-location-tools.test.ts' 'packages/core/test/workflow-role-execution.test.ts'
+```
+
+```text
+packages/core/src/workflow/execution/contract.ts 121ms (unchanged)
+packages/core/src/workflow/execution/model.ts 97ms (unchanged)
+packages/core/src/workflow/execution/provider-request.ts 12ms (unchanged)
+packages/core/test/workflow-location-tools.test.ts 100ms (unchanged)
+packages/core/test/workflow-role-execution.test.ts 47ms (unchanged)
+Found 0 warnings and 0 errors.
+Finished in 2.7s on 5 files with 130 rules using 16 threads.
+```
+
+`git diff --check` and `git diff --cached --check` exited 0; Git emitted only the repository's CRLF conversion warnings. No temporary/cache artifacts were created.
+
+### Review-fix files changed
+
+- `packages/core/src/workflow/execution/contract.ts`
+- `packages/core/src/workflow/execution/model.ts`
+- `packages/core/src/workflow/execution/provider-request.ts` (new focused owner for canonical dispatch/fingerprinting)
+- `packages/core/test/workflow-location-tools.test.ts`
+- `packages/core/test/workflow-role-execution.test.ts`
+
+### Remaining concern
+
+No new A-scope correctness concern remains. The existing Task 23.7B boundary is unchanged: production visual evidence resolution and trusted screenshot settlement remain fail-closed and are not implemented or exercised here.
