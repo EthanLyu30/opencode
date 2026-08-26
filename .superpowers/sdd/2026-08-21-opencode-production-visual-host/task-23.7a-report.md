@@ -559,3 +559,7 @@ Finished in 2.2s on 4 files with 130 rules using 16 threads.
 ### Remaining concern
 
 No new A-scope correctness concern remains. The Task 23.7B boundary is unchanged: production visual evidence resolution and trusted screenshot settlement remain fail-closed and were not exercised here.
+
+## Fix round 3 independent scoped re-review
+
+The fresh reviewer examined `eb66c126d..177867bf2` and returned **CLEAN**. Both remaining Important findings were addressed: the exact normalized provider request is now deeply owned and immutable across every fingerprinted/dispatched surface, and generic evidence scanning now rejects separator variants plus every ArrayBuffer/view binary representation while retaining the typed `Message` media path. No new Critical or Important breakage was found.
