@@ -481,7 +481,7 @@ describe("Workflow Location tools", () => {
     ),
   )
 
-  modelIt.live("resumes a durable provider result without a duplicate provider call and rejects drift", () =>
+  modelIt.live("dispatches a deeply immutable request, resumes its durable result, and rejects drift", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) =>
@@ -541,6 +541,40 @@ describe("Workflow Location tools", () => {
           expect(Object.isFrozen(observed.tools)).toBe(true)
           expect(observed.system[0]).toMatchObject({ type: "text" })
           expect(observed.generation?.maxTokens).toBe(3)
+          const expectMutationRejected = (target: object, key: PropertyKey, replacement: unknown) => {
+            const hadKey = Object.hasOwn(target, key)
+            const before = Reflect.get(target, key)
+            const accepted = Reflect.set(target, key, replacement)
+            const changed = Reflect.get(target, key) !== before
+            if (accepted) {
+              if (hadKey) Reflect.set(target, key, before)
+              else Reflect.deleteProperty(target, key)
+            }
+            expect(accepted).toBe(false)
+            expect(changed).toBe(false)
+          }
+          const system = observed.system[0]
+          const message = observed.messages[0]
+          const part = message?.content[0]
+          const tool = observed.tools[0]
+          const generation = observed.generation
+          const responseFormat = observed.responseFormat
+          const kimiOptions = observed.model.route.defaults.providerOptions?.kimi
+          if (!system || !message || part?.type !== "text" || !tool || !generation)
+            throw new Error("normalized request fixture is incomplete")
+          if (responseFormat?.type !== "json") throw new Error("normalized response schema fixture is missing")
+          if (!kimiOptions) throw new Error("normalized provider options fixture is missing")
+          expectMutationRejected(system, "text", "mutated system")
+          expectMutationRejected(message, "role", "assistant")
+          expectMutationRejected(part, "text", "mutated message")
+          expectMutationRejected(tool, "description", "mutated tool")
+          expectMutationRejected(tool.inputSchema, "type", "array")
+          expectMutationRejected(generation, "maxTokens", 2)
+          expectMutationRejected(responseFormat.schema, "type", "array")
+          expectMutationRejected(kimiOptions, "reasoningEffort", "low")
+          expectMutationRejected(observed.model, "id", "mutated-model")
+          expectMutationRejected(observed.model.route, "id", "mutated-route")
+          expectMutationRejected(observed.model.route.endpoint, "baseURL", "https://mutated.invalid")
           const fingerprint = (request: LLMRequest) =>
             WorkflowModelExecution.fingerprintProviderRequest({
               request,

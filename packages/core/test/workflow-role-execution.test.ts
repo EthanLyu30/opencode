@@ -5,6 +5,7 @@ import { Message } from "@opencode-ai/llm"
 import { WorkflowRoleContract } from "@opencode-ai/core/workflow/execution/contract"
 import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
 import { WorkflowModelExecution } from "@opencode-ai/core/workflow/execution/model"
+import * as WorkflowProviderRequest from "@opencode-ai/core/workflow/execution/provider-request"
 import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
 import { WorkflowDesignArtifact } from "@opencode-ai/core/workflow/artifacts/design"
 import { WorkflowVisualReviewArtifact } from "@opencode-ai/core/workflow/artifacts/visual-review"
@@ -205,14 +206,48 @@ describe("Workflow role contracts", () => {
       { nested: { image_url: "https://example.test/capture.png" } },
       { dataBase64: "harmless-looking" },
       { data_base64: "separator-bypass" },
+      { "data base64": "space-bypass" },
+      { "data.base64": "dot-bypass" },
+      { nested: { "t y p e": "MeDiA", value: "opaque" } },
+      { nested: { "media.type": "image/png", data: "opaque" } },
       { nested: { DATABASE64: "still-forbidden" } },
       { nested: [{ DaTaBaSe64: "case-insensitive" }] },
       { nested: "data:text/plain,forbidden" },
+      new ArrayBuffer(4),
+      new DataView(new ArrayBuffer(4)),
+      new Uint16Array([1, 2]),
     ]) {
       expect(() => WorkflowRoleContract.assertGenericProviderValue(value)).toThrow()
     }
     expect(() => WorkflowRoleContract.assertGenericProviderValue({ nested: Uint8Array.from([0, 1]) })).toThrow()
     expect(() => WorkflowRoleContract.assertTextSafe("safe", [media])).not.toThrow()
+  })
+
+  test("owns immutable typed media bytes in the canonical provider request", () => {
+    const route = WorkflowRouting.resolve({ role: "visual_review", budget })
+    const inputBytes = Uint8Array.from([1, 2, 3])
+    const built = contract("visual_review", 0, [
+      Message.user([{ type: "media", mediaType: "image/png", data: inputBytes, filename: "pair.png" }]),
+    ])
+    const request = WorkflowProviderRequest.build({
+      model: route.model,
+      route,
+      contract: built,
+      sequence: 1,
+      catalogFingerprint: "a".repeat(64),
+      messages: built.messages,
+      tools: [],
+      remainingTokens: 100,
+    }).request
+    const part = request.messages[0]?.content[0]
+    if (part?.type !== "media" || typeof part.data === "string") throw new Error("typed media request is missing")
+    expect(part.data).toBeInstanceOf(Uint8Array)
+    expect(Buffer.from(part.data)).toEqual(Buffer.from([1, 2, 3]))
+    expect(part.data).not.toBe(inputBytes)
+    const accepted = Reflect.set(part.data, 0, 9)
+    if (accepted) Reflect.set(part.data, 0, 1)
+    expect(accepted).toBe(false)
+    expect(Buffer.from(part.data)).toEqual(Buffer.from([1, 2, 3]))
   })
 
   test("binds the canonical response schema and sorts without locale authority", () => {

@@ -1,4 +1,4 @@
-import { LLM, type LLMRequest, type Message, type Model, type ToolDefinition } from "@opencode-ai/llm"
+import { LLM, LLMRequest, Model, type Message, type ToolDefinition } from "@opencode-ai/llm"
 import { WorkflowRouting } from "../routing"
 import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
@@ -27,7 +27,7 @@ export interface FingerprintInput {
 }
 
 export function build(input: BuildInput) {
-  const request = freezeRequest(
+  const request = ownRequest(
     LLM.request({
       model: input.model,
       system: input.contract.system,
@@ -89,13 +89,65 @@ export function fingerprintProviderRequest(input: FingerprintInput): string {
   return WorkflowBusinessArtifact.hash(descriptor)
 }
 
-function freezeRequest(request: LLMRequest): LLMRequest {
-  Object.freeze(request.system)
-  Object.freeze(request.messages)
-  Object.freeze(request.tools)
-  if (request.generation !== undefined) Object.freeze(request.generation)
-  if (request.responseFormat !== undefined) Object.freeze(request.responseFormat)
-  return Object.freeze(request)
+function ownRequest(request: LLMRequest): LLMRequest {
+  const owned = new LLMRequest({
+    id: request.id,
+    model: ownModel(request.model),
+    system: cloneAndFreeze(request.system),
+    messages: cloneAndFreeze(request.messages),
+    tools: cloneAndFreeze(request.tools),
+    toolChoice: cloneAndFreeze(request.toolChoice),
+    generation: cloneAndFreeze(request.generation),
+    providerOptions: cloneAndFreeze(request.providerOptions),
+    http: cloneAndFreeze(request.http),
+    responseFormat: cloneAndFreeze(request.responseFormat),
+    cache: cloneAndFreeze(request.cache),
+    metadata: cloneAndFreeze(request.metadata),
+  })
+  deepFreeze(owned.system)
+  deepFreeze(owned.messages)
+  deepFreeze(owned.tools)
+  deepFreeze(owned.toolChoice)
+  deepFreeze(owned.generation)
+  deepFreeze(owned.providerOptions)
+  deepFreeze(owned.http)
+  deepFreeze(owned.responseFormat)
+  deepFreeze(owned.cache)
+  deepFreeze(owned.metadata)
+  return Object.freeze(owned)
+}
+
+function ownModel(model: Model): Model {
+  const route = model.route
+  const endpoint = cloneAndFreeze(route.endpoint)
+  const auth = Object.freeze({ ...route.auth })
+  const transport = Object.freeze({ ...route.transport })
+  const defaults = cloneAndFreeze(route.defaults)
+  const rerouted = route.with({
+    endpoint,
+    auth,
+    transport,
+    headers: defaults.headers,
+    limits: defaults.limits,
+    generation: defaults.generation,
+    providerOptions: defaults.providerOptions,
+    http: defaults.http,
+  })
+  deepFreeze(rerouted.endpoint)
+  deepFreeze(rerouted.defaults)
+  const ownedRoute = Object.freeze({
+    ...rerouted,
+    body: Object.freeze({ ...rerouted.body }),
+  })
+  return Object.freeze(
+    new Model({
+      id: model.id,
+      provider: model.provider,
+      route: ownedRoute,
+      defaults: cloneAndFreeze(model.defaults),
+      compatibility: cloneAndFreeze(model.compatibility),
+    }),
+  )
 }
 
 function modelDescriptor(model: Model) {
@@ -150,7 +202,7 @@ function canonicalValue(value: unknown, active = new Set<object>()): unknown {
     if (!Number.isFinite(value)) throw new Error("Provider request authority contains a non-finite number")
     return value
   }
-  if (typeof value !== "object" || value instanceof Uint8Array)
+  if (typeof value !== "object" || isBinaryValue(value))
     throw new Error("Provider request authority contains a non-canonical value")
   if (active.has(value)) throw new Error("Provider request authority contains a cyclic value")
   active.add(value)
@@ -163,4 +215,78 @@ function canonicalValue(value: unknown, active = new Set<object>()): unknown {
       )
   active.delete(value)
   return result
+}
+
+function cloneAndFreeze<T>(value: T): T {
+  const cloned = cloneOwned(value)
+  deepFreeze(cloned)
+  // The clone preserves every data-property prototype while replacing each owned value recursively.
+  // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+  return cloned as T
+}
+
+function cloneOwned(value: unknown, seen = new Map<object, unknown>()): unknown {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return value
+  if (typeof value === "function") return value
+  if (value instanceof Uint8Array) return immutableBytes(value)
+  if (value instanceof ArrayBuffer) return value.slice(0)
+  if (typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer) return value.slice(0)
+  if (ArrayBuffer.isView(value)) {
+    const bytes = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)
+    return new DataView(bytes)
+  }
+  const existing = seen.get(value)
+  if (existing !== undefined) return existing
+  if (Array.isArray(value)) {
+    const result: unknown[] = []
+    seen.set(value, result)
+    for (const item of value) result.push(cloneOwned(item, seen))
+    return result
+  }
+  const result: Record<PropertyKey, unknown> = {}
+  Object.setPrototypeOf(result, Object.getPrototypeOf(value))
+  seen.set(value, result)
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor) continue
+    if ("value" in descriptor) descriptor.value = cloneOwned(descriptor.value, seen)
+    Object.defineProperty(result, key, descriptor)
+  }
+  return result
+}
+
+function deepFreeze(value: unknown, seen = new Set<object>()): void {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return
+  if (typeof value === "function" || isBinaryValue(value) || seen.has(value)) return
+  seen.add(value)
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (descriptor && "value" in descriptor) deepFreeze(descriptor.value, seen)
+  }
+  Object.freeze(value)
+}
+
+function immutableBytes(input: Uint8Array): Uint8Array {
+  const target = Uint8Array.from(input)
+  return new Proxy(target, {
+    get: (bytes, key) => {
+      if (key === "buffer") return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      const value = Reflect.get(bytes, key, bytes)
+      if (typeof value !== "function" || key === "constructor") return value
+      return (...args: unknown[]) => Reflect.apply(value, Uint8Array.from(bytes), args)
+    },
+    set: () => false,
+    defineProperty: () => false,
+    deleteProperty: () => false,
+    setPrototypeOf: () => false,
+  })
+}
+
+function isBinaryValue(value: unknown): value is ArrayBuffer | ArrayBufferView {
+  return (
+    value instanceof ArrayBuffer ||
+    value instanceof Uint8Array ||
+    ArrayBuffer.isView(value) ||
+    (typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer)
+  )
 }

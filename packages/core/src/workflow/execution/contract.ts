@@ -430,7 +430,7 @@ function scanGeneric(value: unknown): void {
     scanText(value)
     return
   }
-  if (value instanceof Uint8Array) throw new Error("Binary data requires a validated media message")
+  if (isBinaryValue(value)) throw new Error("Binary data requires a validated media message")
   if (value === null || typeof value !== "object") return
   if (Array.isArray(value)) {
     for (const item of value) scanGeneric(item)
@@ -480,13 +480,22 @@ function assertNotGenericMediaShape(value: object): void {
 }
 
 function normalizeMediaToken(value: string): string {
-  return value.replaceAll(/[_-]/g, "").trim().toLowerCase()
+  return value.replaceAll(/[^a-z0-9]/gi, "").toLowerCase()
 }
 
 function scanText(value: string): void {
   if (/(?:^|[^A-Za-z0-9_])data\s*:/i.test(value) || /(?:^|[^A-Za-z0-9+/])iVBORw0KGgo[A-Za-z0-9+/=]*/.test(value))
     throw new Error("Screenshot bytes are forbidden in generic provider text")
-  if (/database64/i.test(value)) throw new Error("Screenshot dataBase64 is forbidden in generic provider text")
+  if (/data[^a-z0-9]*base64/i.test(value))
+    throw new Error("Screenshot dataBase64 is forbidden in generic provider text")
+}
+
+function isBinaryValue(value: unknown): boolean {
+  return (
+    value instanceof ArrayBuffer ||
+    ArrayBuffer.isView(value) ||
+    (typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer)
+  )
 }
 
 function defaultMessages(input: BuildInput, artifacts: readonly ArtifactDigest[]): readonly Message[] {
