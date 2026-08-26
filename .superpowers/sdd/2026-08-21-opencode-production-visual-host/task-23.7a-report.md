@@ -5,7 +5,8 @@
 Implemented and locally verified on the existing `dev` checkout.
 
 - Base SHA: `6c509f7e4d50253b7a0b29577fde03a156b216b1`
-- Implementation SHA before report/ledger amendment: `04eb580ec`
+- Original implementation SHA: `04eb580ec`
+- Original report/ledger completion SHA: `2904d19a1`
 - No branch/worktree, push, deployment, provider call, network test, Docker, Chromium, ACL mutation, `.env.local` read, or C-drive Task23 cache was used.
 - Review status: implementer self-review clean. The task explicitly prohibited spawning an independent reviewer.
 
@@ -170,5 +171,140 @@ Finished in 2.8s on 11 files with 130 rules using 16 threads.
 ## Concerns and deferred work
 
 - No architectural conflict was found. Task 23.7B must install the production evidence resolver and owns real Snapshot/filesystem manifesting, functional command/log derivation, preview/capture/media settlement, delivery freshness, and post-EventV2 evidence reconciliation.
-- `execution/role.ts` is 729 lines because A requires the complete resolver contract, all contextual validators, the bounded test-log extension point, and a deterministic fake for all seven roles in the planned module. Task 23.7B should keep its production resolver in its owning module rather than expanding this authority file further.
+- Original implementation concern (resolved by the independent-review fix below): `execution/role.ts` was 729 lines and needed focused extraction before Task 23.7B.
 - No real provider, Docker, Chromium, ACL, network, deployment, or production-environment claim was made.
+
+## Independent review fix round 1 — 2026-08-26
+
+### Status and commit identity
+
+- Review-fix implementation commit: `9750a6ce2` (`fix(workflow): harden role settlement authority`).
+- This section and the progress-ledger correction are a separate documentation commit, so the code SHA above remains stable and is not described as the final visible `dev` SHA.
+- All eight reviewer findings were verified as technically correct before editing. No new architectural conflict or `NEEDS_CONTEXT` condition was found.
+
+### Focused RED evidence
+
+All RED commands ran from `D:\OpenCode-Audit\packages\core` with pinned Bun before the corresponding production fixes.
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts
+```
+
+```text
+(fail) Workflow role contracts > keeps media typed and rejects screenshot data in generic provider text
+Received function did not throw
+(fail) Workflow role contracts > binds the canonical response schema and sorts without locale authority
+TypeError: undefined is not an object (evaluating 'built.authority.responseSchemaSha256')
+10 pass
+2 fail
+```
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts test/workflow-location-tools.test.ts
+```
+
+```text
+(fail) Workflow Location tools > resumes a durable provider result without a duplicate provider call and rejects drift
+(fail) Workflow role contracts > keeps media typed and rejects screenshot data in generic provider text
+(fail) Workflow role contracts > binds the canonical response schema and sorts without locale authority
+(fail) Workflow role business-evidence authority > lets strict non-visual roles complete without evidence authority but never lets visual roles bypass it
+(fail) Workflow role business-evidence authority > passes complete persisted authority to the resolver and validates prior identity before resolution
+22 pass
+5 fail
+```
+
+The generation-option case resumed a successful durable result after the workflow token budget changed, proving that the old request fingerprint did not bind the actual generation limit. The legacy case failed with `role_evidence_unavailable`, proving that strict non-visual execution incorrectly invoked the production resolver. The resolver capture contained only `{ id, type }` workflow facts and omitted budget/usage/provider usage and full artifact identity.
+
+After adding the mutually consistent forged-authority fixture, its independent RED was:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts
+```
+
+```text
+(fail) Workflow role business-evidence authority > mints and validates a context/contract/artifact-set-bound role settlement
+Expected substring: "contract authority"
+Received message: "Unexpected key ... at [\"authority\"]"
+13 pass
+1 fail
+```
+
+This proved that the old receipt had no independently verifiable authority descriptor; it rejected only the unknown field, not a recomputed host-authority mismatch.
+
+### Fix decisions and compatibility behavior
+
+- Non-visual workflows still undergo strict contract/semantic decoding, but the executor bypasses business-evidence resolution and mints the compatible plain semantic outcome. A `visual-build` still requires a bound settlement, fail-closed evidence resolver, and host-measured provider usage.
+- Resolver input now carries the complete persisted `Workflow.Info`, complete `Workflow.Stage`, complete prior `Workflow.Artifact` identities, admission inputs, workflow budget/usage, execution usage, and provider usage. Full identity, owner/time, URI/hash/size and codec validation occurs before identity is projected into decoded values. The deterministic fake derives visual limits/usage from these host facts.
+- `contractFingerprint` now hashes a bounded authority descriptor containing the canonical actual response-schema digest, fixed route, prompt/system, typed-message digest/media identities, permissions, input artifacts and context. Local reconstructs the fixed contract from persisted host facts, recomputes the fingerprint, and rejects even mutually consistent forged binding/receipt pairs.
+- Each provider turn now constructs one immutable canonical request snapshot containing the public model/route, system, messages, tools, response schema, generation options, catalog, sequence and contract fingerprint. The same snapshot fields are dispatched. Recovery rematerializes tools and recomputes the fingerprint before either resuming a result or returning intent-only ambiguity; schema and generation-option drift fail closed with zero provider reissue.
+- Validated `Message` scanning is separate from generic provider/checkpoint scanning. Only a schema-valid media content part may contain `Uint8Array`; generic values reject every binary, media-shaped bypass, case-insensitive `dataBase64`, data URL and PNG signature. Legitimate typed media remains accepted.
+- Durable artifact ordering uses ordinal code-unit comparison and no longer consults `localeCompare`.
+- Legacy plain outcome replay remains compatible. New visual admission still requires the versioned binding/receipt. A trusted-message/media verification extension is explicit and fail-closed until Task 23.7B supplies persisted screenshot evidence.
+- The 799-line review-time `role.ts` was reduced to 220 lines. Binding/context validation is owned by `execution/role-binding.ts`, the deterministic fake by `execution/role-fake.ts`, and the bounded log codec by `artifacts/test-log.ts`.
+
+### Final GREEN and quality evidence
+
+Mandatory Core matrix, run from `D:\OpenCode-Audit\packages\core` after formatting:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts test/workflow-design-loop.test.ts test/workflow-model-state-machine.test.ts test/workflow-location-tools.test.ts test/workflow-execution.test.ts test/workflow-business-artifacts.test.ts test/workflow-routing.test.ts
+```
+
+```text
+106 pass
+0 fail
+521 expect() calls
+Ran 106 tests across 7 files. [10.59s]
+```
+
+Typecheck, run from `D:\OpenCode-Audit\packages\core`:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' typecheck
+```
+
+```text
+$ tsgo --noEmit
+exit 0
+```
+
+Formatting and changed-file lint, run from `D:\OpenCode-Audit` with the exact literal file list:
+
+```powershell
+& '.\node_modules\.bin\prettier.exe' --write 'packages/core/src/workflow/artifacts/test-log.ts' 'packages/core/src/workflow/execution/contract.ts' 'packages/core/src/workflow/execution/model.ts' 'packages/core/src/workflow/execution/role-binding.ts' 'packages/core/src/workflow/execution/role-fake.ts' 'packages/core/src/workflow/execution/role.ts' 'packages/core/src/workflow/executor.ts' 'packages/core/test/workflow-execution.test.ts' 'packages/core/test/workflow-location-tools.test.ts' 'packages/core/test/workflow-role-execution.test.ts'
+& '.\node_modules\.bin\oxlint.exe' 'packages/core/src/workflow/artifacts/test-log.ts' 'packages/core/src/workflow/execution/contract.ts' 'packages/core/src/workflow/execution/model.ts' 'packages/core/src/workflow/execution/role-binding.ts' 'packages/core/src/workflow/execution/role-fake.ts' 'packages/core/src/workflow/execution/role.ts' 'packages/core/src/workflow/executor.ts' 'packages/core/test/workflow-execution.test.ts' 'packages/core/test/workflow-location-tools.test.ts' 'packages/core/test/workflow-role-execution.test.ts'
+```
+
+```text
+packages/core/src/workflow/artifacts/test-log.ts 54ms (unchanged)
+packages/core/src/workflow/execution/contract.ts 54ms (unchanged)
+packages/core/src/workflow/execution/model.ts 96ms (unchanged)
+packages/core/src/workflow/execution/role-binding.ts 28ms (unchanged)
+packages/core/src/workflow/execution/role-fake.ts 12ms (unchanged)
+packages/core/src/workflow/execution/role.ts 9ms (unchanged)
+packages/core/src/workflow/executor.ts 19ms (unchanged)
+packages/core/test/workflow-execution.test.ts 78ms (unchanged)
+packages/core/test/workflow-location-tools.test.ts 71ms (unchanged)
+packages/core/test/workflow-role-execution.test.ts 32ms (unchanged)
+Found 0 warnings and 0 errors.
+Finished in 2.9s on 10 files with 130 rules using 16 threads.
+```
+
+`git diff --check` and `git diff --cached --check` exited 0; Git emitted only the repository's CRLF conversion warnings. No temporary/cache artifacts were created.
+
+### Review-fix files changed
+
+- `packages/core/src/workflow/artifacts/test-log.ts`
+- `packages/core/src/workflow/execution/contract.ts`
+- `packages/core/src/workflow/execution/model.ts`
+- `packages/core/src/workflow/execution/role-binding.ts`
+- `packages/core/src/workflow/execution/role-fake.ts`
+- `packages/core/src/workflow/execution/role.ts`
+- `packages/core/src/workflow/executor.ts`
+- `packages/core/test/workflow-execution.test.ts`
+- `packages/core/test/workflow-location-tools.test.ts`
+- `packages/core/test/workflow-role-execution.test.ts`
+
+### Remaining concern
+
+No A-scope correctness concern remains. Task 23.7B must provide the trusted message/screenshot extension and production resolver; A continues to perform no real Snapshot/filesystem/preview/capture/evidence settlement/delivery-freshness work.
