@@ -85,7 +85,7 @@ export function makeLayer(
             catch: () => unavailable("Workflow Docker sandbox configuration is unavailable"),
           })
           const paths = yield* Effect.tryPromise({
-            try: () => validatePaths(location.directory, request.workdir ?? "."),
+            try: () => validatePaths(config, location.directory, request.workdir ?? "."),
             catch: () => rejected("Workflow sandbox path is not canonical and contained by the persisted Location"),
           })
           const ownership = ownershipFor({
@@ -113,7 +113,11 @@ export function makeLayer(
                 )
                 if (current.leaseOwner !== authority.leaseOwner || current.attempt !== authority.attempt)
                   throw rejected("Persisted Workflow Stage lease changed before launch")
-                const currentPaths = await validatePaths(location.directory, request.workdir ?? ".")
+                const currentPaths = await validatePaths(config, location.directory, request.workdir ?? ".").catch(
+                  () => {
+                    throw rejected("Workflow sandbox path identity changed before launch")
+                  },
+                )
                 if (
                   !sameIdentity(paths.workspace, currentPaths.workspace) ||
                   !sameIdentity(paths.workdir, currentPaths.workdir)
@@ -171,45 +175,48 @@ async function recoverOwned(input: {
 }): Promise<number> {
   const config = await validatedConfig(input.config)
   const ownership = ownershipFor(input.authority)
-  const listed = await execute(input.engine, config, {
-    argv: [
-      "container",
-      "ls",
-      "--all",
-      "--quiet",
-      ...Object.entries(ownership.labels).flatMap(([key, value]) => ["--filter", `label=${key}=${value}`]),
-    ],
-    timeoutMs: config.limits.engineTimeoutMs,
-  })
-  if (listed.exit !== 0) throw unavailable("Workflow Docker recovery is unavailable")
-  if (listed.truncated) throw unavailable("Workflow Docker recovery listing exceeded its bound")
-  const lines = listed.stdout
-    .split(/\r?\n/)
-    .map((value) => value.trim())
-    .filter(Boolean)
-  if (lines.some((value) => !containerIDPattern.test(value)))
-    throw unavailable("Workflow Docker recovery listing was malformed")
-  const ids = [...new Set(lines)]
+  const listOwned = async () => {
+    const listed = await execute(input.engine, config, {
+      argv: [
+        "container",
+        "ls",
+        "--all",
+        "--quiet",
+        ...Object.entries(ownership.labels).flatMap(([key, value]) => ["--filter", `label=${key}=${value}`]),
+      ],
+      timeoutMs: config.limits.engineTimeoutMs,
+    })
+    if (listed.exit !== 0) throw unavailable("Workflow Docker recovery is unavailable")
+    if (listed.truncated) throw unavailable("Workflow Docker recovery listing exceeded its bound")
+    const lines = listed.stdout
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean)
+    if (lines.some((value) => !containerIDPattern.test(value)))
+      throw unavailable("Workflow Docker recovery listing was malformed")
+    return [...new Set(lines)]
+  }
+  const ids = await listOwned()
   const exact = (
-    await Promise.all(
-      ids.map(async (id) => ((await inspect(input.engine, config, id, ownership, true)) ? id : undefined)),
-    )
-  ).filter((id): id is string => id !== undefined)
+    await Promise.all(ids.map(async (id) => await inspect(input.engine, config, id, ownership, true)))
+  ).filter((owned): owned is OwnedContainer => owned !== undefined)
   if (input.finalGate !== undefined && !(await input.finalGate())) return 0
   let cleanupFailed = false
-  for (const id of exact) {
+  for (const owned of exact) {
     try {
-      const killed = await execute(input.engine, config, {
-        argv: ["container", "kill", id],
-        timeoutMs: config.limits.cleanupTimeoutMs,
-      })
-      if (killed.exit !== 0) cleanupFailed = true
+      if (owned.running === true) {
+        const killed = await execute(input.engine, config, {
+          argv: ["container", "kill", owned.id],
+          timeoutMs: config.limits.cleanupTimeoutMs,
+        })
+        if (killed.exit !== 0) cleanupFailed = true
+      }
     } catch {
       cleanupFailed = true
     } finally {
       try {
         const removed = await execute(input.engine, config, {
-          argv: ["container", "rm", "--force", id],
+          argv: ["container", "rm", "--force", owned.id],
           timeoutMs: config.limits.cleanupTimeoutMs,
         })
         if (removed.exit !== 0) cleanupFailed = true
@@ -218,6 +225,8 @@ async function recoverOwned(input: {
       }
     }
   }
+  const remainingOwned = await listOwned()
+  if (remainingOwned.length > 0) cleanupFailed = true
   if (cleanupFailed) throw unavailable("Workflow Docker recovery cleanup failed")
   return exact.length
 }
@@ -299,79 +308,100 @@ const reloadAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadAuthority"
 
 async function runOwned(
   engine: Docker.Engine,
-  config: Config,
+  config: DockerConfig.ValidatedConfig,
   request: WorkflowCommandSandbox.Request,
   paths: { readonly workspace: PathIdentity; readonly workdir: PathIdentity; readonly relativeWorkdir: string },
   ownership: ReturnType<typeof ownershipFor>,
   signal: AbortSignal,
   finalGate: () => Promise<void>,
 ): Promise<WorkflowCommandSandbox.Result> {
+  const callerDeadline = Date.now() + Math.min(request.timeout ?? config.limits.timeoutMs, config.limits.timeoutMs)
   const workspaceAccess = request.role === "implement" || request.role === "repair" ? "readwrite" : "readonly"
   const mount = `type=bind,src=${paths.workspace.canonical},dst=/workspace${workspaceAccess === "readonly" ? ",readonly" : ""}`
-  const created = await execute(engine, config, {
-    argv: [
-      "container",
-      "create",
-      "--name",
-      ownership.name,
-      ...Object.entries(ownership.labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
-      "--pull",
-      "never",
-      "--network",
-      "none",
-      "--read-only",
-      "--cap-drop",
-      "ALL",
-      "--security-opt",
-      "no-new-privileges=true",
-      "--user",
-      "65532:65532",
-      "--pids-limit",
-      String(config.limits.pids),
-      "--memory",
-      String(config.limits.memoryBytes),
-      "--cpus",
-      String(config.limits.cpus),
-      "--stop-timeout",
-      "3",
-      "--tmpfs",
-      "/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=1777",
-      "--tmpfs",
-      "/home/sandbox:rw,nosuid,nodev,noexec,size=16777216,mode=700,uid=65532,gid=65532",
-      "--env",
-      "HOME=/home/sandbox",
-      "--env",
-      "LANG=C.UTF-8",
-      "--mount",
-      mount,
-      "--workdir",
-      paths.relativeWorkdir === "." ? "/workspace" : `/workspace/${paths.relativeWorkdir}`,
-      config.image,
-      "/bin/bash",
-      "-se",
-    ],
-    timeoutMs: config.limits.engineTimeoutMs,
-  })
-  if (created.exit !== 0) throw unavailable("Workflow Docker daemon or pinned image is unavailable")
-  const id = created.stdout.trim()
-  if (!containerIDPattern.test(id)) throw unavailable("Docker returned an invalid container identity")
-  const owned = await inspect(engine, config, id, ownership)
-  if (!owned) throw unavailable("Docker container ownership verification failed")
+  let owned: OwnedContainer | undefined
+  try {
+    const created = await execute(engine, config, {
+      argv: [
+        "container",
+        "create",
+        "--name",
+        ownership.name,
+        ...Object.entries(ownership.labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges=true",
+        "--user",
+        "65532:65532",
+        "--pids-limit",
+        String(config.limits.pids),
+        "--memory",
+        String(config.limits.memoryBytes),
+        "--cpus",
+        String(config.limits.cpus),
+        "--stop-timeout",
+        "3",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=1777",
+        "--tmpfs",
+        "/home/sandbox:rw,nosuid,nodev,noexec,size=16777216,mode=700,uid=65532,gid=65532",
+        "--env",
+        "HOME=/home/sandbox",
+        "--env",
+        "LANG=C.UTF-8",
+        "--mount",
+        mount,
+        "--workdir",
+        paths.relativeWorkdir === "." ? "/workspace" : `/workspace/${paths.relativeWorkdir}`,
+        config.image,
+        "/bin/bash",
+        "-se",
+      ],
+      timeoutMs: remaining(callerDeadline, config.limits.engineTimeoutMs),
+      signal,
+    })
+    if (created.exit !== 0) throw unavailable("Workflow Docker daemon or pinned image is unavailable")
+    const id = created.stdout.trim()
+    if (!containerIDPattern.test(id)) throw unavailable("Docker returned an invalid container identity")
+    owned = await inspect(
+      engine,
+      config,
+      id,
+      ownership,
+      false,
+      remaining(callerDeadline, config.limits.engineTimeoutMs),
+    )
+    if (!owned) throw unavailable("Docker container ownership verification failed")
+  } catch (cause) {
+    void discoverAndCleanup(engine, config, ownership)
+    throw cause
+  }
 
   let kill = false
   let settled: WorkflowCommandSandbox.Result | undefined
   let failure: unknown
   try {
     await finalGate()
-    const timeoutMs = Math.min(request.timeout ?? config.limits.timeoutMs, config.limits.timeoutMs)
     const result = await execute(engine, config, {
       argv: ["container", "start", "--attach", "--interactive", owned.id],
       stdin: `${request.command}\n`,
-      timeoutMs,
+      timeoutMs: remaining(callerDeadline, config.limits.timeoutMs),
       maxOutputBytes: config.limits.maxOutputBytes,
       signal,
     })
-    const final = await inspect(engine, config, owned.id, ownership, true)
+    const final = await inspect(
+      engine,
+      config,
+      owned.id,
+      ownership,
+      true,
+      remaining(callerDeadline, config.limits.engineTimeoutMs),
+    )
     if (!final || final.running !== false || final.exitCode === undefined)
       throw new Docker.Unavailable("Docker container did not expose a settled command state")
     if (result.exit !== 0 && final.exitCode === 0)
@@ -382,15 +412,25 @@ async function runOwned(
     kill = cause instanceof Docker.Cancelled || cause instanceof Docker.Timeout || cause instanceof Docker.Unavailable
     failure = cause
   }
+  if (Date.now() >= callerDeadline || signal.aborted) {
+    void cleanupOwned(engine, config, owned, kill).catch(() => undefined)
+    if (failure !== undefined) throw failure
+    throw unavailable("Workflow Docker command exceeded its cleanup boundary")
+  }
   if (kill) {
     await execute(engine, config, {
       argv: ["container", "kill", owned.id],
-      timeoutMs: config.limits.cleanupTimeoutMs,
+      timeoutMs: remaining(callerDeadline, config.limits.cleanupTimeoutMs),
     }).catch(() => undefined)
+  }
+  if (Date.now() >= callerDeadline) {
+    void cleanupOwned(engine, config, owned, false).catch(() => undefined)
+    if (failure !== undefined) throw failure
+    throw unavailable("Workflow Docker command exceeded its cleanup boundary")
   }
   const removed = await execute(engine, config, {
     argv: ["container", "rm", "--force", owned.id],
-    timeoutMs: config.limits.cleanupTimeoutMs,
+    timeoutMs: remaining(callerDeadline, config.limits.cleanupTimeoutMs),
   }).catch(() => undefined)
   if (removed?.exit !== 0) throw unavailable("Verified Docker container cleanup failed")
   if (failure !== undefined) throw failure
@@ -398,16 +438,70 @@ async function runOwned(
   return settled
 }
 
+async function cleanupOwned(
+  engine: Docker.Engine,
+  config: DockerConfig.ValidatedConfig,
+  owned: OwnedContainer,
+  kill: boolean,
+) {
+  const deadline = Date.now() + config.limits.cleanupTimeoutMs
+  if (kill)
+    await execute(engine, config, {
+      argv: ["container", "kill", owned.id],
+      timeoutMs: remaining(deadline, config.limits.cleanupTimeoutMs),
+    }).catch(() => undefined)
+  await execute(engine, config, {
+    argv: ["container", "rm", "--force", owned.id],
+    timeoutMs: remaining(deadline, config.limits.cleanupTimeoutMs),
+  }).catch(() => undefined)
+}
+
+function remaining(deadline: number, ceiling: number) {
+  return Math.max(1, Math.min(ceiling, deadline - Date.now()))
+}
+
+async function discoverAndCleanup(
+  engine: Docker.Engine,
+  config: DockerConfig.ValidatedConfig,
+  ownership: ReturnType<typeof ownershipFor>,
+) {
+  const deadline = Date.now() + config.limits.cleanupTimeoutMs
+  while (Date.now() < deadline) {
+    const owned = await inspect(
+      engine,
+      config,
+      ownership.name,
+      ownership,
+      false,
+      remaining(deadline, config.limits.cleanupTimeoutMs),
+    ).catch(() => undefined)
+    if (owned) {
+      if (owned.running === true)
+        await execute(engine, config, {
+          argv: ["container", "kill", owned.id],
+          timeoutMs: remaining(deadline, config.limits.cleanupTimeoutMs),
+        }).catch(() => undefined)
+      await execute(engine, config, {
+        argv: ["container", "rm", "--force", owned.id],
+        timeoutMs: remaining(deadline, config.limits.cleanupTimeoutMs),
+      }).catch(() => undefined)
+      return
+    }
+    await Bun.sleep(Math.min(10, Math.max(1, deadline - Date.now())))
+  }
+}
+
 async function inspect(
   engine: Docker.Engine,
-  config: Config,
+  config: DockerConfig.ValidatedConfig,
   id: string,
   ownership: ReturnType<typeof ownershipFor>,
   strict = false,
+  timeoutMs = config.limits.engineTimeoutMs,
 ): Promise<OwnedContainer | undefined> {
   const result = await execute(engine, config, {
     argv: ["container", "inspect", id],
-    timeoutMs: config.limits.engineTimeoutMs,
+    timeoutMs,
   })
   if (result.exit !== 0 || result.truncated) {
     if (strict) throw new Docker.Unavailable("Docker inspection failed")
@@ -426,7 +520,13 @@ async function inspect(
   const candidateID = Reflect.get(candidate, "Id")
   const name = Reflect.get(candidate, "Name")
   const dockerConfig = Reflect.get(candidate, "Config")
-  if (typeof candidateID !== "string" || candidateID !== id || name !== `/${ownership.name}`) return undefined
+  if (
+    typeof candidateID !== "string" ||
+    !containerIDPattern.test(candidateID) ||
+    (id !== ownership.name && candidateID !== id) ||
+    name !== `/${ownership.name}`
+  )
+    return undefined
   if (dockerConfig === null || typeof dockerConfig !== "object") return undefined
   const labels = Reflect.get(dockerConfig, "Labels")
   if (labels === null || typeof labels !== "object" || Array.isArray(labels)) return undefined
@@ -440,7 +540,7 @@ async function inspect(
   const running = state !== null && typeof state === "object" ? Reflect.get(state, "Running") : undefined
   const exitCode = state !== null && typeof state === "object" ? Reflect.get(state, "ExitCode") : undefined
   return {
-    id,
+    id: candidateID,
     name: ownership.name,
     labels: ownership.labels,
     ...(typeof running === "boolean" ? { running } : {}),
@@ -450,7 +550,7 @@ async function inspect(
 
 async function execute(
   engine: Docker.Engine,
-  config: Config,
+  config: DockerConfig.ValidatedConfig,
   input: {
     readonly argv: readonly string[]
     readonly stdin?: string
@@ -459,10 +559,11 @@ async function execute(
     readonly signal?: AbortSignal
   },
 ) {
+  const current = await DockerConfig.revalidate(config)
   return engine.execute({
-    executable: config.enginePath,
+    executable: current.enginePath,
     argv: input.argv,
-    env: DockerConfig.invocationEnvironment(config),
+    env: DockerConfig.invocationEnvironment(current),
     ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
     timeoutMs: input.timeoutMs,
     maxOutputBytes: input.maxOutputBytes ?? config.limits.maxOutputBytes,
@@ -470,13 +571,13 @@ async function execute(
   })
 }
 
-async function validatedConfig(config: Config): Promise<Config> {
+async function validatedConfig(config: Config): Promise<DockerConfig.ValidatedConfig> {
   return DockerConfig.validate(config)
 }
 
-async function validatePaths(workspace: string, workdir: string) {
+async function validatePaths(config: DockerConfig.ValidatedConfig, workspace: string, workdir: string) {
   if (!relativePath(workdir)) throw new TypeError("Workflow workdir must be relative")
-  const canonicalWorkspace = await canonicalDDirectory(workspace)
+  const canonicalWorkspace = await DockerConfig.admitWorkspace(config, workspace)
   await rejectLinks(canonicalWorkspace)
   const target = path.resolve(canonicalWorkspace, ...workdir.replaceAll("\\", "/").split("/"))
   const canonicalWorkdir = await identity(target)
@@ -490,18 +591,6 @@ async function validatePaths(workspace: string, workdir: string) {
     relativeWorkdir:
       workdir === "." ? "." : path.relative(canonicalWorkspace, canonicalWorkdir.canonical).replaceAll("\\", "/"),
   }
-}
-
-async function canonicalDDirectory(value: string): Promise<string> {
-  if (!path.win32.isAbsolute(value) || !/^D:\\/i.test(value) || unsafeWindowsPath(value)) {
-    throw new TypeError("Sandbox host roots must be canonical D-drive paths")
-  }
-  const canonical = await fs.realpath(value)
-  if (!samePath(path.resolve(value), canonical) || !/^D:\\/i.test(canonical)) {
-    throw new TypeError("Sandbox host root changed identity or spelling")
-  }
-  if (!(await fs.stat(canonical)).isDirectory()) throw new TypeError("Sandbox host root must be a directory")
-  return canonical
 }
 
 async function identity(value: string): Promise<PathIdentity> {
@@ -519,7 +608,14 @@ async function rejectLinks(directory: string): Promise<void> {
       const target = path.join(directory, entry.name)
       const stat = await fs.lstat(target)
       if (entry.isSymbolicLink() || stat.isSymbolicLink()) throw new TypeError("Workspace links are forbidden")
-      if (entry.isDirectory()) await rejectLinks(target)
+      if (stat.isFile()) {
+        if (!Number.isSafeInteger(stat.nlink) || stat.nlink !== 1) {
+          throw new TypeError("Workspace regular files must have one trusted owner")
+        }
+        return
+      }
+      if (!stat.isDirectory()) throw new TypeError("Workspace contains an unsupported filesystem object")
+      await rejectLinks(target)
     }),
   )
 }

@@ -17,6 +17,7 @@ interface IdentitySnapshot {
   readonly canonical: string
   readonly device: number
   readonly inode: number
+  readonly links?: number
 }
 
 interface TreeSnapshot {
@@ -212,8 +213,12 @@ export function make(options: Options): ProcessOwnership.Service {
         rejectCancelledOrExpired(input.signal, input.deadline, now)
 
         const completion = settle(options.engine, config, containerID, ownership, input.signal)
+        const exited = completion.then((value) => value.exit)
+        // Consumers may attach after start() returns; mark the rejection observed
+        // immediately while preserving the original promise's rejection semantics.
+        void exited.catch(() => undefined)
         const process: ProcessOwnership.OwnedProcess = Object.freeze({
-          exited: completion.then((value) => value.exit),
+          exited,
           stdout: promisedStream(completion.then((value) => value.stdout)),
           stderr: promisedStream(completion.then((value) => value.stderr)),
         })
@@ -334,7 +339,7 @@ async function startAtCallerBoundary(input: {
     if (timer !== undefined) clearTimeout(timer)
     removeAbort()
     if (detached) {
-      void cleanupDetachedStartedProcess(operation, input.cleanup, input.detachedTimeoutMs)
+      void cleanupDetachedStartedProcess(operation, input.cleanup, input.detachedTimeoutMs).catch(() => undefined)
     }
   }
 }
@@ -377,7 +382,7 @@ function detachedCleanupTimeout(config: DockerConfig.Config) {
 
 async function validateStart(
   configuredHostRoot: string,
-  config: DockerConfig.Config,
+  config: DockerConfig.ValidatedConfig,
   input: Parameters<ProcessOwnership.Service["start"]>[0],
 ) {
   if (!opaquePattern.test(input.identity.hostID) || !opaquePattern.test(input.identity.nonce)) {
@@ -398,7 +403,7 @@ async function validateStart(
     throw new TypeError("Preview port conflicts with the fixed relay")
   }
   const hostRoot = await canonicalDDirectory(configuredHostRoot)
-  const workspace = await canonicalDDirectory(input.plan.locationRoot)
+  const workspace = await DockerConfig.admitWorkspace(config, input.plan.locationRoot)
   const cwd = await canonicalDDirectory(input.plan.cwd)
   const capabilityTemp = await canonicalDDirectory(input.tempRoot)
   const expectedTemp = path.join(hostRoot, input.identity.hostID, ".tmp")
@@ -425,11 +430,11 @@ async function validateStart(
 
 async function revalidate(
   configuredHostRoot: string,
-  config: DockerConfig.Config,
+  config: DockerConfig.ValidatedConfig,
   input: Parameters<ProcessOwnership.Service["start"]>[0],
   admitted: Awaited<ReturnType<typeof validateStart>>,
 ) {
-  const currentConfig = await DockerConfig.validate(config)
+  const currentConfig = await DockerConfig.revalidate(config)
   if (currentConfig.dockerConfig !== config.dockerConfig || currentConfig.temp !== config.temp) {
     throw new TypeError("Preview Docker configuration identity changed")
   }
@@ -475,12 +480,19 @@ async function identity(target: string): Promise<IdentitySnapshot> {
   const canonical = await fs.realpath(lexical)
   const stat = await fs.lstat(lexical)
   if (canonical !== lexical || stat.isSymbolicLink()) throw new TypeError("Preview Docker path aliases are forbidden")
+  if (stat.isFile()) {
+    if (!Number.isSafeInteger(stat.nlink) || stat.nlink !== 1) {
+      throw new TypeError("Preview Docker regular files must have one trusted owner")
+    }
+    return { canonical, device: stat.dev, inode: stat.ino, links: stat.nlink }
+  }
+  if (!stat.isDirectory()) throw new TypeError("Preview Docker path type is unsupported")
   return { canonical, device: stat.dev, inode: stat.ino }
 }
 
 function sameTree(left: TreeSnapshot, right: TreeSnapshot) {
   const same = (a: IdentitySnapshot, b: IdentitySnapshot) =>
-    a.canonical === b.canonical && a.device === b.device && a.inode === b.inode
+    a.canonical === b.canonical && a.device === b.device && a.inode === b.inode && a.links === b.links
   return (
     same(left.hostRoot, right.hostRoot) &&
     left.workspace.length === right.workspace.length &&
@@ -1139,13 +1151,14 @@ async function execute(
     throw new Docker.Timeout("Docker invocation deadline elapsed")
   }
   if (input.signal?.aborted) throw new Docker.Cancelled("Docker invocation was cancelled")
+  const current = await DockerConfig.revalidate(config)
   const controller = new AbortController()
   let timeout: ReturnType<typeof setTimeout> | undefined
   let removeAbort: () => void = () => {}
   const invocation = engine.execute({
-    executable: config.enginePath,
+    executable: current.enginePath,
     argv: input.argv,
-    env: DockerConfig.invocationEnvironment(config),
+    env: DockerConfig.invocationEnvironment(current),
     timeoutMs: input.timeoutMs,
     maxOutputBytes: input.maxOutputBytes ?? config.limits.maxOutputBytes,
     signal: controller.signal,

@@ -296,6 +296,132 @@ describe("EvidenceLedger durable staging", () => {
     }
   })
 
+  test("rejects an oversized BLOB length before reading the BLOB column", async () => {
+    await using temp = await taskTemp()
+    const coordinates = await evidenceCoordinates("wfs_evidence_blob_bound")
+    const bytes = WorkflowVisualHost.deterministicPng(coordinates.viewport)
+    const image = WorkflowVisualHost.capturedImage(coordinates, bytes)
+    const seeded = EvidenceLedger.open(temp.path)
+    await seeded.beginCapture({ coordinates, ownerNonce: "8".repeat(64), now: 1 })
+    await seeded.completeCapture({
+      receipt: image.receipt,
+      bytes,
+      ownerNonce: "8".repeat(64),
+      now: 2,
+      limit: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+    })
+    await seeded.close()
+    const database = new Database(path.join(temp.path, "evidence.sqlite"), { create: false, readwrite: true })
+    database.run("UPDATE workflow_evidence_item SET png_blob = ?", [
+      new Uint8Array(WorkflowVisualHost.MAX_IMAGE_BYTES + 1),
+    ])
+    database.close()
+    let blobReads = 0
+    const restored = EvidenceLedger.open(temp.path, {
+      onBoundary: ({ operation, phase }) => {
+        if (operation === "select-blob" && phase === "before") blobReads++
+      },
+    })
+
+    await expect(restored.get(coordinates)).rejects.toThrow()
+    expect(blobReads).toBe(0)
+    await restored.close().catch(() => undefined)
+  })
+
+  test("reconcile classifies active evidence without reading any BLOB column", async () => {
+    await using temp = await taskTemp()
+    const coordinates = await evidenceCoordinates("wfs_evidence_reconcile_no_blob")
+    const bytes = WorkflowVisualHost.deterministicPng(coordinates.viewport)
+    const image = WorkflowVisualHost.capturedImage(coordinates, bytes)
+    let blobReads = 0
+    const ledger = EvidenceLedger.open(temp.path, {
+      onBoundary: ({ operation, phase }) => {
+        if (operation === "select-blob" && phase === "before") blobReads++
+      },
+    })
+    await ledger.beginCapture({ coordinates, ownerNonce: "7".repeat(64), now: 1 })
+    await ledger.completeCapture({
+      receipt: image.receipt,
+      bytes,
+      ownerNonce: "7".repeat(64),
+      now: 2,
+      limit: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+    })
+    blobReads = 0
+
+    const result = await ledger.reconcile({ workflowID, active: [coordinates], committed: [], abandoned: [] }, 3)
+
+    expect(result.active).toHaveLength(1)
+    expect(blobReads).toBe(0)
+    await ledger.close()
+  })
+
+  test.each(["missing", "lowered"] as const)(
+    "fails closed on reopen when the %s aggregate is below durable item history",
+    async (mode) => {
+      await using temp = await taskTemp()
+      const coordinates = await evidenceCoordinates(`wfs_evidence_aggregate_${mode}`)
+      const bytes = WorkflowVisualHost.deterministicPng(coordinates.viewport)
+      const image = WorkflowVisualHost.capturedImage(coordinates, bytes)
+      const seeded = EvidenceLedger.open(temp.path)
+      await seeded.beginCapture({ coordinates, ownerNonce: "6".repeat(64), now: 1 })
+      await seeded.completeCapture({
+        receipt: image.receipt,
+        bytes,
+        ownerNonce: "6".repeat(64),
+        now: 2,
+        limit: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+      })
+      await seeded.close()
+      const database = new Database(path.join(temp.path, "evidence.sqlite"), { create: false, readwrite: true })
+      database.run(
+        mode === "missing"
+          ? "DELETE FROM workflow_evidence WHERE workflow_id = ?"
+          : "UPDATE workflow_evidence SET evidence_bytes = 0 WHERE workflow_id = ?",
+        [String(workflowID)],
+      )
+      database.close()
+
+      let restored: EvidenceLedger.Service | undefined
+      let failure: unknown
+      try {
+        restored = EvidenceLedger.open(temp.path)
+      } catch (cause) {
+        failure = cause
+      }
+      await restored?.close()
+      expect(failure).toBeInstanceOf(Error)
+      expect(String(failure)).toMatch(/total|aggregate|history/i)
+    },
+  )
+
+  test("fails closed when aggregate corruption appears before a quota mutation", async () => {
+    await using temp = await taskTemp()
+    const coordinates = await evidenceCoordinates("wfs_evidence_aggregate_race")
+    const bytes = WorkflowVisualHost.deterministicPng(coordinates.viewport)
+    const image = WorkflowVisualHost.capturedImage(coordinates, bytes)
+    const ledger = EvidenceLedger.open(temp.path)
+    await ledger.beginCapture({ coordinates, ownerNonce: "5".repeat(64), now: 1 })
+    await ledger.completeCapture({
+      receipt: image.receipt,
+      bytes,
+      ownerNonce: "5".repeat(64),
+      now: 2,
+      limit: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+    })
+    const database = new Database(path.join(temp.path, "evidence.sqlite"), { create: false, readwrite: true })
+    database.run("DELETE FROM workflow_evidence WHERE workflow_id = ?", [String(workflowID)])
+    database.close()
+
+    const failure = await ledger
+      .reserve(String(workflowID), 1, WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES)
+      .catch((cause) => cause)
+    expect(failure).toBeInstanceOf(Error)
+    expect(String(failure)).toMatch(/total|aggregate|history/i)
+    await expect(ledger.used(String(workflowID))).rejects.toThrow(/closed/i)
+    await ledger.close().catch(() => undefined)
+  })
+
   test("reconciles only full active, terminal, and artifact authority and preserves unknown staging", async () => {
     await using temp = await taskTemp()
     const ledger = EvidenceLedger.open(temp.path)
@@ -345,6 +471,42 @@ describe("EvidenceLedger durable staging", () => {
     )
     expect(await ledger.get(unknown.receipt.coordinates)).toMatchObject({ state: "staged" })
     expect(await ledger.get(capturing)).toMatchObject({ state: "capturing" })
+    await ledger.close()
+  })
+
+  test("rejects duplicate committed authority with conflicting release parity", async () => {
+    await using temp = await taskTemp()
+    const coordinates = await evidenceCoordinates("wfs_evidence_reconcile_duplicate")
+    const bytes = WorkflowVisualHost.deterministicPng(coordinates.viewport)
+    const image = WorkflowVisualHost.capturedImage(coordinates, bytes)
+    const artifact = screenshotArtifact(image, "wfa_evidence_reconcile_duplicate")
+    const ledger = EvidenceLedger.open(temp.path)
+    await ledger.beginCapture({ coordinates, ownerNonce: "4".repeat(64), now: 1 })
+    await ledger.completeCapture({
+      receipt: image.receipt,
+      bytes,
+      ownerNonce: "4".repeat(64),
+      now: 2,
+      limit: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+    })
+
+    const failure = await ledger
+      .reconcile(
+        {
+          workflowID,
+          active: [],
+          abandoned: [],
+          committed: [
+            { receipt: image.receipt, artifact, release: false },
+            { receipt: image.receipt, artifact, release: true },
+          ],
+        },
+        3,
+      )
+      .catch((cause) => cause)
+    expect(failure).toBeInstanceOf(Error)
+    expect(String(failure)).toMatch(/authority conflicts/i)
+    expect(await ledger.get(coordinates)).toMatchObject({ state: "staged" })
     await ledger.close()
   })
 

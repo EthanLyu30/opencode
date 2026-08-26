@@ -120,3 +120,41 @@ Changed-file oxlint:   0 warnings, 0 errors
 Prettier/write:        PASS
 git diff --check:      PASS
 ```
+
+## Task23.6 joint fix round 1
+
+Base: `cc7ceae36f9f02bdeae4ad7637262eefe147cd64` on the existing `dev` checkout. All runs used pinned Bun 1.3.14 with `TEMP`, `TMP`, and Bun cache on D:. No provider, network, real Docker/Chromium, ACL mutation/probe, deployment, or `.env.local` access occurred.
+
+### RED evidence and rulings
+
+- Critical 1 command admission: the missing engine, protected Location, and post-create engine replacement cases first produced `61 pass, 3 fail, 227 expect`; the shared VisualHost admission case produced `0 pass, 1 fail`; the preview protected-root overlap case likewise failed before the shared policy was installed.
+- Critical 2 hardlinks: command, preview mount, and static-fetch pairs each first produced `0 pass, 2 fail`. The old paths accepted a multiply-linked leaf or returned external bytes after replacement.
+- Important 3 acquisition: the five create/inspect failure modes plus late visibility first produced `0 pass, 6 fail`; no deterministic-name cleanup occurred before the condition deadline.
+- Important 4 recovery: stopped and still-present regressions first produced `1 pass, 2 fail`; recovery poisoned a stopped container with kill failure and did not prove post-rm absence.
+- Important 5: the review's recorded `SELECT *` implementation was confirmed in source before replacement. Focused query-boundary coverage now proves an oversized length fails with zero `select-blob` boundaries and reconcile performs zero BLOB reads. The first two-test run exposed a test-owned open-handle cleanup defect (`1 pass, 2 fail`), corrected without changing the production ruling.
+- Important 6 aggregate: missing/lowered reopen and mutation-time corruption first produced `0 pass, 3 fail`; missing aggregate was treated as zero.
+- Minor parity: conflicting duplicate `release` authority first failed because Server sequentially accepted false then true and changed state.
+
+### GREEN implementation
+
+- One protected-root contract now covers command and preview composition. It canonicalizes host roots, rejects case-insensitive ancestor/descendant overlap, pins an ordinary single-link D-drive `docker.exe`, and performs a cheap dev/ino/birthtime/link-count identity fence immediately before every engine invocation.
+- Recursive command/preview admission and point-of-read static serving reject hardlinks and replacement. Static bytes are read through a verified file handle and rechecked before response.
+- Command acquisition uses one absolute caller deadline and signal from create onward. Any uncertain create/ID/inspect outcome launches bounded deterministic-name discovery, authenticates the complete exact labels, and only then removes the returned opaque ID. Late cleanup never extends the caller boundary.
+- Recovery retains `Running`, skips kill for stopped owners, removes exact owners, and performs a second exact-label listing before declaring absence.
+- Evidence reads select scalar metadata plus `length(png_blob)` first. Only `get`/binding paths read one validated BLOB inside the same transaction; reconcile reads metadata only. Aggregate is checked against durable item-history SUM on open and every quota mutation; higher legacy counters remain valid while lower/missing counters fail closed.
+- Server duplicate authority normalization matches Core fake behavior.
+- Timing diagnosis found delayed rejected `completion` derivatives and stream drains that Bun reported against later parallel tests. Rejections are now observed immediately without changing promise semantics; detached cleanup is also terminally caught. No timeout was increased.
+
+### Verification
+
+```text
+Focused EvidenceLedger: 16 pass, 0 fail, 75 expect
+Six-file Server matrix, repeated default-parallel runs: 208 pass, 0 fail, 702 expect (three consecutive runs)
+Final post-format six-file run: 208 pass, 0 fail, 702 expect
+Server typecheck (`bun run typecheck`): PASS
+Changed-file oxlint (9 files): 0 warnings, 0 errors
+Prettier/write (9 files): PASS
+git diff --check: PASS (only Git LF→CRLF notices)
+```
+
+The repository-wide `bun run lint` was also attempted. It completed in 98 seconds with the pre-existing repository baseline of `4925 warnings and 1 error` across 3213 files; changed-file oxlint is clean. This wave does not modify unrelated baseline findings.

@@ -47,6 +47,7 @@ export interface Options {
   readonly evidenceLedger?: EvidenceLedger.Service
   readonly evidenceRootPolicy?: EvidenceLedger.OpenOptions["rootPolicy"]
   readonly hostRootPolicy?: (canonicalHostRoot: string) => void
+  readonly workspacePolicy?: (canonicalWorkspace: string) => Promise<void>
   readonly processOwnership?: ProcessOwnership.Service
   readonly now?: () => number
   readonly startupTimeoutMs?: number
@@ -130,6 +131,10 @@ export function productionLayer(input: ProductionLayerOptions) {
         }),
       evidenceRootPolicy: policy.verifyEvidenceRoot,
       hostRootPolicy: policy.verifyTempRoot,
+      workspacePolicy: async (workspace) => {
+        const validated = await DockerConfig.validate(config)
+        await DockerConfig.admitWorkspace(validated, workspace)
+      },
       processOwnership: DockerProcessOwnership.make({
         engine: input.engine ?? Docker.production,
         config,
@@ -150,6 +155,7 @@ export const node = makeGlobalNode({ service: WorkflowVisualHost.Service, layer,
 interface State {
   readonly root: string
   readonly hostRootPolicy?: (canonicalHostRoot: string) => void
+  readonly workspacePolicy?: (canonicalWorkspace: string) => Promise<void>
   readonly browser: PlaywrightCapture.Runtime
   readonly processOwnership: ProcessOwnership.Service
   readonly active: Map<WorkflowVisualHost.HostID, HostRecord>
@@ -190,6 +196,7 @@ async function makeState(options: Options): Promise<State> {
   return {
     root,
     hostRootPolicy: options.hostRootPolicy,
+    workspacePolicy: options.workspacePolicy,
     browser: options.browser,
     processOwnership: options.processOwnership ?? ProcessOwnership.unavailable,
     active: new Map(),
@@ -295,6 +302,17 @@ function prepareImplementation(
             : failure("prepare_implementation", "invalid_preview_plan", "Preview plan is not frozen"),
       })
       const resolveImplementationContract = state.resolveImplementationContract
+      if (state.workspacePolicy !== undefined) {
+        yield* Effect.tryPromise({
+          try: () => state.workspacePolicy!(input.plan.locationRoot),
+          catch: () =>
+            failure(
+              "prepare_implementation",
+              "invalid_preview_plan",
+              "Implementation Location overlaps protected host/runtime roots",
+            ),
+        })
+      }
       if (resolveImplementationContract === undefined) {
         return yield* failure(
           "prepare_implementation",
@@ -672,9 +690,9 @@ function startStaticServer(record: HostRecord, root: string, entrypoint: string,
             ? entrypoint
             : path.join(root, ...entrypoint.split("/"))
           : path.join(root, ...relative.split("/"))
-      const canonical = await canonicalFile(target, containmentRoot)
-      if (canonical === undefined) return new Response("Not found", { status: 404 })
-      return new Response(Bun.file(canonical))
+      const file = await readStaticFile(target, containmentRoot)
+      if (file === undefined) return new Response("Not found", { status: 404 })
+      return new Response(Uint8Array.from(file.bytes).buffer, { headers: { "content-type": file.contentType } })
     },
   })
 }
@@ -726,17 +744,22 @@ async function spawnPreviewProcess(
   })
   record.process = owned
   record.logDrains = [
-    drainBounded(owned.stdout, state.maxProcessLogBytes),
-    drainBounded(owned.stderr, state.maxProcessLogBytes),
+    drainBounded(owned.stdout, state.maxProcessLogBytes).catch(() => undefined),
+    drainBounded(owned.stderr, state.maxProcessLogBytes).catch(() => undefined),
   ]
 }
 
 async function waitForOrigin(state: State, record: HostRecord, origin: string, signal: AbortSignal): Promise<void> {
   const deadline = Date.now() + state.startupTimeoutMs
   let exited = false
-  void record.process?.exited.then(() => {
-    exited = true
-  })
+  void record.process?.exited.then(
+    () => {
+      exited = true
+    },
+    () => {
+      exited = true
+    },
+  )
   while (Date.now() < deadline && !signal.aborted) {
     if (exited) throw new Error("preview process exited")
     const ready = await fetch(origin, { redirect: "manual", signal: AbortSignal.timeout(500) }).then(
@@ -950,15 +973,50 @@ function materializedPath(root: string, value: string): string {
   return target
 }
 
-async function canonicalFile(target: string, root: string): Promise<string | undefined> {
+async function readStaticFile(
+  target: string,
+  root: string,
+): Promise<{ readonly bytes: Uint8Array; readonly contentType: string } | undefined> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined
   try {
     const lexical = path.resolve(target)
     const canonical = await fs.realpath(lexical)
     if (comparisonKey(lexical) !== comparisonKey(canonical) || !strictlyContains(root, canonical)) return undefined
-    return (await fs.stat(canonical)).isFile() ? canonical : undefined
+    const admitted = await fs.lstat(lexical, { bigint: true })
+    if (!safeStaticFile(admitted)) return undefined
+    handle = await fs.open(lexical, "r")
+    const opened = await handle.stat({ bigint: true })
+    if (!safeStaticFile(opened) || !sameFileIdentity(admitted, opened)) return undefined
+    const bytes = new Uint8Array(await handle.readFile())
+    const settled = await handle.stat({ bigint: true })
+    const pathSettled = await fs.lstat(lexical, { bigint: true })
+    const canonicalSettled = await fs.realpath(lexical)
+    if (
+      !safeStaticFile(settled) ||
+      !safeStaticFile(pathSettled) ||
+      !sameFileIdentity(opened, settled) ||
+      !sameFileIdentity(opened, pathSettled) ||
+      comparisonKey(canonicalSettled) !== comparisonKey(canonical)
+    ) {
+      return undefined
+    }
+    return { bytes, contentType: Bun.file(lexical).type || "application/octet-stream" }
   } catch {
     return undefined
+  } finally {
+    await handle?.close().catch(() => undefined)
   }
+}
+
+function safeStaticFile(stat: Awaited<ReturnType<Awaited<ReturnType<typeof fs.open>>["stat"]>>) {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n
+}
+
+function sameFileIdentity(
+  left: Awaited<ReturnType<Awaited<ReturnType<typeof fs.open>>["stat"]>>,
+  right: Awaited<ReturnType<Awaited<ReturnType<typeof fs.open>>["stat"]>>,
+) {
+  return left.dev === right.dev && left.ino === right.ino && left.birthtimeMs === right.birthtimeMs
 }
 
 function capabilityPath(url: string, hostID: WorkflowVisualHost.HostID): string | undefined {

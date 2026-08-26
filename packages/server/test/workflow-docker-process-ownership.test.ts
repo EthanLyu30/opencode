@@ -12,7 +12,6 @@ import { ProcessOwnership } from "../src/workflow/process-ownership"
 
 const root = "D:\\OpenCode-Local\\tmp\\workflow-preview-docker-tests"
 const image = `opencode/workflow-sandbox@sha256:${"a".repeat(64)}`
-const enginePath = "D:\\Applications\\Docker\\resources\\bin\\docker.exe"
 
 afterAll(async () => {
   if (path.resolve(root) !== root) throw new TypeError("Unexpected preview Docker test root")
@@ -34,7 +33,7 @@ describe("DockerProcessOwnership", () => {
     expect(count(network.argv, "--label")).toBe(5)
     expect(network.env).toEqual(fixture.dockerEnv)
     const create = fixture.engine.one("container", "create")
-    expect(create.executable).toBe(enginePath)
+    expect(create.executable).toBe(fixture.config.enginePath)
     expect(valuesAfter(create.argv, "--mount")).toEqual([
       `type=bind,src=${fixture.workspace},dst=/workspace,readonly`,
       `type=bind,src=${fixture.capabilityTemp},dst=/opencode/tmp`,
@@ -115,6 +114,52 @@ describe("DockerProcessOwnership", () => {
     await fs.rm(outside, { recursive: true, force: true })
   })
 
+  test("rejects a multiply-linked regular preview leaf before Docker", async () => {
+    await using fixture = await setup()
+    const target = path.join(fixture.workspace, "server.mjs")
+    const outside = path.join(fixture.caseRoot, "outside-preview.mjs")
+    await fs.rm(target)
+    await fs.writeFile(outside, "outside-owned")
+    await fs.link(outside, target)
+
+    await expect(fixture.service.start(fixture.startInput())).rejects.toThrow()
+    expect(fixture.engine.invocations).toEqual([])
+  })
+
+  test("rechecks regular preview leaf link count after container creation and never starts", async () => {
+    await using fixture = await setup()
+    const target = path.join(fixture.workspace, "server.mjs")
+    const outside = path.join(fixture.caseRoot, "late-hardlink.mjs")
+    fixture.engine.onContainerCreate = async () => {
+      await fs.link(target, outside)
+    }
+
+    await expect(fixture.service.start(fixture.startInput())).rejects.toThrow()
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+  })
+
+  test("rejects a preview Location which overlaps any shared protected host root", async () => {
+    await using fixture = await setup()
+    Reflect.set(fixture.config, "protectedRoots", [fixture.workspace])
+
+    await expect(fixture.service.start(fixture.startInput())).rejects.toThrow()
+    expect(fixture.engine.invocations).toEqual([])
+  })
+
+  test("revalidates the fixed docker.exe identity before every preview engine spawn", async () => {
+    await using fixture = await setup()
+    const enginePath = fixture.config.enginePath
+    fixture.engine.onNetworkCreate = async () => {
+      await fs.rename(enginePath, path.join(path.dirname(enginePath), "docker.old.exe"))
+      await fs.writeFile(enginePath, "replacement")
+    }
+
+    await expect(fixture.service.start(fixture.startInput())).rejects.toThrow()
+    expect(fixture.engine.all("network", "create")).toHaveLength(1)
+    expect(fixture.engine.all("container", "create")).toEqual([])
+  })
+
   test("revalidates workspace identity after create and never starts a swapped mount", async () => {
     await using fixture = await setup()
     const parked = `${fixture.workspace}-parked`
@@ -179,6 +224,7 @@ describe("DockerProcessOwnership", () => {
     await expect(fixture.service.start({ ...fixture.startInput(), deadline: 1_100 })).rejects.toThrow()
 
     expect(fixture.engine.all("container", "create")).toEqual([])
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 250)
     expect(fixture.engine.all("network", "rm")).toHaveLength(1)
   })
 
@@ -260,6 +306,8 @@ describe("DockerProcessOwnership", () => {
 
     await expect(fixture.service.start(fixture.startInput())).rejects.toThrow()
 
+    await waitUntil(() => fixture.engine.all("network", "inspect").length === 1, 250)
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 250)
     expect(fixture.engine.all("network", "inspect")).toHaveLength(1)
     expect(fixture.engine.one("network", "inspect").argv[2]).toMatch(/^ocpn-[a-f0-9]+$/)
     expect(fixture.engine.all("network", "rm")).toHaveLength(1)
@@ -337,6 +385,7 @@ describe("DockerProcessOwnership", () => {
     creation.resolve()
     await start.catch(() => undefined)
     await waitUntil(() => fixture.engine.all("container", "rm").length === 1, 1_000)
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 1_000)
 
     expect(observed).toBe("rejected")
     expect(fixture.engine.all("container", "start")).toEqual([])
@@ -352,6 +401,7 @@ describe("DockerProcessOwnership", () => {
       Docker.Timeout,
     )
     await waitUntil(() => fixture.engine.all("container", "rm").length === 1, 1_000)
+    await waitUntil(() => fixture.engine.all("network", "rm").length === 1, 1_000)
 
     expect(fixture.engine.all("container", "inspect").some((call) => call.argv[2]?.startsWith("ocp-"))).toBe(true)
     expect(fixture.engine.all("container", "start")).toEqual([])
@@ -682,16 +732,18 @@ async function setup(
   const workspace = path.join(caseRoot, "workspace")
   const dockerConfig = path.join(caseRoot, "docker-config")
   const dockerTemp = path.join(caseRoot, "docker-temp")
+  const enginePath = path.join(caseRoot, "engine", "docker.exe")
   const identity: ProcessOwnership.Identity = {
     hostID: WorkflowVisualHost.HostID.make("d".repeat(64)),
     nonce: "e".repeat(64),
   }
   const capabilityTemp = path.join(hostRoot, identity.hostID, ".tmp")
   await Promise.all(
-    [hostRoot, workspace, dockerConfig, dockerTemp, capabilityTemp].map((directory) =>
+    [hostRoot, workspace, dockerConfig, dockerTemp, capabilityTemp, path.dirname(enginePath)].map((directory) =>
       fs.mkdir(directory, { recursive: true }),
     ),
   )
+  await fs.writeFile(enginePath, "fake docker test executable")
   await fs.writeFile(path.join(workspace, "server.mjs"), "setInterval(() => undefined, 60_000)\n")
   const port = 4317
   const plan = PreviewPlan.freeze({

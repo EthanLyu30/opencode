@@ -21,7 +21,7 @@ import { WorkflowCommandSandboxServer } from "../src/workflow/command-sandbox"
 
 const root = "D:\\OpenCode-Local\\tmp\\workflow-sandbox-tests"
 const image = `opencode/workflow-sandbox@sha256:${"a".repeat(64)}`
-const enginePath = "D:\\Applications\\Docker\\resources\\bin\\docker.exe"
+const enginePath = path.join(root, "engine", "docker.exe")
 type PersistedStage = NonNullable<Effect.Success<ReturnType<WorkflowStore.Interface["stage"]>>>
 type MutableFixture = {
   readonly persisted: {
@@ -95,7 +95,8 @@ describe("WorkflowCommandSandboxServer", () => {
     const start = fixture.engine.one("container", "start")
     expect(start.argv).toEqual(["container", "start", "--attach", "--interactive", fixture.engine.containerID])
     expect(start.stdin).toBe(`${command}\n`)
-    expect(start.timeoutMs).toBe(10_000)
+    expect(start.timeoutMs).toBeGreaterThan(0)
+    expect(start.timeoutMs).toBeLessThanOrEqual(10_000)
     expect(start.maxOutputBytes).toBe(65_536)
     expect(fixture.engine.one("container", "rm").argv).toEqual([
       "container",
@@ -423,6 +424,44 @@ describe("WorkflowCommandSandboxServer", () => {
     expect(fixture.engine.invocations).toEqual([])
   })
 
+  test("fails closed when the configured docker.exe is missing", async () => {
+    const missingEngine = path.join(root, `missing-engine-${crypto.randomUUID()}`, "docker.exe")
+    await using fixture = await setup("implement", { config: { enginePath: missingEngine } })
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(fixture.engine.invocations).toEqual([])
+  })
+
+  test("rejects a Location below a protected host root before Docker", async () => {
+    await using fixture = await setup("implement")
+    Reflect.set(fixture.config, "protectedRoots", [fixture.workspace])
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.engine.invocations).toEqual([])
+  })
+
+  test("revalidates the fixed docker.exe identity before every engine spawn", async () => {
+    const engineRoot = path.join(root, `replace-engine-${crypto.randomUUID()}`)
+    const replaceableEngine = path.join(engineRoot, "docker.exe")
+    await fs.mkdir(engineRoot, { recursive: true })
+    await fs.writeFile(replaceableEngine, "first")
+    await using fixture = await setup("implement", { config: { enginePath: replaceableEngine } })
+    fixture.engine.onCreate = async () => {
+      await fs.rename(replaceableEngine, path.join(engineRoot, "docker.old.exe"))
+      await fs.writeFile(replaceableEngine, "replacement")
+    }
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(fixture.engine.invocations.map((call) => call.argv.slice(0, 2))).toEqual([["container", "create"]])
+    await fs.rm(engineRoot, { recursive: true, force: true })
+  })
+
   test.each([
     ["traversal", "..\\outside"],
     ["absolute", "D:\\outside"],
@@ -449,6 +488,38 @@ describe("WorkflowCommandSandboxServer", () => {
     await fs.rm(outside, { recursive: true, force: true })
   })
 
+  test("rejects a multiply-linked regular workspace leaf before Docker", async () => {
+    await using fixture = await setup("implement")
+    const outside = path.join(root, `hardlink-owner-${crypto.randomUUID()}.txt`)
+    await fs.writeFile(outside, "outside-owned")
+    await fs.link(outside, path.join(fixture.workspace, "linked.txt"))
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.engine.invocations).toEqual([])
+    await fs.rm(outside, { force: true })
+  })
+
+  test("rechecks regular leaf link count after container creation and never starts a replaced mount", async () => {
+    await using fixture = await setup("implement")
+    const target = path.join(fixture.workspace, "source.txt")
+    const outside = path.join(root, `hardlink-swap-${crypto.randomUUID()}.txt`)
+    await fs.writeFile(target, "workspace-owned")
+    await fs.writeFile(outside, "outside-owned")
+    fixture.engine.onCreate = async () => {
+      await fs.rm(target)
+      await fs.link(outside, target)
+    }
+
+    const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+    await fs.rm(outside, { force: true })
+  })
+
   test("detects a workspace junction swap after create and removes only the verified container", async () => {
     await using fixture = await setup("implement")
     const original = `${fixture.workspace}-original`
@@ -461,7 +532,7 @@ describe("WorkflowCommandSandboxServer", () => {
 
     const failure = await fixture.run({ command: "true" }).catch((error) => error)
 
-    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
     expect(fixture.engine.all("container", "start")).toEqual([])
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
     await fs.unlink(fixture.workspace)
@@ -482,7 +553,7 @@ describe("WorkflowCommandSandboxServer", () => {
 
     const failure = await fixture.run({ command: "true" }).catch((error) => error)
 
-    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Rejected)
     expect(fixture.engine.all("container", "start")).toEqual([])
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
     await fs.unlink(nested)
@@ -564,6 +635,39 @@ describe("WorkflowCommandSandboxServer", () => {
     },
   )
 
+  test.each(["timeout", "exit", "cancelled", "invalid-id", "inspect-once"] as const)(
+    "discovers and removes an exact-owned container after %s during acquisition",
+    async (acquisitionFailure) => {
+      await using fixture = await setup("implement", { acquisitionFailure })
+
+      const failure = await fixture.run({ command: "true" }).catch((error) => error)
+
+      expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+      await waitUntil(() => fixture.engine.all("container", "rm").length === 1)
+      expect(fixture.engine.all("container", "start")).toEqual([])
+      expect(fixture.engine.one("container", "rm").argv).toEqual([
+        "container",
+        "rm",
+        "--force",
+        fixture.engine.containerID,
+      ])
+    },
+  )
+
+  test("returns at the caller deadline while bounded cleanup discovers a late-visible exact owner", async () => {
+    await using fixture = await setup("implement", {
+      acquisitionFailure: "late-timeout",
+      callInput: { command: "true", timeout: 10 },
+    })
+
+    const failure = await fixture.run({ command: "true", timeout: 10 }).catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
+    expect(fixture.engine.all("container", "rm")).toEqual([])
+    fixture.engine.containerVisible = true
+    await waitUntil(() => fixture.engine.all("container", "rm").length === 1)
+  })
+
   test("reports verified-container removal failure as typed unavailable", async () => {
     await using fixture = await setup("implement", { cleanupFailure: "rm" })
 
@@ -597,10 +701,13 @@ describe("WorkflowCommandSandboxServer", () => {
     })
 
     expect(recovered).toBe(1)
-    const list = fixture.engine.one("container", "ls")
-    expect(count(list.argv, "--filter")).toBe(8)
+    const lists = fixture.engine.all("container", "ls")
+    expect(lists).toHaveLength(2)
+    expect(lists.every((list) => count(list.argv, "--filter") === 8)).toBe(true)
     expect(
-      valuesAfter(list.argv, "--filter").every((value) => /^label=io\.opencode\.workflow\.[a-z]+=/.test(value)),
+      lists.every((list) =>
+        valuesAfter(list.argv, "--filter").every((value) => /^label=io\.opencode\.workflow\.[a-z]+=/.test(value)),
+      ),
     ).toBe(true)
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
     expect(fixture.engine.one("container", "rm").argv.at(-1)).toBe(fixture.engine.containerID)
@@ -611,11 +718,49 @@ describe("WorkflowCommandSandboxServer", () => {
     await fixture.run({ command: "true" })
     fixture.engine.invocations.splice(0)
     fixture.engine.recoveryIDs = [fixture.engine.containerID]
+    fixture.engine.recoveryRunning = true
 
     const failure = await fixture.recover().catch((error) => error)
 
     expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
     expect(fixture.engine.all("container", "kill")).toHaveLength(1)
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+  })
+
+  test("recovery skips kill for an exact-owned stopped container and accepts verified removal", async () => {
+    await using fixture = await setup("implement", { recoveryFailure: "kill" })
+    await fixture.run({ command: "true" })
+    fixture.engine.invocations.splice(0)
+    fixture.engine.recoveryIDs = [fixture.engine.containerID]
+
+    const recovered = await fixture.recover()
+
+    expect(recovered).toBe(1)
+    expect(fixture.engine.all("container", "kill")).toEqual([])
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+  })
+
+  test("recovery treats a verified empty ownership listing as already absent", async () => {
+    await using fixture = await setup("implement")
+    await fixture.run({ command: "true" })
+    fixture.engine.invocations.splice(0)
+
+    const recovered = await fixture.recover()
+
+    expect(recovered).toBe(0)
+    expect(fixture.engine.all("container", "kill")).toEqual([])
+    expect(fixture.engine.all("container", "rm")).toEqual([])
+  })
+
+  test("recovery stays unavailable when an exact-owned container remains after rm", async () => {
+    await using fixture = await setup("implement", { recoveryFailure: "still-present" })
+    await fixture.run({ command: "true" })
+    fixture.engine.invocations.splice(0)
+    fixture.engine.recoveryIDs = [fixture.engine.containerID]
+
+    const failure = await fixture.recover().catch((error) => error)
+
+    expect(failure).toBeInstanceOf(WorkflowCommandSandbox.Unavailable)
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
   })
 
@@ -689,7 +834,10 @@ class FakeEngine implements Docker.Engine {
   readonly containerID = "a".repeat(64)
   readonly invocations: Docker.Invocation[] = []
   recoveryIDs: string[] = []
+  recoveryRunning = false
   onCreate?: () => Promise<void>
+  containerVisible = true
+  private inspectAttempts = 0
   private name = ""
   private labels: Record<string, string> = {}
 
@@ -698,9 +846,10 @@ class FakeEngine implements Docker.Engine {
       readonly engineFailure?: "daemon" | "image"
       readonly startFailure?: "cancelled" | "timeout" | "engine" | "command"
       readonly inspectMismatch?: boolean
-      readonly recoveryFailure?: "list" | "listing-junk" | "inspect-json" | "kill" | "rm"
+      readonly recoveryFailure?: "list" | "listing-junk" | "inspect-json" | "kill" | "rm" | "still-present"
       readonly inspectFailure?: "malformed" | "truncated"
       readonly cleanupFailure?: "rm"
+      readonly acquisitionFailure?: "timeout" | "exit" | "cancelled" | "invalid-id" | "inspect-once" | "late-timeout"
     },
   ) {}
 
@@ -716,11 +865,26 @@ class FakeEngine implements Docker.Engine {
       this.name = valueAfter(input.argv, "--name")
       this.labels = Object.fromEntries(valuesAfter(input.argv, "--label").map((value) => value.split("=", 2)))
       await this.onCreate?.()
+      if (this.options.acquisitionFailure === "late-timeout") {
+        this.containerVisible = false
+        throw new Docker.Timeout("create timed out")
+      }
+      if (this.options.acquisitionFailure === "timeout") throw new Docker.Timeout("create timed out")
+      if (this.options.acquisitionFailure === "cancelled") throw new Docker.Cancelled("create cancelled")
+      if (this.options.acquisitionFailure === "exit")
+        return { exit: 1, stdout: "", stderr: "create failed after allocation", truncated: false }
+      if (this.options.acquisitionFailure === "invalid-id")
+        return { exit: 0, stdout: "not-a-container-id", stderr: "", truncated: false }
       return { exit: 0, stdout: `${this.containerID}\n`, stderr: "", truncated: false }
     }
     if (input.argv[0] === "container" && input.argv[1] === "inspect") {
       const id = input.argv.at(-1)!
-      const exact = id === this.containerID
+      const exact = id === this.containerID || id === this.name
+      if (!this.containerVisible && id === this.name)
+        return { exit: 1, stdout: "", stderr: "not found", truncated: false }
+      this.inspectAttempts++
+      if (this.options.acquisitionFailure === "inspect-once" && this.inspectAttempts === 1)
+        return { exit: 1, stdout: "", stderr: "transient inspect failure", truncated: false }
       if (this.options.inspectFailure === "malformed") return { exit: 0, stdout: "{", stderr: "", truncated: false }
       if (this.options.inspectFailure === "truncated") return { exit: 0, stdout: "[]", stderr: "", truncated: true }
       if (this.options.recoveryFailure === "inspect-json" && this.recoveryIDs.length > 0)
@@ -729,10 +893,13 @@ class FakeEngine implements Docker.Engine {
         exit: 0,
         stdout: JSON.stringify([
           {
-            Id: id,
+            Id: exact ? this.containerID : id,
             Name: `/${exact ? this.name : "foreign"}`,
             Config: { Labels: exact && !this.options.inspectMismatch ? this.labels : { foreign: "true" } },
-            State: { Running: false, ExitCode: this.options.startFailure === "command" ? 23 : 0 },
+            State: {
+              Running: this.recoveryIDs.length > 0 ? this.recoveryRunning : false,
+              ExitCode: this.options.startFailure === "command" ? 23 : 0,
+            },
           },
         ]),
         stderr: "",
@@ -765,6 +932,9 @@ class FakeEngine implements Docker.Engine {
       this.recoveryIDs.length > 0
     )
       throw new Error("recovery rm failed")
+    if (input.argv[0] === "container" && input.argv[1] === "rm" && this.recoveryIDs.length > 0) {
+      if (this.options.recoveryFailure !== "still-present") this.recoveryIDs = []
+    }
     return { exit: 0, stdout: "", stderr: "", truncated: false }
   }
 
@@ -779,6 +949,14 @@ class FakeEngine implements Docker.Engine {
   }
 }
 
+async function waitUntil(check: () => boolean, timeoutMs = 500) {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error("condition was not met before deadline")
+    await Bun.sleep(5)
+  }
+}
+
 async function setup(
   role: WorkflowCommandSandbox.Request["role"],
   options: {
@@ -787,13 +965,16 @@ async function setup(
     readonly engineFailure?: "daemon" | "image"
     readonly startFailure?: "cancelled" | "timeout" | "engine" | "command"
     readonly inspectMismatch?: boolean
-    readonly recoveryFailure?: "list" | "listing-junk" | "inspect-json" | "kill" | "rm"
+    readonly recoveryFailure?: "list" | "listing-junk" | "inspect-json" | "kill" | "rm" | "still-present"
     readonly inspectFailure?: "malformed" | "truncated"
     readonly cleanupFailure?: "rm"
+    readonly acquisitionFailure?: "timeout" | "exit" | "cancelled" | "invalid-id" | "inspect-once" | "late-timeout"
     readonly callInput?: { readonly command: string; readonly workdir?: string; readonly timeout?: number }
   } = {},
 ) {
   await fs.mkdir(root, { recursive: true })
+  await fs.mkdir(path.dirname(enginePath), { recursive: true })
+  await fs.writeFile(enginePath, "fake docker test executable", { flag: "a" })
   const workspace = await fs.mkdtemp(path.join(root, "workspace-"))
   await fs.mkdir(path.join(workspace, "src"))
   const dockerConfig = path.join(root, `config-${crypto.randomUUID()}`)

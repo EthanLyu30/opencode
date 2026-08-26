@@ -998,6 +998,124 @@ describe("WorkflowVisualHostServer", () => {
     expect(runtime.aborted).toEqual(["https://example.com/tracker.js"])
   })
 
+  test("never serves a multiply-linked static implementation file", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    await using outsideTemp = await taskTemp()
+    const outside = path.join(outsideTemp.path, "outside.html")
+    const entrypoint = path.join(workspaceTemp.path, "index.html")
+    await fs.writeFile(outside, "outside-secret")
+    await fs.link(outside, entrypoint)
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "static", entrypoint: "index.html" },
+    })
+
+    const response = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.prepareImplementation({ workflowID, revision: 0, plan })
+          return yield* Effect.promise(() => fetch(preview.url))
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolveImplementationContract,
+          }),
+        ),
+      ),
+    )
+
+    expect(response.status).toBe(404)
+    expect(await response.text()).not.toContain("outside-secret")
+  })
+
+  test("does not serve external bytes after an admitted static file is replaced", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    await using outsideTemp = await taskTemp()
+    const entrypoint = path.join(workspaceTemp.path, "index.html")
+    const outside = path.join(outsideTemp.path, "outside.html")
+    await fs.writeFile(entrypoint, "workspace-owned")
+    await fs.writeFile(outside, "outside-secret")
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "static", entrypoint: "index.html" },
+    })
+
+    const response = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.prepareImplementation({ workflowID, revision: 0, plan })
+          yield* Effect.promise(async () => {
+            await fs.rm(entrypoint)
+            await fs.link(outside, entrypoint)
+          })
+          return yield* Effect.promise(() => fetch(preview.url))
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolveImplementationContract,
+          }),
+        ),
+      ),
+    )
+
+    expect(response.status).toBe(404)
+    expect(await response.text()).not.toContain("outside-secret")
+  })
+
+  test("applies the shared protected-root admission before any implementation preview capability", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    await fs.writeFile(path.join(workspaceTemp.path, "index.html"), "<!doctype html><main id=ready></main>")
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "static", entrypoint: "index.html" },
+    })
+    let checks = 0
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.prepareImplementation({ workflowID, revision: 0, plan })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolveImplementationContract,
+            ...({
+              workspacePolicy: async () => {
+                checks++
+                throw new TypeError("Location overlaps protected host roots")
+              },
+            } as Record<string, unknown>),
+          }),
+        ),
+        Effect.match({
+          onFailure: (failure) => ({ _tag: "Left" as const, failure }),
+          onSuccess: () => ({ _tag: "Right" as const }),
+        }),
+      ),
+    )
+
+    expect(outcome).toMatchObject({ _tag: "Left", failure: { code: "invalid_preview_plan" } })
+    expect(checks).toBe(1)
+  })
+
   test("re-verifies the frozen implementation plan before creating a capability", async () => {
     await using temp = await taskTemp()
     await using workspaceTemp = await taskTemp()

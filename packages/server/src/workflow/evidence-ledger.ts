@@ -58,7 +58,9 @@ export type Operation =
   | "select-prepare"
   | "upsert-prepare"
   | "select-get"
+  | "select-history"
   | "select-item"
+  | "select-blob"
   | "list-items"
   | "begin"
   | "insert-capture"
@@ -108,7 +110,7 @@ interface EvidenceRow {
   readonly ready_selector_sha256: string
   readonly state: string
   readonly owner_nonce: string | null
-  readonly png_blob: Uint8Array | null
+  readonly png_length: number | null
   readonly png_sha256: string | null
   readonly evidence_bytes: number
   readonly receipt_json: string | null
@@ -158,6 +160,7 @@ export function open(root: string, options: OpenOptions = {}): Service {
       closed: false,
     }
     initialize(state)
+    verifyAllAggregates(state)
     publicGuard(state)
     acquired.pop()
     return makeService(state)
@@ -314,9 +317,11 @@ function makeService(state: State): Service {
     get: async (coordinatesInput) =>
       operate(state, () => {
         const coordinates = WorkflowVisualHost.validateEvidenceCoordinates(coordinatesInput)
-        const item = readItem(state, WorkflowVisualHost.evidenceID(coordinates))
-        if (item !== undefined) assertCoordinates(item.coordinates, coordinates)
-        return item
+        return transaction(state, () => {
+          const item = readItem(state, WorkflowVisualHost.evidenceID(coordinates))
+          if (item !== undefined) assertCoordinates(item.coordinates, coordinates)
+          return item
+        })
       }),
     commit: async (input, now) =>
       operate(state, () => transaction(state, () => commitItem(state, input, validateTimestamp(now)))),
@@ -481,6 +486,10 @@ function reconcile(
     }
     abandoned.add(receipt.evidenceID)
   }
+  const committed = new Map<
+    WorkflowVisualHost.EvidenceID,
+    WorkflowVisualHost.BindEvidenceInput & { readonly release: boolean }
+  >()
   for (const authority of input.committed) {
     const receipt = WorkflowVisualHost.validateEvidenceReceipt(authority.receipt)
     WorkflowVisualHost.evidenceArtifactBinding(authority)
@@ -491,10 +500,15 @@ function reconcile(
     ) {
       throw new TypeError("Committed evidence authority conflicts")
     }
+    const prior = committed.get(receipt.evidenceID)
+    if (prior !== undefined && !sameJSON(prior, authority)) {
+      throw new TypeError("Committed evidence authority conflicts")
+    }
+    committed.set(receipt.evidenceID, authority)
   }
   return transaction(state, () => {
     for (const authority of input.abandoned) abandonItem(state, authority, now)
-    for (const authority of input.committed) {
+    for (const authority of committed.values()) {
       commitItem(state, authority, now)
       if (authority.release) releaseItem(state, authority, now)
     }
@@ -538,11 +552,27 @@ function toSummary(item: Item): WorkflowVisualHost.EvidenceSummary {
 
 function readItem(state: State, evidenceID: WorkflowVisualHost.EvidenceID): Item | undefined {
   const row = sql(state, "select-item", () =>
+    state.database.query<EvidenceRow, [string]>(`${metadataSelect} WHERE evidence_id = ?`).get(evidenceID),
+  )
+  if (row === null) return undefined
+  const item = decodeRow(row)
+  if (item.state !== "staged" && item.state !== "committed") return item
+  const blob = sql(state, "select-blob", () =>
     state.database
-      .query<EvidenceRow, [string]>("SELECT * FROM workflow_evidence_item WHERE evidence_id = ?")
+      .query<
+        { readonly png_blob: Uint8Array | null },
+        [string]
+      >("SELECT png_blob FROM workflow_evidence_item WHERE evidence_id = ?")
       .get(evidenceID),
   )
-  return row === null ? undefined : decodeRow(row)
+  if (blob === null || !(blob.png_blob instanceof Uint8Array) || item.receipt === undefined)
+    throw new FatalEvidenceError(new TypeError("Active evidence BLOB is missing"))
+  try {
+    const restored = WorkflowVisualHost.restoreCapturedImage({ receipt: item.receipt, bytes: blob.png_blob })
+    return Object.freeze({ ...item, bytes: Uint8Array.from(restored.bytes) })
+  } catch (cause) {
+    throw new FatalEvidenceError(cause)
+  }
 }
 
 function requireItem(state: State, evidenceID: WorkflowVisualHost.EvidenceID): Item {
@@ -554,10 +584,7 @@ function requireItem(state: State, evidenceID: WorkflowVisualHost.EvidenceID): I
 function listItems(state: State, workflowID: string): readonly Item[] {
   const rows = sql(state, "list-items", () =>
     state.database
-      .query<
-        EvidenceRow,
-        [string]
-      >("SELECT * FROM workflow_evidence_item WHERE workflow_id = ? ORDER BY evidence_id ASC")
+      .query<EvidenceRow, [string]>(`${metadataSelect} WHERE workflow_id = ? ORDER BY evidence_id ASC`)
       .all(workflowID),
   )
   return rows.map(decodeRow)
@@ -593,7 +620,7 @@ function decodeRow(row: EvidenceRow): Item {
       if (
         row.owner_nonce === null ||
         !sha256Pattern.test(row.owner_nonce) ||
-        row.png_blob !== null ||
+        row.png_length !== null ||
         row.png_sha256 !== null ||
         row.evidence_bytes !== 0 ||
         row.receipt_json !== null ||
@@ -634,22 +661,25 @@ function decodeRow(row: EvidenceRow): Item {
       throw new TypeError("Abandoned evidence metadata is invalid")
     }
     if (row.state === "released" || row.state === "abandoned") {
-      if (row.png_blob !== null) throw new TypeError("Terminal evidence retained a staging BLOB")
+      if (row.png_length !== null) throw new TypeError("Terminal evidence retained a staging BLOB")
       return Object.freeze({ ...base, receipt, state: row.state, artifact, abandonment })
     }
-    if (!(row.png_blob instanceof Uint8Array)) throw new TypeError("Active evidence BLOB is missing")
-    const restored = WorkflowVisualHost.restoreCapturedImage({ receipt, bytes: row.png_blob })
-    return Object.freeze({
-      ...base,
-      receipt,
-      state: row.state,
-      artifact,
-      bytes: Uint8Array.from(restored.bytes),
-    })
+    if (!Number.isSafeInteger(row.png_length) || row.png_length !== row.evidence_bytes)
+      throw new TypeError("Active evidence BLOB length differs from its receipt")
+    return Object.freeze({ ...base, receipt, state: row.state, artifact })
   } catch (cause) {
     throw new FatalEvidenceError(cause)
   }
 }
+
+const metadataSelect = `SELECT
+  evidence_id, workflow_id, stage_id, preview_kind, revision,
+  viewport_name, viewport_width, viewport_height,
+  config_sha256, source_sha256, ready_selector_sha256,
+  state, owner_nonce, length(png_blob) AS png_length, png_sha256,
+  evidence_bytes, receipt_json, artifact_json, abandonment_json,
+  created_at, updated_at
+FROM workflow_evidence_item`
 
 function parseReceipt(value: string): WorkflowVisualHost.EvidenceReceipt {
   return WorkflowVisualHost.validateEvidenceReceipt(parseJSON(value))
@@ -685,7 +715,37 @@ function selectUsed(state: State, workflowID: string): number {
   if (!Number.isSafeInteger(value) || value < 0 || value > WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
     throw new FatalEvidenceError(new Error("Evidence ledger contains an invalid total"))
   }
+  const history = selectHistory(state, workflowID)
+  if (value < history) throw new FatalEvidenceError(new Error("Evidence aggregate is below durable item history"))
   return value
+}
+
+function selectHistory(state: State, workflowID: string): number {
+  const row = sql(state, "select-history", () =>
+    state.database
+      .query<
+        { readonly evidence_bytes: number | null },
+        [string]
+      >("SELECT SUM(evidence_bytes) AS evidence_bytes FROM workflow_evidence_item WHERE workflow_id = ?")
+      .get(workflowID),
+  )
+  const value = row?.evidence_bytes ?? 0
+  if (!Number.isSafeInteger(value) || value < 0 || value > WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
+    throw new FatalEvidenceError(new Error("Durable evidence item history is outside the production bound"))
+  }
+  return value
+}
+
+function verifyAllAggregates(state: State): void {
+  const rows = sql(state, "select-history", () =>
+    state.database
+      .query<
+        { readonly workflow_id: string },
+        []
+      >("SELECT workflow_id FROM workflow_evidence UNION SELECT workflow_id FROM workflow_evidence_item")
+      .all(),
+  )
+  for (const row of rows) selectUsed(state, validateWorkflowID(row.workflow_id))
 }
 
 function setUsed(state: State, workflowID: string, value: number): void {
