@@ -999,7 +999,7 @@ describe("WorkflowVisualHostServer", () => {
   })
 
   test("bounds static responses at 32 MiB and rejects oversize or growth before returning bytes", async () => {
-    const serve = async (size: number, grow = false) => {
+    const serve = async (size: number, grow?: "before-read" | "after-read") => {
       await using temp = await taskTemp()
       await using workspaceTemp = await taskTemp()
       const entrypoint = path.join(workspaceTemp.path, "index.html")
@@ -1027,11 +1027,18 @@ describe("WorkflowVisualHostServer", () => {
               hostRoot: temp.path,
               browser: browserRuntime().runtime,
               resolveImplementationContract,
-              onStaticFileOpened: grow
-                ? async (file) => {
-                    await fs.appendFile(file, new Uint8Array(1))
-                  }
-                : undefined,
+              onStaticFileOpened:
+                grow === "before-read"
+                  ? async (file) => {
+                      await fs.appendFile(file, new Uint8Array(1))
+                    }
+                  : undefined,
+              onStaticFileRead:
+                grow === "after-read"
+                  ? async (file) => {
+                      await fs.appendFile(file, new Uint8Array(1))
+                    }
+                  : undefined,
             }),
           ),
         ),
@@ -1040,7 +1047,8 @@ describe("WorkflowVisualHostServer", () => {
 
     expect(await serve(32 * 1024 * 1024)).toEqual({ status: 200, bytes: 32 * 1024 * 1024 })
     expect(await serve(32 * 1024 * 1024 + 1)).toMatchObject({ status: 413 })
-    expect(await serve(16, true)).toMatchObject({ status: 413 })
+    expect(await serve(16, "before-read")).toMatchObject({ status: 413 })
+    expect(await serve(16, "after-read")).toMatchObject({ status: 413 })
   })
 
   test("never serves a multiply-linked static implementation file", async () => {

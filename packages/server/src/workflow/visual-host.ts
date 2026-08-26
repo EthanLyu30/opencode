@@ -58,6 +58,7 @@ export interface Options {
   readonly onSpawnArgv?: (argv: readonly string[]) => void
   readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
   readonly onStaticFileOpened?: (file: string) => Promise<void>
+  readonly onStaticFileRead?: (file: string) => Promise<void>
   /**
    * Trusted host seam. Task23.7 supplies a resolver backed by exact durable
    * design + implementation/snapshot authority; absence fails closed.
@@ -171,6 +172,7 @@ interface State {
   readonly onSpawnArgv?: (argv: readonly string[]) => void
   readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
   readonly onStaticFileOpened?: (file: string) => Promise<void>
+  readonly onStaticFileRead?: (file: string) => Promise<void>
   readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
 }
 
@@ -217,6 +219,7 @@ async function makeState(options: Options): Promise<State> {
     onSpawnArgv: options.onSpawnArgv,
     onRecordCreated: options.onRecordCreated,
     onStaticFileOpened: options.onStaticFileOpened,
+    onStaticFileRead: options.onStaticFileRead,
     resolveImplementationContract: options.resolveImplementationContract,
   }
 }
@@ -252,7 +255,14 @@ function materializeReference(
           for (const file of reference.files) await writeReferenceFile(state, record, file)
           await guardHostRoot(state, record.directory)
           await writeManifest(state, record)
-          startStaticServer(record, record.directory, reference.entrypoint, record.directory, state.onStaticFileOpened)
+          startStaticServer(
+            record,
+            record.directory,
+            reference.entrypoint,
+            record.directory,
+            state.onStaticFileOpened,
+            state.onStaticFileRead,
+          )
           await guardHostRoot(state, record.directory)
         },
         catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
@@ -366,6 +376,7 @@ function prepareImplementation(
               input.plan.entrypoint ?? "",
               input.plan.locationRoot,
               state.onStaticFileOpened,
+              state.onStaticFileRead,
             ),
           catch: () =>
             failure("prepare_implementation", "visual_host_unavailable", "Static implementation host could not start"),
@@ -688,6 +699,7 @@ function startStaticServer(
   entrypoint: string,
   containmentRoot: string,
   onStaticFileOpened?: (file: string) => Promise<void>,
+  onStaticFileRead?: (file: string) => Promise<void>,
 ): void {
   record.server = Bun.serve({
     hostname: "127.0.0.1",
@@ -701,7 +713,7 @@ function startStaticServer(
             ? entrypoint
             : path.join(root, ...entrypoint.split("/"))
           : path.join(root, ...relative.split("/"))
-      const file = await readStaticFile(target, containmentRoot, onStaticFileOpened)
+      const file = await readStaticFile(target, containmentRoot, onStaticFileOpened, onStaticFileRead)
       if (file === undefined) return new Response("Not found", { status: 404 })
       if (file.status === "too-large") return new Response("Static response exceeds host limit", { status: 413 })
       return new Response(Uint8Array.from(file.bytes).buffer, { headers: { "content-type": file.contentType } })
@@ -989,6 +1001,7 @@ async function readStaticFile(
   target: string,
   root: string,
   onOpened?: (file: string) => Promise<void>,
+  onRead?: (file: string) => Promise<void>,
 ): Promise<
   | { readonly status: "ok"; readonly bytes: Uint8Array; readonly contentType: string }
   | { readonly status: "too-large" }
@@ -1014,6 +1027,7 @@ async function readStaticFile(
       offset += result.bytesRead
     }
     const settled = await handle.stat({ bigint: true })
+    await onRead?.(lexical)
     const pathSettled = await fs.lstat(lexical, { bigint: true })
     const canonicalSettled = await fs.realpath(lexical)
     if (
@@ -1025,7 +1039,14 @@ async function readStaticFile(
     ) {
       return undefined
     }
-    if (settled.size !== opened.size || settled.size > BigInt(MAX_STATIC_RESPONSE_BYTES)) return { status: "too-large" }
+    if (
+      settled.size !== opened.size ||
+      pathSettled.size !== opened.size ||
+      settled.size !== pathSettled.size ||
+      settled.size > BigInt(MAX_STATIC_RESPONSE_BYTES) ||
+      pathSettled.size > BigInt(MAX_STATIC_RESPONSE_BYTES)
+    )
+      return { status: "too-large" }
     return { status: "ok", bytes, contentType: Bun.file(lexical).type || "application/octet-stream" }
   } catch {
     return undefined

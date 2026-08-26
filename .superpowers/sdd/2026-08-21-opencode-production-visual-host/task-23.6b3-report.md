@@ -186,3 +186,65 @@ Server typecheck: PASS
 ```
 
 One deliberately overlapping verification launch (a three-run PowerShell loop was still active when another matrix was started) produced cross-process fixture interference and was discarded; after confirming no Bun process remained, the same default-parallel command returned 211/211 clean. No timeout was increased.
+
+Round-2 exact quality commands/results:
+
+```text
+cd D:\OpenCode-Audit\packages\server
+D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe run typecheck
+$ tsgo --noEmit  # exit 0
+
+cd D:\OpenCode-Audit
+D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe x oxlint \
+  packages/server/src/workflow/{command-sandbox,evidence-ledger,visual-host}.ts \
+  packages/server/test/workflow-{command-sandbox,evidence-ledger,visual-host}.test.ts
+Found 0 warnings and 0 errors.
+
+D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe x prettier --write <the same six changed TS files> task-23.6b3-report.md
+all files formatted/unchanged; exit 0
+
+git diff --check
+exit 0; only Git LF->CRLF notices
+```
+
+## Task23.6 joint fix round 3
+
+The remaining pathname-size interval was reproduced deterministically with a host-only `onStaticFileRead` hook positioned after the post-read handle `stat` and before pathname `lstat`.
+
+RED:
+
+```text
+bun test test/workflow-visual-host.test.ts --test-name-pattern "bounds static responses"
+Expected status 413; received { status: 200, bytes: 16 }
+0 pass, 1 fail, 12 expect
+```
+
+The handle retained its admitted 16-byte size while the same pathname/inode grew to 17 bytes. Identity/link checks therefore passed and old bytes escaped with 200.
+
+GREEN requires admitted, post-read handle, and post-read pathname sizes to be mutually equal and independently within the fixed 32 MiB cap. Any growth returns 413 without body bytes; exact 32 MiB, pre-read growth, hardlink, and replacement protection remain intact.
+
+```text
+bun test test/workflow-visual-host.test.ts --test-name-pattern "bounds static responses"
+1 pass, 0 fail, 12 expect
+
+bun test test/workflow-command-sandbox.test.ts test/workflow-evidence-ledger.test.ts test/workflow-visual-host.test.ts
+133 pass, 0 fail, 500 expect
+
+bun test test/workflow-evidence-ledger.test.ts test/workflow-visual-host.test.ts \
+  test/workflow-host-root-policy.test.ts test/workflow-runtime-composition.test.ts \
+  test/workflow-docker-process-ownership.test.ts test/workflow-command-sandbox.test.ts
+run 1: 211 pass, 0 fail, 722 expect
+run 2: 211 pass, 0 fail, 722 expect
+
+bun run typecheck
+$ tsgo --noEmit  # exit 0
+
+bun x oxlint <round-2/round-3 six changed TS files>
+0 errors (final rerun after the one reported optional-parameter warning was corrected)
+
+bun x prettier --check <round-2/round-3 six changed TS files and report>
+All matched files use Prettier code style!
+
+git diff --check
+exit 0; only Git LF->CRLF notices
+```
