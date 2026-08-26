@@ -198,7 +198,13 @@ describe("Workflow role contracts", () => {
 
     for (const value of [
       { type: "media", data: Uint8Array.from([1, 2, 3]) },
+      { type: "media", mediaType: "image/png", data: "opaque" },
+      { nested: { TyPe: "MeDiA", MeDiAtYpE: "image/png", DaTa: "opaque" } },
+      { nested: { TyPe: "MeDiA", type: "text", value: "opaque" } },
+      { nested: [{ type: "IMAGE", mimeType: "image/png", bytes: "opaque" }] },
+      { nested: { image_url: "https://example.test/capture.png" } },
       { dataBase64: "harmless-looking" },
+      { data_base64: "separator-bypass" },
       { nested: { DATABASE64: "still-forbidden" } },
       { nested: [{ DaTaBaSe64: "case-insensitive" }] },
       { nested: "data:text/plain,forbidden" },

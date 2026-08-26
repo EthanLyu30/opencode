@@ -436,10 +436,51 @@ function scanGeneric(value: unknown): void {
     for (const item of value) scanGeneric(item)
     return
   }
+  assertNotGenericMediaShape(value)
   for (const [key, item] of Object.entries(value)) {
-    if (key.toLowerCase() === "database64") throw new Error("dataBase64 is forbidden outside validated media messages")
+    if (normalizeMediaToken(key) === "database64")
+      throw new Error("dataBase64 is forbidden outside validated media messages")
     scanGeneric(item)
   }
+}
+
+function assertNotGenericMediaShape(value: object): void {
+  const entries = Object.entries(value).map(([key, item]) => [normalizeMediaToken(key), item] as const)
+  const keys = new Set(entries.map(([key]) => key))
+  if (
+    entries.some(
+      ([key, item]) =>
+        key === "type" &&
+        typeof item === "string" &&
+        ["media", "image", "inputimage", "outputimage", "imageurl", "inputimageurl"].includes(
+          normalizeMediaToken(item),
+        ),
+    )
+  ) {
+    throw new Error("Media values require a validated media message")
+  }
+  if (
+    ["imageurl", "imageuri", "imagedata", "imagebytes", "mediaurl", "mediauri", "mediadata", "mediabytes"].some((key) =>
+      keys.has(key),
+    )
+  ) {
+    throw new Error("Media values require a validated media message")
+  }
+  const hasPayload = ["data", "bytes", "base64", "url", "uri", "source"].some((key) => keys.has(key))
+  if ((keys.has("mediatype") || keys.has("mimetype")) && hasPayload)
+    throw new Error("Media values require a validated media message")
+  if (
+    entries.some(
+      ([key, item]) => key === "contenttype" && typeof item === "string" && /^(?:image|audio|video)\//i.test(item),
+    ) &&
+    (hasPayload || keys.has("content"))
+  ) {
+    throw new Error("Media values require a validated media message")
+  }
+}
+
+function normalizeMediaToken(value: string): string {
+  return value.replaceAll(/[_-]/g, "").trim().toLowerCase()
 }
 
 function scanText(value: string): void {

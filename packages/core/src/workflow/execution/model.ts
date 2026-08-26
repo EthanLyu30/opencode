@@ -1,16 +1,6 @@
 export * as WorkflowModelExecution from "./model"
 
-import {
-  LLM,
-  LLMClient,
-  LLMError,
-  LLMResponse,
-  Message,
-  Model,
-  ToolDefinition,
-  ToolResultValue,
-  Usage,
-} from "@opencode-ai/llm"
+import { LLMClient, LLMError, LLMResponse, Message, Model, ToolResultValue, Usage } from "@opencode-ai/llm"
 import { Auth } from "@opencode-ai/llm/route"
 import { Integration } from "@opencode-ai/schema/integration"
 import { Responses } from "@opencode-ai/schema/responses"
@@ -34,6 +24,9 @@ import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowToolLineage } from "../tool-lineage"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
 import { WorkflowRoleContract } from "./contract"
+import * as WorkflowProviderRequest from "./provider-request"
+
+export { fingerprintProviderRequest } from "./provider-request"
 
 export interface Input extends ExecutionInput {
   readonly route: WorkflowRouting.Route
@@ -355,7 +348,8 @@ const productionLayer = Layer.effect(
                         ...continuation.turns.flatMap(continuationMessages),
                       ]
                       const remainingTokens = remainingTokenBudget(input, route, continuation.usage)
-                      const requestFingerprint = providerRequestSnapshot({
+                      const requestFingerprint = WorkflowProviderRequest.build({
+                        model: route.model,
                         route,
                         contract,
                         sequence: continuation.providerTurn.sequence,
@@ -427,7 +421,8 @@ const productionLayer = Layer.effect(
                   materialization = yield* registry.materialize(contract.permissions)
                   catalogFingerprint = materialization.fingerprint
                   const sequence = usage.turns + 1
-                  const requestSnapshot = providerRequestSnapshot({
+                  const requestSnapshot = WorkflowProviderRequest.build({
+                    model,
                     route,
                     contract,
                     sequence,
@@ -459,12 +454,7 @@ const productionLayer = Layer.effect(
                     artifacts: toolArtifacts,
                   } satisfies ModelContinuation)
                   const raw = yield* modelClient
-                    .generate(
-                      LLM.request({
-                        model,
-                        ...requestSnapshot.request,
-                      }),
-                    )
+                    .generate(requestSnapshot.request)
                     .pipe(
                       Effect.mapError((error) =>
                         providerFailure(input, response, error, usage, checkpointedUsage, providerUsage),
@@ -1383,42 +1373,6 @@ function remainingTokenBudget(input: Input, route: WorkflowRouting.Route, usage:
   return route.budget.maxTokens === undefined
     ? undefined
     : Math.max(0, route.budget.maxTokens - input.workflow.usage.tokens - usage.tokens)
-}
-
-function providerRequestSnapshot(input: {
-  readonly route: WorkflowRouting.Route
-  readonly contract: WorkflowRoleContract.Contract
-  readonly sequence: number
-  readonly catalogFingerprint: string
-  readonly messages: readonly Message[]
-  readonly tools: readonly ToolDefinition.Input[]
-  readonly remainingTokens: number | undefined
-}) {
-  const request = Object.freeze({
-    system: input.contract.system,
-    messages: Object.freeze([...input.messages]),
-    tools: Object.freeze([...input.tools]),
-    responseFormat: Object.freeze({
-      type: "json" as const,
-      schema: WorkflowRoleContract.responseSchema(input.contract.output),
-    }),
-    ...(input.remainingTokens === undefined ? {} : { generation: Object.freeze({ maxTokens: input.remainingTokens }) }),
-  })
-  const snapshot = Object.freeze({
-    snapshotVersion: 1,
-    model: Model.input(input.route.model),
-    route: Object.freeze({
-      providerID: input.route.providerID,
-      modelID: input.route.modelID,
-      protocol: input.route.protocol,
-      reasoningEffort: input.route.reasoningEffort,
-    }),
-    contractFingerprint: input.contract.contractFingerprint,
-    sequence: input.sequence,
-    catalogFingerprint: input.catalogFingerprint,
-    request,
-  })
-  return Object.freeze({ snapshot, request, fingerprint: WorkflowBusinessArtifact.hash(snapshot) })
 }
 
 const zeroUsage: Workflow.Usage = { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 }

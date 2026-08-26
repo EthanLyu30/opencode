@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
 import { describe, expect } from "bun:test"
-import { LLMClient, LLMEvent, LLMResponse, type LLMRequest } from "@opencode-ai/llm"
+import { LLM, LLMClient, LLMEvent, LLMResponse, Message, type LLMRequest } from "@opencode-ai/llm"
 import { DateTime, Effect, Layer, Schema, Stream } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Credential } from "@opencode-ai/core/credential"
@@ -496,27 +496,75 @@ describe("Workflow Location tools", () => {
           if (!response) throw new Error("invalid provider result fixture")
           modelResponses.push(response)
           let durableResult: Readonly<Record<string, unknown>> | undefined
-          const input = modelInput(location, sessionID, (checkpoint) => {
-            const turn = checkpoint.providerTurn
-            if (typeof turn === "object" && turn !== null && "result" in turn) {
-              durableResult = checkpoint
-              return Effect.fail({
-                failure: {
-                  category: "transient" as const,
-                  code: "simulated_crash_after_provider_result",
-                  message: "Simulated crash after the durable provider result",
-                },
-                usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
-              })
-            }
-            return Effect.void
-          })
+          const budget = { maxTokens: 3, maxTurns: 3, maxToolCalls: 2, maxAttempts: 2 }
+          const input = modelInput(
+            location,
+            sessionID,
+            (checkpoint) => {
+              const turn = checkpoint.providerTurn
+              if (typeof turn === "object" && turn !== null && "result" in turn) {
+                durableResult = checkpoint
+                return Effect.fail({
+                  failure: {
+                    category: "transient" as const,
+                    code: "simulated_crash_after_provider_result",
+                    message: "Simulated crash after the durable provider result",
+                  },
+                  usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+                })
+              }
+              return Effect.void
+            },
+            {},
+            { budget },
+          )
           yield* WorkflowModelExecution.Service.use((models) => models.execute(input).pipe(Effect.flip))
           if (!durableResult) throw new Error("provider result was not checkpointed")
           expect(modelRequests).toHaveLength(1)
+          const observed = modelRequests[0]
+          const turn = durableResult.providerTurn
+          if (typeof turn !== "object" || turn === null) throw new Error("provider turn was not checkpointed")
+          if (!("requestFingerprint" in turn) || typeof turn.requestFingerprint !== "string")
+            throw new Error("provider request fingerprint was not checkpointed")
+          if (!("sequence" in turn) || typeof turn.sequence !== "number")
+            throw new Error("provider request sequence was not checkpointed")
+          if (typeof durableResult.contractFingerprint !== "string")
+            throw new Error("provider contract fingerprint was not checkpointed")
+          if (typeof durableResult.catalogFingerprint !== "string")
+            throw new Error("provider catalog fingerprint was not checkpointed")
+          const contractFingerprint = durableResult.contractFingerprint
+          const catalogFingerprint = durableResult.catalogFingerprint
+          const sequence = turn.sequence
+          expect(Object.isFrozen(observed)).toBe(true)
+          expect(Object.isFrozen(observed.system)).toBe(true)
+          expect(Object.isFrozen(observed.messages)).toBe(true)
+          expect(Object.isFrozen(observed.tools)).toBe(true)
+          expect(observed.system[0]).toMatchObject({ type: "text" })
+          expect(observed.generation?.maxTokens).toBe(3)
+          const fingerprint = (request: LLMRequest) =>
+            WorkflowModelExecution.fingerprintProviderRequest({
+              request,
+              route: input.route,
+              contractFingerprint,
+              sequence,
+              catalogFingerprint,
+            })
+          expect(fingerprint(observed)).toBe(turn.requestFingerprint)
+
+          const driftedRequests = [
+            LLM.updateRequest(observed, {
+              responseFormat: { type: "json", schema: { type: "object", properties: { drift: { type: "string" } } } },
+            }),
+            LLM.updateRequest(observed, { generation: { maxTokens: 2 } }),
+            LLM.updateRequest(observed, { tools: [...observed.tools].reverse() }),
+            LLM.updateRequest(observed, { messages: [...observed.messages, Message.user("request drift")] }),
+          ]
+          for (const request of driftedRequests) expect(fingerprint(request)).not.toBe(turn.requestFingerprint)
 
           const resumed = yield* WorkflowModelExecution.Service.use((models) =>
-            models.execute(modelInput(location, sessionID, () => Effect.void, { checkpoint: durableResult })),
+            models.execute(
+              modelInput(location, sessionID, () => Effect.void, { checkpoint: durableResult }, { budget }),
+            ),
           )
           expect(resumed.outcome).toEqual(providerDesignEnvelope().outcome)
           expect(modelRequests).toHaveLength(1)
@@ -527,7 +575,9 @@ describe("Workflow Location tools", () => {
           ]
           for (const checkpoint of drifted) {
             const failure = yield* WorkflowModelExecution.Service.use((models) =>
-              models.execute(modelInput(location, sessionID, () => Effect.void, { checkpoint })).pipe(Effect.flip),
+              models
+                .execute(modelInput(location, sessionID, () => Effect.void, { checkpoint }, { budget }))
+                .pipe(Effect.flip),
             )
             if (!("failure" in failure)) throw new Error("expected continuation drift failure")
             expect(failure.failure.code).toBe("model_continuation_mismatch")
@@ -540,7 +590,7 @@ describe("Workflow Location tools", () => {
                   sessionID,
                   () => Effect.void,
                   { checkpoint: durableResult },
-                  { stageInput: { revision: 1 } },
+                  { budget, stageInput: { revision: 1 } },
                 ),
               )
               .pipe(Effect.flip),
