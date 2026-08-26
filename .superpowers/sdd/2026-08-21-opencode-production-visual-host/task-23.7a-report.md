@@ -432,3 +432,130 @@ Finished in 2.7s on 5 files with 130 rules using 16 threads.
 ### Remaining concern
 
 No new A-scope correctness concern remains. The existing Task 23.7B boundary is unchanged: production visual evidence resolution and trusted screenshot settlement remain fail-closed and are not implemented or exercised here.
+
+## Independent review fix round 3 — 2026-08-26
+
+### Status and commit identity
+
+- Review-fix implementation commit: `4bef87733` (`fix(workflow): own immutable provider requests`).
+- This section and the progress-ledger entry are a separate documentation commit; the implementation SHA above is the exact code revision reviewed here.
+- Both scoped findings were reproduced before production edits. No architectural conflict or `NEEDS_CONTEXT` condition was found.
+
+### Focused RED evidence
+
+After adding nested mutation attempts and generic separator/binary bypass cases, the corrected first behavioral RED ran from `D:\OpenCode-Audit\packages\core`:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts test/workflow-location-tools.test.ts
+```
+
+```text
+(fail) Workflow Location tools > dispatches a deeply immutable request, resumes its durable result, and rejects drift
+expect(accepted).toBe(false)
+Expected: false
+Received: true
+(fail) Workflow role contracts > keeps media typed and rejects screenshot data in generic provider text
+Received function did not throw
+26 pass
+2 fail
+167 expect() calls
+Ran 28 tests across 2 files. [4.36s]
+```
+
+The mutation was accepted on a nested normalized request object, while spaced/dotted media-authority keys and non-`Uint8Array` binary views passed generic scanning. An earlier test-draft run addressed `model.defaults.providerOptions` even though the fixture owns that default at `model.route.defaults.providerOptions`; that fixture error was corrected before the behavioral RED above and was not treated as product evidence.
+
+A second RED added an ownership assertion for schema-valid media bytes, again from the Core package:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts
+```
+
+```text
+(fail) Workflow role contracts > keeps media typed and rejects screenshot data in generic provider text
+Received function did not throw
+(fail) Workflow role contracts > owns immutable typed media bytes in the canonical provider request
+expect(part.data).not.toBe(inputBytes)
+14 pass
+2 fail
+74 expect() calls
+Ran 16 tests across 1 file. [800.00ms]
+```
+
+After changing only the generic scanner, the scanner case passed while the media ownership test remained RED (`15 pass`, `1 fail`, `85 expect() calls`, `868.00ms`), isolating the request-ownership defect before its fix.
+
+### Fix decisions and compatibility behavior
+
+- `execution/provider-request.ts` still normalizes exactly once with `LLM.request`. It now constructs an exclusively owned `LLMRequest` graph from that normalized result, including independent system/messages/tools/schema/options/model data. The fingerprint descriptor reads that owned graph, and the exact same top-level request is dispatched.
+- Model routing is re-created with owned endpoint, auth/transport wrappers, and independently cloned route defaults so freezing the canonical request cannot freeze a provider-shared route/default object. Provider body/schema/functions are retained as runtime capabilities rather than recursively freezing provider implementation state.
+- Ordinary nested request data is recursively cloned and frozen. Schema-valid media bytes are copied into a mutation-denying `Uint8Array` proxy which preserves the provider-facing typed-media contract, `instanceof Uint8Array`, iteration and `Buffer.from` behavior without exposing the owned backing buffer.
+- Generic contract scanning now removes every non-alphanumeric separator before comparing keys/tags. It therefore rejects spaced, dotted, underscored, hyphenated and case-varied `dataBase64`, type/media, MIME and recognized image/media fields consistently.
+- Generic values reject `ArrayBuffer`, `SharedArrayBuffer` when available, and every `ArrayBuffer.isView` value, including `DataView` and all typed-array forms. The exception remains limited to bytes inside a schema-validated `Message` media part.
+- Durable recovery, legacy replay, visual binding/receipt authority, fixed routing, and the Task 23.7B fail-closed production-evidence boundary are unchanged.
+
+### Final GREEN and quality evidence
+
+Focused Core tests, run from `D:\OpenCode-Audit\packages\core` after final formatting:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts test/workflow-location-tools.test.ts
+```
+
+```text
+29 pass
+0 fail
+216 expect() calls
+Ran 29 tests across 2 files. [4.55s]
+```
+
+Mandatory Core matrix, run from `D:\OpenCode-Audit\packages\core`:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' test test/workflow-role-execution.test.ts test/workflow-design-loop.test.ts test/workflow-model-state-machine.test.ts test/workflow-location-tools.test.ts test/workflow-execution.test.ts test/workflow-business-artifacts.test.ts test/workflow-routing.test.ts
+```
+
+```text
+107 pass
+0 fail
+572 expect() calls
+Ran 107 tests across 7 files. [9.75s]
+```
+
+Core typecheck, run from `D:\OpenCode-Audit\packages\core`:
+
+```powershell
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' typecheck
+```
+
+```text
+$ tsgo --noEmit
+exit 0
+```
+
+Formatting and changed-file lint, run from `D:\OpenCode-Audit` with exact literal file lists:
+
+```powershell
+& '.\node_modules\.bin\prettier.exe' --write 'packages/core/src/workflow/execution/contract.ts' 'packages/core/src/workflow/execution/provider-request.ts' 'packages/core/test/workflow-location-tools.test.ts' 'packages/core/test/workflow-role-execution.test.ts'
+& '.\node_modules\.bin\oxlint.exe' 'packages/core/src/workflow/execution/contract.ts' 'packages/core/src/workflow/execution/provider-request.ts' 'packages/core/test/workflow-location-tools.test.ts' 'packages/core/test/workflow-role-execution.test.ts'
+```
+
+```text
+packages/core/src/workflow/execution/contract.ts 95ms (unchanged)
+packages/core/src/workflow/execution/provider-request.ts 23ms (unchanged)
+packages/core/test/workflow-location-tools.test.ts 98ms (unchanged)
+packages/core/test/workflow-role-execution.test.ts 50ms (unchanged)
+Found 0 warnings and 0 errors.
+Finished in 2.2s on 4 files with 130 rules using 16 threads.
+```
+
+`git diff --check` and `git diff --cached --check` exited 0; Git emitted only the repository's CRLF conversion warnings. No temporary/cache artifacts were created.
+
+### Review-fix files changed
+
+- `packages/core/src/workflow/execution/contract.ts`
+- `packages/core/src/workflow/execution/provider-request.ts`
+- `packages/core/test/workflow-location-tools.test.ts`
+- `packages/core/test/workflow-role-execution.test.ts`
+
+### Remaining concern
+
+No new A-scope correctness concern remains. The Task 23.7B boundary is unchanged: production visual evidence resolution and trusted screenshot settlement remain fail-closed and were not exercised here.
