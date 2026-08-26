@@ -217,11 +217,12 @@ const modelInput = (
     readonly workflowID?: Workflow.ID
     readonly stageID?: Workflow.StageID
     readonly role?: WorkflowRole.Role
+    readonly budget?: Workflow.Budget
     readonly workflowInput?: Readonly<Record<string, unknown>>
     readonly stageInput?: Readonly<Record<string, unknown>>
   } = {},
 ): WorkflowModelExecution.Input => {
-  const budget: Workflow.Budget = { maxTurns: 3, maxToolCalls: 2, maxAttempts: 2 }
+  const budget: Workflow.Budget = identity.budget ?? { maxTurns: 3, maxToolCalls: 2, maxAttempts: 2 }
   const role = identity.role ?? "design"
   const workflow = Workflow.Info.make({
     id: identity.workflowID ?? Workflow.ID.make("wfl_location_model"),
@@ -546,6 +547,22 @@ describe("Workflow Location tools", () => {
           )
           if (!("failure" in contextFailure)) throw new Error("expected context drift failure")
           expect(contextFailure.failure.code).toBe("model_continuation_mismatch")
+
+          const generationFailure = yield* WorkflowModelExecution.Service.use((models) =>
+            models
+              .execute(
+                modelInput(
+                  location,
+                  sessionID,
+                  () => Effect.void,
+                  { checkpoint: durableResult },
+                  { budget: { maxTokens: 1, maxTurns: 3, maxToolCalls: 2, maxAttempts: 2 } },
+                ),
+              )
+              .pipe(Effect.flip),
+          )
+          if (!("failure" in generationFailure)) throw new Error("expected generation-option drift failure")
+          expect(generationFailure.failure.code).toBe("model_continuation_mismatch")
           expect(modelRequests).toHaveLength(1)
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),

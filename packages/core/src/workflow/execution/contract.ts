@@ -4,11 +4,11 @@ import { Message } from "@opencode-ai/llm"
 import { DesignArtifact } from "@opencode-ai/schema/design-artifact"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
-import { Schema } from "effect"
+import { JsonSchema, Schema } from "effect"
 import { Hash } from "../../util/hash"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
 import { WorkflowPermissions } from "../permissions"
-import type { WorkflowRouting } from "../routing"
+import { WorkflowRouting } from "../routing"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 const Summary = Schema.NonEmptyString.check(
@@ -175,6 +175,37 @@ export interface ArtifactDigest {
   readonly size: number
 }
 
+export interface MediaDigest {
+  readonly mediaType: string
+  readonly sha256: string
+  readonly size: number
+  readonly filename?: string
+}
+
+export interface Authority {
+  readonly authorityVersion: 1
+  readonly role: WorkflowRole.Role
+  readonly revision: number
+  readonly route: {
+    readonly role: WorkflowRole.Role
+    readonly providerID: string
+    readonly modelID: string
+    readonly protocol: WorkflowRole.Protocol
+    readonly reasoningEffort: WorkflowRole.ReasoningEffort
+    readonly requiredCapabilities: readonly string[]
+  }
+  readonly promptVersion: string
+  readonly systemSha256: string
+  readonly messageSource: "default" | "trusted"
+  readonly messagesSha256: string
+  readonly media: readonly MediaDigest[]
+  readonly outputIdentifier: string
+  readonly responseSchemaSha256: string
+  readonly permissionsSha256: string
+  readonly inputArtifacts: readonly ArtifactDigest[]
+  readonly contextDigest: string
+}
+
 export interface Contract {
   readonly contractVersion: 1
   readonly role: WorkflowRole.Role
@@ -189,6 +220,7 @@ export interface Contract {
   readonly contextDigest: string
   readonly routeFingerprint: string
   readonly contractFingerprint: string
+  readonly authority: Authority
 }
 
 export interface BuildInput {
@@ -223,19 +255,23 @@ export function build(input: BuildInput): Contract {
   const routeFingerprint = hash(routeFacts)
   const messages = Object.freeze([...(input.messages ?? defaultMessages(input, inputArtifacts))])
   assertTextSafe(systems[role], messages)
-  const contractFingerprint = hash({
-    contractVersion: 1,
+  const authority: Authority = Object.freeze({
+    authorityVersion: 1,
     role,
     revision,
     route: routeFacts,
     promptVersion: promptVersions[role],
-    system: systems[role],
-    messages: canonicalMessageValue(messages),
+    systemSha256: Hash.sha256(systems[role]),
+    messageSource: input.messages === undefined ? "default" : "trusted",
+    messagesSha256: hash(canonicalMessageValue(messages)),
+    media: Object.freeze(mediaDigests(messages)),
     outputIdentifier,
-    permissions,
+    responseSchemaSha256: hash(responseSchema(output)),
+    permissionsSha256: hash(permissions),
     inputArtifacts,
     contextDigest,
   })
+  const contractFingerprint = fingerprintAuthority(authority)
   return Object.freeze({
     contractVersion: 1,
     role,
@@ -250,7 +286,52 @@ export function build(input: BuildInput): Contract {
     contextDigest,
     routeFingerprint,
     contractFingerprint,
+    authority,
   })
+}
+
+export function fingerprintAuthority(authority: Authority): string {
+  return hash(authority)
+}
+
+export function verifyAuthority(input: {
+  readonly authority: Authority
+  readonly workflow: Workflow.Info
+  readonly stage: Workflow.Stage
+  readonly priorArtifacts: ReadonlyArray<Workflow.Artifact | Workflow.ArtifactCommit>
+  readonly trustedMessages?: readonly Message[]
+}): void {
+  const role = Schema.decodeUnknownSync(WorkflowRole.Role)(input.stage.type)
+  const route = WorkflowRouting.resolve({
+    role,
+    budget: input.workflow.budget,
+    requested: WorkflowRouting.requestedFromStage(role, input.stage.input),
+  })
+  const messages =
+    input.authority.messageSource === "default"
+      ? undefined
+      : (input.trustedMessages ??
+        (() => {
+          throw new Error("Role contract authority requires trusted message evidence")
+        })())
+  const expected = build({
+    workflow: input.workflow,
+    stage: input.stage,
+    route,
+    priorArtifacts: input.priorArtifacts,
+    ...(messages === undefined ? {} : { messages }),
+  })
+  if (
+    fingerprintAuthority(input.authority) !== expected.contractFingerprint ||
+    WorkflowBusinessArtifact.encode(input.authority) !== WorkflowBusinessArtifact.encode(expected.authority)
+  )
+    throw new Error("Role contract authority does not match persisted host facts")
+}
+
+export function responseSchema(schema: Schema.Top): JsonSchema.JsonSchema {
+  const document = Schema.toJsonSchemaDocument(schema)
+  if (Object.keys(document.definitions).length === 0) return document.schema
+  return { ...document.schema, $defs: document.definitions }
 }
 
 export function decode(contract: Contract, input: unknown): RoleResult {
@@ -317,35 +398,54 @@ export function inputContextDigest(input: {
 
 export function assertTextSafe(system: string, messages: readonly Message[]): void {
   scanText(system)
-  for (const message of messages) scanMessage(message)
+  for (const message of messages) scanValidatedMessage(message)
 }
 
 export function assertGenericProviderValue(value: unknown): void {
-  scanMessage(value)
+  scanGeneric(value)
 }
 
-function scanMessage(value: unknown): void {
+function scanValidatedMessage(value: Message): void {
+  if (!Schema.is(Message)(value)) throw new Error("Provider message is not a validated Message")
+  const message = value
+  scanGeneric(message.id)
+  scanGeneric(message.role)
+  scanGeneric(message.metadata)
+  scanGeneric(message.native)
+  for (const part of message.content) {
+    if (part.type !== "media") {
+      scanGeneric(part)
+      continue
+    }
+    scanGeneric(part.type)
+    scanGeneric(part.mediaType)
+    scanGeneric(part.filename)
+    scanGeneric(part.metadata)
+    if (typeof part.data === "string") scanText(part.data)
+  }
+}
+
+function scanGeneric(value: unknown): void {
   if (typeof value === "string") {
     scanText(value)
     return
   }
-  if (value instanceof Uint8Array) throw new Error("Screenshot bytes require an explicit media message")
+  if (value instanceof Uint8Array) throw new Error("Binary data requires a validated media message")
   if (value === null || typeof value !== "object") return
   if (Array.isArray(value)) {
-    for (const item of value) scanMessage(item)
+    for (const item of value) scanGeneric(item)
     return
   }
-  const media = "type" in value && value.type === "media"
   for (const [key, item] of Object.entries(value)) {
-    if (media && key === "data" && item instanceof Uint8Array) continue
-    scanMessage(item)
+    if (key.toLowerCase() === "database64") throw new Error("dataBase64 is forbidden outside validated media messages")
+    scanGeneric(item)
   }
 }
 
 function scanText(value: string): void {
-  if (/data\s*:\s*image\//i.test(value) || /(?:^|[^A-Za-z0-9+/])iVBORw0KGgo[A-Za-z0-9+/=]*/.test(value))
+  if (/(?:^|[^A-Za-z0-9_])data\s*:/i.test(value) || /(?:^|[^A-Za-z0-9+/])iVBORw0KGgo[A-Za-z0-9+/=]*/.test(value))
     throw new Error("Screenshot bytes are forbidden in generic provider text")
-  if (/"?dataBase64"?\s*:/.test(value)) throw new Error("Screenshot dataBase64 is forbidden in generic provider text")
+  if (/database64/i.test(value)) throw new Error("Screenshot dataBase64 is forbidden in generic provider text")
 }
 
 function defaultMessages(input: BuildInput, artifacts: readonly ArtifactDigest[]): readonly Message[] {
@@ -375,12 +475,33 @@ function revisionOf(stage: Workflow.Stage): number {
 
 function compareArtifact(left: ArtifactDigest, right: ArtifactDigest): number {
   return (
-    left.kind.localeCompare(right.kind) ||
-    left.uri.localeCompare(right.uri) ||
-    left.mime.localeCompare(right.mime) ||
-    left.sha256.localeCompare(right.sha256) ||
+    compareText(left.kind, right.kind) ||
+    compareText(left.uri, right.uri) ||
+    compareText(left.mime, right.mime) ||
+    compareText(left.sha256, right.sha256) ||
     left.size - right.size
   )
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+function mediaDigests(messages: readonly Message[]): MediaDigest[] {
+  const media: MediaDigest[] = []
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type !== "media") continue
+      const bytes = typeof part.data === "string" ? Buffer.from(part.data, "utf8") : Buffer.from(part.data)
+      media.push({
+        mediaType: part.mediaType,
+        sha256: Hash.sha256(bytes),
+        size: bytes.byteLength,
+        ...(part.filename === undefined ? {} : { filename: part.filename }),
+      })
+    }
+  }
+  return media
 }
 
 function canonicalMessageValue(value: unknown): unknown {

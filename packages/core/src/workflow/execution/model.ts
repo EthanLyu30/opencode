@@ -1,12 +1,22 @@
 export * as WorkflowModelExecution from "./model"
 
-import { LLM, LLMClient, LLMError, LLMResponse, Message, Model, ToolResultValue, Usage } from "@opencode-ai/llm"
+import {
+  LLM,
+  LLMClient,
+  LLMError,
+  LLMResponse,
+  Message,
+  Model,
+  ToolDefinition,
+  ToolResultValue,
+  Usage,
+} from "@opencode-ai/llm"
 import { Auth } from "@opencode-ai/llm/route"
 import { Integration } from "@opencode-ai/schema/integration"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
-import { Context, Effect, JsonSchema, Layer, Schema, Scope } from "effect"
+import { Context, Effect, Layer, Schema, Scope } from "effect"
 import { Credential } from "../../credential"
 import { makeGlobalNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
@@ -34,6 +44,7 @@ export interface Output extends Omit<Result, "artifacts"> {
   readonly contract?: WorkflowRoleContract.Contract
   readonly semantic?: WorkflowRoleContract.RoleResult
   readonly artifacts?: Result["artifacts"]
+  readonly providerUsage?: Responses.Usage
 }
 
 export interface Interface {
@@ -312,16 +323,6 @@ const productionLayer = Layer.effect(
               ...(context === undefined ? {} : { messages: context }),
             })
             const continuation = yield* continuationFromStage(input, responseID, responses, route, contract)
-            if (continuation?.providerTurn !== undefined && continuation.providerTurn.result === undefined) {
-              return yield* Effect.fail({
-                failure: {
-                  category: "ambiguous",
-                  code: "provider_execution_ambiguous",
-                  message: "A provider request may have completed before its result was durably checkpointed.",
-                },
-                usage: zeroUsage,
-              } satisfies ExecutionFailure)
-            }
             if (continuation?.activeTurn?.pendingCallID !== undefined) {
               return yield* Effect.fail({
                 failure: {
@@ -348,8 +349,42 @@ const productionLayer = Layer.effect(
                         ),
                       )
                     }
+                    if (continuation.providerTurn !== undefined) {
+                      const recoveredMessages = [
+                        ...contract.messages,
+                        ...continuation.turns.flatMap(continuationMessages),
+                      ]
+                      const remainingTokens = remainingTokenBudget(input, route, continuation.usage)
+                      const requestFingerprint = providerRequestSnapshot({
+                        route,
+                        contract,
+                        sequence: continuation.providerTurn.sequence,
+                        catalogFingerprint: materialization.fingerprint,
+                        messages: recoveredMessages,
+                        tools: materialization.definitions,
+                        remainingTokens,
+                      }).fingerprint
+                      if (requestFingerprint !== continuation.providerTurn.requestFingerprint)
+                        return yield* Effect.fail(
+                          executionFailure(
+                            "invalid_request",
+                            "model_continuation_mismatch",
+                            "Recovered provider request no longer matches its durable intent",
+                          ),
+                        )
+                    }
                     return materialization
                   })
+            if (continuation?.providerTurn !== undefined && continuation.providerTurn.result === undefined) {
+              return yield* Effect.fail({
+                failure: {
+                  category: "ambiguous",
+                  code: "provider_execution_ambiguous",
+                  message: "A provider request may have completed before its result was durably checkpointed.",
+                },
+                usage: zeroUsage,
+              } satisfies ExecutionFailure)
+            }
             const model = yield* credentialedModel(credentials, route).pipe(
               Effect.mapError((error) => settleExecutionFailure(response, error)),
             )
@@ -383,10 +418,7 @@ const productionLayer = Layer.effect(
                   ) {
                     return yield* Effect.fail(budgetFailure("turn", WorkflowRetry.usageDelta(usage, checkpointedUsage)))
                   }
-                  const remainingTokens =
-                    route.budget.maxTokens === undefined
-                      ? undefined
-                      : Math.max(0, route.budget.maxTokens - input.workflow.usage.tokens - usage.tokens)
+                  const remainingTokens = remainingTokenBudget(input, route, usage)
                   if (remainingTokens === 0)
                     return yield* Effect.fail(
                       budgetFailure("token", WorkflowRetry.usageDelta(usage, checkpointedUsage)),
@@ -395,12 +427,16 @@ const productionLayer = Layer.effect(
                   materialization = yield* registry.materialize(contract.permissions)
                   catalogFingerprint = materialization.fingerprint
                   const sequence = usage.turns + 1
-                  const requestFingerprint = WorkflowBusinessArtifact.hash({
-                    contractFingerprint: contract.contractFingerprint,
+                  const requestSnapshot = providerRequestSnapshot({
+                    route,
+                    contract,
                     sequence,
                     catalogFingerprint,
                     messages,
+                    tools: materialization.definitions,
+                    remainingTokens,
                   })
+                  const requestFingerprint = requestSnapshot.fingerprint
                   providerTurn = { sequence, requestFingerprint }
                   yield* saveContinuation(input, responses, response, {
                     kind: "workflow.model.continuation",
@@ -426,11 +462,7 @@ const productionLayer = Layer.effect(
                     .generate(
                       LLM.request({
                         model,
-                        system: contract.system,
-                        messages,
-                        tools: materialization.definitions,
-                        responseFormat: { type: "json", schema: schemaJson(contract.output) },
-                        ...(remainingTokens === undefined ? {} : { generation: { maxTokens: remainingTokens } }),
+                        ...requestSnapshot.request,
                       }),
                     )
                     .pipe(
@@ -715,6 +747,7 @@ const productionLayer = Layer.effect(
               contract,
               semantic,
               usage,
+              providerUsage,
               artifacts: toolArtifacts,
               responseSettlement:
                 responseID === undefined || response === undefined
@@ -881,15 +914,6 @@ function decodeAndValidateContinuation(
           : continuation.providerTurn.result === undefined
             ? continuation.usage.turns + 1
             : continuation.usage.turns
-      const requestFingerprint =
-        continuation.providerTurn === undefined || continuation.catalogFingerprint === undefined
-          ? undefined
-          : WorkflowBusinessArtifact.hash({
-              contractFingerprint: contract.contractFingerprint,
-              sequence: continuation.providerTurn.sequence,
-              catalogFingerprint: continuation.catalogFingerprint,
-              messages: [...contract.messages, ...continuation.turns.flatMap(continuationMessages)],
-            })
       if (
         continuation.providerID !== route.providerID ||
         continuation.modelID !== route.modelID ||
@@ -903,8 +927,7 @@ function decodeAndValidateContinuation(
         continuation.completedTurns !== expectedTurns ||
         continuation.usage.toolCalls !== toolCalls + activeResults + pendingCalls ||
         continuation.providerTurn?.sequence !== expectedProviderSequence ||
-        (continuation.providerTurn !== undefined &&
-          continuation.providerTurn.requestFingerprint !== requestFingerprint) ||
+        (continuation.providerTurn !== undefined && continuation.catalogFingerprint === undefined) ||
         (continuation.providerTurn !== undefined && continuation.activeTurn !== undefined) ||
         activeTurnInvalid ||
         invalidTurns
@@ -1356,10 +1379,46 @@ function workflowMessageID(stageID: Workflow.StageID, callID: string) {
   return SessionMessage.ID.make(`msg_workflow_${stageID.slice(4)}_${Hash.sha256(callID).slice(0, 16)}`)
 }
 
-function schemaJson(schema: Schema.Top): JsonSchema.JsonSchema {
-  const document = Schema.toJsonSchemaDocument(schema)
-  if (Object.keys(document.definitions).length === 0) return document.schema
-  return { ...document.schema, $defs: document.definitions }
+function remainingTokenBudget(input: Input, route: WorkflowRouting.Route, usage: Workflow.Usage): number | undefined {
+  return route.budget.maxTokens === undefined
+    ? undefined
+    : Math.max(0, route.budget.maxTokens - input.workflow.usage.tokens - usage.tokens)
+}
+
+function providerRequestSnapshot(input: {
+  readonly route: WorkflowRouting.Route
+  readonly contract: WorkflowRoleContract.Contract
+  readonly sequence: number
+  readonly catalogFingerprint: string
+  readonly messages: readonly Message[]
+  readonly tools: readonly ToolDefinition.Input[]
+  readonly remainingTokens: number | undefined
+}) {
+  const request = Object.freeze({
+    system: input.contract.system,
+    messages: Object.freeze([...input.messages]),
+    tools: Object.freeze([...input.tools]),
+    responseFormat: Object.freeze({
+      type: "json" as const,
+      schema: WorkflowRoleContract.responseSchema(input.contract.output),
+    }),
+    ...(input.remainingTokens === undefined ? {} : { generation: Object.freeze({ maxTokens: input.remainingTokens }) }),
+  })
+  const snapshot = Object.freeze({
+    snapshotVersion: 1,
+    model: Model.input(input.route.model),
+    route: Object.freeze({
+      providerID: input.route.providerID,
+      modelID: input.route.modelID,
+      protocol: input.route.protocol,
+      reasoningEffort: input.route.reasoningEffort,
+    }),
+    contractFingerprint: input.contract.contractFingerprint,
+    sequence: input.sequence,
+    catalogFingerprint: input.catalogFingerprint,
+    request,
+  })
+  return Object.freeze({ snapshot, request, fingerprint: WorkflowBusinessArtifact.hash(snapshot) })
 }
 
 const zeroUsage: Workflow.Usage = { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 }

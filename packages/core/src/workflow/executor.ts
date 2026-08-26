@@ -8,6 +8,7 @@ import { Context, DateTime, Effect, Layer, Schema, Scope } from "effect"
 import { makeGlobalNode } from "../effect/app-node"
 import { Hash } from "../util/hash"
 import { WorkflowModelExecution } from "./execution/model"
+import { WorkflowRoleContract } from "./execution/contract"
 import { WorkflowRoleExecution } from "./execution/role"
 import { WorkflowRetry } from "./retry"
 import { WorkflowRouting } from "./routing"
@@ -170,23 +171,45 @@ const injectedRoleLayer = Layer.effect(
                 result.responseSettlement,
               ),
             )
-          const settlement = strict
-            ? yield* WorkflowRoleExecution.settle({
-                workflow: input.workflow,
-                stage: input.stage,
-                contract: result.contract!,
-                semantic: result.semantic!,
-                priorArtifacts: input.artifacts,
-                settledToolEvidence: result.artifacts ?? [],
-              }).pipe(
-                Effect.provideService(WorkflowRoleExecution.Service, evidence),
-                Effect.mapError((error) =>
-                  invalidOutcome(`${error.code}: ${error.message}`, result.usage, result.responseSettlement),
-                ),
-              )
+          const strictSemantic = strict
+            ? yield* Effect.try({
+                try: () => WorkflowRoleContract.decode(result.contract!, result.semantic),
+                catch: () =>
+                  invalidOutcome(
+                    "Model output did not match the strict role contract",
+                    result.usage,
+                    result.responseSettlement,
+                  ),
+              })
             : undefined
+          if (strict && input.workflow.type === "visual-build" && result.providerUsage === undefined)
+            return yield* Effect.fail(
+              invalidOutcome(
+                "Production visual roles require host-measured provider usage",
+                result.usage,
+                result.responseSettlement,
+              ),
+            )
+          const settlement =
+            strict && input.workflow.type === "visual-build"
+              ? yield* WorkflowRoleExecution.settle({
+                  workflow: input.workflow,
+                  stage: input.stage,
+                  contract: result.contract!,
+                  semantic: strictSemantic!,
+                  priorArtifacts: input.artifacts,
+                  settledToolEvidence: result.artifacts ?? [],
+                  executionUsage: result.usage,
+                  providerUsage: result.providerUsage!,
+                }).pipe(
+                  Effect.provideService(WorkflowRoleExecution.Service, evidence),
+                  Effect.mapError((error) =>
+                    invalidOutcome(`${error.code}: ${error.message}`, result.usage, result.responseSettlement),
+                  ),
+                )
+              : undefined
           const outcome = strict
-            ? result.semantic!.outcome
+            ? strictSemantic!.outcome
             : yield* Schema.decodeUnknownEffect(WorkflowRole.Outcome)(result.outcome).pipe(
                 Effect.mapError(() =>
                   invalidOutcome(

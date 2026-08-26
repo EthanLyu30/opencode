@@ -1,9 +1,13 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { Message } from "@opencode-ai/llm"
 import { WorkflowRoleContract } from "@opencode-ai/core/workflow/execution/contract"
 import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
+import { WorkflowModelExecution } from "@opencode-ai/core/workflow/execution/model"
+import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
+import { WorkflowDesignArtifact } from "@opencode-ai/core/workflow/artifacts/design"
+import { WorkflowVisualReviewArtifact } from "@opencode-ai/core/workflow/artifacts/visual-review"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
 import { AbsolutePath } from "@opencode-ai/core/schema"
@@ -11,7 +15,7 @@ import { DesignArtifact } from "@opencode-ai/schema/design-artifact"
 import { Location } from "@opencode-ai/schema/location"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
-import { DateTime, Effect } from "effect"
+import { DateTime, Effect, Layer } from "effect"
 
 const workflowID = Workflow.ID.make("wfl_role_contract")
 const location = Location.Ref.make({ directory: AbsolutePath.make("D:\\role-contract-workspace") })
@@ -191,10 +195,106 @@ describe("Workflow role contracts", () => {
         payload: { summary: "data:image/png;base64,iVBORw0KGgo=" },
       }),
     ).toThrow()
+
+    for (const value of [
+      { type: "media", data: Uint8Array.from([1, 2, 3]) },
+      { dataBase64: "harmless-looking" },
+      { nested: { DATABASE64: "still-forbidden" } },
+      { nested: [{ DaTaBaSe64: "case-insensitive" }] },
+      { nested: "data:text/plain,forbidden" },
+    ]) {
+      expect(() => WorkflowRoleContract.assertGenericProviderValue(value)).toThrow()
+    }
+    expect(() => WorkflowRoleContract.assertGenericProviderValue({ nested: Uint8Array.from([0, 1]) })).toThrow()
+    expect(() => WorkflowRoleContract.assertTextSafe("safe", [media])).not.toThrow()
+  })
+
+  test("binds the canonical response schema and sorts without locale authority", () => {
+    const built = contract("design")
+    expect(built.authority.responseSchemaSha256).toMatch(/^[a-f0-9]{64}$/)
+    const schemaDrift = {
+      ...built.authority,
+      responseSchemaSha256: "0".repeat(64),
+    }
+    expect(WorkflowRoleContract.fingerprintAuthority(schemaDrift)).not.toBe(built.contractFingerprint)
+
+    const localeCompare = spyOn(String.prototype, "localeCompare").mockImplementation(() => {
+      throw new Error("localeCompare must not control durable order")
+    })
+    try {
+      expect(
+        WorkflowRoleContract.canonicalArtifacts([
+          { kind: "z", uri: "u", mime: "m", sha256: "f".repeat(64), size: 1 },
+          { kind: "a", uri: "u", mime: "m", sha256: "e".repeat(64), size: 1 },
+        ]).map((artifact) => artifact.kind),
+      ).toEqual(["a", "z"])
+    } finally {
+      localeCompare.mockRestore()
+    }
   })
 })
 
 describe("Workflow role business-evidence authority", () => {
+  test("lets strict non-visual roles complete without evidence authority but never lets visual roles bypass it", async () => {
+    const current = stage("design")
+    const next = Workflow.Stage.make({
+      ...stage("decompose"),
+      status: "pending",
+      attempt: 0,
+      ordinal: 1,
+      time: { created: DateTime.makeUnsafe(1), updated: DateTime.makeUnsafe(1) },
+    })
+    const execute = (currentWorkflow: Workflow.Info) =>
+      Effect.gen(function* () {
+        const executor = yield* WorkflowExecutor.Service
+        return yield* executor.execute({
+          workflow: currentWorkflow,
+          stage: current,
+          stages: [current, next],
+          artifacts: [],
+          lease: { owner: "worker", attempt: 1, expiresAt: DateTime.makeUnsafe(60_000) },
+          saveCheckpoint: () => Effect.void,
+        })
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          WorkflowExecutor.roleLayer.pipe(
+            Layer.provide(
+              WorkflowModelExecution.layerWith((input) => {
+                const strict = WorkflowRoleContract.build({
+                  workflow: input.workflow,
+                  stage: input.stage,
+                  route: input.route,
+                  priorArtifacts: [],
+                })
+                return Effect.succeed({
+                  contract: strict,
+                  semantic: WorkflowRoleContract.decode(strict, {
+                    contractVersion: 1,
+                    outcome: outcomes.design,
+                    payload: payloads.design,
+                  }),
+                  outcome: outcomes.design,
+                  artifacts: [],
+                  usage: { tokens: 4, turns: 1, toolCalls: 0, attempts: 0 },
+                  providerUsage: { inputTokens: 3, outputTokens: 1, totalTokens: 4 },
+                })
+              }),
+            ),
+          ),
+        ),
+        Effect.runPromise,
+      )
+
+    const legacy = await execute(Workflow.Info.make({ ...workflow, type: "development" }))
+    expect(legacy.roleReceipt).toBeUndefined()
+    expect(legacy.artifacts?.[0]?.metadata).toEqual(outcomes.design)
+
+    const failure = await execute(workflow).catch((error) => error)
+    expect(failure.failure).toMatchObject({ code: "invalid_role_outcome" })
+    expect(failure.failure.message).toContain("role_evidence_unavailable")
+  })
+
   test("mints and validates a context/contract/artifact-set-bound role settlement", async () => {
     const current = stage("design")
     const roleContract = contract("design")
@@ -210,6 +310,8 @@ describe("Workflow role business-evidence authority", () => {
       semantic,
       priorArtifacts: [],
       settledToolEvidence: [],
+      executionUsage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+      providerUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
     }).pipe(Effect.provide(WorkflowRoleExecution.deterministicLayer), Effect.runPromise)
 
     expect(WorkflowRoleExecution.requiredKinds("design")).toEqual([
@@ -269,6 +371,155 @@ describe("Workflow role business-evidence authority", () => {
         }),
       ).toThrow()
     }
+
+    const forgedAuthority = {
+      ...settlement.receipt.authority,
+      promptVersion: "workflow-role/forged@1",
+    }
+    const forgedFingerprint = WorkflowRoleContract.fingerprintAuthority(forgedAuthority)
+    const outcome = settlement.artifacts.find((artifact) => artifact.kind === "workflow.role.outcome")!
+    const originalBinding = WorkflowStageMachine.decodeOutcomeBinding(outcome)
+    const forgedBinding = WorkflowStageMachine.OutcomeBinding.make({
+      ...originalBinding,
+      contractFingerprint: forgedFingerprint,
+    })
+    const forgedBody = WorkflowStageMachine.encodeOutcome(forgedBinding)
+    const forgedOutcome = {
+      ...outcome,
+      metadata: forgedBinding,
+      sha256: new Bun.CryptoHasher("sha256").update(forgedBody).digest("hex"),
+      size: Buffer.byteLength(forgedBody),
+    }
+    expect(() =>
+      WorkflowRoleExecution.validateSettlement({
+        workflow,
+        stage: current,
+        priorArtifacts: [],
+        artifacts: [...settlement.artifacts.filter((artifact) => artifact !== outcome), forgedOutcome],
+        receipt: {
+          ...settlement.receipt,
+          authority: forgedAuthority,
+          contractFingerprint: forgedFingerprint,
+          outcomeSha256: forgedOutcome.sha256,
+        },
+      }),
+    ).toThrow("contract authority")
+  })
+
+  test("passes complete persisted authority to the resolver and validates prior identity before resolution", async () => {
+    const current = stage("design")
+    const roleContract = contract("design")
+    const semantic = WorkflowRoleContract.decode(roleContract, {
+      contractVersion: 1,
+      outcome: outcomes.design,
+      payload: payloads.design,
+    })
+    let captured: WorkflowRoleExecution.ResolverInput | undefined
+    const captureLayer = Layer.succeed(
+      WorkflowRoleExecution.Service,
+      WorkflowRoleExecution.Service.of({
+        resolve: (input) => {
+          captured = input
+          return Effect.fail(
+            new WorkflowRoleExecution.EvidenceFailure({ code: "captured", message: "captured resolver input" }),
+          )
+        },
+      }),
+    )
+    const authoritativeWorkflow = Workflow.Info.make({
+      ...workflow,
+      usage: { tokens: 37, turns: 3, toolCalls: 2, attempts: 1 },
+      budget: { ...budget, maxTokens: 321 },
+    })
+    await WorkflowRoleExecution.settle({
+      workflow: authoritativeWorkflow,
+      stage: current,
+      contract: WorkflowRoleContract.build({
+        workflow: authoritativeWorkflow,
+        stage: current,
+        route: WorkflowRouting.resolve({ role: "design", budget: authoritativeWorkflow.budget }),
+        priorArtifacts: [],
+      }),
+      semantic,
+      priorArtifacts: [],
+      settledToolEvidence: [],
+      executionUsage: { tokens: 11, turns: 1, toolCalls: 0, attempts: 0 },
+      providerUsage: { inputTokens: 7, outputTokens: 4, totalTokens: 11 },
+    }).pipe(Effect.provide(captureLayer), Effect.runPromise, (promise) => promise.catch(() => undefined))
+    expect(captured?.workflow).toEqual(authoritativeWorkflow)
+    expect(captured?.stage).toEqual(current)
+    expect(captured?.execution).toEqual({
+      workflowUsage: authoritativeWorkflow.usage,
+      workflowBudget: authoritativeWorkflow.budget,
+      executionUsage: { tokens: 11, turns: 1, toolCalls: 0, attempts: 0 },
+      providerUsage: { inputTokens: 7, outputTokens: 4, totalTokens: 11 },
+    })
+
+    const validPrior = persisted(WorkflowDesignArtifact.commitSpec(workflowID, designSpec), current, "identity")
+    for (const tampered of [
+      Workflow.Artifact.make({ ...validPrior, workflowID: Workflow.ID.make("wfl_foreign") }),
+      Workflow.Artifact.make({ ...validPrior, timeCreated: DateTime.makeUnsafe(0) }),
+      Workflow.Artifact.make({ ...validPrior, uri: `${validPrior.uri}.forged` }),
+      Workflow.Artifact.make({ ...validPrior, sha256: "0".repeat(64) }),
+      Workflow.Artifact.make({ ...validPrior, size: validPrior.size + 1 }),
+    ]) {
+      captured = undefined
+      const badContract = WorkflowRoleContract.build({
+        workflow,
+        stage: current,
+        route: WorkflowRouting.resolve({ role: "design", budget }),
+        priorArtifacts: [tampered],
+      })
+      await WorkflowRoleExecution.settle({
+        workflow,
+        stage: current,
+        contract: badContract,
+        semantic,
+        priorArtifacts: [tampered],
+        settledToolEvidence: [],
+        executionUsage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+        providerUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      }).pipe(Effect.provide(captureLayer), Effect.runPromise, (promise) => promise.catch(() => undefined))
+      expect(captured).toBeUndefined()
+    }
+  })
+
+  test("injects visual limits and usage only from deterministic host authority", async () => {
+    const designStage = stage("design")
+    const priorArtifacts = [
+      persisted(WorkflowDesignArtifact.commitSpec(workflowID, designSpec), designStage, "visual_spec"),
+    ]
+    const current = stage("visual_review")
+    const authoritativeWorkflow = Workflow.Info.make({
+      ...workflow,
+      budget: { ...budget, maxTokens: 4321, maxTurns: 7, maxToolCalls: 9 },
+    })
+    const roleContract = WorkflowRoleContract.build({
+      workflow: authoritativeWorkflow,
+      stage: current,
+      route: WorkflowRouting.resolve({ role: "visual_review", budget: authoritativeWorkflow.budget }),
+      priorArtifacts,
+    })
+    const settlement = await WorkflowRoleExecution.settle({
+      workflow: authoritativeWorkflow,
+      stage: current,
+      contract: roleContract,
+      semantic: WorkflowRoleContract.decode(roleContract, {
+        contractVersion: 1,
+        outcome: outcomes.visual_review,
+        payload: payloads.visual_review,
+      }),
+      priorArtifacts,
+      settledToolEvidence: [],
+      executionUsage: { tokens: 23, turns: 2, toolCalls: 1, attempts: 0 },
+      providerUsage: { inputTokens: 15, outputTokens: 8, totalTokens: 23 },
+    }).pipe(Effect.provide(WorkflowRoleExecution.deterministicLayer), Effect.runPromise)
+    const reviewCommit = settlement.artifacts.find(
+      (artifact) => artifact.kind === WorkflowVisualReviewArtifact.REVIEW_KIND,
+    )!
+    const review = WorkflowVisualReviewArtifact.decodeReview(reviewCommit, workflowID)
+    expect(review.limits).toEqual({ maxRevisions: 10, maxTokens: 4321, maxTurns: 7, maxToolCalls: 9 })
+    expect(review.usage).toEqual({ tokens: 23, turns: 2, toolCalls: 1 })
   })
 
   test("rejects an outcome verdict that contradicts the durable test result", async () => {
@@ -285,6 +536,8 @@ describe("Workflow role business-evidence authority", () => {
       }),
       priorArtifacts: [],
       settledToolEvidence: [],
+      executionUsage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+      providerUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
     }).pipe(Effect.provide(WorkflowRoleExecution.deterministicLayer), Effect.runPromise)
     const manifest = implementation.artifacts.find((artifact) => artifact.kind === "workflow.implementation-manifest")
     if (!manifest) throw new Error("deterministic implementation manifest missing")
@@ -302,6 +555,8 @@ describe("Workflow role business-evidence authority", () => {
       }),
       priorArtifacts,
       settledToolEvidence: [],
+      executionUsage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+      providerUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
     }).pipe(Effect.provide(WorkflowRoleExecution.deterministicLayer), Effect.runPromise)
     expect(() =>
       WorkflowRoleExecution.validateSettlement({

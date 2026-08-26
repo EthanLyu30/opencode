@@ -16,6 +16,9 @@ import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { ResponsesProjector } from "@opencode-ai/core/responses/projector"
 import { ResponsesStore } from "@opencode-ai/core/responses/store"
 import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
+import { WorkflowRoleContract } from "@opencode-ai/core/workflow/execution/contract"
+import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
+import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowGraph } from "@opencode-ai/core/workflow/graph"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
@@ -168,7 +171,7 @@ const incompleteRoleHistoryIt = makeWorkerIt(incompleteRoleHistoryExecutor)
 const invalidBranchOutcomeExecutor = Layer.succeed(
   WorkflowExecutor.Service,
   WorkflowExecutor.Service.of({
-    execute: ({ stage }) => {
+    execute: ({ workflow, stage }) => {
       if (stage.type !== "design") {
         return Effect.fail({
           failure: {
@@ -179,8 +182,24 @@ const invalidBranchOutcomeExecutor = Layer.succeed(
           usage: { tokens: 1, turns: 1, toolCalls: 0, attempts: 0 },
         })
       }
-      const metadata = { schemaVersion: 1 as const, role: "design" as const, verdict: "ready" as const, revision: 0 }
-      const body = JSON.stringify(metadata)
+      const outcome = { schemaVersion: 1 as const, role: "design" as const, verdict: "ready" as const, revision: 0 }
+      const contract = WorkflowRoleContract.build({
+        workflow,
+        stage,
+        route: WorkflowRouting.resolve({ role: "design", budget: workflow.budget }),
+        priorArtifacts: [],
+      })
+      const authority = { ...contract.authority, promptVersion: "workflow-role/forged@1" }
+      const contractFingerprint = WorkflowRoleContract.fingerprintAuthority(authority)
+      const binding = WorkflowStageMachine.OutcomeBinding.make({
+        bindingVersion: 1,
+        outcome,
+        contractFingerprint,
+        contextDigest: contract.contextDigest,
+        requiredArtifactSetSha256: WorkflowRoleExecution.artifactSetDigest([]),
+      })
+      const body = WorkflowStageMachine.encodeOutcome(binding)
+      const sha256 = new Bun.CryptoHasher("sha256").update(body).digest("hex")
       return Effect.succeed({
         usage: { tokens: 2, turns: 1, toolCalls: 0, attempts: 0 },
         artifacts: [
@@ -188,11 +207,23 @@ const invalidBranchOutcomeExecutor = Layer.succeed(
             kind: WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
             uri: `workflow://${stage.workflowID}/stages/${stage.id}/role-outcome.json`,
             mime: WorkflowStageMachine.OUTCOME_ARTIFACT_MIME,
-            sha256: "f".repeat(64),
+            sha256,
             size: new TextEncoder().encode(body).byteLength,
-            metadata,
+            metadata: binding,
           },
         ],
+        roleReceipt: WorkflowRoleExecution.Receipt.make({
+          receiptVersion: 1,
+          workflowID: workflow.id,
+          stageID: stage.id,
+          role: "design",
+          revision: 0,
+          contractFingerprint,
+          contextDigest: contract.contextDigest,
+          requiredArtifactSetSha256: WorkflowRoleExecution.artifactSetDigest([]),
+          outcomeSha256: sha256,
+          authority,
+        }),
       })
     },
   }),
@@ -831,7 +862,7 @@ describe("Workflow local execution", () => {
     }),
   )
 
-  invalidBranchOutcomeIt.live("atomically fails a non-final role stage whose outcome artifact hash is invalid", () =>
+  invalidBranchOutcomeIt.live("atomically rejects a mutually consistent forged binding and receipt", () =>
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
       const responses = yield* ResponsesV2.Service
