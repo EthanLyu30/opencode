@@ -678,7 +678,7 @@ describe("Workflow local execution", () => {
       ]
       yield* admit(workflow, {
         id: workflowID,
-        type: "visual-build",
+        type: "development",
         input: { brief: "Exercise both skip branches" },
         budget: { maxAttempts: 12 },
         stages,
@@ -898,7 +898,7 @@ describe("Workflow local execution", () => {
         [decomposeStageID, "pending"],
         [deliverStageID, "pending"],
       ])
-      expect(detail.stages[0].error?.code).toBe("invalid_role_history")
+      expect(detail.stages[0].error?.code).toBe("invalid_role_evidence")
       const rows = yield* db
         .select({ type: EventTable.type, batchID: EventTable.batch_id, data: EventTable.data })
         .from(EventTable)
@@ -930,9 +930,13 @@ describe("Workflow local execution", () => {
           data: expect.objectContaining({ stageID: designStageID }),
         }),
       )
+      expect(rows.some((row) => row.type === "workflow.artifact.created.1")).toBe(false)
+      expect(rows.some((row) => row.type === "workflow.stage.skipped.1")).toBe(false)
+      expect(rows.some((row) => row.type === "workflow.succeeded.1")).toBe(false)
+      expect(rows.some((row) => row.type === "response.completed.1")).toBe(false)
       expect(yield* responses.get(responseID)).toMatchObject({
         status: "failed",
-        error: { code: "invalid_role_history" },
+        error: { code: "invalid_role_evidence" },
       })
     }),
   )

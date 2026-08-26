@@ -125,12 +125,10 @@ export function forResponseModel(route: Route, modelID: string): Route {
     throw new Error("Only DeepSeek Responses routes can execute a linked Response model")
   }
 
+  if (modelID !== route.modelID) throw new Error("The linked Response model must match the fixed deliver route")
+
   for (const required of route.requiredCapabilities) {
     Capabilities.requireModelCapability({ provider: route.providerID, model: modelID, required })
-  }
-
-  if (modelID !== "deepseek-v4-flash" && modelID !== "deepseek-v4-pro") {
-    throw new Error(`Unsupported DeepSeek Responses model: ${modelID}`)
   }
 
   return Object.freeze({

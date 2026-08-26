@@ -33,6 +33,7 @@ import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
+import { DesignArtifact } from "@opencode-ai/schema/design-artifact"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 
@@ -120,6 +121,46 @@ const modelIt = testEffect(
     ],
   ),
 )
+
+const providerSource = "<!doctype html><html><body><main>Provider fixture</main></body></html>"
+const providerSourceSha256 = new Bun.CryptoHasher("sha256").update(providerSource).digest("hex")
+const providerDesignSpec = DesignArtifact.Spec.make({
+  schemaVersion: 1,
+  goals: ["Render the provider fixture"],
+  routes: [{ path: "/", goal: "Show the fixture" }],
+  layoutConstraints: ["Keep main visible"],
+  componentTree: [{ id: "root", component: "main", children: [] }],
+  states: [{ name: "ready", description: "The fixture is ready" }],
+  typography: [{ token: "body", family: "sans-serif", weight: 400, sizePx: 16, lineHeight: 1.5 }],
+  colors: [{ token: "background", value: "#ffffff" }],
+  responsiveRules: [{ viewport: "desktop", width: 1280, height: 720, rules: ["Keep main visible"] }],
+  accessibilityRules: ["Use semantic landmarks"],
+  acceptanceCriteria: ["The fixture renders"],
+  projectStack: ["HTML"],
+  referenceApp: {
+    entrypoint: "index.html",
+    readySelector: "main",
+    files: [{ path: "index.html", sha256: providerSourceSha256, size: Buffer.byteLength(providerSource) }],
+    viewports: [{ name: "desktop", width: 1280, height: 720 }],
+  },
+})
+
+function providerDesignEnvelope() {
+  return {
+    contractVersion: 1,
+    outcome: { schemaVersion: 1, role: "design", verdict: "ready", revision: 0 },
+    payload: { spec: providerDesignSpec, sources: [{ path: "index.html", content: providerSource }] },
+  }
+}
+
+function providerResponse(value: unknown) {
+  return LLMResponse.fromEvents([
+    LLMEvent.textStart({ id: "outcome" }),
+    LLMEvent.textDelta({ id: "outcome", text: JSON.stringify(value) }),
+    LLMEvent.textEnd({ id: "outcome" }),
+    LLMEvent.finish({ reason: "stop" }),
+  ])
+}
 
 const sandboxAttempts: WorkflowCommandSandbox.Request[] = []
 const sandboxLaunches: WorkflowCommandSandbox.Request[] = []
@@ -298,7 +339,7 @@ describe("Workflow Location tools", () => {
     ),
   )
 
-  modelIt.live("does not repeat a pending tool call even when retry recovery is requested", () =>
+  modelIt.live("fails closed on a nonempty legacy continuation without a contract fingerprint", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) =>
@@ -321,9 +362,191 @@ describe("Workflow Location tools", () => {
               .pipe(Effect.flip),
           )
 
-          expect(failure).toMatchObject({ failure: { category: "ambiguous", code: "tool_execution_ambiguous" } })
+          expect(failure).toMatchObject({ failure: { code: "model_continuation_mismatch" } })
           expect(modelRequests).toEqual([])
           expect(modelTimeline).toEqual([])
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  modelIt.live("does not repeat a versioned pending tool intent", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          modelTimeline.length = 0
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_versioned_tool_intent")
+          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          let executions = 0
+          yield* ApplicationTools.Service.use((tools) =>
+            tools.register({
+              location_probe: Tool.withPermission(
+                Tool.make({
+                  description: "Must not execute while its intent is ambiguous",
+                  input: Schema.Struct({}),
+                  output: Schema.Struct({}),
+                  execute: () => Effect.sync(() => executions++).pipe(Effect.as({})),
+                }),
+                "read",
+              ),
+            }),
+          )
+          const response = LLMResponse.fromEvents([
+            LLMEvent.toolCall({ id: "call-versioned-ambiguous", name: "location_probe", input: {} }),
+            LLMEvent.finish({ reason: "tool-calls" }),
+          ])
+          if (!response) throw new Error("invalid pending tool fixture")
+          modelResponses.push(response)
+          let pending: Readonly<Record<string, unknown>> | undefined
+          const input = modelInput(location, sessionID, (checkpoint) => {
+            const active = checkpoint.activeTurn
+            if (typeof active === "object" && active !== null && "pendingCallID" in active) {
+              pending = checkpoint
+              return Effect.fail({
+                failure: {
+                  category: "transient" as const,
+                  code: "simulated_crash_after_tool_intent",
+                  message: "Simulated crash after the durable tool intent",
+                },
+                usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+              })
+            }
+            return Effect.void
+          })
+          yield* WorkflowModelExecution.Service.use((models) => models.execute(input).pipe(Effect.flip))
+          if (!pending) throw new Error("pending tool intent was not checkpointed")
+          expect(modelRequests).toHaveLength(1)
+          expect(executions).toBe(0)
+
+          const failure = yield* WorkflowModelExecution.Service.use((models) =>
+            models
+              .execute(modelInput(location, sessionID, () => Effect.void, { checkpoint: pending }))
+              .pipe(Effect.flip),
+          )
+          expect(failure).toMatchObject({ failure: { category: "ambiguous", code: "tool_execution_ambiguous" } })
+          expect(modelRequests).toHaveLength(1)
+          expect(executions).toBe(0)
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  modelIt.live("recovers a provider request intent without reissuing the provider call", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          modelTimeline.length = 0
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_provider_intent")
+          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          let providerIntent: Readonly<Record<string, unknown>> | undefined
+          const input = modelInput(location, sessionID, (checkpoint) => {
+            if (typeof checkpoint.providerTurn === "object" && checkpoint.providerTurn !== null) {
+              providerIntent = checkpoint
+              return Effect.fail({
+                failure: {
+                  category: "transient" as const,
+                  code: "simulated_crash_after_provider_intent",
+                  message: "Simulated crash after the durable provider intent",
+                },
+                usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+              })
+            }
+            return Effect.void
+          })
+          yield* WorkflowModelExecution.Service.use((models) => models.execute(input).pipe(Effect.flip))
+          if (!providerIntent) throw new Error("provider intent was not checkpointed")
+
+          const failure = yield* WorkflowModelExecution.Service.use((models) =>
+            models
+              .execute(modelInput(location, sessionID, () => Effect.void, { checkpoint: providerIntent }))
+              .pipe(Effect.flip),
+          )
+
+          expect(failure).toMatchObject({
+            failure: { category: "ambiguous", code: "provider_execution_ambiguous" },
+          })
+          expect(modelRequests).toEqual([])
+          expect(modelTimeline).toEqual([])
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  modelIt.live("resumes a durable provider result without a duplicate provider call and rejects drift", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          modelTimeline.length = 0
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_provider_result")
+          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          const response = providerResponse(providerDesignEnvelope())
+          if (!response) throw new Error("invalid provider result fixture")
+          modelResponses.push(response)
+          let durableResult: Readonly<Record<string, unknown>> | undefined
+          const input = modelInput(location, sessionID, (checkpoint) => {
+            const turn = checkpoint.providerTurn
+            if (typeof turn === "object" && turn !== null && "result" in turn) {
+              durableResult = checkpoint
+              return Effect.fail({
+                failure: {
+                  category: "transient" as const,
+                  code: "simulated_crash_after_provider_result",
+                  message: "Simulated crash after the durable provider result",
+                },
+                usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+              })
+            }
+            return Effect.void
+          })
+          yield* WorkflowModelExecution.Service.use((models) => models.execute(input).pipe(Effect.flip))
+          if (!durableResult) throw new Error("provider result was not checkpointed")
+          expect(modelRequests).toHaveLength(1)
+
+          const resumed = yield* WorkflowModelExecution.Service.use((models) =>
+            models.execute(modelInput(location, sessionID, () => Effect.void, { checkpoint: durableResult })),
+          )
+          expect(resumed.outcome).toEqual(providerDesignEnvelope().outcome)
+          expect(modelRequests).toHaveLength(1)
+
+          const drifted = [
+            { ...durableResult, contractFingerprint: "0".repeat(64) },
+            { ...durableResult, routeFingerprint: "1".repeat(64) },
+          ]
+          for (const checkpoint of drifted) {
+            const failure = yield* WorkflowModelExecution.Service.use((models) =>
+              models.execute(modelInput(location, sessionID, () => Effect.void, { checkpoint })).pipe(Effect.flip),
+            )
+            if (!("failure" in failure)) throw new Error("expected continuation drift failure")
+            expect(failure.failure.code).toBe("model_continuation_mismatch")
+          }
+          const contextFailure = yield* WorkflowModelExecution.Service.use((models) =>
+            models
+              .execute(
+                modelInput(
+                  location,
+                  sessionID,
+                  () => Effect.void,
+                  { checkpoint: durableResult },
+                  { stageInput: { revision: 1 } },
+                ),
+              )
+              .pipe(Effect.flip),
+          )
+          if (!("failure" in contextFailure)) throw new Error("expected context drift failure")
+          expect(contextFailure.failure.code).toBe("model_continuation_mismatch")
+          expect(modelRequests).toHaveLength(1)
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
@@ -339,51 +562,65 @@ describe("Workflow Location tools", () => {
           modelTimeline.length = 0
           const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_location_settled")
-          const response = LLMResponse.fromEvents([
-            LLMEvent.textStart({ id: "outcome" }),
-            LLMEvent.textDelta({
-              id: "outcome",
-              text: JSON.stringify({ schemaVersion: 1, role: "design", verdict: "ready", revision: 0 }),
-            }),
-            LLMEvent.textEnd({ id: "outcome" }),
-            LLMEvent.finish({ reason: "stop" }),
+          const toolTurn = LLMResponse.fromEvents([
+            LLMEvent.toolCall({ id: "call-settled", name: "location_probe", input: {} }),
+            LLMEvent.finish({ reason: "tool-calls" }),
           ])
-          if (!response) return yield* Effect.die("invalid offline response")
-          modelResponses.push(response)
+          if (!toolTurn) throw new Error("invalid offline tool response")
+          modelResponses.push(toolTurn)
           yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          let executions = 0
           yield* ApplicationTools.Service.use((tools) =>
             tools.register({
               location_probe: Tool.withPermission(
                 Tool.make({
-                  description: "Must not execute after durable settlement",
+                  description: "Execute exactly once before durable settlement recovery",
                   input: Schema.Struct({}),
                   output: Schema.Struct({}),
-                  execute: () => Effect.die("settled tool repeated"),
+                  execute: () => Effect.sync(() => executions++).pipe(Effect.as({})),
                 }),
                 "read",
               ),
             }),
           )
-
+          let settled: Readonly<Record<string, unknown>> | undefined
+          const firstInput = modelInput(location, sessionID, (checkpoint) => {
+            const active = checkpoint.activeTurn
+            if (
+              typeof active === "object" &&
+              active !== null &&
+              "results" in active &&
+              Array.isArray(active.results) &&
+              active.results.length === 1
+            ) {
+              settled = checkpoint
+              return Effect.fail({
+                failure: {
+                  category: "transient" as const,
+                  code: "simulated_crash_after_tool_result",
+                  message: "Simulated crash after the durable tool result",
+                },
+                usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+              })
+            }
+            return Effect.void
+          })
+          yield* persistModelInput(firstInput)
+          yield* WorkflowModelExecution.Service.use((models) => models.execute(firstInput).pipe(Effect.flip))
+          if (!settled) throw new Error("settled tool result was not checkpointed")
+          const response = providerResponse(providerDesignEnvelope())
+          if (!response) throw new Error("invalid offline outcome response")
+          modelResponses.push(response)
           const result = yield* WorkflowModelExecution.Service.use((models) =>
-            models.execute(
-              modelInput(location, sessionID, () => Effect.void, {
-                checkpoint: continuation({
-                  results: [
-                    {
-                      id: "call-ambiguous",
-                      name: "location_probe",
-                      result: { type: "text", value: "already settled" },
-                    },
-                  ],
-                }),
-              }),
-            ),
+            models.execute({
+              ...firstInput,
+              stage: Workflow.Stage.make({ ...firstInput.stage, checkpoint: settled }),
+              saveCheckpoint: () => Effect.void,
+            }),
           )
-
           expect(result.outcome).toMatchObject({ role: "design", verdict: "ready" })
-          expect(modelRequests).toHaveLength(1)
-          expect(modelTimeline).toEqual(["provider:1"])
+          expect(executions).toBe(1)
+          expect(modelRequests).toHaveLength(2)
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
@@ -422,40 +659,47 @@ describe("Workflow Location tools", () => {
               }),
             ),
           })
-          const fingerprint = yield* ToolRegistry.Service.use((registry) =>
-            registry
-              .materialize(WorkflowPermissions.forRole("design"))
-              .pipe(Effect.map((materialization) => materialization.fingerprint)),
-          ).pipe(Effect.provide(LocationServiceMap.Service.get(location)), Effect.scoped)
+          const response = LLMResponse.fromEvents([
+            LLMEvent.toolCall({ id: "call-catalog-drift", name: "location_remaining", input: {} }),
+            LLMEvent.finish({ reason: "tool-calls" }),
+          ])
+          if (!response) throw new Error("invalid catalog drift fixture")
+          modelResponses.push(response)
+          let durableResult: Readonly<Record<string, unknown>> | undefined
+          yield* WorkflowModelExecution.Service.use((models) =>
+            models
+              .execute(
+                modelInput(location, sessionID, (checkpoint) => {
+                  const turn = checkpoint.providerTurn
+                  if (typeof turn === "object" && turn !== null && "result" in turn) {
+                    durableResult = checkpoint
+                    return Effect.fail({
+                      failure: {
+                        category: "transient" as const,
+                        code: "simulated_crash_before_catalog_drift",
+                        message: "Simulated crash after provider result",
+                      },
+                      usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+                    })
+                  }
+                  return Effect.void
+                }),
+              )
+              .pipe(Effect.flip),
+          )
+          if (!durableResult) throw new Error("provider result was not checkpointed")
           yield* applicationTools.register({ location_probe: probe("Replacement probe") })
           modelCredentialReads = 0
 
           const failure = yield* WorkflowModelExecution.Service.use((models) =>
             models
-              .execute(
-                modelInput(location, sessionID, () => Effect.void, {
-                  checkpoint: continuation({
-                    catalogFingerprint: fingerprint,
-                    calls: [
-                      { id: "call-settled", name: "location_probe", input: {} },
-                      { id: "call-remaining", name: "location_remaining", input: {} },
-                    ],
-                    results: [
-                      {
-                        id: "call-settled",
-                        name: "location_probe",
-                        result: { type: "text", value: "already settled" },
-                      },
-                    ],
-                  }),
-                }),
-              )
+              .execute(modelInput(location, sessionID, () => Effect.void, { checkpoint: durableResult }))
               .pipe(Effect.flip),
           )
 
           expect(failure).toMatchObject({ failure: { category: "ambiguous", code: "tool_catalog_ambiguous" } })
           expect(remainingExecutions).toBe(0)
-          expect(modelRequests).toEqual([])
+          expect(modelRequests).toHaveLength(1)
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
@@ -476,16 +720,8 @@ describe("Workflow Location tools", () => {
             LLMEvent.toolCall({ id: "call-location-probe", name: "location_probe", input: {} }),
             LLMEvent.finish({ reason: "tool-calls" }),
           ])
-          const second = LLMResponse.fromEvents([
-            LLMEvent.textStart({ id: "outcome" }),
-            LLMEvent.textDelta({
-              id: "outcome",
-              text: JSON.stringify({ schemaVersion: 1, role: "design", verdict: "ready", revision: 0 }),
-            }),
-            LLMEvent.textEnd({ id: "outcome" }),
-            LLMEvent.finish({ reason: "stop" }),
-          ])
-          if (!first || !second) return yield* Effect.die("invalid offline responses")
+          const second = providerResponse(providerDesignEnvelope())
+          if (!first || !second) throw new Error("invalid offline responses")
           modelResponses.push(first, second)
 
           yield* SessionV2.Service.use((sessions) =>
@@ -512,10 +748,15 @@ describe("Workflow Location tools", () => {
           const executionInput = modelInput(location, sessionID, (checkpoint) =>
             Effect.sync(() => {
               const active = checkpoint.activeTurn
+              const provider = checkpoint.providerTurn
               modelTimeline.push(
                 typeof active === "object" && active !== null && "pendingCallID" in active
-                  ? "checkpoint:pending"
-                  : "checkpoint:settled",
+                  ? "checkpoint:tool-intent"
+                  : typeof provider === "object" && provider !== null && "result" in provider
+                    ? "checkpoint:provider-result"
+                    : typeof provider === "object" && provider !== null
+                      ? "checkpoint:provider-intent"
+                      : "checkpoint:tool-result",
               )
             }),
           )
@@ -552,11 +793,15 @@ describe("Workflow Location tools", () => {
             },
           })
           expect(modelTimeline).toEqual([
+            "checkpoint:provider-intent",
             "provider:1",
-            "checkpoint:pending",
+            "checkpoint:provider-result",
+            "checkpoint:tool-intent",
             "tool",
-            "checkpoint:settled",
+            "checkpoint:tool-result",
+            "checkpoint:provider-intent",
             "provider:2",
+            "checkpoint:provider-result",
           ])
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
@@ -642,7 +887,11 @@ describe("Workflow Location tools", () => {
               LLMEvent.textStart({ id: `${callID}-outcome` }),
               LLMEvent.textDelta({
                 id: `${callID}-outcome`,
-                text: JSON.stringify({ schemaVersion: 1, role: "implement", verdict: "ready", revision: 0 }),
+                text: JSON.stringify({
+                  contractVersion: 1,
+                  outcome: { schemaVersion: 1, role: "implement", verdict: "ready", revision: 0 },
+                  payload: { summary: "Implemented through the admitted Location tools." },
+                }),
               }),
               LLMEvent.textEnd({ id: `${callID}-outcome` }),
               LLMEvent.finish({ reason: "stop" }),
@@ -758,8 +1007,7 @@ describe("Workflow Location tools", () => {
                     agent.hidden = false
                     agent.description = "user override"
                     agent.permissions = [{ action: "*", resource: "*", effect: "allow" }]
-                    const mutable = agent as unknown as Record<string, unknown>
-                    mutable.userOverride = true
+                    Reflect.set(agent, "userOverride", true)
                   }),
                 ),
               ),

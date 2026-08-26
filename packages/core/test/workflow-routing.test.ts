@@ -172,6 +172,15 @@ describe("WorkflowRouting", () => {
     )
   })
 
+  test("does not let a linked Response switch visual delivery to Flash", () => {
+    const route = WorkflowRouting.resolve({ role: "deliver", budget })
+
+    expect(() => WorkflowRouting.forResponseModel(route, "deepseek-v4-flash")).toThrow(
+      "The linked Response model must match the fixed deliver route",
+    )
+    expect(WorkflowRouting.forResponseModel(route, "deepseek-v4-pro").modelID).toBe("deepseek-v4-pro")
+  })
+
   test("redacts secret-shaped route overrides from policy diagnostics", () => {
     try {
       WorkflowRouting.resolve({

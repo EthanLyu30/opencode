@@ -8,6 +8,7 @@ import { Context, DateTime, Effect, Layer, Schema, Scope } from "effect"
 import { makeGlobalNode } from "../effect/app-node"
 import { Hash } from "../util/hash"
 import { WorkflowModelExecution } from "./execution/model"
+import { WorkflowRoleExecution } from "./execution/role"
 import { WorkflowRetry } from "./retry"
 import { WorkflowRouting } from "./routing"
 import { WorkflowSecretGuard } from "./secret-guard"
@@ -53,6 +54,7 @@ export interface Result {
   readonly artifacts?: ReadonlyArray<Workflow.ArtifactCommit>
   readonly usage: Workflow.Usage
   readonly responseSettlement?: Extract<ResponseSettlement, { readonly type: "completed" }>
+  readonly roleReceipt?: WorkflowRoleExecution.Receipt
 }
 
 export interface ExecutionFailure {
@@ -108,10 +110,11 @@ export const emptyLayer = Layer.succeed(
   }),
 )
 
-export const roleLayer = Layer.effect(
+const injectedRoleLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const models = yield* WorkflowModelExecution.Service
+    const evidence = yield* WorkflowRoleExecution.Service
     return Service.of({
       execute: (input) =>
         Effect.gen(function* () {
@@ -150,16 +153,52 @@ export const roleLayer = Layer.effect(
                 result.responseSettlement,
               ),
             )
-          const outcome = yield* Schema.decodeUnknownEffect(WorkflowRole.Outcome)(result.outcome).pipe(
-            Effect.mapError(() =>
+          const strict = result.contract !== undefined || result.semantic !== undefined
+          if (strict && (result.contract === undefined || result.semantic === undefined))
+            return yield* Effect.fail(
               invalidOutcome(
-                "Model output did not match WorkflowRole.Outcome",
+                "Model execution returned an incomplete role contract result",
                 result.usage,
                 result.responseSettlement,
               ),
-            ),
-          )
-          const artifact = outcomeArtifact(input.stage, outcome)
+            )
+          if (!strict && input.workflow.type === "visual-build")
+            return yield* Effect.fail(
+              invalidOutcome(
+                "Production visual roles require a host-bound role contract result",
+                result.usage,
+                result.responseSettlement,
+              ),
+            )
+          const settlement = strict
+            ? yield* WorkflowRoleExecution.settle({
+                workflow: input.workflow,
+                stage: input.stage,
+                contract: result.contract!,
+                semantic: result.semantic!,
+                priorArtifacts: input.artifacts,
+                settledToolEvidence: result.artifacts ?? [],
+              }).pipe(
+                Effect.provideService(WorkflowRoleExecution.Service, evidence),
+                Effect.mapError((error) =>
+                  invalidOutcome(`${error.code}: ${error.message}`, result.usage, result.responseSettlement),
+                ),
+              )
+            : undefined
+          const outcome = strict
+            ? result.semantic!.outcome
+            : yield* Schema.decodeUnknownEffect(WorkflowRole.Outcome)(result.outcome).pipe(
+                Effect.mapError(() =>
+                  invalidOutcome(
+                    "Model output did not match WorkflowRole.Outcome",
+                    result.usage,
+                    result.responseSettlement,
+                  ),
+                ),
+              )
+          const artifact =
+            settlement?.artifacts.find((item) => item.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND) ??
+            outcomeArtifact(input.stage, outcome)
           const nextState = yield* WorkflowStageMachine.advance(state, artifact).pipe(
             Effect.mapError((error) =>
               invalidOutcome(
@@ -206,13 +245,22 @@ export const roleLayer = Layer.effect(
           return {
             checkpoint: result.checkpoint,
             usage: result.usage,
-            artifacts: [...(result.artifacts ?? []), artifact],
+            artifacts:
+              settlement === undefined
+                ? [...(result.artifacts ?? []), artifact]
+                : [...(result.artifacts ?? []), ...settlement.artifacts],
+            ...(settlement === undefined ? {} : { roleReceipt: settlement.receipt }),
             responseSettlement: result.responseSettlement,
           }
         }),
     })
   }),
 )
+
+export const roleLayer = injectedRoleLayer.pipe(Layer.provide(WorkflowRoleExecution.failClosedLayer))
+
+export const roleLayerWith = (evidence: Layer.Layer<WorkflowRoleExecution.Service>) =>
+  injectedRoleLayer.pipe(Layer.provide(evidence))
 
 function outcomeArtifact(stage: Workflow.Stage, outcome: WorkflowRole.Outcome): Workflow.ArtifactCommit {
   const body = WorkflowStageMachine.encodeOutcome(outcome)
@@ -351,4 +399,8 @@ function unknownFailure(error: unknown): ExecutionFailure {
 
 const zeroUsage: Workflow.Usage = { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 }
 
-export const node = makeGlobalNode({ service: Service, layer: roleLayer, deps: [WorkflowModelExecution.node] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer: injectedRoleLayer,
+  deps: [WorkflowModelExecution.node, WorkflowRoleExecution.node],
+})

@@ -34,6 +34,7 @@ import { WorkflowState } from "../state"
 import { WorkflowStageMachine } from "../stage-machine"
 import { WorkflowGraph } from "../graph"
 import { WorkflowStore } from "../store"
+import { WorkflowRoleExecution } from "./role"
 
 class CancelRequested extends Data.TaggedError("CancelRequested")<{
   readonly workflowID: Workflow.ID
@@ -394,6 +395,7 @@ export const layerWith = (options: Options) =>
                 checkpointFailure("stale_checkpoint_lease", "Workflow checkpoint lost its fenced lease"),
               )
             }
+            return undefined
           })
 
         const execution = executor.execute({
@@ -688,6 +690,32 @@ export const layerWith = (options: Options) =>
           )
         })
         const roleStage = Schema.is(WorkflowRole.Role)(stage.type)
+        if (roleStage) {
+          const evidenceValidation = yield* Effect.try({
+            try: () =>
+              WorkflowRoleExecution.validateSettlement({
+                workflow: initial.run,
+                stage,
+                priorArtifacts: initial.artifacts,
+                artifacts: committedArtifacts,
+                receipt: executionResult.roleReceipt,
+              }),
+            catch: () => undefined,
+          }).pipe(
+            Effect.match({
+              onFailure: () => false,
+              onSuccess: () => true,
+            }),
+          )
+          if (!evidenceValidation) {
+            yield* failRoleSettlement({
+              category: "schema",
+              code: "invalid_role_evidence",
+              message: "Role business evidence or its host binding is invalid",
+            })
+            return
+          }
+        }
         const branchValidation = !roleStage
           ? ({ type: "none" } as const)
           : outcomeArtifacts.length !== 1

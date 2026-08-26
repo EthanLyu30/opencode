@@ -10,6 +10,16 @@ import { WorkflowGraph } from "./graph"
 export const OUTCOME_ARTIFACT_KIND = "workflow.role.outcome"
 export const OUTCOME_ARTIFACT_MIME = "application/vnd.opencode.workflow-role-outcome+json"
 
+const exact = { parseOptions: { onExcessProperty: "error" as const } }
+export const OutcomeBinding = Schema.Struct({
+  bindingVersion: Schema.Literal(1),
+  outcome: WorkflowRole.Outcome,
+  contractFingerprint: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  contextDigest: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  requiredArtifactSetSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+}).annotate({ identifier: "WorkflowStageMachine.OutcomeBinding", ...exact })
+export interface OutcomeBinding extends Schema.Schema.Type<typeof OutcomeBinding> {}
+
 export type State =
   | { readonly status: "active"; readonly role: WorkflowRole.Role; readonly revision: number }
   | { readonly status: "completed"; readonly revision: number }
@@ -49,12 +59,26 @@ export function decideVisualRepair(input: {
   return { type: "repair", revision: input.revision + 1 }
 }
 
-export function encodeOutcome(outcome: WorkflowRole.Outcome) {
+export function encodeOutcome(input: WorkflowRole.Outcome | OutcomeBinding) {
+  if (Schema.is(OutcomeBinding)(input)) {
+    return JSON.stringify({
+      bindingVersion: input.bindingVersion,
+      outcome: {
+        schemaVersion: input.outcome.schemaVersion,
+        role: input.outcome.role,
+        verdict: input.outcome.verdict,
+        revision: input.outcome.revision,
+      },
+      contractFingerprint: input.contractFingerprint,
+      contextDigest: input.contextDigest,
+      requiredArtifactSetSha256: input.requiredArtifactSetSha256,
+    })
+  }
   return JSON.stringify({
-    schemaVersion: outcome.schemaVersion,
-    role: outcome.role,
-    verdict: outcome.verdict,
-    revision: outcome.revision,
+    schemaVersion: input.schemaVersion,
+    role: input.role,
+    verdict: input.verdict,
+    revision: input.revision,
   })
 }
 
@@ -64,13 +88,26 @@ export const decodeOutcome = Effect.fn("WorkflowStageMachine.decodeOutcome")(fun
   if (artifact.kind !== OUTCOME_ARTIFACT_KIND || artifact.mime !== OUTCOME_ARTIFACT_MIME)
     return yield* new InvalidOutcome({ code: "invalid_artifact" })
 
-  const outcome = yield* Schema.decodeUnknownEffect(WorkflowRole.Outcome)(artifact.metadata).pipe(
-    Effect.mapError(() => new InvalidOutcome({ code: "invalid_metadata" })),
-  )
-  if (Hash.sha256(encodeOutcome(outcome)) !== artifact.sha256)
+  const binding = Schema.is(OutcomeBinding)(artifact.metadata)
+    ? Schema.decodeUnknownSync(OutcomeBinding)(artifact.metadata)
+    : undefined
+  const outcome =
+    binding?.outcome ??
+    (yield* Schema.decodeUnknownEffect(WorkflowRole.Outcome)(artifact.metadata).pipe(
+      Effect.mapError(() => new InvalidOutcome({ code: "invalid_metadata" })),
+    ))
+  if (Hash.sha256(encodeOutcome(binding ?? outcome)) !== artifact.sha256)
     return yield* new InvalidOutcome({ code: "hash_mismatch" })
   return outcome
 })
+
+export function decodeOutcomeBinding(artifact: Workflow.ArtifactCommit): OutcomeBinding {
+  if (artifact.kind !== OUTCOME_ARTIFACT_KIND || artifact.mime !== OUTCOME_ARTIFACT_MIME)
+    throw new Error("Artifact is not a role outcome")
+  const binding = Schema.decodeUnknownSync(OutcomeBinding)(artifact.metadata)
+  if (Hash.sha256(encodeOutcome(binding)) !== artifact.sha256) throw new Error("Role outcome binding hash mismatch")
+  return binding
+}
 
 export const advance = Effect.fn("WorkflowStageMachine.advance")(function* (
   state: State,
