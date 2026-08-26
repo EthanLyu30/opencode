@@ -15,52 +15,52 @@ Start HEAD: `b183b7a67`
 
 ## Preflight task self-consistency
 
-| Task | Tests versus implementation/files | Result |
-| --- | --- | --- |
-| 23.1 | Placement RED tests map to Schema, SQL, projector, store, migration, and legacy claim behavior. | Consistent after legacy-required ruling above. |
-| 23.2 | Graph/replay/projector/execution tests map to graph expansion, Stage.Skipped, and atomic related settlement. | Consistent. |
-| 23.3 | Hostile codec tests map to four focused Schema/Core artifact modules and chain validation. | Consistent; Schema test is a new file. |
-| 23.4 | Real Location tests cover catalog visibility and leaf authorization; implementation includes role-agent profiles. | Consistent after role-agent ruling above. |
-| 23.5 | Preview-plan/host fake tests cover public payload, frozen command/config, containment, URL, and evidence caps. | Consistent. |
-| 23.6 | Offline runtime tests cover loopback serving, Playwright policy, teardown, and runtime dependency ownership. | Consistent; `packages/server/test` is created by this task. |
-| 23.7 | Role tests cover every required business artifact, snapshot, Kimi paired media, and atomic settlement inputs. | Consistent. |
-| 23.8 | Projector-failure/idempotency tests cover one related EventV2 admission and exact reconciliation. | Consistent under EventV2 ruling above. |
-| 23.9 | Protocol/SDK tests cover a Location-derived payload and deterministic generated clients. | Consistent; generated files are not edited manually. |
-| 23.10 | CLI process tests cover command/help/progress/cancel/JSON/exit status and dedicated implementation files. | Consistent. |
-| 23.11 | Recorded E2E, crash workers, cancellation, replay, host security, and secret scans match the acceptance matrix. | Consistent; source changes are restricted to failures exposed by acceptance. |
-| 23.12 | Deployment tests precede scripts; offline gates precede authorized push/build/atomic D deployment. | Consistent; user already authorized push and local deployment. |
+| Task  | Tests versus implementation/files                                                                                 | Result                                                                       |
+| ----- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 23.1  | Placement RED tests map to Schema, SQL, projector, store, migration, and legacy claim behavior.                   | Consistent after legacy-required ruling above.                               |
+| 23.2  | Graph/replay/projector/execution tests map to graph expansion, Stage.Skipped, and atomic related settlement.      | Consistent.                                                                  |
+| 23.3  | Hostile codec tests map to four focused Schema/Core artifact modules and chain validation.                        | Consistent; Schema test is a new file.                                       |
+| 23.4  | Real Location tests cover catalog visibility and leaf authorization; implementation includes role-agent profiles. | Consistent after role-agent ruling above.                                    |
+| 23.5  | Preview-plan/host fake tests cover public payload, frozen command/config, containment, URL, and evidence caps.    | Consistent.                                                                  |
+| 23.6  | Offline runtime tests cover loopback serving, Playwright policy, teardown, and runtime dependency ownership.      | Consistent; `packages/server/test` is created by this task.                  |
+| 23.7  | Role tests cover every required business artifact, snapshot, Kimi paired media, and atomic settlement inputs.     | Consistent.                                                                  |
+| 23.8  | Projector-failure/idempotency tests cover one related EventV2 admission and exact reconciliation.                 | Consistent under EventV2 ruling above.                                       |
+| 23.9  | Protocol/SDK tests cover a Location-derived payload and deterministic generated clients.                          | Consistent; generated files are not edited manually.                         |
+| 23.10 | CLI process tests cover command/help/progress/cancel/JSON/exit status and dedicated implementation files.         | Consistent.                                                                  |
+| 23.11 | Recorded E2E, crash workers, cancellation, replay, host security, and secret scans match the acceptance matrix.   | Consistent; source changes are restricted to failures exposed by acceptance. |
+| 23.12 | Deployment tests precede scripts; offline gates precede authorized push/build/atomic D deployment.                | Consistent; user already authorized push and local deployment.               |
 
 ## Shared file/interface scan
 
-| Tasks | Producer → consumer / shared surface | Finding |
-| --- | --- | --- |
-| 23.1 ↔ 23.2 | Persisted stages/projector → skip projection and graph replay. | Compatible; 23.2 builds only after placement migration is green. |
-| 23.1 ↔ 23.4 | `Workflow.Info.location/sessionID/agent` → Location tool execution. | Compatible; missing legacy values fail before providers. |
-| 23.1 ↔ 23.8 | `Workflow.AdmissionInput`/projection → atomic product admission. | Compatible; Task23.8 reuses rather than duplicates normalization. |
-| 23.2 ↔ 23.4 | `executor.ts`/`execution/local.ts` shared by branch and tool settlement. | Compatible; 23.4 preserves 23.2 related skip events. |
-| 23.2 ↔ 23.7 | Graph/outcome authority → role artifacts and final settlement. | Compatible; artifact hash drives `unreachableAfter`. |
-| 23.2 ↔ 23.8 | `expandVisualBuild` → admitted frozen stages. | Compatible. |
-| 23.2 ↔ 23.11 | skip/replay/crash behavior → acceptance workers. | Compatible. |
-| 23.3 ↔ 23.7 | strict codec helpers → role executor required artifacts. | Compatible; no provider adapter owns business codecs. |
-| 23.3 ↔ 23.11 | artifact chain → E2E assertions/hostile fixtures. | Compatible. |
-| 23.4 ↔ 23.7 | `model.ts`/`executor.ts` and role tool policies shared. | Compatible; 23.7 supplies role contract/messages without restoring global tools. |
-| 23.4 ↔ 23.8 | real hidden Session identity → atomic Session admission. | Compatible. |
-| 23.4 ↔ 23.11 | pending intent/result semantics → crash acceptance. | Compatible. |
-| 23.5 ↔ 23.6 | Core `WorkflowVisualHost`/PreviewPlan → Server production layer. | Compatible under runtime ownership ruling. |
-| 23.5 ↔ 23.7 | host fake/contracts → role visual orchestration. | Compatible. |
-| 23.5 ↔ 23.8 | `WorkflowVisualBuild.CreateInput` and frozen plan → request hashing/admission. | Compatible. |
-| 23.5 ↔ 23.9 | public payload schema → Protocol endpoint/client generation. | Compatible; placement remains absent. |
-| 23.6 ↔ 23.7 | managed runtime host → Kimi capture path. | Compatible; production role code sees only the Core service. |
-| 23.6 ↔ 23.9 | `packages/server/src/routes.ts` layer composition and API route wiring. | Compatible; 23.9 must retain VisualHost replacement. |
-| 23.6 ↔ 23.11 | preview/browser security → adversarial runtime tests. | Compatible. |
-| 23.7 ↔ 23.8 | executable complete graph → admission wake. | Compatible; wake occurs only after atomic batch. |
-| 23.7 ↔ 23.11 | role/snapshot/media flow → recorded repair scenario. | Compatible. |
-| 23.8 ↔ 23.9 | `WorkflowAdmission.Service` → Location-aware HTTP handler. | Compatible. |
-| 23.8 ↔ 23.11 | atomic creation/reconciliation → admission crash cases. | Compatible. |
-| 23.9 ↔ 23.10 | generated client operation/SSE → CLI command. | Compatible; CLI does not call Core directly. |
-| 23.9 ↔ 23.11 | embedded API → full SDK acceptance. | Compatible. |
-| 23.10 ↔ 23.12 | CLI command/help/offline flow → deployed launcher smoke. | Compatible. |
-| 23.11 ↔ 23.12 | clean offline acceptance → release gate/deployment authorization. | Compatible; no live API smoke is implied. |
+| Tasks          | Producer → consumer / shared surface                                           | Finding                                                                          |
+| -------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| 23.1 ↔ 23.2   | Persisted stages/projector → skip projection and graph replay.                 | Compatible; 23.2 builds only after placement migration is green.                 |
+| 23.1 ↔ 23.4   | `Workflow.Info.location/sessionID/agent` → Location tool execution.            | Compatible; missing legacy values fail before providers.                         |
+| 23.1 ↔ 23.8   | `Workflow.AdmissionInput`/projection → atomic product admission.               | Compatible; Task23.8 reuses rather than duplicates normalization.                |
+| 23.2 ↔ 23.4   | `executor.ts`/`execution/local.ts` shared by branch and tool settlement.       | Compatible; 23.4 preserves 23.2 related skip events.                             |
+| 23.2 ↔ 23.7   | Graph/outcome authority → role artifacts and final settlement.                 | Compatible; artifact hash drives `unreachableAfter`.                             |
+| 23.2 ↔ 23.8   | `expandVisualBuild` → admitted frozen stages.                                  | Compatible.                                                                      |
+| 23.2 ↔ 23.11  | skip/replay/crash behavior → acceptance workers.                               | Compatible.                                                                      |
+| 23.3 ↔ 23.7   | strict codec helpers → role executor required artifacts.                       | Compatible; no provider adapter owns business codecs.                            |
+| 23.3 ↔ 23.11  | artifact chain → E2E assertions/hostile fixtures.                              | Compatible.                                                                      |
+| 23.4 ↔ 23.7   | `model.ts`/`executor.ts` and role tool policies shared.                        | Compatible; 23.7 supplies role contract/messages without restoring global tools. |
+| 23.4 ↔ 23.8   | real hidden Session identity → atomic Session admission.                       | Compatible.                                                                      |
+| 23.4 ↔ 23.11  | pending intent/result semantics → crash acceptance.                            | Compatible.                                                                      |
+| 23.5 ↔ 23.6   | Core `WorkflowVisualHost`/PreviewPlan → Server production layer.               | Compatible under runtime ownership ruling.                                       |
+| 23.5 ↔ 23.7   | host fake/contracts → role visual orchestration.                               | Compatible.                                                                      |
+| 23.5 ↔ 23.8   | `WorkflowVisualBuild.CreateInput` and frozen plan → request hashing/admission. | Compatible.                                                                      |
+| 23.5 ↔ 23.9   | public payload schema → Protocol endpoint/client generation.                   | Compatible; placement remains absent.                                            |
+| 23.6 ↔ 23.7   | managed runtime host → Kimi capture path.                                      | Compatible; production role code sees only the Core service.                     |
+| 23.6 ↔ 23.9   | `packages/server/src/routes.ts` layer composition and API route wiring.        | Compatible; 23.9 must retain VisualHost replacement.                             |
+| 23.6 ↔ 23.11  | preview/browser security → adversarial runtime tests.                          | Compatible.                                                                      |
+| 23.7 ↔ 23.8   | executable complete graph → admission wake.                                    | Compatible; wake occurs only after atomic batch.                                 |
+| 23.7 ↔ 23.11  | role/snapshot/media flow → recorded repair scenario.                           | Compatible.                                                                      |
+| 23.8 ↔ 23.9   | `WorkflowAdmission.Service` → Location-aware HTTP handler.                     | Compatible.                                                                      |
+| 23.8 ↔ 23.11  | atomic creation/reconciliation → admission crash cases.                        | Compatible.                                                                      |
+| 23.9 ↔ 23.10  | generated client operation/SSE → CLI command.                                  | Compatible; CLI does not call Core directly.                                     |
+| 23.9 ↔ 23.11  | embedded API → full SDK acceptance.                                            | Compatible.                                                                      |
+| 23.10 ↔ 23.12 | CLI command/help/offline flow → deployed launcher smoke.                       | Compatible.                                                                      |
+| 23.11 ↔ 23.12 | clean offline acceptance → release gate/deployment authorization.              | Compatible; no live API smoke is implied.                                        |
 
 ## Task progress
 
@@ -116,3 +116,4 @@ Task 23.6B3: implementation complete (Core identity/fake; Server durable intent/
 Task 23.6B3: joint fix round 1 complete (`f45efaac7`; protected-root/engine identity and hardlink fences; caller-bounded acquisition cleanup; running-aware recovery with verified absence; metadata-first single-BLOB staging reads; aggregate-history lower bound; Core/Server reconcile parity; delayed-rejection timing root cause fixed; Server 208/208 repeated, typecheck and changed-file lint clean).
 Task 23.6B3: joint fix round 2 complete (`cb87e737c`; inspect cancellation/deadline propagation and detached rejection safety; kill-race removal dominated by proven final absence; all reconcile authority paths metadata-only; host-owned bounded 32 MiB static reads with growth fence; Server 211/211 repeated, typecheck and changed-file lint clean).
 Task 23.6B3: joint fix round 3 complete (`39e071f05`; interval-specific post-handle-stat pathname growth now requires admitted/handle/path size equality and returns 413 without bytes; exact 32 MiB and hardlink/replacement defenses preserved; Server 211/211 repeated, typecheck/lint/format/diff clean).
+Task 23.6: complete (`01010e07e..f9105007f`; joint security/stability review clean after three scoped fix rounds; final Server matrix 211/211 twice sequentially, Server typecheck and changed-file quality gates clean).

@@ -196,11 +196,22 @@ $ tsgo --noEmit  # exit 0
 
 cd D:\OpenCode-Audit
 D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe x oxlint \
-  packages/server/src/workflow/{command-sandbox,evidence-ledger,visual-host}.ts \
-  packages/server/test/workflow-{command-sandbox,evidence-ledger,visual-host}.test.ts
+  packages/server/src/workflow/command-sandbox.ts \
+  packages/server/src/workflow/evidence-ledger.ts \
+  packages/server/src/workflow/visual-host.ts \
+  packages/server/test/workflow-command-sandbox.test.ts \
+  packages/server/test/workflow-evidence-ledger.test.ts \
+  packages/server/test/workflow-visual-host.test.ts
 Found 0 warnings and 0 errors.
 
-D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe x prettier --write <the same six changed TS files> task-23.6b3-report.md
+D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe x prettier --write \
+  packages/server/src/workflow/command-sandbox.ts \
+  packages/server/src/workflow/evidence-ledger.ts \
+  packages/server/src/workflow/visual-host.ts \
+  packages/server/test/workflow-command-sandbox.test.ts \
+  packages/server/test/workflow-evidence-ledger.test.ts \
+  packages/server/test/workflow-visual-host.test.ts \
+  .superpowers/sdd/2026-08-21-opencode-production-visual-host/task-23.6b3-report.md
 all files formatted/unchanged; exit 0
 
 git diff --check
@@ -239,12 +250,18 @@ run 2: 211 pass, 0 fail, 722 expect
 bun run typecheck
 $ tsgo --noEmit  # exit 0
 
-bun x oxlint <round-2/round-3 six changed TS files>
+bun x oxlint packages/server/src/workflow/visual-host.ts packages/server/test/workflow-visual-host.test.ts
 0 errors (final rerun after the one reported optional-parameter warning was corrected)
 
-bun x prettier --check <round-2/round-3 six changed TS files and report>
+bun x prettier --check packages/server/src/workflow/visual-host.ts packages/server/test/workflow-visual-host.test.ts \
+  .superpowers/sdd/2026-08-21-opencode-production-visual-host/task-23.6b3-report.md
 All matched files use Prettier code style!
 
 git diff --check
 exit 0; only Git LF->CRLF notices
 ```
+
+The two final 211/211 runs were launched sequentially only after confirming no
+other Bun process remained. The scoped round-3 independent re-review found the
+post-read pathname growth fence addressed and no new Critical or Important
+breakage. Task23.6 is review-clean.
