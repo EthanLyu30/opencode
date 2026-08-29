@@ -1,6 +1,6 @@
+import { Database } from "@opencode-ai/core/database/database"
 import { EventV2 } from "@opencode-ai/core/event"
 import { PublicEventVisibility } from "@opencode-ai/core/event/public-visibility"
-import { SessionV2 } from "@opencode-ai/core/session"
 import { OpenCodeEvent } from "@opencode-ai/protocol/groups/event"
 import { Effect, Schema, Stream } from "effect"
 import { HttpServerResponse } from "effect/unstable/http"
@@ -12,17 +12,8 @@ const subscriberCapacity = 256
 
 export function publicSessionEvent(
   event: Parameters<typeof PublicEventVisibility.isPublic>[0],
-  sessions: Pick<SessionV2.Interface, "get">,
+  authority: PublicEventVisibility.Authority,
 ) {
-  const authority = {
-    session: (sessionID: SessionV2.ID) =>
-      sessions.get(sessionID).pipe(
-        Effect.as("public" as const),
-        Effect.catchTag("Session.NotFoundError", () => Effect.succeed(undefined)),
-      ),
-    workflow: () => Effect.succeed(undefined),
-    response: () => Effect.succeed(undefined),
-  }
   return PublicEventVisibility.isPublic(event, authority)
 }
 
@@ -38,7 +29,8 @@ function eventData(data: unknown): Sse.Event {
 export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers) =>
   Effect.gen(function* () {
     const events = yield* EventV2.Service
-    const sessions = yield* SessionV2.Service
+    const { db } = yield* Database.Service
+    const authority = PublicEventVisibility.databaseAuthority(db)
     return handlers.handleRaw("event.subscribe", () =>
       Effect.gen(function* () {
         const connected = {
@@ -51,7 +43,7 @@ export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers)
             // Acquiring the bounded stream installs its listener before readiness is observable.
             const live = yield* EventV2.allBounded(events, subscriberCapacity)
             return Stream.make(connected).pipe(
-              Stream.concat(live.pipe(Stream.filterEffect((event) => publicSessionEvent(event, sessions)))),
+              Stream.concat(live.pipe(Stream.filterEffect((event) => publicSessionEvent(event, authority)))),
             )
           }),
         ).pipe(Stream.map(eventData), Stream.pipeThroughChannel(Sse.encode()))

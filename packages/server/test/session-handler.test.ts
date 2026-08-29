@@ -10,6 +10,18 @@ import { InvalidRequestError } from "@opencode-ai/protocol/errors"
 import { reservedAgent } from "../src/handlers/session"
 import { publicSessionEvent } from "../src/handlers/event"
 
+function sessionAuthority(sessions: Pick<SessionV2.Interface, "get">): PublicEventVisibility.Authority {
+  return {
+    session: (sessionID) =>
+      sessions.get(sessionID).pipe(
+        Effect.as("public" as const),
+        Effect.catchTag("Session.NotFoundError", () => Effect.succeed(undefined)),
+      ),
+    workflow: () => Effect.succeed(undefined),
+    response: () => Effect.succeed(undefined),
+  }
+}
+
 describe("SessionHandler", () => {
   test("maps public selection of a reserved workflow agent to a deterministic invalid request", () => {
     const agent = WorkflowRoleAgents.agentForRole("implement")
@@ -36,7 +48,7 @@ describe("SessionHandler", () => {
         {
           durable: { aggregateID: hiddenID },
         },
-        sessions,
+        sessionAuthority(sessions),
       ),
     )
 
@@ -48,7 +60,9 @@ describe("SessionHandler", () => {
     const sessions = {
       get: () => Effect.fail(new SessionV2.NotFoundError({ sessionID: hiddenID })),
     } as Pick<SessionV2.Interface, "get">
-    const visible = await Effect.runPromise(publicSessionEvent({ data: { sessionID: hiddenID } }, sessions))
+    const visible = await Effect.runPromise(
+      publicSessionEvent({ data: { sessionID: hiddenID } }, sessionAuthority(sessions)),
+    )
 
     expect(visible).toBe(false)
   })
@@ -89,7 +103,7 @@ describe("SessionHandler", () => {
             data: member.data,
             type: member.type,
           },
-          sessions,
+          sessionAuthority(sessions),
         ),
       )
       expect(visible).toBe(false)
@@ -109,7 +123,7 @@ describe("SessionHandler", () => {
           type: "session.deleted",
           data: { sessionID: deletedID, visibility: "public" },
         },
-        sessions,
+        sessionAuthority(sessions),
       ),
     )
 
@@ -130,7 +144,7 @@ describe("SessionHandler", () => {
           type: "session.deleted",
           data: deletion,
         },
-        sessions,
+        sessionAuthority(sessions),
       ),
     )
     const current = await Effect.runPromise(
@@ -140,7 +154,7 @@ describe("SessionHandler", () => {
           type: "session.deleted",
           data: deletion,
         },
-        sessions,
+        sessionAuthority(sessions),
       ),
     )
 
@@ -163,7 +177,7 @@ describe("SessionHandler", () => {
           type: "response.created",
           data: { responseID: "resp_unknown_batch", workflowID: "wfl_unknown_batch" },
         },
-        sessions,
+        sessionAuthority(sessions),
       ),
     )
 
@@ -194,15 +208,15 @@ describe("SessionHandler", () => {
     const visible = await Effect.runPromise(
       publicSessionEvent(
         {
-          type: related[2]!.type,
-          data: related[2]!.data,
+          type: related[2].type,
+          data: related[2].data,
           durable: {
             aggregateID: "resp_public_unresolved_batch",
             batch: { id: "evt_public_unresolved_batch", index: 2, size: related.length },
             related,
           },
         },
-        sessions,
+        sessionAuthority(sessions),
       ),
     )
 
@@ -222,8 +236,8 @@ describe("SessionHandler", () => {
     const visible = await Effect.runPromise(
       PublicEventVisibility.isPublic(
         {
-          type: related[3]!.type,
-          data: related[3]!.data,
+          type: related[3].type,
+          data: related[3].data,
           durable: {
             aggregateID: workflowID,
             batch: { id: "evt_public_duplicate", index: 3, size: related.length },
@@ -233,6 +247,64 @@ describe("SessionHandler", () => {
         {
           session: () => Effect.succeed("public"),
           workflow: () => Effect.succeed(first),
+          response: () => Effect.succeed(undefined),
+        },
+      ),
+    )
+
+    expect(visible).toBe(false)
+  })
+
+  test("fails closed when one complete live batch repeats the same Response owner with divergent context", async () => {
+    const sessionID = SessionV2.ID.make("ses_public_duplicate_response")
+    const workflowID = WorkflowV2.ID.make("wfl_public_duplicate_response")
+    const responseID = ResponsesV2.ID.make("resp_public_duplicate_response")
+    const related = [
+      { type: "session.updated", data: { sessionID } },
+      { type: "workflow.created", data: { workflowID, sessionID } },
+      {
+        type: "response.created",
+        data: { responseID, workflowID, context: [{ type: "message", content: "public" }] },
+      },
+      {
+        type: "response.created",
+        data: { responseID, workflowID, context: [{ type: "message", content: "HIDDEN_DUPLICATE_RECEIPT" }] },
+      },
+    ]
+    const visible = await Effect.runPromise(
+      PublicEventVisibility.isPublic(
+        {
+          type: related[3].type,
+          data: related[3].data,
+          durable: {
+            aggregateID: responseID,
+            batch: { id: "evt_public_duplicate_response", index: 3, size: related.length },
+            related,
+          },
+        },
+        {
+          session: () => Effect.succeed("public"),
+          workflow: () => Effect.succeed(sessionID),
+          response: () => Effect.succeed(workflowID),
+        },
+      ),
+    )
+
+    expect(visible).toBe(false)
+  })
+
+  test("requires authoritative Session storage for session.created despite declared public visibility", async () => {
+    const sessionID = SessionV2.ID.make("ses_missing_created_authority")
+    const visible = await Effect.runPromise(
+      PublicEventVisibility.isPublic(
+        {
+          type: "session.created",
+          data: { sessionID, visibility: "public" },
+          durable: { aggregateID: sessionID, version: 1 },
+        },
+        {
+          session: () => Effect.succeed(undefined),
+          workflow: () => Effect.succeed(undefined),
           response: () => Effect.succeed(undefined),
         },
       ),
@@ -253,8 +325,8 @@ describe("SessionHandler", () => {
     const visible = await Effect.runPromise(
       PublicEventVisibility.isPublic(
         {
-          type: related[2]!.type,
-          data: related[2]!.data,
+          type: related[2].type,
+          data: related[2].data,
           durable: {
             aggregateID: responseID,
             batch: { id: "evt_public_authoritative", index: 2, size: related.length },

@@ -26,6 +26,7 @@ import { Workflow } from "@opencode-ai/schema/workflow"
 import { Event } from "@opencode-ai/schema/event"
 import { WorkflowRunTable } from "@opencode-ai/core/workflow/sql"
 import { ResponseTable } from "@opencode-ai/core/responses/sql"
+import { SessionV2 } from "@opencode-ai/core/session"
 
 const ForgedResponseCreated = Event.define({
   type: "response.created",
@@ -335,6 +336,113 @@ describe("session.created event", () => {
 
       expect(received).toEqual([])
       expect(JSON.stringify(received)).not.toContain("FORGED_GLOBAL_RECEIPT")
+    }),
+  )
+
+  it.instance("rejects duplicate public-owner Response declarations before a hidden receipt reaches GlobalBus", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const publicSession = yield* session.create({})
+      const workflowID = Workflow.ID.make("wfl_duplicate_authoritative_global")
+      const responseID = Responses.ID.make("resp_duplicate_authoritative_global")
+      const { db } = yield* Database.Service
+      yield* db
+        .insert(WorkflowRunTable)
+        .values({
+          id: workflowID,
+          type: "visual-build",
+          status: "queued",
+          input: {},
+          budget: {},
+          usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+          session_id: publicSession.id,
+          version: 0,
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(ResponseTable)
+        .values({
+          id: responseID,
+          workflow_id: workflowID,
+          model: "test",
+          status: "queued",
+          background: true,
+          store: true,
+          request_hash: "duplicate-global-authority",
+          output: [],
+          created_at: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      const received: unknown[] = []
+      const listener = (event: { payload: unknown }) => received.push(event)
+      GlobalBus.on("event", listener)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
+
+      yield* events.publish(
+        ForgedResponseCreated,
+        {
+          responseID,
+          workflowID,
+          context: [{ type: "message", content: "public context" }],
+        },
+        {
+          related: [
+            {
+              definition: ForgedResponseCreated,
+              data: {
+                responseID,
+                workflowID,
+                context: [{ type: "message", content: "HIDDEN_DUPLICATE_GLOBAL_RECEIPT" }],
+              },
+            },
+            {
+              definition: ForgedWorkflowCreated,
+              data: { workflowID, sessionID: publicSession.id },
+            },
+            {
+              definition: SessionV1.Event.Updated,
+              data: { sessionID: publicSession.id, info: publicSession },
+            },
+          ],
+        },
+      )
+
+      expect(received).toEqual([])
+      expect(JSON.stringify(received)).not.toContain("HIDDEN_DUPLICATE_GLOBAL_RECEIPT")
+    }),
+  )
+
+  it.instance("suppresses session.created on GlobalBus when its projected Session is absent at notification", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const template = yield* session.create({})
+      const missingID = SessionV2.ID.make("ses_missing_created_global")
+      const info = { ...template, id: missingID, slug: "missing-created-global" }
+      const { db } = yield* Database.Service
+      const received: unknown[] = []
+      const listener = (event: { payload: unknown }) => {
+        if (JSON.stringify(event).includes(missingID)) received.push(event)
+      }
+      GlobalBus.on("event", listener)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
+
+      yield* events.publish(
+        SessionV1.Event.Created,
+        { sessionID: missingID, info, visibility: "public" },
+        {
+          commit: () =>
+            db.delete(SessionTable).where(eq(SessionTable.id, missingID)).run().pipe(Effect.orDie, Effect.asVoid),
+        },
+      )
+
+      expect(received).toEqual([])
     }),
   )
 

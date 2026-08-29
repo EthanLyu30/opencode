@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Result, Schema } from "effect"
 import { Durable } from "../src/durable-event-manifest"
 import { LegacyEvent } from "../src/legacy-event"
+import { EventManifest } from "../src/event-manifest"
 import { PermissionV1 } from "../src/permission-v1"
 import { QuestionV1 } from "../src/question-v1"
 import { Project } from "../src/project"
@@ -75,5 +76,29 @@ describe("legacy public event schemas", () => {
     expect(legacy?.durable?.version).toBe(1)
     expect(Result.isSuccess(Schema.decodeUnknownResult(legacy!.data)(deletion))).toBe(true)
     expect(Durable.get("session.deleted.2")).toBe(SessionV1.Event.Deleted)
+  })
+
+  test("does not decode a v2 deletion without visibility through the legacy v1 branch", () => {
+    const publicEvent = Schema.Union(EventManifest.ServerDefinitions)
+    const payload = {
+      id: "evt_legacy_delete_version_guard",
+      type: "session.deleted",
+      durable: {
+        aggregateID: deletion.sessionID,
+        seq: 0,
+        version: 2,
+      },
+      data: deletion,
+    }
+
+    expect(Result.isFailure(Schema.decodeUnknownResult(publicEvent)(payload))).toBe(true)
+    expect(
+      Result.isSuccess(
+        Schema.decodeUnknownResult(publicEvent)({
+          ...payload,
+          durable: { ...payload.durable, version: 1 },
+        }),
+      ),
+    ).toBe(true)
   })
 })

@@ -18,23 +18,35 @@ import { testEffect } from "../lib/effect"
 
 const it = testEffect(LayerNode.compile(Database.node))
 
+interface QueryObservation {
+  readonly method: "all" | "get"
+  readonly rows: number
+}
+
 /* oxlint-disable typescript-eslint/no-unsafe-type-assertion */
-function observeAllRows<A extends object>(target: A, observations: number[]): A {
+function observeQueries<A extends object>(target: A, observations: QueryObservation[]): A {
   return new Proxy(target, {
     get(current, key) {
       const value = Reflect.get(current, key, current)
       if (typeof value !== "function") return value
       return (...args: unknown[]) => {
         const result = Reflect.apply(value, current, args)
-        if (key === "all") {
-          return (result as Effect.Effect<ReadonlyArray<unknown>>).pipe(
-            Effect.tap((rows) => Effect.sync(() => observations.push(rows.length))),
+        if (key === "all" || key === "get") {
+          return (result as Effect.Effect<unknown>).pipe(
+            Effect.tap((value) =>
+              Effect.sync(() =>
+                observations.push({
+                  method: key,
+                  rows: Array.isArray(value) ? value.length : value === undefined ? 0 : 1,
+                }),
+              ),
+            ),
           )
         }
-        return typeof result === "object" && result !== null ? observeAllRows(result, observations) : result
+        return typeof result === "object" && result !== null ? observeQueries(result, observations) : result
       }
     },
-  }) as A
+  })
 }
 /* oxlint-enable typescript-eslint/no-unsafe-type-assertion */
 
@@ -464,6 +476,156 @@ describe("public sync history", () => {
     }),
   )
 
+  it.effect("rejects duplicate same-owner Response declarations with divergent receipt context", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const sessionID = SessionV2.ID.make("ses_duplicate_response_history")
+      const workflowID = Workflow.ID.make("wfl_duplicate_response_history")
+      const responseID = Responses.ID.make("resp_duplicate_response_history")
+      yield* db
+        .insert(ProjectTable)
+        .values({
+          id: ProjectV2.ID.global,
+          worktree: AbsolutePath.make("D:/duplicate-response-history"),
+          sandboxes: [],
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: ProjectV2.ID.global,
+          slug: sessionID,
+          directory: AbsolutePath.make("D:/duplicate-response-history"),
+          title: sessionID,
+          visibility: "public",
+          version: "test",
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(WorkflowRunTable)
+        .values({
+          id: workflowID,
+          type: "visual-build",
+          status: "queued",
+          input: {},
+          budget: {},
+          usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+          session_id: sessionID,
+          version: 0,
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(ResponseTable)
+        .values({
+          id: responseID,
+          workflow_id: workflowID,
+          model: "test",
+          status: "queued",
+          background: true,
+          store: true,
+          request_hash: "duplicate-response-history",
+          output: [],
+          created_at: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(EventSequenceTable)
+        .values([
+          { aggregate_id: responseID, seq: 1 },
+          { aggregate_id: workflowID, seq: 0 },
+          { aggregate_id: sessionID, seq: 0 },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(EventTable)
+        .values([
+          {
+            id: EventV2.ID.make("evt_duplicate_response_history_public"),
+            aggregate_id: responseID,
+            seq: 0,
+            batch_id: "evt_duplicate_response_history_batch",
+            batch_index: 0,
+            batch_size: 4,
+            type: "response.created.1",
+            data: { responseID, workflowID, context: [{ type: "message", content: "public" }] },
+          },
+          {
+            id: EventV2.ID.make("evt_duplicate_response_history_hidden"),
+            aggregate_id: responseID,
+            seq: 1,
+            batch_id: "evt_duplicate_response_history_batch",
+            batch_index: 1,
+            batch_size: 4,
+            type: "response.created.1",
+            data: {
+              responseID,
+              workflowID,
+              context: [{ type: "message", content: "HIDDEN_DUPLICATE_HISTORY_RECEIPT" }],
+            },
+          },
+          {
+            id: EventV2.ID.make("evt_duplicate_response_history_workflow"),
+            aggregate_id: workflowID,
+            seq: 0,
+            batch_id: "evt_duplicate_response_history_batch",
+            batch_index: 2,
+            batch_size: 4,
+            type: "workflow.created.1",
+            data: { workflowID, sessionID },
+          },
+          {
+            id: EventV2.ID.make("evt_duplicate_response_history_session"),
+            aggregate_id: sessionID,
+            seq: 0,
+            batch_id: "evt_duplicate_response_history_batch",
+            batch_index: 3,
+            batch_size: 4,
+            type: "session.updated.1",
+            data: { sessionID },
+          },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+
+      const rows = yield* publicHistory(db, {})
+      expect(rows).toEqual([])
+      expect(JSON.stringify(rows)).not.toContain("HIDDEN_DUPLICATE_HISTORY_RECEIPT")
+    }),
+  )
+
+  it.effect("suppresses session.created history when no authoritative Session row exists", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const sessionID = SessionV2.ID.make("ses_missing_created_history")
+      yield* db.insert(EventSequenceTable).values({ aggregate_id: sessionID, seq: 0 }).run().pipe(Effect.orDie)
+      yield* db
+        .insert(EventTable)
+        .values({
+          id: EventV2.ID.make("evt_missing_created_history"),
+          aggregate_id: sessionID,
+          seq: 0,
+          type: "session.created.1",
+          data: { sessionID, info: {}, visibility: "public" },
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      expect(yield* publicHistory(db, {})).toEqual([])
+    }),
+  )
+
   it.effect("does not issue a second history query when the fence leaves zero candidates", () =>
     Effect.gen(function* () {
       const { db } = yield* Database.Service
@@ -479,36 +641,111 @@ describe("public sync history", () => {
         })
         .run()
         .pipe(Effect.orDie)
-      const observations: number[] = []
-      const instrumented = observeAllRows(db, observations)
+      const observations: QueryObservation[] = []
+      const instrumented = observeQueries(db, observations)
 
       expect(yield* publicHistory(instrumented, { unrelated: 0 })).toEqual([])
-      expect(observations).toEqual([0])
+      expect(observations).toEqual([{ method: "all", rows: 0 }])
     }),
   )
 
-  it.effect("loads only chunk-bounded candidate batches instead of scanning large unrelated history", () =>
+  it.effect("bulk-loads authority for 1050 owned Response batches without point-query N+1", () =>
     Effect.gen(function* () {
       const { db } = yield* Database.Service
       const candidateCount = 1_050
       const unrelatedCount = 5_000
       yield* db
+        .insert(ProjectTable)
+        .values({
+          id: ProjectV2.ID.global,
+          worktree: AbsolutePath.make("D:/bulk-authority-history"),
+          sandboxes: [],
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      const sessionIDs = Array.from({ length: candidateCount }, (_, index) =>
+        SessionV2.ID.make(`ses_bulk_authority_history_${index}`),
+      )
+      const workflowIDs = Array.from({ length: candidateCount }, (_, index) =>
+        Workflow.ID.make(`wfl_bulk_authority_history_${index}`),
+      )
+      const responseIDs = Array.from({ length: candidateCount }, (_, index) =>
+        Responses.ID.make(`resp_bulk_authority_history_${index}`),
+      )
+      yield* Effect.forEach(
+        chunk(
+          sessionIDs.map((id) => ({
+            id,
+            project_id: ProjectV2.ID.global,
+            slug: id,
+            directory: AbsolutePath.make("D:/bulk-authority-history"),
+            title: id,
+            visibility: "public" as const,
+            version: "test",
+            time_created: 1,
+            time_updated: 1,
+          })),
+          100,
+        ),
+        (rows) => db.insert(SessionTable).values(rows).run().pipe(Effect.orDie),
+        { discard: true },
+      )
+      yield* Effect.forEach(
+        chunk(
+          workflowIDs.map((id, index) => ({
+            id,
+            type: "visual-build",
+            status: "queued" as const,
+            input: {},
+            budget: {},
+            usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+            session_id: sessionIDs[index],
+            version: 0,
+            time_created: 1,
+            time_updated: 1,
+          })),
+          100,
+        ),
+        (rows) => db.insert(WorkflowRunTable).values(rows).run().pipe(Effect.orDie),
+        { discard: true },
+      )
+      yield* Effect.forEach(
+        chunk(
+          responseIDs.map((id, index) => ({
+            id,
+            workflow_id: workflowIDs[index],
+            model: "test",
+            status: "queued" as const,
+            background: true,
+            store: true,
+            request_hash: `bulk-authority-history-${index}`,
+            output: [],
+            created_at: 1,
+          })),
+          100,
+        ),
+        (rows) => db.insert(ResponseTable).values(rows).run().pipe(Effect.orDie),
+        { discard: true },
+      )
+      yield* db
         .insert(EventSequenceTable)
         .values([
-          { aggregate_id: "candidate_history", seq: candidateCount - 1 },
+          ...responseIDs.map((aggregate_id, seq) => ({ aggregate_id, seq })),
           { aggregate_id: "unrelated_history", seq: unrelatedCount - 1 },
         ])
         .run()
         .pipe(Effect.orDie)
       const candidates = Array.from({ length: candidateCount }, (_, index) => ({
         id: EventV2.ID.make(`evt_candidate_history_${index}`),
-        aggregate_id: "candidate_history",
+        aggregate_id: responseIDs[index],
         seq: index,
         batch_id: `evt_candidate_history_batch_${index}`,
         batch_index: 0,
         batch_size: 1,
-        type: "server.test.1",
-        data: {},
+        type: "response.in_progress.1",
+        data: { responseID: responseIDs[index], timestamp: 1 },
       }))
       const unrelated = Array.from({ length: unrelatedCount }, (_, index) => ({
         id: EventV2.ID.make(`evt_unrelated_history_${index}`),
@@ -522,13 +759,15 @@ describe("public sync history", () => {
         (rows) => db.insert(EventTable).values(rows).run().pipe(Effect.orDie),
         { discard: true },
       )
-      const observations: number[] = []
-      const instrumented = observeAllRows(db, observations)
+      const observations: QueryObservation[] = []
+      const instrumented = observeQueries(db, observations)
 
       const rows = yield* publicHistory(instrumented, { unrelated_history: unrelatedCount - 1 })
       expect(rows).toHaveLength(candidateCount)
-      expect(observations.length).toBeLessThan(10)
-      expect(observations.reduce((total, count) => total + count, 0)).toBe(candidateCount * 2)
+      expect(rows.map((row) => row.id)).toEqual(candidates.map((row) => row.id))
+      expect(observations.filter((observation) => observation.method === "get")).toEqual([])
+      expect(observations).toHaveLength(21)
+      expect(observations.reduce((total, observation) => total + observation.rows, 0)).toBe(candidateCount * 5)
     }),
   )
 })

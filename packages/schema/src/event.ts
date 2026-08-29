@@ -66,7 +66,7 @@ export function define<
       Schema.Struct({
         aggregateID: Schema.String,
         seq: Schema.Int,
-        version: Schema.Int,
+        version: input.durable === undefined ? Schema.Int : Schema.Literal(input.durable.version),
         replay: optional(Schema.Boolean),
         batch: optional(
           Schema.Struct({

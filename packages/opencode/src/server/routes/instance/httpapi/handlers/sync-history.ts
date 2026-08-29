@@ -43,5 +43,6 @@ export const publicHistory = Effect.fn("SyncHttpApi.publicHistory")(function* (
         .pipe(Effect.orDie),
     { concurrency: 1 },
   )).flat()
-  return yield* PublicEventVisibility.filterHistory(candidates, complete, PublicEventVisibility.databaseAuthority(db))
+  const authority = yield* PublicEventVisibility.preloadDatabaseAuthority(db, [...candidates, ...complete])
+  return yield* PublicEventVisibility.filterHistory(candidates, complete, authority)
 })
