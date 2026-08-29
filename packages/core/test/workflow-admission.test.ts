@@ -20,7 +20,7 @@ import { SessionStore } from "@opencode-ai/core/session/store"
 import { WorkflowAdmission } from "@opencode-ai/core/workflow/admission"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
-import { WorkflowRunTable, WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
+import { WorkflowRunTable } from "@opencode-ai/core/workflow/sql"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { testEffect } from "./lib/effect"
@@ -183,7 +183,7 @@ describe("WorkflowAdmission", () => {
 
       const receiptItems = yield* responses.items(first.response.id, "context")
       expect(receiptItems).toHaveLength(1)
-      expect(ResponsesAdmission.decodeVisualBuildReceipt(receiptItems[0]!.payload)).toMatchObject({
+      expect(ResponsesAdmission.decodeVisualBuildReceipt(receiptItems[0].payload)).toMatchObject({
         schemaVersion: 1,
         ids: {
           workflowID: first.workflow.id,

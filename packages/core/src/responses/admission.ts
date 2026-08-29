@@ -172,7 +172,6 @@ export function prepareVisualBuild(input: Responses.CreateInput, options: {
     input.requestHash !== receipt.requestHash ||
     input.model !== receipt.response.model ||
     input.background !== receipt.response.background ||
-    receipt.response.store !== true ||
     receipt.response.background !== (receipt.response.delivery === "background")
   ) {
     throw new InvalidCreate("Visual builds require one stored, same-workflow Response")

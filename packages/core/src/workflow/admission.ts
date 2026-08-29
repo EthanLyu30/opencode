@@ -185,7 +185,7 @@ const layer = Layer.effect(
       try {
         receipt =
           receiptItems.length === 1
-            ? ResponsesAdmission.decodeVisualBuildReceipt(receiptItems[0]!.payload)
+            ? ResponsesAdmission.decodeVisualBuildReceipt(receiptItems[0].payload)
             : undefined
       } catch {
         receipt = undefined
@@ -195,7 +195,7 @@ const layer = Layer.effect(
         winner.workflowID === expected.response.resource.workflowID &&
         winner.model === expected.response.resource.model &&
         winner.background === expected.response.resource.background &&
-        winner.store === true &&
+        winner.store &&
         winner.previousResponseID === undefined &&
         winner.conversationID === undefined &&
         winner.requestHash === expected.response.resource.requestHash
@@ -270,7 +270,7 @@ const layer = Layer.effect(
             maxRevisions: request.visual.maxRevisions,
             maxAttempts: request.budget.maxAttempts ?? 1,
             responseID: ids.responseID,
-          }).map((stage, index) => ({ ...stage, id: ids.stageIDs[index]! })),
+          }).map((stage, index) => ({ ...stage, id: ids.stageIDs[index] })),
         )
         const workflowInput = WorkflowProductionHostPlan.withPlan(
           {
@@ -410,32 +410,38 @@ function deterministicIDs(claim: string, maxRevisions: number) {
   const stageCount = 6 + maxRevisions * 3
   const digest = (kind: string, ordinal?: number) =>
     WorkflowBusinessArtifact.hash({ domain: ID_DOMAIN, claim, kind, ...(ordinal === undefined ? {} : { ordinal }) })
+  const firstStageID = Workflow.StageID.make(`wfs_${digest("stage", 0)}`)
+  const remainingStageIDs = Array.from({ length: stageCount - 1 }, (_, index) =>
+    Workflow.StageID.make(`wfs_${digest("stage", index + 1)}`),
+  )
   return Object.freeze({
     workflowID: Workflow.ID.make(`wfl_${digest("workflow")}`),
     sessionID: SessionSchema.ID.make(`ses_${digest("session")}`),
     responseID: Responses.ID.make(`resp_${digest("response")}`),
-    stageIDs: Object.freeze(
-      Array.from({ length: stageCount }, (_, ordinal) => Workflow.StageID.make(`wfs_${digest("stage", ordinal)}`)),
-    ) as readonly [Workflow.StageID, ...Workflow.StageID[]],
+    stageIDs: Object.freeze([firstStageID, ...remainingStageIDs] as const),
   })
 }
 
 function buildRouteMatrix(budget: Workflow.Budget): ResponsesAdmission.VisualBuildReceipt["routeMatrix"] {
-  return Object.fromEntries(
-    WorkflowRole.Role.literals.map((role) => {
-      const route = WorkflowRouting.resolve({ role, budget })
-      return [
-        role,
-        {
-          providerID: route.providerID,
-          modelID: route.modelID,
-          protocol: route.protocol,
-          reasoningEffort: route.reasoningEffort,
-          requiredCapabilities: [...route.requiredCapabilities],
-        },
-      ]
-    }),
-  ) as unknown as ResponsesAdmission.VisualBuildReceipt["routeMatrix"]
+  const route = (role: WorkflowRole.Role) => {
+    const resolved = WorkflowRouting.resolve({ role, budget })
+    return {
+      providerID: resolved.providerID,
+      modelID: resolved.modelID,
+      protocol: resolved.protocol,
+      reasoningEffort: resolved.reasoningEffort,
+      requiredCapabilities: [...resolved.requiredCapabilities],
+    }
+  }
+  return {
+    design: route("design"),
+    decompose: route("decompose"),
+    implement: route("implement"),
+    repair: route("repair"),
+    test: route("test"),
+    visual_review: route("visual_review"),
+    deliver: route("deliver"),
+  }
 }
 
 export const node = makeGlobalNode({

@@ -14,14 +14,17 @@ export function publicSessionEvent(
   sessions: Pick<SessionV2.Interface, "get">,
 ) {
   const durableID = event.durable?.aggregateID
-  const data = typeof event.data === "object" && event.data !== null ? (event.data as Record<string, unknown>) : undefined
+  const dataSessionID =
+    typeof event.data === "object" && event.data !== null && "sessionID" in event.data
+      ? event.data.sessionID
+      : undefined
   const sessionID =
     durableID !== undefined
       ? Schema.is(SessionV2.ID)(durableID)
         ? durableID
         : undefined
-      : Schema.is(SessionV2.ID)(data?.sessionID)
-        ? data.sessionID
+      : Schema.is(SessionV2.ID)(dataSessionID)
+        ? dataSessionID
         : undefined
   if (sessionID === undefined) return Effect.succeed(true)
   return sessions.get(sessionID).pipe(

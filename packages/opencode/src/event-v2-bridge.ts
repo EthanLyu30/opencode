@@ -40,14 +40,14 @@ const layer = Layer.effect(
     const unsubscribe = yield* events.listen((event) =>
       Effect.gen(function* () {
         const durableID = event.durable?.aggregateID
-        const data = event.data as Record<string, unknown>
+        const dataSessionID = "sessionID" in event.data ? event.data.sessionID : undefined
         const sessionID =
           durableID !== undefined
             ? Schema.is(SessionV2.ID)(durableID)
               ? durableID
               : undefined
-            : Schema.is(SessionV2.ID)(data.sessionID)
-              ? data.sessionID
+            : Schema.is(SessionV2.ID)(dataSessionID)
+              ? dataSessionID
               : undefined
         if (sessionID !== undefined) {
           const row = yield* db

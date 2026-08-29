@@ -82,30 +82,38 @@ function visualReceipt(responseID: Responses.ID) {
     preview: { kind: "static", entrypoint: "package.json" },
     delivery: "background",
   })
-  const stageIDs = WorkflowGraph.expandVisualBuild({ maxRevisions: 0, maxAttempts: 1, responseID }).map(
-    (_, ordinal) => Workflow.StageID.make(`wfs_receipt_${ordinal}`),
-  ) as [Workflow.StageID, ...Workflow.StageID[]]
-  const graph = ResponsesAdmission.VisualBuildGraph.make(
-    WorkflowGraph.expandVisualBuild({ maxRevisions: 0, maxAttempts: 1, responseID }).map((stage, ordinal) => ({
-      ...stage,
-      id: stageIDs[ordinal]!,
-    })) as [ResponsesAdmission.VisualBuildReceipt["graph"][number], ...ResponsesAdmission.VisualBuildReceipt["graph"]],
-  )
-  const routeMatrix = Object.fromEntries(
-    WorkflowRole.Role.literals.map((role) => {
-      const route = WorkflowRouting.resolve({ role, budget: request.budget })
-      return [
-        role,
-        {
-          providerID: route.providerID,
-          modelID: route.modelID,
-          protocol: route.protocol,
-          reasoningEffort: route.reasoningEffort,
-          requiredCapabilities: [...route.requiredCapabilities],
-        },
-      ]
-    }),
-  ) as unknown as ResponsesAdmission.VisualBuildReceipt["routeMatrix"]
+  const [firstStage, ...remainingStages] = WorkflowGraph.expandVisualBuild({
+    maxRevisions: 0,
+    maxAttempts: 1,
+    responseID,
+  })
+  if (!firstStage) throw new Error("Visual graph fixture must be non-empty")
+  const firstStageID = Workflow.StageID.make("wfs_receipt_0")
+  const remainingStageIDs = remainingStages.map((_, index) => Workflow.StageID.make(`wfs_receipt_${index + 1}`))
+  const stageIDs = [firstStageID, ...remainingStageIDs] as const
+  const graph = ResponsesAdmission.VisualBuildGraph.make([
+    { ...firstStage, id: firstStageID },
+    ...remainingStages.map((stage, index) => ({ ...stage, id: remainingStageIDs[index] })),
+  ])
+  const route = (role: WorkflowRole.Role) => {
+    const resolved = WorkflowRouting.resolve({ role, budget: request.budget })
+    return {
+      providerID: resolved.providerID,
+      modelID: resolved.modelID,
+      protocol: resolved.protocol,
+      reasoningEffort: resolved.reasoningEffort,
+      requiredCapabilities: [...resolved.requiredCapabilities],
+    }
+  }
+  const routeMatrix = {
+    design: route("design"),
+    decompose: route("decompose"),
+    implement: route("implement"),
+    repair: route("repair"),
+    test: route("test"),
+    visual_review: route("visual_review"),
+    deliver: route("deliver"),
+  }
   const location = Location.Ref.make({ directory: AbsolutePath.make(process.cwd()) })
   const preview = PreviewPlan.freeze({ authority: "admission", location, preview: request.preview })
   const productionHostPlan = WorkflowProductionHostPlan.freeze({ authority: "admission", location, preview })
