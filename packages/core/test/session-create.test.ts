@@ -51,6 +51,25 @@ const location = Location.Ref.make({ directory: AbsolutePath.make("/project") })
 const id = SessionV2.ID.create()
 
 describe("SessionV2.create", () => {
+  it.effect("prepares byte-identical Session creation events for the same admission identity", () =>
+    Effect.sync(() => {
+      const project = { id: ProjectV2.ID.global, directory: location.directory }
+      const prepared = {
+        id: SessionV2.ID.make("ses_deterministic_admission"),
+        location,
+        project,
+        visibility: "workflow" as const,
+        timestamp: 1_788_000_000_000,
+      }
+
+      const first = SessionAdmission.prepare(prepared)
+      const retried = SessionAdmission.prepare(prepared)
+
+      expect(JSON.stringify(retried.entry)).toBe(JSON.stringify(first.entry))
+      expect(retried.entry.data.info.slug).toBe(first.entry.data.info.slug)
+    }),
+  )
+
   it.effect("keeps workflow Sessions behind every public Session surface", () =>
     Effect.gen(function* () {
       const session = yield* SessionV2.Service

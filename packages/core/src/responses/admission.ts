@@ -88,7 +88,14 @@ export const VisualBuildReceiptPayload = Schema.Struct({
 }).annotate({ identifier: "ResponsesAdmission.VisualBuildReceiptPayload", ...exact })
 export interface VisualBuildReceiptPayload extends Schema.Schema.Type<typeof VisualBuildReceiptPayload> {}
 
-export class InvalidCreate extends Error {}
+export class InvalidCreate extends Error {
+  constructor(
+    readonly reason: "invalid_relationship" | "invalid_receipt" | "receipt_too_large",
+    message: string,
+  ) {
+    super(message)
+  }
+}
 
 export function receiptPayload(receipt: VisualBuildReceipt): VisualBuildReceiptPayload {
   const validated = validateVisualBuildReceipt(Schema.decodeUnknownSync(VisualBuildReceipt)(receipt))
@@ -112,13 +119,19 @@ export function tryDecodeVisualBuildReceipt(input: unknown): VisualBuildReceipt 
   }
 }
 
-export function prepare(input: Responses.CreateInput, options: {
-  readonly responseID: Responses.ID
-  readonly timestamp: DateTime.Utc
-  readonly context: ReadonlyArray<Responses.ItemPayload>
-}) {
-  if ((input.previousResponseID && input.conversationID) || (!input.store && (input.conversationID || input.background))) {
-    throw new InvalidCreate("Invalid Response persistence relationship")
+export function prepare(
+  input: Responses.CreateInput,
+  options: {
+    readonly responseID: Responses.ID
+    readonly timestamp: DateTime.Utc
+    readonly context: ReadonlyArray<Responses.ItemPayload>
+  },
+) {
+  if (
+    (input.previousResponseID && input.conversationID) ||
+    (!input.store && (input.conversationID || input.background))
+  ) {
+    throw new InvalidCreate("invalid_relationship", "Invalid Response persistence relationship")
   }
   const resource = Responses.Resource.make({
     id: options.responseID,
@@ -157,11 +170,14 @@ export function prepare(input: Responses.CreateInput, options: {
   })
 }
 
-export function prepareVisualBuild(input: Responses.CreateInput, options: {
-  readonly responseID: Responses.ID
-  readonly timestamp: DateTime.Utc
-  readonly receipt: VisualBuildReceipt
-}) {
+export function prepareVisualBuild(
+  input: Responses.CreateInput,
+  options: {
+    readonly responseID: Responses.ID
+    readonly timestamp: DateTime.Utc
+    readonly receipt: VisualBuildReceipt
+  },
+) {
   const receipt = validateVisualBuildReceipt(Schema.decodeUnknownSync(VisualBuildReceipt)(options.receipt))
   if (
     !input.store ||
@@ -174,7 +190,7 @@ export function prepareVisualBuild(input: Responses.CreateInput, options: {
     input.background !== receipt.response.background ||
     receipt.response.background !== (receipt.response.delivery === "background")
   ) {
-    throw new InvalidCreate("Visual builds require one stored, same-workflow Response")
+    throw new InvalidCreate("invalid_relationship", "Visual builds require one stored, same-workflow Response")
   }
   return prepare(input, {
     responseID: options.responseID,
@@ -222,14 +238,14 @@ function validateVisualBuildReceipt(receipt: VisualBuildReceipt): VisualBuildRec
     receipt.previewPlanSha256 !== preview.configSha256 ||
     receipt.productionHostPlanSha256 !== WorkflowBusinessArtifact.hash(productionHostPlan)
   ) {
-    throw new InvalidCreate("Visual-build admission receipt is internally inconsistent")
+    throw new InvalidCreate("invalid_receipt", "Visual-build admission receipt is internally inconsistent")
   }
   return receipt
 }
 
 function bounded<A extends VisualBuildReceiptPayload>(value: A): A {
   if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_VISUAL_BUILD_RECEIPT_BYTES) {
-    throw new InvalidCreate("Visual-build admission receipt exceeds its durable bound")
+    throw new InvalidCreate("receipt_too_large", "Visual-build admission receipt exceeds its durable bound")
   }
   return value
 }

@@ -638,7 +638,7 @@ const layer: Layer.Layer<
           yield* remove(child.id)
         }
 
-        yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
+        yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session, visibility: "public" })
         yield* events.remove(sessionID)
       } catch (error) {
         yield* Effect.logError("failed to remove session", { sessionID, error })

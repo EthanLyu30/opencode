@@ -210,6 +210,32 @@ describe("WorkflowAdmission", () => {
     }),
   )
 
+  it.effect("publishes complete related ownership metadata on every admission batch member", () =>
+    Effect.gen(function* () {
+      wakes = 0
+      failWake = false
+      const root = yield* workspace()
+      const admission = yield* WorkflowAdmission.Service
+      const source = yield* EventV2.Service
+      const observed: EventV2.Payload[] = []
+      const unsubscribe = yield* source.listen((event) => Effect.sync(() => observed.push(event)))
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const result = yield* admission.admitVisualBuild(input(), locationOf(root.path), "complete-related-batch")
+      const batchID = observed.find((event) => event.type === WorkflowEvent.Created.type)?.durable?.batch?.id
+      const batch = observed.filter((event) => event.durable?.batch?.id === batchID)
+
+      expect(batch).toHaveLength(12)
+      for (const event of batch) {
+        expect(event.durable?.related).toHaveLength(batch.length)
+        expect(event.durable?.related).toContainEqual({
+          type: SessionV1.Event.Created.type,
+          data: expect.objectContaining({ sessionID: result.workflow.sessionID, visibility: "workflow" }),
+        })
+      }
+    }),
+  )
+
   it.effect("keeps a committed admission recoverable across a crash before wake", () =>
     Effect.gen(function* () {
       wakes = 0
@@ -288,9 +314,9 @@ describe("WorkflowAdmission", () => {
 
       expect(
         Exit.isFailure(
-          yield* admission.admitVisualBuild(payload as WorkflowVisualBuild.CreateInput, locationOf(root.path)).pipe(
-            Effect.exit,
-          ),
+          yield* admission
+            .admitVisualBuild(payload as WorkflowVisualBuild.CreateInput, locationOf(root.path))
+            .pipe(Effect.exit),
         ),
       ).toBe(true)
       expect(yield* rowCounts).toEqual([0, 0, 0, 0, 0, 0])
@@ -306,6 +332,40 @@ describe("WorkflowAdmission", () => {
         expect(failure._tag).toBe("WorkflowAdmission.InvalidIdempotencyKey")
       }
       expect(yield* rowCounts).toEqual([0, 0, 0, 0, 0, 0])
+    }),
+  )
+
+  it.effect("returns a bounded typed error for an oversized admission receipt without partial writes", () =>
+    Effect.gen(function* () {
+      wakes = 0
+      failWake = false
+      const root = yield* workspace()
+      const admission = yield* WorkflowAdmission.Service
+      const responses = yield* ResponsesStore.Service
+      const location = locationOf(root.path)
+
+      const measured = yield* admission.admitVisualBuild(input({ prompt: "x" }), location, "measure-receipt")
+      const measuredPayload = (yield* responses.items(measured.response.id, "context"))[0].payload
+      const measuredBytes = new TextEncoder().encode(JSON.stringify(measuredPayload)).byteLength
+      const atLimitPrompt = "x".repeat(ResponsesAdmission.MAX_VISUAL_BUILD_RECEIPT_BYTES - measuredBytes + 1)
+
+      const atLimit = yield* admission.admitVisualBuild(input({ prompt: atLimitPrompt }), location, "at-limit")
+      const atLimitPayload = (yield* responses.items(atLimit.response.id, "context"))[0].payload
+      expect(new TextEncoder().encode(JSON.stringify(atLimitPayload)).byteLength).toBe(
+        ResponsesAdmission.MAX_VISUAL_BUILD_RECEIPT_BYTES,
+      )
+      const beforeFailure = yield* rowCounts
+
+      const secret = "TOP_SECRET_RECEIPT_BOUNDARY"
+      const failure = yield* admission
+        .admitVisualBuild(input({ prompt: atLimitPrompt + secret }), location, "over-limit")
+        .pipe(Effect.flip)
+      expect(failure._tag).toBe("WorkflowAdmission.InvalidAdmission")
+      expect(failure.message.length).toBeLessThanOrEqual(128)
+      expect(failure.message).not.toContain(secret)
+      expect(yield* rowCounts).toEqual(beforeFailure)
+
+      expect(wakes).toBe(2)
     }),
   )
 })

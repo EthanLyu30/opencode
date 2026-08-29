@@ -26,7 +26,7 @@ export interface PrepareInput {
 export function prepare(input: PrepareInput) {
   const legacy = SessionV1.SessionInfo.make({
     id: input.id,
-    slug: Slug.create(),
+    slug: Slug.create(input.id),
     version: InstallationVersion,
     projectID: input.project.id,
     directory: input.location.directory,

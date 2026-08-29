@@ -989,6 +989,7 @@ describe("EventV2", () => {
         { id: serialized[0]!.batchID, index: 0, size: 2 },
         { id: serialized[0]!.batchID, index: 1, size: 2 },
       ])
+      expect(received.map((event) => event.durable?.related?.length)).toEqual([2, 2])
       expect(projected[0]?.durable?.related).toMatchObject([{ type: DurableMessage.type }])
       expect(projected[1]?.durable?.related).toHaveLength(2)
 

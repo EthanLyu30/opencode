@@ -45,6 +45,14 @@ export class InvalidIdempotencyKey extends Schema.TaggedErrorClass<InvalidIdempo
   { message: Schema.String },
 ) {}
 
+export class InvalidAdmission extends Schema.TaggedErrorClass<InvalidAdmission>()(
+  "WorkflowAdmission.InvalidAdmission",
+  {
+    reason: Schema.Literal("receipt_too_large"),
+    message: Schema.String.check(Schema.isMaxLength(128)),
+  },
+) {}
+
 export interface Admission {
   readonly workflow: Workflow.Info
   readonly response: Responses.Resource
@@ -58,6 +66,7 @@ export interface Interface {
   ) => Effect.Effect<
     Admission,
     | ConflictError
+    | InvalidAdmission
     | InvalidIdempotencyKey
     | WorkflowSecretGuard.UnsafePersistenceError
     | AgentV2.ReservedSelectionError
@@ -68,12 +77,15 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
 
 type AdmittedStage = Omit<Workflow.StageInput, "id"> & { readonly id: Workflow.StageID }
 
-export function prepare(input: Workflow.CreateInput, options: {
-  readonly workflowID: Workflow.ID
-  readonly stages: readonly [AdmittedStage, ...AdmittedStage[]]
-  readonly timestamp: DateTime.Utc
-  readonly admission?: Pick<Workflow.AdmissionInput, "location" | "sessionID" | "agent">
-}) {
+export function prepare(
+  input: Workflow.CreateInput,
+  options: {
+    readonly workflowID: Workflow.ID
+    readonly stages: readonly [AdmittedStage, ...AdmittedStage[]]
+    readonly timestamp: DateTime.Utc
+    readonly admission?: Pick<Workflow.AdmissionInput, "location" | "sessionID" | "agent">
+  },
+) {
   const ordinals = new Set<number>()
   const keys = new Set<string>()
   for (const stage of options.stages) {
@@ -184,9 +196,7 @@ const layer = Layer.effect(
       let receipt: ResponsesAdmission.VisualBuildReceipt | undefined
       try {
         receipt =
-          receiptItems.length === 1
-            ? ResponsesAdmission.decodeVisualBuildReceipt(receiptItems[0].payload)
-            : undefined
+          receiptItems.length === 1 ? ResponsesAdmission.decodeVisualBuildReceipt(receiptItems[0].payload) : undefined
       } catch {
         receipt = undefined
       }
@@ -336,10 +346,21 @@ const layer = Layer.effect(
           requestHash: claim,
           input: [{ type: "message", role: "user", content: request.prompt }],
         }
-        const response = ResponsesAdmission.prepareVisualBuild(responseInput, {
-          responseID: ids.responseID,
-          timestamp,
-          receipt,
+        const response = yield* Effect.try({
+          try: () =>
+            ResponsesAdmission.prepareVisualBuild(responseInput, {
+              responseID: ids.responseID,
+              timestamp,
+              receipt,
+            }),
+          catch: (error) => {
+            if (!(error instanceof ResponsesAdmission.InvalidCreate) || error.reason !== "receipt_too_large")
+              throw error
+            return new InvalidAdmission({
+              reason: "receipt_too_large",
+              message: "Visual-build admission exceeds the durable receipt bound",
+            })
+          },
         })
         const expected: PreparedVisualBuild = { workflow, session, response, receipt }
         if (yield* responses.request(claim)) return yield* reconcile(expected)
@@ -355,13 +376,15 @@ const layer = Layer.effect(
           .pipe(
             Effect.as({ created: true as const }),
             Effect.catchCause((cause) =>
-              responses.request(claim).pipe(
-                Effect.flatMap((winner) =>
-                  winner
-                    ? reconcile(expected).pipe(Effect.map((admission) => ({ created: false as const, admission })))
-                    : Effect.failCause(cause),
+              responses
+                .request(claim)
+                .pipe(
+                  Effect.flatMap((winner) =>
+                    winner
+                      ? reconcile(expected).pipe(Effect.map((admission) => ({ created: false as const, admission })))
+                      : Effect.failCause(cause),
+                  ),
                 ),
-              ),
             ),
           )
         if (!published.created) return published.admission
@@ -387,7 +410,12 @@ function normalizeKey(
   if (input === undefined) {
     return `derived:${WorkflowBusinessArtifact.hash({ schemaVersion: 1, request, location })}`
   }
-  if (input.length < 1 || input.length > 256 || input.normalize("NFC") !== input || /[\u0000-\u001f\u007f]/.test(input)) {
+  if (
+    input.length < 1 ||
+    input.length > 256 ||
+    input.normalize("NFC") !== input ||
+    /[\u0000-\u001f\u007f]/.test(input)
+  ) {
     throw new InvalidIdempotencyKey({ message: "Idempotency key is not normalized" })
   }
   return input

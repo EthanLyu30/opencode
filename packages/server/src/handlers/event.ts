@@ -1,4 +1,5 @@
 import { EventV2 } from "@opencode-ai/core/event"
+import { PublicEventVisibility } from "@opencode-ai/core/event/public-visibility"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { OpenCodeEvent } from "@opencode-ai/protocol/groups/event"
 import { Effect, Schema, Stream } from "effect"
@@ -10,27 +11,19 @@ import { Api } from "../api"
 const subscriberCapacity = 256
 
 export function publicSessionEvent(
-  event: { readonly durable?: { readonly aggregateID: string }; readonly data?: unknown },
+  event: Parameters<typeof PublicEventVisibility.isPublic>[0],
   sessions: Pick<SessionV2.Interface, "get">,
 ) {
-  const durableID = event.durable?.aggregateID
-  const dataSessionID =
-    typeof event.data === "object" && event.data !== null && "sessionID" in event.data
-      ? event.data.sessionID
-      : undefined
-  const sessionID =
-    durableID !== undefined
-      ? Schema.is(SessionV2.ID)(durableID)
-        ? durableID
-        : undefined
-      : Schema.is(SessionV2.ID)(dataSessionID)
-        ? dataSessionID
-        : undefined
-  if (sessionID === undefined) return Effect.succeed(true)
-  return sessions.get(sessionID).pipe(
-    Effect.as(true),
-    Effect.catchTag("Session.NotFoundError", () => Effect.succeed(false)),
-  )
+  const authority = {
+    session: (sessionID: SessionV2.ID) =>
+      sessions.get(sessionID).pipe(
+        Effect.as("public" as const),
+        Effect.catchTag("Session.NotFoundError", () => Effect.succeed(undefined)),
+      ),
+    workflow: () => Effect.succeed(undefined),
+    response: () => Effect.succeed(undefined),
+  }
+  return PublicEventVisibility.isPublic(event, authority)
 }
 
 function eventData(data: unknown): Sse.Event {

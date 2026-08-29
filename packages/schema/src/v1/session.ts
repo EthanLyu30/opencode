@@ -599,6 +599,7 @@ const events = {
     schema: {
       sessionID: SessionID,
       info: SessionInfo,
+      visibility: optional(Schema.Literals(["public", "workflow"])),
     },
   }),
   MessageUpdated: define({

@@ -65,7 +65,16 @@ export namespace Slug {
     "wolf",
   ] as const
 
-  export function create() {
+  export function create(identity?: string) {
+    if (identity !== undefined) {
+      let hash = 2166136261
+      for (let index = 0; index < identity.length; index++) {
+        hash = Math.imul(hash ^ identity.charCodeAt(index), 16777619) >>> 0
+      }
+      const adjective = ADJECTIVES[hash % ADJECTIVES.length]
+      const noun = NOUNS[(Math.imul(hash, 2246822519) >>> 0) % NOUNS.length]
+      return `${adjective}-${noun}`
+    }
     return [
       ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)],
       NOUNS[Math.floor(Math.random() * NOUNS.length)],

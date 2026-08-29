@@ -75,7 +75,7 @@ const layer = Layer.effect(
     const sessions = yield* SessionStore.Service
 
     const moveSession = Effect.fn("MoveSession.moveSession")(function* (input: Input) {
-      const current = yield* sessions.get(input.sessionID)
+      const current = yield* sessions.getPublic(input.sessionID)
       if (!current) return yield* new SessionV2.NotFoundError({ sessionID: input.sessionID })
       const directory = AbsolutePath.make(input.destination.directory)
       if (current.location.directory === directory) return

@@ -4,14 +4,12 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 import { GlobalBus } from "@/bus/global"
 import { EventV2 } from "@opencode-ai/core/event"
+import { PublicEventVisibility } from "@opencode-ai/core/event/public-visibility"
 import { Location } from "@opencode-ai/core/location"
 import { Project } from "@opencode-ai/core/project"
 import { AbsolutePath } from "@opencode-ai/core/schema"
-import { SessionV2 } from "@opencode-ai/core/session"
-import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Database } from "@opencode-ai/core/database/database"
-import { eq } from "drizzle-orm"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer } from "effect"
 
 export class Service extends Context.Service<Service, EventV2.Interface>()("@opencode/EventV2Bridge") {}
 
@@ -20,6 +18,7 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const events = yield* EventV2.Service
     const { db } = yield* Database.Service
+    const visibility = PublicEventVisibility.databaseAuthority(db)
 
     const publish: EventV2.Interface["publish"] = (definition, data, options) =>
       Effect.gen(function* () {
@@ -39,25 +38,7 @@ const layer = Layer.effect(
 
     const unsubscribe = yield* events.listen((event) =>
       Effect.gen(function* () {
-        const durableID = event.durable?.aggregateID
-        const dataSessionID = "sessionID" in event.data ? event.data.sessionID : undefined
-        const sessionID =
-          durableID !== undefined
-            ? Schema.is(SessionV2.ID)(durableID)
-              ? durableID
-              : undefined
-            : Schema.is(SessionV2.ID)(dataSessionID)
-              ? dataSessionID
-              : undefined
-        if (sessionID !== undefined) {
-          const row = yield* db
-            .select({ visibility: SessionTable.visibility })
-            .from(SessionTable)
-            .where(eq(SessionTable.id, sessionID))
-            .get()
-            .pipe(Effect.orDie)
-          if (row?.visibility !== "public") return
-        }
+        if (!(yield* PublicEventVisibility.isPublic(event, visibility))) return
         const ctx = yield* InstanceRef
         const workspaceID = (yield* WorkspaceRef) ?? event.location?.workspaceID
         GlobalBus.emit("event", {

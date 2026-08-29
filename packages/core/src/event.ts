@@ -704,6 +704,14 @@ export const layerWith = (options?: LayerOptions) =>
                   seq: committed.seq,
                   version: definition.durable.version,
                   batch,
+                  ...(options?.related?.length
+                    ? {
+                        related: [
+                          { type: event.type, data: event.data },
+                          ...options.related.map((item) => ({ type: item.definition.type, data: item.data })),
+                        ],
+                      }
+                    : {}),
                 },
               }
               yield* notifyCommitted([event as Payload, ...committed.relatedEvents])
@@ -1088,6 +1096,10 @@ export const layerWith = (options?: LayerOptions) =>
                       version: entry.definition.durable!.version,
                       replay: true,
                       ...(entry.primary.batch ? { batch: entry.primary.batch } : {}),
+                      related: entry.batch.members.map((member) => ({
+                        type: member.payload.type,
+                        data: member.payload.data,
+                      })),
                     },
                   },
                   ...entry.result.relatedEvents,

@@ -19,6 +19,10 @@ import { InstanceBootstrap } from "@/project/bootstrap"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { eq } from "drizzle-orm"
+import { DateTime } from "effect"
+import { ResponseEvent } from "@opencode-ai/schema/response-event"
+import { Responses } from "@opencode-ai/schema/responses"
+import { Workflow } from "@opencode-ai/schema/workflow"
 
 const it = testEffect(
   AppNodeBuilder.build(
@@ -165,6 +169,99 @@ describe("session.created event", () => {
       })
       yield* events.publish(SessionNs.Event.Diff, { sessionID: info.id, diff: [] })
 
+      expect(received).toEqual([])
+    }),
+  )
+
+  it.instance("does not emit response members of a hidden Session batch on the legacy global bus", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const info = yield* session.create({})
+      const { db } = yield* Database.Service
+      yield* db
+        .update(SessionTable)
+        .set({ visibility: "workflow" })
+        .where(eq(SessionTable.id, info.id))
+        .run()
+        .pipe(Effect.orDie)
+
+      const responseID = Responses.ID.make("resp_hidden_global_batch")
+      const workflowID = Workflow.ID.make("wfl_hidden_global_batch")
+      const received: unknown[] = []
+      const listener = (event: { payload: { properties?: unknown; syncEvent?: EventV2.SerializedEvent } }) => {
+        const encoded = JSON.stringify(event)
+        if (encoded.includes(responseID) || encoded.includes("HIDDEN_RECEIPT_SENTINEL")) received.push(event)
+      }
+      GlobalBus.on("event", listener)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
+
+      yield* events.publish(
+        ResponseEvent.Created,
+        {
+          responseID,
+          workflowID,
+          timestamp: DateTime.makeUnsafe(2_000),
+          model: "test",
+          background: true,
+          store: true,
+          requestHash: "hidden-global-batch",
+          context: [{ type: "message", content: "HIDDEN_RECEIPT_SENTINEL" }],
+          input: [{ type: "message", role: "user", content: "hidden" }],
+        },
+        {
+          related: [
+            {
+              definition: SessionV1.Event.Updated,
+              data: { sessionID: info.id, info },
+            },
+          ],
+        },
+      )
+
+      expect(received).toEqual([])
+    }),
+  )
+
+  it.instance("emits a public Session deletion after its projected row is gone", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const info = yield* session.create({})
+      const received = yield* Deferred.make<unknown>()
+      const listener = (event: { payload: { type?: string; properties?: { sessionID?: string } } }) => {
+        if (event.payload.type === "session.deleted" && event.payload.properties?.sessionID === info.id) {
+          Deferred.doneUnsafe(received, Effect.succeed(event))
+        }
+      }
+      GlobalBus.on("event", listener)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
+
+      yield* events.publish(SessionV1.Event.Deleted, { sessionID: info.id, info, visibility: "public" })
+      expect(yield* awaitDeferred(received, "timed out waiting for public session.deleted")).toBeDefined()
+    }),
+  )
+
+  it.instance("suppresses a workflow Session deletion after its projected row is gone", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const info = yield* session.create({})
+      const { db } = yield* Database.Service
+      yield* db
+        .update(SessionTable)
+        .set({ visibility: "workflow" })
+        .where(eq(SessionTable.id, info.id))
+        .run()
+        .pipe(Effect.orDie)
+      const received: unknown[] = []
+      const listener = (event: { payload: unknown }) => {
+        if (JSON.stringify(event).includes(info.id)) received.push(event)
+      }
+      GlobalBus.on("event", listener)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
+
+      yield* events.publish(SessionV1.Event.Deleted, { sessionID: info.id, info, visibility: "workflow" })
       expect(received).toEqual([])
     }),
   )

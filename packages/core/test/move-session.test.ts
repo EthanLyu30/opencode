@@ -51,6 +51,55 @@ async function initRepo(directory: string) {
 }
 
 describe("MoveSession", () => {
+  it.live("rejects a known workflow Session before resolving or moving its destination", () =>
+    Effect.gen(function* () {
+      const root = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+      )
+      const source = abs(yield* Effect.promise(() => fs.realpath(root.path)))
+      const projectID = Project.ID.make("global")
+      const sessionID = SessionV2.ID.make("ses_hidden_move")
+      const { db } = yield* Database.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: projectID, worktree: source, sandboxes: [], time_created: 1, time_updated: 1 })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: projectID,
+          slug: "hidden-move",
+          directory: source,
+          title: "hidden move",
+          version: "test",
+          visibility: "workflow",
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      const error = yield* MoveSession.Service.use((service) =>
+        service
+          .moveSession({
+            sessionID,
+            destination: { directory: abs(path.join(source, "must-not-be-resolved")) },
+            moveChanges: true,
+          })
+          .pipe(Effect.flip),
+      )
+
+      expect(error).toBeInstanceOf(SessionV2.NotFoundError)
+      expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get()).toMatchObject({
+        directory: source,
+        visibility: "workflow",
+      })
+    }),
+  )
+
   it.live("moves session changes to another project directory", () =>
     Effect.gen(function* () {
       const root = yield* Effect.acquireRelease(
