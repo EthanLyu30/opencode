@@ -9,6 +9,7 @@ import { WorkflowImplementationArtifact } from "@opencode-ai/core/workflow/artif
 import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/production-host-plan"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { DateTime, Effect } from "effect"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -111,6 +112,8 @@ describe("Workflow production evidence Server composition", () => {
       let currentEntries = entries
       let capturedBytes = source
       const materializationRoot = `${directory}-materializations`
+      let materializationFences = 0
+      let rejectMaterializationRoot = false
       const resolver = WorkflowProductionEvidenceServer.makeImplementationResolver({
         getWorkflow: () => Effect.succeed(detail),
         captureSnapshot: () =>
@@ -121,6 +124,11 @@ describe("Workflow production evidence Server composition", () => {
           }),
         snapshotEntries: (_location, snapshot) => Effect.succeed(snapshot === baseline ? entries : currentEntries),
         materializationRoot: () => materializationRoot,
+        verifyMaterializationRoot: async (root) => {
+          expect(root).toBe(path.resolve(materializationRoot))
+          materializationFences++
+          if (rejectMaterializationRoot) throw new TypeError("hostile junction identity")
+        },
         materializeSnapshot: (_location, _snapshot, target) =>
           Effect.promise(async () => {
             await fs.mkdir(target, { recursive: true })
@@ -137,13 +145,202 @@ describe("Workflow production evidence Server composition", () => {
       if (resolved.materialization === undefined) throw new Error("missing exact materialization")
       expect(await fs.readFile(path.join(resolved.materialization.root, "index.html"), "utf8")).toBe(source)
       expect(await fs.readFile(path.join(directory, "index.html"), "utf8")).toBe(source)
+      expect(materializationFences).toBeGreaterThanOrEqual(4)
+      const manager = WorkflowProductionEvidenceServer.makeMaterializationLeaseManager({
+        root: () => materializationRoot,
+        verifyRoot: async (root) => {
+          expect(root).toBe(path.resolve(materializationRoot))
+        },
+        getWorkflow: () => Effect.succeed(detail),
+      })
+      const ownerRoot = path.dirname(resolved.materialization.root)
+      expect(
+        await manager.release({
+          workflowID,
+          stageID: WorkflowSchema.StageID.make("wfs_foreign_cleanup_owner"),
+          revision: 0,
+        }),
+      ).toBe(false)
+      expect(await fs.lstat(ownerRoot).then(() => true)).toBe(true)
+      expect(await manager.release({ workflowID, stageID: reviewStage.id, revision: 0 })).toBe(true)
+      expect(
+        await fs.lstat(ownerRoot).then(
+          () => true,
+          () => false,
+        ),
+      ).toBe(false)
       currentEntries = Snapshot.canonicalEntries([
         { path: RelativePath.make("index.html"), type: "file", sha256: "f".repeat(64), size: 1 },
       ])
       await expect(resolver({ workflowID, revision: 0, plan: preview })).rejects.toThrow("Current workspace")
+      currentEntries = entries
+      rejectMaterializationRoot = true
+      await expect(resolver({ workflowID, revision: 0, plan: preview })).rejects.toThrow("materialization")
     } finally {
       await fs.rm(directory, { recursive: true, force: true })
       await fs.rm(`${directory}-materializations`, { recursive: true, force: true })
+    }
+  })
+
+  test("garbage-collects exact terminal leases fairly while retaining a foreign owner", async () => {
+    const root = await fs.mkdtemp("D:\\OpenCode-Task23.7b\\lease-gc-")
+    try {
+      const details = new Map<string, WorkflowSchema.Detail>()
+      const emptyArchive = await WorkflowWorkspaceMaterialization.seal([], async () => {
+        throw new Error("empty archive has no readable entries")
+      })
+      for (let index = 0; index < 3; index++) {
+        const workflowID = WorkflowSchema.ID.make(`wfl_gc_${index}`)
+        const stageID = WorkflowSchema.StageID.make(`wfs_gc_${index}`)
+        const location = Location.Ref.make({ directory: AbsolutePath.make(`D:\\workspace-${index}`) })
+        const provisional = {
+          workflowID,
+          stageID,
+          revision: 0,
+          location,
+          snapshotRef: Snapshot.ID.make(`snapshot-${index}`),
+          manifestSha256: String(index + 1).repeat(64),
+          workspaceSha256: emptyArchive.workspaceSha256,
+        }
+        const identity = WorkflowWorkspaceMaterialization.materializationID(provisional)
+        const ownerRoot = path.join(root, identity)
+        const treeRoot = path.join(ownerRoot, "tree")
+        const leasesRoot = path.join(ownerRoot, "leases")
+        await fs.mkdir(treeRoot, { recursive: true })
+        await fs.mkdir(leasesRoot)
+        await fs.writeFile(
+          path.join(ownerRoot, "owner.json"),
+          JSON.stringify({
+            schemaVersion: 1,
+            materializationID: identity,
+            workflowID: provisional.workflowID,
+            revision: provisional.revision,
+            location: provisional.location,
+            snapshotRef: provisional.snapshotRef,
+            manifestSha256: provisional.manifestSha256,
+            workspaceSha256: provisional.workspaceSha256,
+          }),
+        )
+        const lease = WorkflowWorkspaceMaterialization.make({
+          ...provisional,
+          root: AbsolutePath.make(treeRoot),
+          archive: emptyArchive,
+        })
+        await fs.writeFile(
+          path.join(leasesRoot, `${lease.leaseID}.json`),
+          JSON.stringify({ schemaVersion: 1, state: "active", lease, acquiredAt: 1 }),
+        )
+        const failed = stage(workflowID, "test", 0, 0, "failed")
+        details.set(workflowID, {
+          run: WorkflowSchema.Info.make({
+            id: workflowID,
+            type: "visual-build",
+            status: "running",
+            input: {},
+            budget: {},
+            usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
+            version: 1,
+            time: { created: DateTime.makeUnsafe(index + 1), updated: DateTime.makeUnsafe(index + 1) },
+          }),
+          stages: [{ ...failed, id: stageID }],
+          artifacts: [],
+        })
+      }
+      const foreign = "f".repeat(64)
+      await fs.mkdir(path.join(root, foreign))
+      await fs.writeFile(path.join(root, foreign, "foreign.txt"), "retain")
+      const manager = WorkflowProductionEvidenceServer.makeMaterializationLeaseManager({
+        root: () => root,
+        verifyRoot: async () => undefined,
+        getWorkflow: (id) => Effect.succeed(details.get(id)),
+        batchSize: 1,
+        now: () => 2,
+      })
+
+      for (let tick = 0; tick < 6; tick++) await manager.gcTick()
+
+      const retained = (await fs.readdir(root)).sort()
+      expect(retained).toEqual([foreign])
+      expect(await fs.readFile(path.join(root, foreign, "foreign.txt"), "utf8")).toBe("retain")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("retains a materialization whose durable owner authority differs from its lease", async () => {
+    const root = await fs.mkdtemp("D:\\OpenCode-Task23.7b\\lease-foreign-owner-")
+    try {
+      const emptyArchive = await WorkflowWorkspaceMaterialization.seal([], async () => {
+        throw new Error("empty archive has no readable entries")
+      })
+      const workflowID = WorkflowSchema.ID.make("wfl_gc_owner_authority")
+      const stageID = WorkflowSchema.StageID.make("wfs_gc_owner_authority")
+      const location = Location.Ref.make({ directory: AbsolutePath.make("D:\\workspace-owner-authority") })
+      const provisional = {
+        workflowID,
+        stageID,
+        revision: 0,
+        location,
+        snapshotRef: Snapshot.ID.make("snapshot-owner-authority"),
+        manifestSha256: "1".repeat(64),
+        workspaceSha256: emptyArchive.workspaceSha256,
+      }
+      const identity = WorkflowWorkspaceMaterialization.materializationID(provisional)
+      const ownerRoot = path.join(root, identity)
+      const treeRoot = path.join(ownerRoot, "tree")
+      const leasesRoot = path.join(ownerRoot, "leases")
+      await fs.mkdir(treeRoot, { recursive: true })
+      await fs.mkdir(leasesRoot)
+      await fs.writeFile(
+        path.join(ownerRoot, "owner.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          materializationID: identity,
+          workflowID: "wfl_foreign_owner",
+          revision: provisional.revision,
+          location: provisional.location,
+          snapshotRef: provisional.snapshotRef,
+          manifestSha256: provisional.manifestSha256,
+          workspaceSha256: provisional.workspaceSha256,
+        }),
+      )
+      const lease = WorkflowWorkspaceMaterialization.make({
+        ...provisional,
+        root: AbsolutePath.make(treeRoot),
+        archive: emptyArchive,
+      })
+      await fs.writeFile(
+        path.join(leasesRoot, `${lease.leaseID}.json`),
+        JSON.stringify({ schemaVersion: 1, state: "active", lease, acquiredAt: 1 }),
+      )
+      const manager = WorkflowProductionEvidenceServer.makeMaterializationLeaseManager({
+        root: () => root,
+        verifyRoot: async () => undefined,
+        getWorkflow: () => Effect.succeed(undefined),
+      })
+
+      expect(await manager.release({ workflowID, stageID, revision: 0 })).toBe(false)
+      expect(await fs.readFile(path.join(ownerRoot, "owner.json"), "utf8")).toContain("wfl_foreign_owner")
+
+      await fs.writeFile(
+        path.join(ownerRoot, "owner.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          materializationID: identity,
+          workflowID: provisional.workflowID,
+          revision: provisional.revision,
+          location: provisional.location,
+          snapshotRef: provisional.snapshotRef,
+          manifestSha256: provisional.manifestSha256,
+          workspaceSha256: provisional.workspaceSha256,
+        }),
+      )
+      const outsideLease = path.join(root, "outside-lease.json")
+      await fs.link(path.join(leasesRoot, `${lease.leaseID}.json`), outsideLease)
+      expect(await manager.release({ workflowID, stageID, revision: 0 })).toBe(false)
+      expect(await fs.readFile(outsideLease, "utf8")).toContain('"state":"active"')
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
     }
   })
 })

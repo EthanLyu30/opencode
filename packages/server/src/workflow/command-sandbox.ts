@@ -162,13 +162,13 @@ export function makeLayer(
             try: () => validatedConfig(options.config),
             catch: () => unavailable("Workflow Docker sandbox configuration is unavailable"),
           })
-          yield* Effect.tryPromise({
-            try: () => WorkflowWorkspaceMaterialization.verifyRoot(request.materialization),
-            catch: () => rejected("Frozen test materialization is missing or mutated"),
-          })
-          const paths = yield* Effect.tryPromise({
-            try: () => validatePaths(config, request.materialization.root, request.cwd),
-            catch: () => rejected("Frozen test path is not canonical and contained by the persisted Location"),
+          const archive = yield* Effect.try({
+            try: () => {
+              const value = request.materialization.archive
+              if (value === undefined) throw new TypeError("missing sealed archive")
+              return WorkflowWorkspaceMaterialization.validateArchive(value)
+            },
+            catch: () => rejected("Frozen test requires exact host-sealed Snapshot bytes"),
           })
           const ownership = ownershipFor({
             workflowID: request.workflowID,
@@ -187,7 +187,11 @@ export function makeLayer(
                 options.engine,
                 config,
                 { role: "test", argv: request.argv },
-                paths,
+                {
+                  workspace: { canonical: "", device: 0, inode: 0 },
+                  workdir: { canonical: "", device: 0, inode: 0 },
+                  relativeWorkdir: ".",
+                },
                 ownership,
                 signal,
                 async () => {
@@ -196,20 +200,8 @@ export function makeLayer(
                   )
                   if (current.leaseOwner !== authority.leaseOwner || current.attempt !== authority.attempt)
                     throw rejected("Persisted Workflow Stage lease changed before frozen test launch")
-                  const currentPaths = await validatePaths(config, request.materialization.root, request.cwd).catch(
-                    () => {
-                      throw rejected("Frozen test path identity changed before launch")
-                    },
-                  )
-                  if (
-                    !sameIdentity(paths.workspace, currentPaths.workspace) ||
-                    !sameIdentity(paths.workdir, currentPaths.workdir)
-                  )
-                    throw rejected("Frozen test workspace identity changed before launch")
-                  await WorkflowWorkspaceMaterialization.verifyRoot(request.materialization).catch(() => {
-                    throw rejected("Frozen test materialization changed before launch")
-                  })
                 },
+                archive,
               ),
             catch: (cause) =>
               cause instanceof WorkflowCommandSandbox.Rejected
@@ -467,6 +459,7 @@ async function runOwned(
   ownership: ReturnType<typeof ownershipFor>,
   signal: AbortSignal,
   finalGate: () => Promise<void>,
+  archive?: WorkflowWorkspaceMaterialization.Archive,
 ): Promise<WorkflowCommandSandbox.Result> {
   const callerDeadline = Date.now() + Math.min(request.timeout ?? config.limits.timeoutMs, config.limits.timeoutMs)
   const workspaceAccess = request.role === "implement" || request.role === "repair" ? "readwrite" : "readonly"
@@ -507,8 +500,7 @@ async function runOwned(
         "HOME=/home/sandbox",
         "--env",
         "LANG=C.UTF-8",
-        "--mount",
-        mount,
+        ...(archive === undefined ? ["--mount", mount] : []),
         "--workdir",
         paths.relativeWorkdir === "." ? "/workspace" : `/workspace/${paths.relativeWorkdir}`,
         config.image,
@@ -530,6 +522,15 @@ async function runOwned(
       signal,
     )
     if (!owned) throw unavailable("Docker container ownership verification failed")
+    if (archive !== undefined) {
+      const imported = await execute(engine, config, {
+        argv: ["container", "cp", "-", `${owned.id}:/`],
+        stdin: WorkflowWorkspaceMaterialization.tarBytes(archive),
+        timeoutMs: remaining(callerDeadline, config.limits.engineTimeoutMs),
+        signal,
+      })
+      if (imported.exit !== 0) throw unavailable("Host-sealed Snapshot import into owned container failed")
+    }
   } catch (cause) {
     void discoverAndCleanup(engine, config, ownership).catch(() => undefined)
     throw cause
@@ -708,7 +709,7 @@ async function execute(
   config: DockerConfig.ValidatedConfig,
   input: {
     readonly argv: readonly string[]
-    readonly stdin?: string
+    readonly stdin?: string | Uint8Array
     readonly timeoutMs: number
     readonly maxOutputBytes?: number
     readonly signal?: AbortSignal

@@ -1,6 +1,7 @@
 export * as DockerProcessOwnership from "./docker-process-ownership"
 
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -145,8 +146,9 @@ export function make(options: Options): ProcessOwnership.Service {
             "--tmpfs",
             "/home/sandbox:rw,nosuid,nodev,noexec,size=16777216,mode=700,uid=65532,gid=65532",
             ...environmentArgv(input.plan.env, admitted.port),
-            "--mount",
-            `type=bind,src=${admitted.workspace},dst=/workspace,readonly`,
+            ...(input.archive === undefined
+              ? ["--mount", `type=bind,src=${admitted.workspace},dst=/workspace,readonly`]
+              : []),
             "--mount",
             `type=bind,src=${admitted.capabilityTemp},dst=/opencode/tmp`,
             "--workdir",
@@ -185,6 +187,18 @@ export function make(options: Options): ProcessOwnership.Service {
         containerVerified = createdState !== undefined
         containerRunning = createdState ?? false
         if (!containerVerified) throw new Docker.Unavailable("Preview Docker container ownership verification failed")
+
+        if (input.archive !== undefined) {
+          const imported = await execute(options.engine, config, {
+            argv: ["container", "cp", "-", `${containerID}:/`],
+            stdin: WorkflowWorkspaceMaterialization.tarBytes(input.archive),
+            timeoutMs: Math.min(config.limits.engineTimeoutMs, input.deadline - now()),
+            maxOutputBytes: config.limits.maxOutputBytes,
+            signal: input.signal,
+          })
+          if (imported.exit !== 0 || imported.truncated)
+            throw new Docker.Unavailable("Host-sealed Snapshot import into preview container failed")
+        }
 
         rejectCancelledOrExpired(input.signal, input.deadline, now)
         await revalidate(options.hostRoot, config, input, admitted)
@@ -403,16 +417,21 @@ async function validateStart(
     throw new TypeError("Preview port conflicts with the fixed relay")
   }
   const hostRoot = await canonicalDDirectory(configuredHostRoot)
-  const workspace = await DockerConfig.admitWorkspace(config, input.workspaceRoot ?? input.plan.locationRoot)
-  const cwd = await canonicalDDirectory(input.plan.cwd)
+  const archive =
+    input.archive === undefined ? undefined : WorkflowWorkspaceMaterialization.validateArchive(input.archive)
+  const workspace =
+    archive === undefined
+      ? await DockerConfig.admitWorkspace(config, input.workspaceRoot ?? input.plan.locationRoot)
+      : ""
+  const cwd = archive === undefined ? await canonicalDDirectory(input.plan.cwd) : path.resolve(input.plan.cwd)
   const capabilityTemp = await canonicalDDirectory(input.tempRoot)
   const expectedTemp = path.join(hostRoot, input.identity.hostID, ".tmp")
   if (
     path.resolve(expectedTemp) !== capabilityTemp ||
-    !contains(workspace, cwd) ||
-    overlap(hostRoot, workspace) ||
-    overlap(config.dockerConfig, workspace) ||
-    overlap(config.temp, workspace) ||
+    (archive === undefined ? !contains(workspace, cwd) : !contains(path.resolve(input.plan.locationRoot), cwd)) ||
+    (archive === undefined && overlap(hostRoot, workspace)) ||
+    (archive === undefined && overlap(config.dockerConfig, workspace)) ||
+    (archive === undefined && overlap(config.temp, workspace)) ||
     overlap(config.dockerConfig, hostRoot) ||
     overlap(config.temp, hostRoot)
   ) {
@@ -423,7 +442,12 @@ async function validateStart(
     port,
     workspace,
     capabilityTemp,
-    relativeCwd: cwd === workspace ? "." : path.relative(workspace, cwd).replaceAll("\\", "/"),
+    relativeCwd:
+      archive === undefined
+        ? cwd === workspace
+          ? "."
+          : path.relative(workspace, cwd).replaceAll("\\", "/")
+        : path.relative(path.resolve(input.plan.locationRoot), cwd).replaceAll("\\", "/") || ".",
     snapshot,
   }
 }
@@ -454,7 +478,7 @@ async function revalidate(
 async function snapshotTree(hostRoot: string, workspace: string, capabilityTemp: string): Promise<TreeSnapshot> {
   return {
     hostRoot: await identity(hostRoot),
-    workspace: await walk(workspace),
+    workspace: workspace === "" ? [] : await walk(workspace),
     capabilityTemp: await walk(capabilityTemp),
   }
 }
@@ -1145,6 +1169,7 @@ async function execute(
     readonly maxOutputBytes?: number
     readonly signal?: AbortSignal
     readonly late?: LateResultObserver
+    readonly stdin?: string | Uint8Array
   },
 ) {
   if (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0) {
@@ -1161,6 +1186,7 @@ async function execute(
     env: DockerConfig.invocationEnvironment(current),
     timeoutMs: input.timeoutMs,
     maxOutputBytes: input.maxOutputBytes ?? config.limits.maxOutputBytes,
+    ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
     signal: controller.signal,
   })
   const boundary = new Promise<{ readonly kind: "boundary"; readonly cause: Docker.Cancelled | Docker.Timeout }>(

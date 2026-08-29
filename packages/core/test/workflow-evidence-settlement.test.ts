@@ -263,4 +263,66 @@ describe("Workflow Local visual evidence settlement", () => {
 
     expect(attempts).toBe(2)
   })
+
+  test("retains a fair bounded cursor across ticks and wraps only after reaching the synthetic tail", async () => {
+    const total = 7
+    const run = (index: number) =>
+      WorkflowSchema.Info.make({
+        id: WorkflowSchema.ID.make(`wfl_fair_${String(index).padStart(3, "0")}`),
+        type: "visual-build",
+        status: "running",
+        input: {},
+        budget: {},
+        usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
+        version: 1,
+        time: { created: DateTime.makeUnsafe(index + 1), updated: DateTime.makeUnsafe(index + 1) },
+      })
+    const workflows = WorkflowStore.Service.of({
+      list: (input) => {
+        const start = input?.cursor?.timeCreated ?? 0
+        return Effect.succeed(
+          Array.from({ length: Math.min(input?.limit ?? 1, Math.max(0, total - start)) }, (_, offset) =>
+            run(start + offset),
+          ),
+        )
+      },
+      get: (id) => {
+        const index = Number(id.slice(-3))
+        const value = run(index)
+        return Effect.succeed({ run: value, stages: [], artifacts: [] })
+      },
+      stage: () => Effect.succeed(undefined),
+      artifacts: () => Effect.succeed([]),
+      gateBudget: () => Effect.succeed(false),
+      claimCandidates: () => Effect.succeed([]),
+      claim: () => Effect.succeedNone,
+      renew: () => Effect.succeed(false),
+      expired: () => Effect.succeed([]),
+    })
+    const reconciled: string[] = []
+    const visualHost: WorkflowVisualHost.Interface = {
+      materializeReference: () => Effect.die("unused"),
+      prepareImplementation: () => Effect.die("unused"),
+      capture: () => Effect.die("unused"),
+      lookupEvidence: () => Effect.die("unused"),
+      commitEvidence: () => Effect.die("unused"),
+      releaseEvidence: () => Effect.die("unused"),
+      abandonEvidence: () => Effect.die("unused"),
+      reconcileEvidence: (input) =>
+        Effect.sync(() => {
+          reconciled.push(input.workflowID)
+          return { active: [], committed: [], released: [], abandoned: [], ambiguous: [] }
+        }),
+      recoverExpired: () => Effect.void,
+    }
+    const state = WorkflowExecutionLocal.makeReconciliationState()
+
+    for (let tick = 0; tick < 5; tick++)
+      await Effect.runPromise(
+        WorkflowExecutionLocal.reconcileEvidenceIteration({ workflows, visualHost, state, limit: 1, maxPages: 2 }),
+      )
+
+    expect(reconciled.slice(0, total)).toEqual(Array.from({ length: total }, (_, index) => run(index).id))
+    expect(reconciled[total]).toBe(run(0).id)
+  })
 })

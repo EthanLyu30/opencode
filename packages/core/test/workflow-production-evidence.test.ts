@@ -315,13 +315,23 @@ describe("Workflow production evidence", () => {
           const referenceDependencies = (first.artifacts ?? [])
             .filter((commit) => commit.kind === WorkflowVisualReviewArtifact.REFERENCE_SCREENSHOT_KIND)
             .map((commit, index) => persisted(commit, reviewStage0, `reference-${index}`))
+          currentEntries = entries1
+          const ambiguousFailure = yield* service
+            .prepare({
+              workflow: fixture.workflow,
+              stage: reviewStage1,
+              revision: 1,
+              location: fixture.location,
+              priorArtifacts: [design, reference, manifest0, ...referenceDependencies, manifest1],
+              admission: { workflowInput: fixture.workflow.input, stageInput: reviewStage1.input },
+            })
+            .pipe(Effect.flip)
           for (const artifact of referenceDependencies) {
             const image = WorkflowVisualReviewArtifact.decodeScreenshot(toCommit(artifact), workflowID)
             if (image.evidenceReceipt === undefined) throw new Error("missing receipt")
             yield* host.commitEvidence({ receipt: image.evidenceReceipt, artifact })
             yield* host.releaseEvidence({ receipt: image.evidenceReceipt, artifact })
           }
-          currentEntries = entries1
           const second = yield* service.prepare({
             workflow: fixture.workflow,
             stage: reviewStage1,
@@ -412,7 +422,7 @@ describe("Workflow production evidence", () => {
               },
             })
             .pipe(Effect.flip)
-          return { second, settled, referenceDependencies, forgedFailure }
+          return { second, settled, referenceDependencies, forgedFailure, ambiguousFailure }
         }),
       ).pipe(
         Effect.provide(
@@ -443,6 +453,7 @@ describe("Workflow production evidence", () => {
     expect(captures).toBe(6)
     expect(result.settled.dependencies).toEqual(result.referenceDependencies)
     expect(result.forgedFailure).toMatchObject({ code: "invalid_visual_authority" })
+    expect(result.ambiguousFailure).toMatchObject({ code: "reference_evidence_ambiguous" })
     expect(result.settled.artifacts.map((artifact) => artifact.kind)).toEqual([
       WorkflowVisualReviewArtifact.IMPLEMENTATION_SCREENSHOT_KIND,
       WorkflowVisualReviewArtifact.IMPLEMENTATION_SCREENSHOT_KIND,

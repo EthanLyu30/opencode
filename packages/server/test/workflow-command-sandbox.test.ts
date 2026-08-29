@@ -63,7 +63,7 @@ describe("WorkflowCommandSandboxServer", () => {
     expect(fixture.engine.one("container", "start").stdin).toBeUndefined()
   })
 
-  test("rejects a materialized Snapshot mutation at the final frozen-test launch gate", async () => {
+  test("imports sealed Snapshot bytes even when the mutable cache is edited after container creation", async () => {
     await using fixture = await setup("test")
     const location = fixture.persisted.run.location!
     const entrypoint = path.join(location.directory, "index.html")
@@ -76,10 +76,14 @@ describe("WorkflowCommandSandboxServer", () => {
     }
     fixture.engine.onCreate = async () => {
       await fs.writeFile(entrypoint, "mutated after container creation")
+      await fs.writeFile(entrypoint, "<!doctype html><main>captured</main>")
     }
 
-    await expect(fixture.runFrozen(plan)).rejects.toBeInstanceOf(WorkflowCommandSandbox.Rejected)
-    expect(fixture.engine.all("container", "start")).toHaveLength(0)
+    await expect(fixture.runFrozen(plan)).resolves.toEqual({ exit: 0, output: "sandbox output", truncated: false })
+    expect(valuesAfter(fixture.engine.one("container", "create").argv, "--mount")).toEqual([])
+    const imported = fixture.engine.one("container", "cp")
+    expect(imported.argv).toEqual(["container", "cp", "-", `${fixture.engine.containerID}:/`])
+    expect(Buffer.from(imported.stdin!).includes(Buffer.from("<!doctype html><main>captured</main>"))).toBe(true)
   })
 
   test("pipes hostile model command only to bash stdin and creates a digest-pinned, least-authority container", async () => {
@@ -1247,6 +1251,15 @@ async function setup(
       ),
     runFrozen: async (plan: WorkflowProductionHostPlan.Plan) => {
       const bytes = await fs.readFile(path.join(workspace, "index.html"))
+      const entries = [
+        {
+          path: RelativePath.make("index.html"),
+          type: "file" as const,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          size: bytes.byteLength,
+        },
+      ]
+      const archive = await WorkflowWorkspaceMaterialization.seal(entries, async () => bytes)
       return Effect.runPromise(
         Effect.flatMap(WorkflowCommandSandbox.Service, (sandbox) =>
           sandbox.runFrozenTest!({
@@ -1264,15 +1277,9 @@ async function setup(
               location: Location.Ref.make({ directory: AbsolutePath.make(workspace) }),
               snapshotRef: Snapshot.ID.make("test-materialization"),
               manifestSha256: "b".repeat(64),
-              workspaceSha256: Snapshot.workspaceSha256([
-                {
-                  path: RelativePath.make("index.html"),
-                  type: "file",
-                  sha256: createHash("sha256").update(bytes).digest("hex"),
-                  size: bytes.byteLength,
-                },
-              ]),
+              workspaceSha256: Snapshot.workspaceSha256(entries),
               root: AbsolutePath.make(workspace),
+              archive,
             }),
           }),
         ).pipe(Effect.provide(layer)),

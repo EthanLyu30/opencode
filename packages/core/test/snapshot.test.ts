@@ -1,5 +1,5 @@
 import { $ } from "bun"
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { Effect, Layer } from "effect"
@@ -9,10 +9,37 @@ import { Location } from "@opencode-ai/core/location"
 import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { Hash } from "@opencode-ai/core/util/hash"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 
 describe("Snapshot", () => {
+  test("seals exact Snapshot bytes independently from the mutable materialization cache", async () => {
+    const source = Buffer.from("sealed implementation\n")
+    const entries = [
+      {
+        path: RelativePath.make("index.html"),
+        type: "file" as const,
+        sha256: Hash.sha256(source),
+        size: source.byteLength,
+      },
+    ]
+    const archive = await WorkflowWorkspaceMaterialization.seal(entries, async () => source)
+
+    source.fill(0)
+
+    expect(Buffer.from(WorkflowWorkspaceMaterialization.bytes(archive).get(RelativePath.make("index.html"))!)).toEqual(
+      Buffer.from("sealed implementation\n"),
+    )
+    expect(archive.workspaceSha256).toBe(Snapshot.workspaceSha256(entries))
+    expect(() =>
+      WorkflowWorkspaceMaterialization.validateArchive({
+        ...archive,
+        entries: [{ ...archive.entries[0], contentBase64: Buffer.from("drift").toString("base64") }],
+      }),
+    ).toThrow("archive")
+  })
+
   testEffect(Layer.empty).live("captures and restores Location-scoped changes", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

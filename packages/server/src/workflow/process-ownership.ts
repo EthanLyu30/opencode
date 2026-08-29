@@ -2,6 +2,7 @@ export * as ProcessOwnership from "./process-ownership"
 
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 
 export interface Identity {
   readonly hostID: WorkflowVisualHost.HostID
@@ -25,6 +26,8 @@ export interface Service {
     readonly plan: PreviewPlan.PreviewPlan
     /** Exact host-materialized Snapshot root; never the mutable admitted Location. */
     readonly workspaceRoot?: string
+    /** Exact sealed bytes imported into the owned container; excludes any mutable host bind. */
+    readonly archive?: WorkflowWorkspaceMaterialization.Archive
     readonly tempRoot: string
     readonly signal: AbortSignal
     readonly deadline: number

@@ -694,26 +694,30 @@ function reusableReferences(
       try: () => WorkflowVisualHost.referenceIdentity(workflowID, referenceApp),
       catch: () => evidenceFailure("invalid_visual_authority", "Durable reference identity is invalid"),
     })
-    const ordered = spec.referenceApp.viewports.map((viewport) => {
-      const matches = candidates.filter((candidate) => {
-        const image = WorkflowVisualReviewArtifact.decodeScreenshot(candidate.commit, workflowID)
-        const receipt = image.evidenceReceipt
-        return (
-          image.kind === "reference" &&
-          image.revision === 0 &&
-          image.viewport === viewport.name &&
-          receipt !== undefined &&
-          receipt.coordinates.stageID === candidate.artifact.stageID &&
-          receipt.coordinates.viewport.name === viewport.name &&
-          receipt.coordinates.viewport.width === viewport.width &&
-          receipt.coordinates.viewport.height === viewport.height &&
-          receipt.coordinates.configSha256 === identity.configSha256 &&
-          receipt.coordinates.sourceSha256 === identity.sourceSha256 &&
-          receipt.coordinates.readySelectorSha256 === identity.readySelectorSha256
-        )
-      })
-      if (matches.length !== 1) throw new Error("Reference dependency identity is missing or ambiguous")
-      return matches[0]
+    const ordered = yield* Effect.try({
+      try: () =>
+        spec.referenceApp.viewports.map((viewport) => {
+          const matches = candidates.filter((candidate) => {
+            const image = WorkflowVisualReviewArtifact.decodeScreenshot(candidate.commit, workflowID)
+            const receipt = image.evidenceReceipt
+            return (
+              image.kind === "reference" &&
+              image.revision === 0 &&
+              image.viewport === viewport.name &&
+              receipt !== undefined &&
+              receipt.coordinates.stageID === candidate.artifact.stageID &&
+              receipt.coordinates.viewport.name === viewport.name &&
+              receipt.coordinates.viewport.width === viewport.width &&
+              receipt.coordinates.viewport.height === viewport.height &&
+              receipt.coordinates.configSha256 === identity.configSha256 &&
+              receipt.coordinates.sourceSha256 === identity.sourceSha256 &&
+              receipt.coordinates.readySelectorSha256 === identity.readySelectorSha256
+            )
+          })
+          if (matches.length !== 1) throw new Error("Reference dependency identity is missing or ambiguous")
+          return matches[0]
+        }),
+      catch: () => evidenceFailure("reference_evidence_ambiguous", "Reference dependency identity is ambiguous"),
     })
     const ledger = yield* visualHost
       .reconcileEvidence({ workflowID, active: [], abandoned: [], committed: [] })
@@ -723,6 +727,14 @@ function reusableReferences(
       const receipt = image.evidenceReceipt
       if (receipt === undefined)
         return yield* evidenceFailure("invalid_visual_authority", "Reference dependency receipt is missing")
+      const unsettled = [...ledger.active, ...ledger.ambiguous].filter(
+        (candidate) => candidate.evidenceID === receipt.evidenceID,
+      )
+      if (unsettled.length !== 0)
+        return yield* evidenceFailure(
+          "reference_evidence_ambiguous",
+          "Reference evidence has a staged or ambiguous durable owner",
+        )
       const summary = [...ledger.committed, ...ledger.released].filter(
         (candidate) => candidate.evidenceID === receipt.evidenceID,
       )

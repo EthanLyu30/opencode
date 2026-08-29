@@ -1,8 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { Location } from "@opencode-ai/core/location"
-import { AbsolutePath } from "@opencode-ai/core/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
+import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { Docker } from "../src/workflow/docker"
@@ -19,6 +21,33 @@ afterAll(async () => {
 })
 
 describe("DockerProcessOwnership", () => {
+  test("imports sealed script preview bytes without a mutable workspace bind", async () => {
+    await using fixture = await setup()
+    const captured = Buffer.from("setInterval(() => 'captured', 60_000)\n")
+    const entry = {
+      path: RelativePath.make("server.mjs"),
+      type: "file" as const,
+      sha256: createHash("sha256").update(captured).digest("hex"),
+      size: captured.byteLength,
+    }
+    const archive = await WorkflowWorkspaceMaterialization.seal([entry], async () => captured)
+    fixture.engine.onContainerCreate = async () => {
+      const target = path.join(fixture.workspace, "server.mjs")
+      await fs.writeFile(target, "mutated")
+      await fs.writeFile(target, captured)
+    }
+
+    const owned = await fixture.service.start({ ...fixture.startInput(), archive })
+
+    expect(valuesAfter(fixture.engine.one("container", "create").argv, "--mount")).toEqual([
+      `type=bind,src=${fixture.capabilityTemp},dst=/opencode/tmp`,
+    ])
+    const imported = fixture.engine.one("container", "cp")
+    expect(Buffer.from(imported.stdin!).includes(captured)).toBe(true)
+    expect(fixture.engine.one("container", "start")).toBeDefined()
+    await fixture.service.stop({ identity: fixture.identity, process: owned })
+  })
+
   test("creates an exact-label internal-network preview with only admitted mounts and one loopback publication", async () => {
     await using fixture = await setup()
 
@@ -424,7 +453,10 @@ describe("DockerProcessOwnership", () => {
     await Bun.sleep(35)
 
     fixture.engine.containerVisible = true
-    await waitUntil(() => fixture.engine.all("container", "rm").length === 1, 1_000)
+    await waitUntil(
+      () => fixture.engine.all("container", "rm").length === 1 && fixture.engine.all("network", "rm").length === 1,
+      1_000,
+    )
 
     expect(fixture.engine.all("container", "inspect").length).toBeGreaterThanOrEqual(2)
     expect(fixture.engine.all("container", "start")).toEqual([])

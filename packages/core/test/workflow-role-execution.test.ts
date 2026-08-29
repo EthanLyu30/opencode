@@ -349,6 +349,7 @@ describe("Workflow role business-evidence authority", () => {
       { code: "preview_configuration_required", category: "ambiguous" as const },
       { code: "workspace_stale", category: "ambiguous" as const },
       { code: "evidence_capture_ambiguous", category: "ambiguous" as const },
+      { code: "reference_evidence_ambiguous", category: "ambiguous" as const },
       { code: "invalid_visual_authority", category: "visual" as const },
     ]) {
       const evidence = Layer.succeed(

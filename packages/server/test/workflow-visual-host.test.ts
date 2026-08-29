@@ -1014,14 +1014,16 @@ describe("WorkflowVisualHostServer", () => {
       location,
       preview: { kind: "static", entrypoint: "index.html" },
     })
-    const workspaceSha256 = Snapshot.workspaceSha256([
+    const entries = [
       {
         path: RelativePath.make("index.html"),
         type: "file",
         sha256: createHash("sha256").update(captured).digest("hex"),
         size: Buffer.byteLength(captured),
       },
-    ])
+    ] as const
+    const workspaceSha256 = Snapshot.workspaceSha256(entries)
+    const archive = await WorkflowWorkspaceMaterialization.seal(entries, async () => Buffer.from(captured))
     const materialization = WorkflowWorkspaceMaterialization.make({
       workflowID,
       stageID: captureStageID,
@@ -1031,6 +1033,7 @@ describe("WorkflowVisualHostServer", () => {
       manifestSha256: implementationSha256,
       workspaceSha256,
       root: AbsolutePath.make(materializedTemp.path),
+      archive,
     })
 
     const html = await Effect.runPromise(
@@ -1039,7 +1042,10 @@ describe("WorkflowVisualHostServer", () => {
           const host = yield* WorkflowVisualHost.Service
           const preview = yield* host.prepareImplementation({ workflowID, revision: 2, plan })
           yield* Effect.promise(() => fs.writeFile(path.join(workspaceTemp.path, "index.html"), captured))
-          return yield* Effect.promise(() => fetch(preview.url).then((response) => response.text()))
+          yield* Effect.promise(() => fs.writeFile(path.join(materializedTemp.path, "index.html"), changed))
+          const result = yield* Effect.promise(() => fetch(preview.url).then((response) => response.text()))
+          yield* Effect.promise(() => fs.writeFile(path.join(materializedTemp.path, "index.html"), captured))
+          return result
         }),
       ).pipe(
         Effect.provide(

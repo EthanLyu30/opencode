@@ -74,6 +74,7 @@ export const layerWith = (options: Options) =>
       const wake = yield* Effect.acquireRelease(PubSub.sliding<void>(1), PubSub.shutdown)
       const fibers = new Map<Workflow.ID, Set<Fiber.Fiber<void>>>()
       const slots = yield* Semaphore.make(options.concurrency)
+      const reconciliation = makeReconciliationState()
 
       const hasCapacity = () => {
         let active = 0
@@ -993,12 +994,12 @@ export const layerWith = (options: Options) =>
 
       yield* settlePersistedCancellations
       yield* settleExpiredLeases
-      yield* reconcileEvidenceIteration({ workflows: store, visualHost })
+      yield* reconcileEvidenceIteration({ workflows: store, visualHost, state: reconciliation })
 
       yield* Stream.merge(Stream.fromPubSub(wake), Stream.tick(options.pollIntervalMs)).pipe(
         Stream.runForEach(() =>
           settlePersistedCancellations.pipe(
-            Effect.andThen(reconcileEvidenceIteration({ workflows: store, visualHost })),
+            Effect.andThen(reconcileEvidenceIteration({ workflows: store, visualHost, state: reconciliation })),
             Effect.andThen(fill),
             Effect.catchCause((cause) => Effect.logError("Workflow scheduler iteration failed", cause)),
           ),
@@ -1083,13 +1084,19 @@ export function reconcileDurableEvidence(input: {
   readonly workflows: WorkflowStore.Interface
   readonly visualHost: WorkflowVisualHost.Interface
   readonly limit?: number
+  readonly maxPages?: number
+  readonly state?: ReconciliationState
 }) {
   return Effect.gen(function* () {
     const pageSize = Math.min(1_000, Math.max(1, input.limit ?? 1_000))
-    let cursor: { readonly timeCreated: number; readonly workflowID: Workflow.ID } | undefined
-    for (let page = 0; page < 10_000; page++) {
+    const maximumPages = Math.min(10_000, Math.max(1, input.maxPages ?? 10_000))
+    let cursor = input.state?.cursor
+    for (let page = 0; page < maximumPages; page++) {
       const runs = yield* input.workflows.list({ limit: pageSize, ...(cursor === undefined ? {} : { cursor }) })
-      if (runs.length === 0) return
+      if (runs.length === 0) {
+        if (input.state !== undefined) input.state.cursor = undefined
+        return
+      }
       yield* Effect.forEach(
         runs.filter((run) => run.type === "visual-build"),
         (run) =>
@@ -1127,10 +1134,23 @@ export function reconcileDurableEvidence(input: {
       )
         yield* Effect.die(new Error("Workflow reconciliation cursor did not advance"))
       cursor = next
-      if (runs.length < pageSize) return
+      if (input.state !== undefined) input.state.cursor = next
+      if (runs.length < pageSize) {
+        if (input.state !== undefined) input.state.cursor = undefined
+        return
+      }
     }
-    yield* Effect.die(new Error("Workflow reconciliation exceeded its deterministic page bound"))
+    if (input.state === undefined)
+      yield* Effect.die(new Error("Workflow reconciliation exceeded its deterministic page bound"))
   })
+}
+
+export interface ReconciliationState {
+  cursor?: { readonly timeCreated: number; readonly workflowID: Workflow.ID }
+}
+
+export function makeReconciliationState(): ReconciliationState {
+  return {}
 }
 
 /** Shared startup/periodic scheduler boundary: failures are retained and retried on the next tick. */
@@ -1138,6 +1158,8 @@ export function reconcileEvidenceIteration(input: {
   readonly workflows: WorkflowStore.Interface
   readonly visualHost: WorkflowVisualHost.Interface
   readonly limit?: number
+  readonly maxPages?: number
+  readonly state?: ReconciliationState
 }) {
   return reconcileDurableEvidence(input).pipe(
     Effect.catchCause((cause) => Effect.logWarning("Workflow visual evidence reconciliation deferred", cause)),

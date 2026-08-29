@@ -4,7 +4,7 @@ export interface Invocation {
   readonly executable: string
   readonly argv: readonly string[]
   readonly env: Readonly<Record<string, string>>
-  readonly stdin?: string
+  readonly stdin?: string | Uint8Array
   readonly timeoutMs: number
   readonly maxOutputBytes: number
   readonly signal?: AbortSignal
@@ -22,7 +22,10 @@ export interface Engine {
 }
 
 export interface SpawnedProcess {
-  readonly stdin: { readonly write: (value: string) => unknown; readonly end: () => unknown } | number | undefined
+  readonly stdin:
+    | { readonly write: (value: string | Uint8Array) => unknown; readonly end: () => unknown }
+    | number
+    | undefined
   readonly stdout: ReadableStream<Uint8Array> | number | undefined
   readonly stderr: ReadableStream<Uint8Array> | number | undefined
   readonly exited: Promise<number>
