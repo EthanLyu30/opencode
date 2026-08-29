@@ -168,6 +168,7 @@ describe("LocationServiceMap", () => {
                 id: SessionV2.ID.make("ses_unavailable_model"),
                 projectID: ProjectV2.ID.global,
                 title: "test",
+                visibility: "public",
                 model: {
                   id: ModelV2.ID.make("chat"),
                   providerID: ProviderV2.ID.make("unavailable"),

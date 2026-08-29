@@ -5,7 +5,7 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
-import { eq } from "drizzle-orm"
+import { and, eq } from "drizzle-orm"
 import { Effect, Layer, Schema } from "effect"
 import { HttpRouter } from "effect/unstable/http"
 import { HttpApiMiddleware } from "effect/unstable/httpapi"
@@ -42,7 +42,7 @@ export const sessionLocationLayer = Layer.effect(
         const row = yield* db
           .select({ directory: SessionTable.directory, workspaceID: SessionTable.workspace_id })
           .from(SessionTable)
-          .where(eq(SessionTable.id, sessionID))
+          .where(and(eq(SessionTable.id, sessionID), eq(SessionTable.visibility, "public")))
           .get()
           .pipe(Effect.orDie)
         if (!row)

@@ -33,6 +33,7 @@ export const SessionTable = sqliteTable(
     directory: DatabasePath.directoryColumn().notNull(),
     path: DatabasePath.pathColumn(),
     title: text().notNull(),
+    visibility: text().$type<SessionSchema.Visibility>().notNull().default("public"),
     version: text().notNull(),
     share_url: text(),
     summary_additions: integer(),

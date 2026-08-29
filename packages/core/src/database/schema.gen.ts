@@ -239,6 +239,7 @@ export default {
           \`directory\` text NOT NULL,
           \`path\` text,
           \`title\` text NOT NULL,
+          \`visibility\` text DEFAULT 'public' NOT NULL,
           \`version\` text NOT NULL,
           \`share_url\` text,
           \`summary_additions\` integer,

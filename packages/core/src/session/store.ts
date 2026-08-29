@@ -1,6 +1,6 @@
 export * as SessionStore from "./store"
 
-import { eq } from "drizzle-orm"
+import { and, eq } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
 import { makeGlobalNode } from "../effect/app-node"
@@ -13,6 +13,8 @@ import { fromRow } from "./info"
 
 export interface Interface {
   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info | undefined>
+  readonly getPublic: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info | undefined>
+  readonly getWorkflow: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info | undefined>
   readonly context: (sessionID: SessionSchema.ID) => Effect.Effect<SessionMessage.Message[], MessageDecodeError>
   readonly runnerContext: (
     sessionID: SessionSchema.ID,
@@ -34,6 +36,24 @@ const layer = Layer.effect(
     return Service.of({
       get: Effect.fn("SessionStore.get")(function* (sessionID) {
         const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+        return row ? fromRow(row) : undefined
+      }),
+      getPublic: Effect.fn("SessionStore.getPublic")(function* (sessionID) {
+        const row = yield* db
+          .select()
+          .from(SessionTable)
+          .where(and(eq(SessionTable.id, sessionID), eq(SessionTable.visibility, "public")))
+          .get()
+          .pipe(Effect.orDie)
+        return row ? fromRow(row) : undefined
+      }),
+      getWorkflow: Effect.fn("SessionStore.getWorkflow")(function* (sessionID) {
+        const row = yield* db
+          .select()
+          .from(SessionTable)
+          .where(and(eq(SessionTable.id, sessionID), eq(SessionTable.visibility, "workflow")))
+          .get()
+          .pipe(Effect.orDie)
         return row ? fromRow(row) : undefined
       }),
       context: Effect.fn("SessionStore.context")(function* (sessionID) {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Exit } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Database } from "@opencode-ai/core/database/database"
@@ -30,6 +30,38 @@ afterEach(async () => {
 })
 
 describe("session.list", () => {
+  it.instance(
+    "hides workflow sessions from legacy public get, list, and children surfaces",
+    () =>
+      Effect.gen(function* () {
+        const hidden = yield* SessionNs.use.create({ title: "workflow-owned" })
+        const parent = yield* withSession({ title: "public-parent" })
+        const hiddenChild = yield* SessionNs.use.create({ title: "workflow-child", parentID: parent.id })
+        const { db } = yield* Database.Service
+        yield* db
+          .update(SessionTable)
+          .set({ visibility: "workflow" })
+          .where(eq(SessionTable.id, hidden.id))
+          .run()
+          .pipe(Effect.orDie)
+        yield* db
+          .update(SessionTable)
+          .set({ visibility: "workflow" })
+          .where(eq(SessionTable.id, hiddenChild.id))
+          .run()
+          .pipe(Effect.orDie)
+
+        const getExit = yield* SessionNs.use.get(hidden.id).pipe(Effect.exit)
+        expect(Exit.isFailure(getExit)).toBe(true)
+        expect((yield* SessionNs.use.list()).map((session) => session.id)).not.toContain(hidden.id)
+        expect((yield* SessionNs.use.listGlobal({ archived: true })).map((session) => session.id)).not.toContain(
+          hidden.id,
+        )
+        expect((yield* SessionNs.use.children(parent.id)).map((session) => session.id)).not.toContain(hiddenChild.id)
+      }),
+    { git: true },
+  )
+
   it.instance(
     "does not filter by directory when directory is omitted",
     () =>

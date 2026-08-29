@@ -15,6 +15,9 @@ export type ID = SessionID
 
 export const Event = SessionEvent
 
+export const Visibility = Schema.Literals(["public", "workflow"])
+export type Visibility = typeof Visibility.Type
+
 export interface Info extends Schema.Schema.Type<typeof Info> {}
 export const Info = Schema.Struct({
   id: ID,
@@ -38,6 +41,7 @@ export const Info = Schema.Struct({
     archived: DateTimeUtcFromMillis.pipe(optional),
   }),
   title: Schema.String,
+  visibility: Visibility,
   location: Location.Ref,
   subpath: RelativePath.pipe(optional),
   revert: Revert.State.pipe(optional),

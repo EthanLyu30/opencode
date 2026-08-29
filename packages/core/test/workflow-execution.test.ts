@@ -6,6 +6,7 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventTable } from "@opencode-ai/core/event/sql"
+import { EventV2 } from "@opencode-ai/core/event"
 import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
@@ -26,6 +27,7 @@ import { WorkflowVisualReviewArtifact } from "@opencode-ai/core/workflow/artifac
 import { WorkflowVisualEvidence } from "@opencode-ai/core/workflow/visual-evidence"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { Location } from "@opencode-ai/schema/location"
 import { AbsolutePath } from "@opencode-ai/schema/schema"
 import { Session } from "@opencode-ai/schema/session"
@@ -84,6 +86,7 @@ const makeWorkerIt = (
     AppNodeBuilder.build(
       LayerNode.group([
         Database.node,
+        EventV2.node,
         WorkflowV2.node,
         WorkflowStore.node,
         WorkflowExecutor.node,
@@ -1263,6 +1266,43 @@ describe("Workflow local execution", () => {
         expect(detail.run.status).toBe("waiting_approval")
         expect(detail.stages[0].status).toBe("waiting_approval")
         expect(detail.run.usage).toEqual({ tokens: 5, turns: 1, toolCalls: 1, attempts: 1 })
+      }),
+    5_000,
+  )
+
+  workerIt.live(
+    "polls a durable queued workflow that committed without an in-process wake",
+    () =>
+      Effect.gen(function* () {
+        const events = yield* EventV2.Service
+        const workflow = yield* WorkflowV2.Service
+        const input = createInput("worker_post_commit_poll")
+        const timestamp = yield* DateTime.now
+        const location = Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit") })
+        const stage = input.stages[0]
+        yield* events.publish(WorkflowEvent.Created, {
+          workflowID: input.id!,
+          timestamp,
+          type: input.type,
+          input: input.input,
+          budget: input.budget,
+          stages: [{ ...stage, id: stage.id! }],
+          location,
+          sessionID: Session.ID.make("ses_workflow_execution"),
+          agent: Agent.ID.make("build"),
+        })
+        yield* events.publish(WorkflowEvent.Stage.Queued, {
+          workflowID: input.id!,
+          stageID: input.stages[0].id!,
+          timestamp,
+        })
+
+        yield* workflow.events({ workflowID: input.id! }).pipe(
+          Stream.filter((event) => event.type === "workflow.succeeded"),
+          Stream.runHead,
+          Effect.timeout("2 seconds"),
+        )
+        expect((yield* workflow.get(input.id!)).run.status).toBe("succeeded")
       }),
     5_000,
   )

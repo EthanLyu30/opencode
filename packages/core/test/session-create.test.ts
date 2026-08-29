@@ -24,6 +24,8 @@ import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionStore } from "@opencode-ai/core/session/store"
+import { SessionAdmission } from "@opencode-ai/core/session/admission"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { testEffect } from "./lib/effect"
 import { tmpdir } from "./fixture/tmpdir"
@@ -49,6 +51,42 @@ const location = Location.Ref.make({ directory: AbsolutePath.make("/project") })
 const id = SessionV2.ID.create()
 
 describe("SessionV2.create", () => {
+  it.effect("keeps workflow Sessions behind every public Session surface", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const store = yield* SessionStore.Service
+      const hiddenID = SessionV2.ID.make("ses_hidden_workflow_surface")
+      const prepared = SessionAdmission.prepare({
+        id: hiddenID,
+        agent: WorkflowRoleAgents.agentForRole("design"),
+        location,
+        project: { id: ProjectV2.ID.global, directory: location.directory },
+        visibility: "workflow",
+        timestamp: 0,
+      })
+      yield* events.publish(prepared.entry.definition, prepared.entry.data, { location })
+
+      expect((yield* store.getWorkflow(hiddenID))?.visibility).toBe("workflow")
+      expect(yield* session.list()).toEqual([])
+      const assertHidden = <A, E extends { readonly _tag: string }>(attempt: Effect.Effect<A, E>) =>
+        attempt.pipe(
+          Effect.flip,
+          Effect.map((error) => expect(error._tag).toBe("Session.NotFoundError")),
+        )
+      yield* assertHidden(session.get(hiddenID))
+      yield* assertHidden(session.messages({ sessionID: hiddenID }))
+      yield* assertHidden(session.message({ sessionID: hiddenID, messageID: SessionMessage.ID.make("msg_hidden") }))
+      yield* assertHidden(session.context(hiddenID))
+      yield* assertHidden(session.history({ sessionID: hiddenID, limit: 10 }))
+      yield* assertHidden(session.prompt({ sessionID: hiddenID, prompt: Prompt.make({ text: "must stay hidden" }) }))
+      yield* assertHidden(session.shell({ sessionID: hiddenID, command: "pwd" }))
+      yield* assertHidden(session.skill({ sessionID: hiddenID, skill: "test" }))
+      yield* assertHidden(session.interrupt(hiddenID))
+      yield* assertHidden(Stream.runCollect(session.events({ sessionID: hiddenID })))
+    }),
+  )
+
   it.effect("creates a fresh projected session when the ID is omitted", () =>
     Effect.gen(function* () {
       const session = yield* SessionV2.Service
@@ -57,7 +95,33 @@ describe("SessionV2.create", () => {
       const second = yield* session.create({ location })
 
       expect(second.id).not.toBe(first.id)
+      expect(first.visibility).toBe("public")
+      expect(second.visibility).toBe("public")
       expect(yield* session.list()).toHaveLength(2)
+    }),
+  )
+
+  it.effect("projects legacy Session creation without visibility as public", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const seed = yield* session.create({ location })
+      const legacyID = SessionV2.ID.make("ses_legacy_visibility_default")
+      yield* events.publish(SessionV1.Event.Created, {
+        sessionID: legacyID,
+        info: SessionV1.SessionInfo.make({
+          id: legacyID,
+          slug: "legacy-public",
+          version: "legacy",
+          projectID: seed.projectID,
+          directory: location.directory,
+          title: "Legacy public Session",
+          time: { created: 0, updated: 0 },
+        }),
+      })
+
+      expect(yield* session.get(legacyID)).toMatchObject({ id: legacyID, visibility: "public" })
+      expect((yield* session.list()).map((item) => item.id)).toContain(legacyID)
     }),
   )
 

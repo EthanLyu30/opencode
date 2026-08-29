@@ -7,7 +7,11 @@ import { EventV2 } from "@opencode-ai/core/event"
 import { Location } from "@opencode-ai/core/location"
 import { Project } from "@opencode-ai/core/project"
 import { AbsolutePath } from "@opencode-ai/core/schema"
-import { Context, Effect, Layer } from "effect"
+import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionTable } from "@opencode-ai/core/session/sql"
+import { Database } from "@opencode-ai/core/database/database"
+import { eq } from "drizzle-orm"
+import { Context, Effect, Layer, Schema } from "effect"
 
 export class Service extends Context.Service<Service, EventV2.Interface>()("@opencode/EventV2Bridge") {}
 
@@ -15,6 +19,7 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const events = yield* EventV2.Service
+    const { db } = yield* Database.Service
 
     const publish: EventV2.Interface["publish"] = (definition, data, options) =>
       Effect.gen(function* () {
@@ -34,6 +39,25 @@ const layer = Layer.effect(
 
     const unsubscribe = yield* events.listen((event) =>
       Effect.gen(function* () {
+        const durableID = event.durable?.aggregateID
+        const data = event.data as Record<string, unknown>
+        const sessionID =
+          durableID !== undefined
+            ? Schema.is(SessionV2.ID)(durableID)
+              ? durableID
+              : undefined
+            : Schema.is(SessionV2.ID)(data.sessionID)
+              ? data.sessionID
+              : undefined
+        if (sessionID !== undefined) {
+          const row = yield* db
+            .select({ visibility: SessionTable.visibility })
+            .from(SessionTable)
+            .where(eq(SessionTable.id, sessionID))
+            .get()
+            .pipe(Effect.orDie)
+          if (row?.visibility !== "public") return
+        }
         const ctx = yield* InstanceRef
         const workspaceID = (yield* WorkspaceRef) ?? event.location?.workspaceID
         GlobalBus.emit("event", {
@@ -66,6 +90,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2.node, Database.node] })
 
 export * as EventV2Bridge from "./event-v2-bridge"

@@ -11,6 +11,7 @@ import { makeGlobalNode } from "../effect/app-node"
 import { WorkflowRunTable, WorkflowStageTable } from "../workflow/sql"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { ConversationItemTable, ConversationTable, ResponseItemTable, ResponseTable } from "./sql"
+import { ResponsesAdmission } from "./admission"
 
 type DB = Database.Interface["db"]
 
@@ -242,6 +243,8 @@ const layer = Layer.effectDiscard(
     yield* events.project(ResponseEvent.Created, (event) =>
       Effect.gen(function* () {
         const data = event.data
+        const admissionReceipt =
+          data.context.length === 1 ? ResponsesAdmission.tryDecodeVisualBuildReceipt(data.context[0]) : undefined
         if (
           (data.previousResponseID && data.conversationID) ||
           (!data.store && (data.conversationID || data.background))
@@ -251,7 +254,22 @@ const layer = Layer.effectDiscard(
         if (!data.store && (data.context.length !== 0 || !isDeepStrictEqual(data.input, [{ type: "redacted" }]))) {
           throw new LifecycleConflict(data.responseID)
         }
-        if (!data.previousResponseID && !data.conversationID && data.context.length > 0) {
+        if (!data.previousResponseID && !data.conversationID && data.context.length > 0 && !admissionReceipt) {
+          throw new LifecycleConflict(data.responseID)
+        }
+        if (
+          admissionReceipt &&
+          (!data.store ||
+            data.previousResponseID !== undefined ||
+            data.conversationID !== undefined ||
+            admissionReceipt.ids.responseID !== data.responseID ||
+            admissionReceipt.ids.workflowID !== data.workflowID ||
+            admissionReceipt.requestHash !== data.requestHash ||
+            admissionReceipt.response.model !== data.model ||
+            admissionReceipt.response.background !== data.background ||
+            admissionReceipt.response.store !== data.store ||
+            admissionReceipt.response.background !== (admissionReceipt.response.delivery === "background"))
+        ) {
           throw new LifecycleConflict(data.responseID)
         }
         if (!event.durable?.replay && data.previousResponseID) {

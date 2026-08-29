@@ -12,6 +12,7 @@ import { makeGlobalNode } from "./effect/app-node"
 import { ResponsesProjector } from "./responses/projector"
 import { ResponsesStore } from "./responses/store"
 import { WorkflowSecretGuard } from "./workflow/secret-guard"
+import { ResponsesAdmission } from "./responses/admission"
 
 export const ID = Responses.ID
 
@@ -554,35 +555,11 @@ const layer = Layer.effect(
           if (!accepted) return yield* new ConflictError({ resourceID: responseID, operation: "create" })
         }
         const timestamp = yield* DateTime.now
-        const admitted: Responses.Resource = {
-          id: responseID,
-          workflowID: input.workflowID,
-          model: input.model,
-          status: "queued",
-          background: input.background,
-          store: input.store,
-          previousResponseID: input.previousResponseID,
-          conversationID: input.conversationID,
-          requestHash: input.requestHash,
-          output: [],
-          createdAt: timestamp,
-        }
+        const prepared = ResponsesAdmission.prepare(input, { responseID, timestamp, context })
         const reconciled = yield* mapConflict(
           events.publish(
-            ResponseEvent.Created,
-            {
-              responseID,
-              workflowID: input.workflowID,
-              timestamp,
-              model: input.model,
-              background: input.background,
-              store: input.store,
-              previousResponseID: input.previousResponseID,
-              conversationID: input.conversationID,
-              requestHash: input.requestHash,
-              context: input.store ? context : [],
-              input: input.store ? input.input : [{ type: "redacted" }],
-            },
+            prepared.entry.definition,
+            prepared.entry.data,
             {
               related: input.conversationID
                 ? input.input.map((payload) => ({
@@ -617,7 +594,7 @@ const layer = Layer.effect(
           if (state) state.responseID = reconciled.id
           return reconciled
         }
-        return admitted
+        return prepared.resource
       }),
 
       list: () => store.list(),

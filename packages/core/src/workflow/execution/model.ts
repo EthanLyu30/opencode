@@ -198,7 +198,7 @@ const productionLayer = Layer.effect(
           )
         }
         return Effect.gen(function* () {
-          const session = yield* sessions.get(sessionID)
+          const session = yield* sessions.getWorkflow(sessionID)
           if (
             session === undefined ||
             session.location.directory !== location.directory ||

@@ -316,7 +316,7 @@ const reloadAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadAuthority"
   const stage = yield* input.workflows.stage(input.request.stageID)
   if (stage === undefined || stage.id !== input.request.stageID || stage.workflowID !== detail.run.id)
     return yield* rejected("Persisted Stage is required")
-  const session = yield* input.sessions.get(input.request.sessionID)
+  const session = yield* input.sessions.getWorkflow(input.request.sessionID)
   if (session === undefined || session.id !== input.request.sessionID)
     return yield* rejected("Persisted Session is required")
   if (

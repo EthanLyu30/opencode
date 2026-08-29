@@ -1156,6 +1156,7 @@ async function setup(
     id: sessionID,
     projectID: ProjectV2.ID.global,
     title: "workflow",
+    visibility: "workflow",
     cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     location,
@@ -1191,7 +1192,9 @@ async function setup(
     expired: () => Effect.succeed([]),
   })
   const sessionStore = SessionStore.Service.of({
-    get: () => {
+    get: () => Effect.succeed(persisted.session),
+    getPublic: () => Effect.succeed(undefined),
+    getWorkflow: () => {
       lookups.session++
       return Effect.succeed(persisted.session)
     },

@@ -8,6 +8,7 @@ import { EventV2 } from "@opencode-ai/core/event"
 import { EventTable } from "@opencode-ai/core/event/sql"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ResponsesProjector } from "@opencode-ai/core/responses/projector"
+import { ResponsesAdmission } from "@opencode-ai/core/responses/admission"
 import { ConversationItemTable, ResponseItemTable, ResponseTable } from "@opencode-ai/core/responses/sql"
 import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
 import { WorkflowRunTable, WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
@@ -15,6 +16,17 @@ import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { Responses } from "@opencode-ai/schema/responses"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
+import { WorkflowVisualBuild } from "@opencode-ai/schema/workflow-visual-build"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Location } from "@opencode-ai/schema/location"
+import { Session } from "@opencode-ai/schema/session"
+import { AbsolutePath } from "@opencode-ai/core/schema"
+import { WorkflowGraph } from "@opencode-ai/core/workflow/graph"
+import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
+import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
+import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/production-host-plan"
+import { WorkflowBusinessArtifact } from "@opencode-ai/core/workflow/artifacts/business"
 import { testEffect } from "./lib/effect"
 import { tmpdir } from "./fixture/tmpdir"
 
@@ -62,7 +74,154 @@ function created(responseID: Responses.ID, overrides?: Partial<(typeof ResponseE
   return value
 }
 
+function visualReceipt(responseID: Responses.ID) {
+  const request = WorkflowVisualBuild.CreateInput.make({
+    prompt: "Build the receipt fixture",
+    budget: { maxAttempts: 1 },
+    visual: { maxRevisions: 0, maxTokens: 1_000, maxTurns: 10, maxToolCalls: 10 },
+    preview: { kind: "static", entrypoint: "package.json" },
+    delivery: "background",
+  })
+  const stageIDs = WorkflowGraph.expandVisualBuild({ maxRevisions: 0, maxAttempts: 1, responseID }).map(
+    (_, ordinal) => Workflow.StageID.make(`wfs_receipt_${ordinal}`),
+  ) as [Workflow.StageID, ...Workflow.StageID[]]
+  const graph = ResponsesAdmission.VisualBuildGraph.make(
+    WorkflowGraph.expandVisualBuild({ maxRevisions: 0, maxAttempts: 1, responseID }).map((stage, ordinal) => ({
+      ...stage,
+      id: stageIDs[ordinal]!,
+    })) as [ResponsesAdmission.VisualBuildReceipt["graph"][number], ...ResponsesAdmission.VisualBuildReceipt["graph"]],
+  )
+  const routeMatrix = Object.fromEntries(
+    WorkflowRole.Role.literals.map((role) => {
+      const route = WorkflowRouting.resolve({ role, budget: request.budget })
+      return [
+        role,
+        {
+          providerID: route.providerID,
+          modelID: route.modelID,
+          protocol: route.protocol,
+          reasoningEffort: route.reasoningEffort,
+          requiredCapabilities: [...route.requiredCapabilities],
+        },
+      ]
+    }),
+  ) as unknown as ResponsesAdmission.VisualBuildReceipt["routeMatrix"]
+  const location = Location.Ref.make({ directory: AbsolutePath.make(process.cwd()) })
+  const preview = PreviewPlan.freeze({ authority: "admission", location, preview: request.preview })
+  const productionHostPlan = WorkflowProductionHostPlan.freeze({ authority: "admission", location, preview })
+  return ResponsesAdmission.VisualBuildReceipt.make({
+    schemaVersion: 1,
+    kind: ResponsesAdmission.VISUAL_BUILD_RECEIPT_TYPE,
+    requestHash: `visual-claim:${responseID}`,
+    request,
+    location,
+    previewPlanSha256: preview.configSha256,
+    productionHostPlanSha256: WorkflowBusinessArtifact.hash(productionHostPlan),
+    ids: {
+      workflowID,
+      sessionID: Session.ID.make("ses_response_receipt"),
+      responseID,
+      stageIDs,
+    },
+    profile: { agent: Agent.ID.make("build"), sessionVisibility: "workflow" },
+    response: { model: "deepseek-v4-pro", store: true, background: true, delivery: "background" },
+    graph,
+    routeMatrix,
+  })
+}
+
 describe("ResponsesProjector", () => {
+  it.effect("rejects a visual-build receipt owned by another Response before projection", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const database = yield* Database.Service
+      const responseID = Responses.ID.make("resp_receipt_target")
+      const otherID = Responses.ID.make("resp_receipt_other")
+      const receipt = visualReceipt(otherID)
+      yield* createWorkflow(events)
+
+      const rejected = yield* events
+        .publish(
+          ResponseEvent.Created,
+          created(responseID, {
+            model: "deepseek-v4-pro",
+            background: true,
+            requestHash: receipt.requestHash,
+            context: [ResponsesAdmission.receiptPayload(receipt)],
+          }),
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(rejected)).toBe(true)
+      expect(
+        yield* database.db
+          .select()
+          .from(ResponseTable)
+          .where(eq(ResponseTable.id, responseID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toBeUndefined()
+      expect(yield* EventV2.latestSequence(database.db, responseID)).toBe(-1)
+    }),
+  )
+
+  it.effect("rejects non-stored and cross-workflow visual Responses before event construction", () =>
+    Effect.sync(() => {
+      const responseID = Responses.ID.make("resp_receipt_prepare")
+      const receipt = visualReceipt(responseID)
+      const base: Responses.CreateInput = {
+        id: responseID,
+        workflowID,
+        model: "deepseek-v4-pro",
+        background: true,
+        store: true,
+        requestHash: receipt.requestHash,
+        input: [{ type: "message", role: "user", content: "fixture" }],
+      }
+      const options = { responseID, timestamp: DateTime.makeUnsafe(2_000), receipt }
+
+      expect(() => ResponsesAdmission.prepareVisualBuild({ ...base, store: false }, options)).toThrow()
+      expect(() =>
+        ResponsesAdmission.prepareVisualBuild(
+          { ...base, workflowID: Workflow.ID.make("wfl_receipt_cross_workflow") },
+          options,
+        ),
+      ).toThrow()
+      const payload = ResponsesAdmission.receiptPayload(receipt)
+      expect(() => ResponsesAdmission.decodeVisualBuildReceipt({ ...payload, unexpected: true })).toThrow()
+      expect(() =>
+        ResponsesAdmission.receiptPayload({
+          ...receipt,
+          request: { ...receipt.request, prompt: "x".repeat(ResponsesAdmission.MAX_VISUAL_BUILD_RECEIPT_BYTES) },
+        }),
+      ).toThrow()
+      expect(() =>
+        ResponsesAdmission.receiptPayload({
+          ...receipt,
+          response: { ...receipt.response, background: false, delivery: "foreground" },
+        }),
+      ).toThrow()
+      expect(() =>
+        ResponsesAdmission.receiptPayload({
+          ...receipt,
+          ids: {
+            ...receipt.ids,
+            stageIDs: [Workflow.StageID.make("wfs_receipt_mismatched"), ...receipt.ids.stageIDs.slice(1)],
+          },
+        }),
+      ).toThrow()
+      expect(() =>
+        ResponsesAdmission.receiptPayload({
+          ...receipt,
+          routeMatrix: {
+            ...receipt.routeMatrix,
+            design: receipt.routeMatrix.implement,
+          },
+        }),
+      ).toThrow()
+    }),
+  )
+
   it.effect("projects lifecycle state and ordered input/output items", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service

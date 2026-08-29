@@ -377,14 +377,32 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.interrupt",
         Effect.fn(function* (ctx) {
-          yield* session.interrupt(ctx.params.sessionID)
+          yield* session.interrupt(ctx.params.sessionID).pipe(
+            Effect.catchTag(
+              "Session.NotFoundError",
+              (error) =>
+                new SessionNotFoundError({
+                  sessionID: error.sessionID,
+                  message: `Session not found: ${error.sessionID}`,
+                }),
+            ),
+          )
           return HttpApiSchema.NoContent.make()
         }),
       )
       .handle(
         "session.message",
         Effect.fn(function* (ctx) {
-          const message = yield* session.message(ctx.params)
+          const message = yield* session.message(ctx.params).pipe(
+            Effect.catchTag(
+              "Session.NotFoundError",
+              (error) =>
+                new SessionNotFoundError({
+                  sessionID: error.sessionID,
+                  message: `Session not found: ${error.sessionID}`,
+                }),
+            ),
+          )
           if (message) return { data: message }
           return yield* new MessageNotFoundError({
             sessionID: ctx.params.sessionID,

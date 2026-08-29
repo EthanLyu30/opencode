@@ -16,11 +16,15 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { InstanceStore } from "@/project/instance-store"
 import { InstanceBootstrap } from "@/project/bootstrap"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionTable } from "@opencode-ai/core/session/sql"
+import { eq } from "drizzle-orm"
 
 const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([
       SessionNs.node,
+      Database.node,
       EventV2Bridge.node,
       SessionProjector.node,
       CrossSpawnSpawner.node,
@@ -128,6 +132,40 @@ describe("session.created event", () => {
       })
 
       yield* session.remove(info.id)
+    }),
+  )
+
+  it.instance("does not emit workflow-session events on the legacy global bus", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const info = yield* session.create({})
+      const { db } = yield* Database.Service
+      yield* db
+        .update(SessionTable)
+        .set({ visibility: "workflow" })
+        .where(eq(SessionTable.id, info.id))
+        .run()
+        .pipe(Effect.orDie)
+
+      const received: unknown[] = []
+      const listener = (event: {
+        payload: { properties?: { sessionID?: string }; syncEvent?: EventV2.SerializedEvent }
+      }) => {
+        if (event.payload.properties?.sessionID === info.id || event.payload.syncEvent?.aggregateID === info.id) {
+          received.push(event)
+        }
+      }
+      GlobalBus.on("event", listener)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
+
+      yield* events.publish(SessionNs.Event.Updated, {
+        sessionID: info.id,
+        info: { ...info, title: "workflow-only-update" },
+      })
+      yield* events.publish(SessionNs.Event.Diff, { sessionID: info.id, diff: [] })
+
+      expect(received).toEqual([])
     }),
   )
 })

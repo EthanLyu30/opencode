@@ -575,6 +575,14 @@ const events = {
     schema: {
       sessionID: SessionID,
       info: SessionInfo,
+      visibility: optional(Schema.Literals(["public", "workflow"])),
+      project: optional(
+        Schema.Struct({
+          id: Project.ID,
+          worktree: Schema.String,
+          vcs: optional(Project.Vcs),
+        }),
+      ),
     },
   }),
   Updated: define({

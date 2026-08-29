@@ -2,7 +2,6 @@ export * as WorkflowV2 from "./workflow"
 export * from "./workflow/schema"
 
 import { Cause, Context, Effect, Layer, Schema, Stream } from "effect"
-import { isDeepStrictEqual } from "node:util"
 import { Database } from "./database/database"
 import { EventV2 } from "./event"
 import { makeGlobalNode } from "./effect/app-node"
@@ -19,6 +18,12 @@ import { WorkflowProjector } from "./workflow/projector"
 import { WorkflowRetry } from "./workflow/retry"
 import { ResponsesV2 } from "./responses"
 import { DateTime } from "effect"
+import {
+  ConflictError,
+  matchesAdmissionInput,
+  matchesCreateInput,
+  prepare as prepareAdmission,
+} from "./workflow/admission"
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -31,10 +36,7 @@ export class StageNotFoundError extends Schema.TaggedErrorClass<StageNotFoundErr
   stageID: Workflow.StageID,
 }) {}
 
-export class ConflictError extends Schema.TaggedErrorClass<ConflictError>()("Workflow.ConflictError", {
-  workflowID: Workflow.ID,
-  operation: Schema.String,
-}) {}
+export { ConflictError }
 
 export { WorkflowSecretGuard }
 
@@ -79,8 +81,6 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Workflow") {}
 
-type AdmittedStage = Omit<Workflow.StageInput, "id"> & { readonly id: Workflow.StageID }
-
 function guardSafe(value: unknown) {
   return Effect.try({
     try: () => WorkflowSecretGuard.assertSafe(value),
@@ -92,39 +92,6 @@ function guardSafe(value: unknown) {
             message: "Persistence value could not be inspected safely",
           }),
   })
-}
-
-function matchesCreateInput(existing: Workflow.Detail, input: Workflow.CreateInput) {
-  if (existing.run.type !== input.type) return false
-  if (!isDeepStrictEqual(existing.run.input, input.input)) return false
-  if (!isDeepStrictEqual(existing.run.budget, input.budget)) return false
-  if (existing.stages.length !== input.stages.length) return false
-
-  return input.stages
-    .toSorted((left, right) => left.ordinal - right.ordinal)
-    .every((stage, index) => {
-      const projected = existing.stages[index]
-      if (!projected) return false
-      return (
-        (stage.id === undefined || stage.id === projected.id) &&
-        stage.type === projected.type &&
-        stage.ordinal === projected.ordinal &&
-        stage.maxAttempts === projected.maxAttempts &&
-        stage.recoveryPolicy === projected.recoveryPolicy &&
-        stage.idempotencyKey === projected.idempotencyKey &&
-        isDeepStrictEqual(stage.input, projected.input)
-      )
-    })
-}
-
-function matchesAdmissionInput(existing: Workflow.Detail, input: Workflow.AdmissionInput) {
-  return (
-    matchesCreateInput(existing, input) &&
-    existing.run.location?.directory === input.location.directory &&
-    existing.run.location.workspaceID === input.location.workspaceID &&
-    existing.run.sessionID === input.sessionID &&
-    existing.run.agent === input.agent
-  )
 }
 
 // ── Layer ─────────────────────────────────────────────────────────────────────
@@ -174,7 +141,7 @@ const layer = Layer.effect(
       yield* guardSafe(input)
 
       const workflowID = input.id ?? Workflow.ID.create()
-      const stages: readonly [AdmittedStage, ...AdmittedStage[]] = [
+      const stages = [
         {
           ...input.stages[0],
           id: input.stages[0].id ?? Workflow.StageID.create(),
@@ -183,24 +150,7 @@ const layer = Layer.effect(
           ...stage,
           id: stage.id ?? Workflow.StageID.create(),
         })),
-      ]
-
-      // Validate unique ordinals and idempotency keys
-      const ordinals = new Set<number>()
-      const keys = new Set<string>()
-      for (const stage of stages) {
-        if (ordinals.has(stage.ordinal)) {
-          return yield* new ConflictError({ workflowID, operation: "create" })
-        }
-        ordinals.add(stage.ordinal)
-        if (keys.has(stage.idempotencyKey)) {
-          return yield* new ConflictError({ workflowID, operation: "create" })
-        }
-        keys.add(stage.idempotencyKey)
-      }
-
-      const now = yield* DateTime.now
-      const timestamp = DateTime.toEpochMillis(now)
+      ] as const
 
       // Check if an exact byte-equivalent workflow already exists
       const existing = yield* store.get(workflowID)
@@ -215,25 +165,24 @@ const layer = Layer.effect(
         return yield* new ConflictError({ workflowID, operation: "create" })
       }
 
-      yield* events.publish(WorkflowEvent.Created, {
-        workflowID,
-        timestamp: DateTime.makeUnsafe(timestamp),
-        type: input.type,
-        input: input.input,
-        budget: input.budget,
-        stages,
-        location: admission?.location,
-        sessionID: admission?.sessionID,
-        agent: admission?.agent,
+      const now = yield* DateTime.now
+      const prepared = yield* Effect.try({
+        try: () =>
+          prepareAdmission(input, {
+            workflowID,
+            stages,
+            timestamp: now,
+            admission,
+          }),
+        catch: (error) =>
+          error instanceof ConflictError ? error : new ConflictError({ workflowID, operation: "create" }),
       })
 
+      yield* events.publish(prepared.entry.definition, prepared.entry.data)
+
       // Publish stage.queued events for audit visibility
-      for (const stage of stages) {
-        yield* events.publish(WorkflowEvent.Stage.Queued, {
-          workflowID,
-          stageID: stage.id,
-          timestamp: DateTime.makeUnsafe(timestamp),
-        })
+      for (const queued of prepared.queued) {
+        yield* events.publish(queued.definition, queued.data)
       }
 
       // Wake execution

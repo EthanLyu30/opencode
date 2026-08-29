@@ -127,6 +127,7 @@ export function toRow(info: Info) {
     directory: info.directory,
     path: info.path,
     title: info.title,
+    visibility: "public" as const,
     agent: info.agent,
     model: info.model,
     version: info.version,
@@ -534,13 +535,22 @@ const layer: Layer.Layer<
       }
       yield* Effect.logInfo("created", result)
 
-      yield* events.publish(SessionV1.Event.Created, { sessionID: result.id, info: result })
+      yield* events.publish(SessionV1.Event.Created, {
+        sessionID: result.id,
+        info: result,
+        visibility: "public",
+      })
 
       return result
     })
 
     const get = Effect.fn("Session.get")(function* (id: SessionID) {
-      const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
+      const row = yield* db
+        .select()
+        .from(SessionTable)
+        .where(and(eq(SessionTable.id, id), eq(SessionTable.visibility, "public")))
+        .get()
+        .pipe(Effect.orDie)
       if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${id}` }))
       return fromRow(row)
     })
@@ -555,7 +565,7 @@ const layer: Layer.Layer<
     })
 
     const listGlobal = Effect.fn("Session.listGlobal")(function* (input?: GlobalListInput) {
-      const conditions: SQL[] = []
+      const conditions: SQL[] = [eq(SessionTable.visibility, "public")]
       if (input?.directory) conditions.push(eq(SessionTable.directory, input.directory))
       if (input?.roots) conditions.push(isNull(SessionTable.parent_id))
       if (input?.start) conditions.push(gte(SessionTable.time_updated, input.start))
@@ -596,10 +606,17 @@ const layer: Layer.Layer<
     })
 
     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
+      const parent = yield* db
+        .select({ id: SessionTable.id })
+        .from(SessionTable)
+        .where(and(eq(SessionTable.id, parentID), eq(SessionTable.visibility, "public")))
+        .get()
+        .pipe(Effect.orDie)
+      if (!parent) return []
       const rows = yield* db
         .select()
         .from(SessionTable)
-        .where(and(eq(SessionTable.parent_id, parentID)))
+        .where(and(eq(SessionTable.parent_id, parentID), eq(SessionTable.visibility, "public")))
         .all()
         .pipe(Effect.orDie)
       return rows.map(fromRow)
@@ -961,7 +978,7 @@ function listByProject(
     experimentalWorkspaces: boolean
   },
 ) {
-  const conditions = [eq(SessionTable.project_id, input.projectID)]
+  const conditions = [eq(SessionTable.project_id, input.projectID), eq(SessionTable.visibility, "public")]
 
   if (input.workspaceID) {
     conditions.push(eq(SessionTable.workspace_id, input.workspaceID))

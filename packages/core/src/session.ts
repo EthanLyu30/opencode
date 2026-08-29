@@ -19,10 +19,6 @@ import { SessionSchema } from "./session/schema"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema"
 import { AgentV2 } from "./agent"
 import { SessionV1 } from "./v1/session"
-import { InstallationVersion } from "./installation/version"
-import { Slug } from "./util/slug"
-import { ProjectTable } from "./project/sql"
-import path from "path"
 import { fromRow } from "./session/info"
 import { SessionRunner } from "./session/runner/index"
 import { SessionStore } from "./session/store"
@@ -37,6 +33,7 @@ import { SessionRevert } from "./session/revert"
 import { Revert } from "@opencode-ai/schema/revert"
 import { FSUtil } from "./fs-util"
 import { SessionDurable } from "@opencode-ai/schema/durable-event-manifest"
+import { SessionAdmission } from "./session/admission"
 
 export const RevertState = Revert.State
 export type RevertState = Revert.State
@@ -131,7 +128,7 @@ export interface Interface {
   readonly message: (input: {
     sessionID: SessionSchema.ID
     messageID: SessionMessage.ID
-  }) => Effect.Effect<SessionMessage.Message | undefined>
+  }) => Effect.Effect<SessionMessage.Message | undefined, NotFoundError>
   readonly context: (
     sessionID: SessionSchema.ID,
   ) => Effect.Effect<SessionMessage.Message[], NotFoundError | MessageDecodeError>
@@ -164,18 +161,18 @@ export interface Interface {
     sessionID: SessionSchema.ID
     command: string
     resume?: boolean
-  }) => Effect.Effect<void, OperationUnavailableError>
+  }) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly skill: (input: {
     id?: EventV2.ID
     sessionID: SessionSchema.ID
     skill: string
     resume?: boolean
-  }) => Effect.Effect<void, OperationUnavailableError>
+  }) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly wait: (id: SessionSchema.ID) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
   readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
-  readonly interrupt: (sessionID: SessionSchema.ID) => Effect.Effect<void>
+  readonly interrupt: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
   readonly revert: {
     readonly stage: (input: {
       sessionID: SessionSchema.ID
@@ -217,38 +214,21 @@ const layer = Layer.effect(
         if (input.agent !== undefined) yield* AgentV2.requirePublicID(input.agent)
         const sessionID = input.id ?? SessionSchema.ID.create()
         const recorded = yield* store.get(sessionID)
-        if (recorded) return recorded
+        if (recorded?.visibility === "public") return recorded
+        if (recorded) return yield* Effect.die(new Error("Public Session creation conflicts with an internal identity"))
         const project = yield* projects.resolve(input.location.directory)
-        yield* db
-          .insert(ProjectTable)
-          .values({ id: project.id, worktree: project.directory, vcs: project.vcs?.type, sandboxes: [] })
-          .onConflictDoNothing()
-          .run()
-          .pipe(Effect.orDie)
         const now = Date.now()
-        const info = SessionV1.SessionInfo.make({
+        const prepared = SessionAdmission.prepare({
           id: sessionID,
-          slug: Slug.create(),
-          version: InstallationVersion,
-          projectID: project.id,
-          directory: input.location.directory,
-          path: path.relative(project.directory, input.location.directory).replaceAll("\\", "/"),
-          workspaceID: input.location.workspaceID ? WorkspaceV2.ID.make(input.location.workspaceID) : undefined,
-          title: `New session - ${new Date(now).toISOString()}`,
           agent: input.agent,
-          model: input.model
-            ? {
-                id: ModelV2.ID.make(input.model.id),
-                providerID: input.model.providerID,
-                variant: input.model.variant,
-              }
-            : undefined,
-          cost: 0,
-          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          time: { created: now, updated: now },
+          model: input.model,
+          location: input.location,
+          project,
+          visibility: "public",
+          timestamp: now,
         })
         const projected = yield* events
-          .publish(SessionV1.Event.Created, { sessionID, info }, { location: input.location })
+          .publish(prepared.entry.definition, prepared.entry.data, { location: input.location })
           .pipe(
             Effect.as({ type: "created" } as const),
             Effect.catchDefect((defect) => {
@@ -260,7 +240,9 @@ const layer = Layer.effect(
                 .get(sessionID)
                 .pipe(
                   Effect.flatMap((session) =>
-                    session ? Effect.succeed({ type: "existing", session } as const) : Effect.die(defect),
+                       session?.visibility === "public"
+                         ? Effect.succeed({ type: "existing", session } as const)
+                         : Effect.die(defect),
                   ),
                 )
             }),
@@ -270,7 +252,7 @@ const layer = Layer.effect(
         return yield* result.get(sessionID).pipe(Effect.orDie)
       }),
       get: Effect.fn("V2Session.get")(function* (sessionID) {
-        const session = yield* store.get(sessionID)
+        const session = yield* store.getPublic(sessionID)
         if (!session) return yield* new NotFoundError({ sessionID })
         return session
       }),
@@ -279,7 +261,7 @@ const layer = Layer.effect(
         const requestedOrder = input.order ?? "desc"
         const order = direction === "previous" ? (requestedOrder === "asc" ? "desc" : "asc") : requestedOrder
         const sortColumn = SessionTable.time_created
-        const conditions: SQL[] = []
+        const conditions: SQL[] = [eq(SessionTable.visibility, "public")]
         if ("directory" in input) conditions.push(eq(SessionTable.directory, input.directory))
         if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
         if ("project" in input) conditions.push(eq(SessionTable.project_id, input.project))
@@ -345,6 +327,7 @@ const layer = Layer.effect(
         return yield* Effect.forEach(direction === "previous" ? rows.toReversed() : rows, decode)
       }),
       message: Effect.fn("V2Session.message")(function* (input) {
+        yield* result.get(input.sessionID)
         const stored = yield* store.message(input.messageID)
         return stored?.sessionID === input.sessionID ? stored.message : undefined
       }),
@@ -393,10 +376,12 @@ const layer = Layer.effect(
           }),
         ),
       ),
-      shell: Effect.fn("V2Session.shell")(function* () {
+      shell: Effect.fn("V2Session.shell")(function* (input) {
+        yield* result.get(input.sessionID)
         return yield* new OperationUnavailableError({ operation: "shell" })
       }),
-      skill: Effect.fn("V2Session.skill")(function* () {
+      skill: Effect.fn("V2Session.skill")(function* (input) {
+        yield* result.get(input.sessionID)
         return yield* new OperationUnavailableError({ operation: "skill" })
       }),
       switchAgent: Effect.fn("V2Session.switchAgent")(function* (input) {
@@ -432,14 +417,19 @@ const layer = Layer.effect(
         yield* result.get(sessionID)
         return yield* new OperationUnavailableError({ operation: "wait" })
       }),
-      active: execution.active,
+      active: Effect.gen(function* () {
+        const active = yield* execution.active
+        const visible = yield* Effect.forEach(active, (sessionID) => store.getPublic(sessionID))
+        return new Set(visible.flatMap((session) => (session ? [session.id] : [])))
+      }),
       resume: Effect.fn("V2Session.resume")(function* (sessionID) {
         yield* result.get(sessionID)
         yield* execution.resume(sessionID)
       }),
-      interrupt: Effect.fn("V2Session.interrupt")((sessionID) =>
-        Effect.uninterruptible(execution.interrupt(sessionID)),
-      ),
+      interrupt: Effect.fn("V2Session.interrupt")(function* (sessionID) {
+        yield* result.get(sessionID)
+        yield* Effect.uninterruptible(execution.interrupt(sessionID))
+      }),
       revert: {
         stage: Effect.fn("V2Session.revert.stage")(function* (input) {
           const session = yield* result.get(input.sessionID)

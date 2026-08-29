@@ -8,13 +8,14 @@ import { makeGlobalNode } from "../effect/app-node"
 import { SessionEvent } from "./event"
 import { SessionV1 } from "../v1/session"
 import { WorkspaceTable } from "../control-plane/workspace.sql"
+import { ProjectTable } from "../project/sql"
 import { SessionMessage } from "./message"
 import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { SessionContextEpoch } from "./context-epoch"
 import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
-import type { DeepMutable } from "../schema"
+import { AbsolutePath, type DeepMutable } from "../schema"
 
 type DatabaseService = Database.Interface["db"]
 
@@ -41,7 +42,10 @@ function usage(part: (typeof SessionV1.Event.PartUpdated.Type)["data"]["part"] |
   return { cost: value.cost as Usage["cost"], tokens: value.tokens as Usage["tokens"] }
 }
 
-function sessionRow(info: SessionV1.SessionInfo): typeof SessionTable.$inferInsert {
+function sessionRow(
+  info: SessionV1.SessionInfo,
+  visibility?: (typeof SessionTable.$inferInsert)["visibility"],
+): typeof SessionTable.$inferInsert {
   return {
     id: info.id,
     project_id: info.projectID,
@@ -51,6 +55,7 @@ function sessionRow(info: SessionV1.SessionInfo): typeof SessionTable.$inferInse
     directory: info.directory,
     path: info.path,
     title: info.title,
+    visibility,
     agent: info.agent,
     model: info.model,
     version: info.version,
@@ -214,9 +219,25 @@ const layer = Layer.effectDiscard(
     const { db } = yield* Database.Service
     yield* events.project(SessionV1.Event.Created, (event) =>
       Effect.gen(function* () {
+        if (event.data.project) {
+          if (event.data.project.id !== event.data.info.projectID) {
+            return yield* Effect.die(new Error("Session project identity does not match its creation event"))
+          }
+          yield* db
+            .insert(ProjectTable)
+            .values({
+              id: event.data.project.id,
+              worktree: AbsolutePath.make(event.data.project.worktree),
+              vcs: event.data.project.vcs,
+              sandboxes: [],
+            })
+            .onConflictDoNothing()
+            .run()
+            .pipe(Effect.orDie)
+        }
         const stored = yield* db
           .insert(SessionTable)
-          .values(sessionRow(event.data.info))
+          .values(sessionRow(event.data.info, event.data.visibility ?? "public"))
           .onConflictDoNothing()
           .returning({ sessionID: SessionTable.id })
           .get()
