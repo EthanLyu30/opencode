@@ -257,3 +257,14 @@ The broader `packages/app/src/context/server-sdk.test.ts` fixture could not star
 The user-required no-subagent constraint prevented a reviewer-subagent pass. A direct adversarial review covered the migration ambiguity rules, every Session creation and cleanup producer, compaction batch integrity, replay atomicity, exact tombstone classification, retained-payload confidentiality, and the complete staged diff. No further open Critical or Important item was found.
 
 No Task23.9 endpoint, Task23.10 CLI, provider/network/browser/Docker/ACL surface, deployment, push, or `env.local` access changed in this round. The exact task-owned `D:\OpenCode-Task23.8-Fix5` directory was verified as non-reparse and containing only `tmp` and `bun-cache`, then moved to the Windows Recycle Bin after final verification; repository and user inputs were preserved.
+
+### Controller-dispatched round-5 re-review verdict
+
+The fresh independent scoped reviewer accepted the terminal tombstone's same-batch, sequential replay, concurrent create/delete, direct import, exact replay, and conservative migration behavior. It did **not** return a clean verdict. The fifth-round breaker therefore tripped with four real, load-bearing findings:
+
+- Critical: the legacy OpenCode instance `GET /event` handler consumes the raw `EventV2Bridge.listen` stream and filters only by Location, so a hidden visual-build admission batch can disclose prompt, receipt/context, internal IDs, Workflow, Response, and Stage events despite the protected GlobalBus and sync-history paths.
+- Important: production deletion commits the v3 tombstone before a separate compaction transaction. A crash/interruption between them leaves sensitive prior history without a retry path, and non-create Session events can still advance the aggregate sequence after the tombstone.
+- Important: EventV2 persists schema-canonical data but uses the caller's original `event.data` for projection/notification, allowing stripped extra fields to remain in live GlobalBus/SSE delivery.
+- Important: four production TUI listeners still dereference legacy `properties.info.id` for a minimal v3 deletion and can throw instead of clearing their indexes; the stale generated SDK type masks the mismatch.
+
+Per the five-round SDD cap, no sixth Task23.8 fix wave was dispatched. The controller recorded each finding as a load-bearing ruling in `progress.md` and made its smallest mandatory closure part of Task23.9's written rulings. Task23.9 cannot pass its own REST/client gate until all four are fixed and independently reviewed.
