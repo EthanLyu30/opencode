@@ -13,7 +13,12 @@ import { SessionTable } from "../session/sql"
 import { WorkflowRunTable } from "../workflow/sql"
 
 type Visibility = SessionSchema.Visibility
-type Member = { readonly type: string; readonly data: unknown }
+type Member = {
+  readonly type: string
+  readonly data: unknown
+  readonly version?: number
+  readonly legacy?: boolean
+}
 const UnknownRecord = Schema.Record(Schema.String, Schema.Unknown)
 
 export interface Authority {
@@ -36,7 +41,18 @@ export interface StoredEvent {
 const record = (value: unknown): Record<string, unknown> | undefined =>
   Schema.is(UnknownRecord)(value) ? value : undefined
 
-const eventType = (type: string) => Durable.get(type)?.type ?? type
+const definition = (type: string) => Durable.get(type)
+const eventType = (type: string) => definition(type)?.type ?? type
+
+function storedMember(row: StoredEvent): Member {
+  const durable = definition(row.type)
+  return {
+    type: durable?.type ?? row.type,
+    data: row.data,
+    ...(durable?.durable ? { version: durable.durable.version } : {}),
+    ...(!durable && row.type === "session.deleted" ? { legacy: true } : {}),
+  }
+}
 
 export function databaseAuthority(db: Database.Interface["db"]): Authority {
   return {
@@ -79,6 +95,7 @@ export function isPublic(
     readonly data?: unknown
     readonly durable?: {
       readonly aggregateID: string
+      readonly version?: number
       readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
       readonly related?: ReadonlyArray<Member>
     }
@@ -88,7 +105,12 @@ export function isPublic(
   return Effect.gen(function* () {
     const batch = event.durable?.batch
     if (batch && batch.size > 1 && event.durable?.related?.length !== batch.size) return false
-    const members: ReadonlyArray<Member> = event.durable?.related ?? [{ type: event.type ?? "", data: event.data }]
+    const members: ReadonlyArray<Member> = event.durable?.related
+      ? event.durable.related.map((member, index) => ({
+          ...member,
+          ...(batch?.index === index && event.durable?.version !== undefined ? { version: event.durable.version } : {}),
+        }))
+      : [{ type: event.type ?? "", data: event.data, version: event.durable?.version }]
     return yield* classify(members, event.durable?.aggregateID, authority)
   })
 }
@@ -123,13 +145,7 @@ export function filterHistory(
                 member.batch_index < expected,
             ) &&
             new Set(related.map((member) => member.batch_index)).size === expected)
-        visible = valid
-          ? yield* classify(
-              related.map((member) => ({ type: eventType(member.type), data: member.data })),
-              row.aggregate_id,
-              authority,
-            )
-          : false
+        visible = valid ? yield* classify(related.map(storedMember), row.aggregate_id, authority) : false
         decisions.set(key, visible)
       }
       if (visible) output.push(row)
@@ -143,8 +159,8 @@ function classify(members: ReadonlyArray<Member>, aggregateID: string | undefine
     const sessions = new Set<SessionSchema.ID>()
     const workflows = new Set<Workflow.ID>()
     const responses = new Set<Responses.ID>()
-    const workflowSessions = new Map<Workflow.ID, SessionSchema.ID>()
-    const responseWorkflows = new Map<Responses.ID, Workflow.ID>()
+    const workflowSessions = new Map<Workflow.ID, Set<SessionSchema.ID>>()
+    const responseWorkflows = new Map<Responses.ID, Set<Workflow.ID>>()
     const explicit = new Map<SessionSchema.ID, Set<Visibility>>()
     let owned = false
     let invalid = false
@@ -153,6 +169,18 @@ function classify(members: ReadonlyArray<Member>, aggregateID: string | undefine
       const values = explicit.get(sessionID) ?? new Set<Visibility>()
       values.add(visibility)
       explicit.set(sessionID, values)
+    }
+
+    const addWorkflowSession = (workflowID: Workflow.ID, sessionID: SessionSchema.ID) => {
+      const values = workflowSessions.get(workflowID) ?? new Set<SessionSchema.ID>()
+      values.add(sessionID)
+      workflowSessions.set(workflowID, values)
+    }
+
+    const addResponseWorkflow = (responseID: Responses.ID, workflowID: Workflow.ID) => {
+      const values = responseWorkflows.get(responseID) ?? new Set<Workflow.ID>()
+      values.add(workflowID)
+      responseWorkflows.set(responseID, values)
     }
 
     for (const member of members) {
@@ -178,18 +206,20 @@ function classify(members: ReadonlyArray<Member>, aggregateID: string | undefine
           invalid = true
         } else if (data?.visibility === "public" || data?.visibility === "workflow") {
           addExplicit(sessionID, data.visibility)
-        } else {
-          // Visibility predates legacy Session events. Missing authority on those two
-          // historical shapes is compatible only as public.
+        } else if (type === "session.created" || member.version === 1 || member.legacy === true) {
+          // Visibility predates legacy Session events. Only the legacy deletion
+          // schema and unversioned historical deletion rows retain that default.
           addExplicit(sessionID, "public")
+        } else {
+          invalid = true
         }
       }
       if (type === "workflow.created" && Schema.is(Workflow.ID)(workflowID)) {
-        if (Schema.is(SessionSchema.ID)(sessionID)) workflowSessions.set(workflowID, sessionID)
+        if (Schema.is(SessionSchema.ID)(sessionID)) addWorkflowSession(workflowID, sessionID)
         else invalid = true
       }
       if (type === "response.created" && Schema.is(Responses.ID)(responseID)) {
-        if (Schema.is(Workflow.ID)(workflowID)) responseWorkflows.set(responseID, workflowID)
+        if (Schema.is(Workflow.ID)(workflowID)) addResponseWorkflow(responseID, workflowID)
         else invalid = true
       }
     }
@@ -210,14 +240,18 @@ function classify(members: ReadonlyArray<Member>, aggregateID: string | undefine
     if (invalid) return false
 
     for (const responseID of responses) {
-      const workflowID = responseWorkflows.get(responseID) ?? (yield* authority.response(responseID))
-      if (!workflowID) return false
-      workflows.add(workflowID)
+      const authoritative = yield* authority.response(responseID)
+      if (!authoritative) return false
+      const declared = responseWorkflows.get(responseID)
+      if (declared && (declared.size !== 1 || !declared.has(authoritative))) return false
+      workflows.add(authoritative)
     }
     for (const workflowID of workflows) {
-      const sessionID = workflowSessions.get(workflowID) ?? (yield* authority.workflow(workflowID))
-      if (!sessionID) return false
-      sessions.add(sessionID)
+      const authoritative = yield* authority.workflow(workflowID)
+      if (!authoritative) return false
+      const declared = workflowSessions.get(workflowID)
+      if (declared && (declared.size !== 1 || !declared.has(authoritative))) return false
+      sessions.add(authoritative)
     }
 
     const visibilities = new Set<Visibility>()

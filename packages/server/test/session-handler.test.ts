@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
+import { PublicEventVisibility } from "@opencode-ai/core/event/public-visibility"
+import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { InvalidRequestError } from "@opencode-ai/protocol/errors"
 import { reservedAgent } from "../src/handlers/session"
@@ -113,6 +116,38 @@ describe("SessionHandler", () => {
     expect(visible).toBe(true)
   })
 
+  test("defaults only legacy deletion versions to public when visibility is absent", async () => {
+    const deletedID = SessionV2.ID.make("ses_deleted_versioned")
+    const sessions = {
+      get: () => Effect.fail(new SessionV2.NotFoundError({ sessionID: deletedID })),
+    } as Pick<SessionV2.Interface, "get">
+    const deletion = { sessionID: deletedID }
+
+    const legacy = await Effect.runPromise(
+      publicSessionEvent(
+        {
+          durable: { aggregateID: deletedID, version: 1 },
+          type: "session.deleted",
+          data: deletion,
+        },
+        sessions,
+      ),
+    )
+    const current = await Effect.runPromise(
+      publicSessionEvent(
+        {
+          durable: { aggregateID: deletedID, version: 2 },
+          type: "session.deleted",
+          data: deletion,
+        },
+        sessions,
+      ),
+    )
+
+    expect(legacy).toBe(true)
+    expect(current).toBe(false)
+  })
+
   test("fails closed for an incomplete workflow batch", async () => {
     const sessions = {
       get: () => Effect.die(new Error("unknown workflow ownership must not query a public Session")),
@@ -133,5 +168,107 @@ describe("SessionHandler", () => {
     )
 
     expect(visible).toBe(false)
+  })
+
+  test("suppresses complete workflow and Response batches when the live surface has no relationship authority", async () => {
+    const publicID = SessionV2.ID.make("ses_public_unresolved_batch")
+    const related = [
+      { type: "session.updated", data: { sessionID: publicID } },
+      {
+        type: "workflow.created",
+        data: { workflowID: "wfl_public_unresolved_batch", sessionID: publicID },
+      },
+      {
+        type: "response.created",
+        data: {
+          responseID: "resp_public_unresolved_batch",
+          workflowID: "wfl_public_unresolved_batch",
+          context: [{ type: "message", content: "UNRESOLVED_RECEIPT_SENTINEL" }],
+        },
+      },
+    ]
+    const sessions = {
+      get: () => Effect.succeed({} as SessionV2.Info),
+    } as Pick<SessionV2.Interface, "get">
+
+    const visible = await Effect.runPromise(
+      publicSessionEvent(
+        {
+          type: related[2]!.type,
+          data: related[2]!.data,
+          durable: {
+            aggregateID: "resp_public_unresolved_batch",
+            batch: { id: "evt_public_unresolved_batch", index: 2, size: related.length },
+            related,
+          },
+        },
+        sessions,
+      ),
+    )
+
+    expect(visible).toBe(false)
+  })
+
+  test("fails closed when one complete live batch declares two owners for the same Workflow", async () => {
+    const first = SessionV2.ID.make("ses_public_duplicate_first")
+    const second = SessionV2.ID.make("ses_public_duplicate_second")
+    const workflowID = "wfl_public_duplicate"
+    const related = [
+      { type: "session.created", data: { sessionID: first, visibility: "public" } },
+      { type: "session.created", data: { sessionID: second, visibility: "public" } },
+      { type: "workflow.created", data: { workflowID, sessionID: second } },
+      { type: "workflow.created", data: { workflowID, sessionID: first } },
+    ]
+    const visible = await Effect.runPromise(
+      PublicEventVisibility.isPublic(
+        {
+          type: related[3]!.type,
+          data: related[3]!.data,
+          durable: {
+            aggregateID: workflowID,
+            batch: { id: "evt_public_duplicate", index: 3, size: related.length },
+            related,
+          },
+        },
+        {
+          session: () => Effect.succeed("public"),
+          workflow: () => Effect.succeed(first),
+          response: () => Effect.succeed(undefined),
+        },
+      ),
+    )
+
+    expect(visible).toBe(false)
+  })
+
+  test("allows a complete Response batch that matches authoritative public ownership", async () => {
+    const sessionID = SessionV2.ID.make("ses_public_authoritative")
+    const workflowID = WorkflowV2.ID.make("wfl_public_authoritative")
+    const responseID = ResponsesV2.ID.make("resp_public_authoritative")
+    const related = [
+      { type: "session.updated", data: { sessionID } },
+      { type: "workflow.created", data: { workflowID, sessionID } },
+      { type: "response.created", data: { responseID, workflowID } },
+    ]
+    const visible = await Effect.runPromise(
+      PublicEventVisibility.isPublic(
+        {
+          type: related[2]!.type,
+          data: related[2]!.data,
+          durable: {
+            aggregateID: responseID,
+            batch: { id: "evt_public_authoritative", index: 2, size: related.length },
+            related,
+          },
+        },
+        {
+          session: () => Effect.succeed("public"),
+          workflow: () => Effect.succeed(sessionID),
+          response: () => Effect.succeed(workflowID),
+        },
+      ),
+    )
+
+    expect(visible).toBe(true)
   })
 })

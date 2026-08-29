@@ -11,10 +11,38 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { ResponseTable } from "@opencode-ai/core/responses/sql"
+import { WorkflowRunTable } from "@opencode-ai/core/workflow/sql"
 import { publicHistory } from "../../src/server/routes/instance/httpapi/handlers/sync-history"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(LayerNode.compile(Database.node))
+
+/* oxlint-disable typescript-eslint/no-unsafe-type-assertion */
+function observeAllRows<A extends object>(target: A, observations: number[]): A {
+  return new Proxy(target, {
+    get(current, key) {
+      const value = Reflect.get(current, key, current)
+      if (typeof value !== "function") return value
+      return (...args: unknown[]) => {
+        const result = Reflect.apply(value, current, args)
+        if (key === "all") {
+          return (result as Effect.Effect<ReadonlyArray<unknown>>).pipe(
+            Effect.tap((rows) => Effect.sync(() => observations.push(rows.length))),
+          )
+        }
+        return typeof result === "object" && result !== null ? observeAllRows(result, observations) : result
+      }
+    },
+  }) as A
+}
+/* oxlint-enable typescript-eslint/no-unsafe-type-assertion */
+
+function chunk<A>(items: ReadonlyArray<A>, size: number) {
+  const output: A[][] = []
+  for (let index = 0; index < items.length; index += size) output.push(items.slice(index, index + size))
+  return output
+}
 
 describe("public sync history", () => {
   it.effect("fails closed for a hidden related batch when the fence map is empty or partial", () =>
@@ -112,9 +140,16 @@ describe("public sync history", () => {
       const publicID = SessionV2.ID.make("ses_public_deletion_history")
       const legacyID = SessionV2.ID.make("ses_legacy_deletion_history")
       const hiddenID = SessionV2.ID.make("ses_hidden_deletion_history")
+      const invalidCurrentID = SessionV2.ID.make("ses_invalid_current_deletion_history")
+      const unversionedID = SessionV2.ID.make("ses_unversioned_deletion_history")
       yield* db
         .insert(EventSequenceTable)
-        .values([publicID, legacyID, hiddenID].map((aggregate_id) => ({ aggregate_id, seq: 0 })))
+        .values(
+          [publicID, legacyID, hiddenID, invalidCurrentID, unversionedID].map((aggregate_id) => ({
+            aggregate_id,
+            seq: 0,
+          })),
+        )
         .run()
         .pipe(Effect.orDie)
       yield* db
@@ -141,12 +176,26 @@ describe("public sync history", () => {
             type: "session.deleted.1",
             data: { sessionID: hiddenID, info: {}, visibility: "workflow" },
           },
+          {
+            id: EventV2.ID.make("evt_invalid_current_deletion_history"),
+            aggregate_id: invalidCurrentID,
+            seq: 0,
+            type: "session.deleted.2",
+            data: { sessionID: invalidCurrentID, info: {} },
+          },
+          {
+            id: EventV2.ID.make("evt_unversioned_deletion_history"),
+            aggregate_id: unversionedID,
+            seq: 0,
+            type: "session.deleted",
+            data: { sessionID: unversionedID, info: {} },
+          },
         ])
         .run()
         .pipe(Effect.orDie)
 
       const rows = yield* publicHistory(db, {})
-      expect(rows.map((row) => row.aggregate_id)).toEqual([publicID, legacyID])
+      expect(rows.map((row) => row.aggregate_id)).toEqual([publicID, legacyID, unversionedID])
     }),
   )
 
@@ -171,6 +220,315 @@ describe("public sync history", () => {
         .pipe(Effect.orDie)
 
       expect(yield* publicHistory(db, {})).toEqual([])
+    }),
+  )
+
+  it.effect("rejects a forged complete history batch that contradicts stored Response ownership", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const publicID = SessionV2.ID.make("ses_public_forged_history")
+      const hiddenID = SessionV2.ID.make("ses_hidden_forged_history")
+      const declaredWorkflowID = Workflow.ID.make("wfl_public_forged_history")
+      const hiddenWorkflowID = Workflow.ID.make("wfl_hidden_forged_history")
+      const responseID = Responses.ID.make("resp_hidden_forged_history")
+      yield* db
+        .insert(ProjectTable)
+        .values({
+          id: ProjectV2.ID.global,
+          worktree: AbsolutePath.make("D:/forged-history"),
+          sandboxes: [],
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values(
+          [
+            [publicID, "public"],
+            [hiddenID, "workflow"],
+          ].map(([id, visibility]) => ({
+            id: SessionV2.ID.make(id!),
+            project_id: ProjectV2.ID.global,
+            slug: id!,
+            directory: AbsolutePath.make("D:/forged-history"),
+            title: id!,
+            visibility: visibility as "public" | "workflow",
+            version: "test",
+            time_created: 1,
+            time_updated: 1,
+          })),
+        )
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(WorkflowRunTable)
+        .values(
+          [
+            [declaredWorkflowID, publicID],
+            [hiddenWorkflowID, hiddenID],
+          ].map(([id, session_id]) => ({
+            id: Workflow.ID.make(id!),
+            type: "visual-build",
+            status: "queued" as const,
+            input: {},
+            budget: {},
+            usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+            session_id: SessionV2.ID.make(session_id!),
+            version: 0,
+            time_created: 1,
+            time_updated: 1,
+          })),
+        )
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(ResponseTable)
+        .values({
+          id: responseID,
+          workflow_id: hiddenWorkflowID,
+          model: "test",
+          status: "queued",
+          background: true,
+          store: true,
+          request_hash: "forged-history-authority",
+          output: [],
+          created_at: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(EventSequenceTable)
+        .values([
+          { aggregate_id: responseID, seq: 0 },
+          { aggregate_id: declaredWorkflowID, seq: 0 },
+          { aggregate_id: publicID, seq: 0 },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(EventTable)
+        .values([
+          {
+            id: EventV2.ID.make("evt_forged_history_response"),
+            aggregate_id: responseID,
+            seq: 0,
+            batch_id: "evt_forged_history_batch",
+            batch_index: 0,
+            batch_size: 3,
+            type: "response.created.1",
+            data: {
+              responseID,
+              workflowID: declaredWorkflowID,
+              context: [{ type: "message", content: "FORGED_HISTORY_RECEIPT" }],
+            },
+          },
+          {
+            id: EventV2.ID.make("evt_forged_history_workflow"),
+            aggregate_id: declaredWorkflowID,
+            seq: 0,
+            batch_id: "evt_forged_history_batch",
+            batch_index: 1,
+            batch_size: 3,
+            type: "workflow.created.1",
+            data: { workflowID: declaredWorkflowID, sessionID: publicID },
+          },
+          {
+            id: EventV2.ID.make("evt_forged_history_session"),
+            aggregate_id: publicID,
+            seq: 0,
+            batch_id: "evt_forged_history_batch",
+            batch_index: 2,
+            batch_size: 3,
+            type: "session.updated.1",
+            data: { sessionID: publicID },
+          },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+
+      const rows = yield* publicHistory(db, {})
+      expect(rows).toEqual([])
+      expect(JSON.stringify(rows)).not.toContain("FORGED_HISTORY_RECEIPT")
+    }),
+  )
+
+  it.effect("rejects duplicate Workflow ownership declarations even when every Session is public", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const first = SessionV2.ID.make("ses_duplicate_history_first")
+      const second = SessionV2.ID.make("ses_duplicate_history_second")
+      const workflowID = Workflow.ID.make("wfl_duplicate_history")
+      yield* db
+        .insert(ProjectTable)
+        .values({
+          id: ProjectV2.ID.global,
+          worktree: AbsolutePath.make("D:/duplicate-history"),
+          sandboxes: [],
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values(
+          [first, second].map((id) => ({
+            id,
+            project_id: ProjectV2.ID.global,
+            slug: id,
+            directory: AbsolutePath.make("D:/duplicate-history"),
+            title: id,
+            visibility: "public" as const,
+            version: "test",
+            time_created: 1,
+            time_updated: 1,
+          })),
+        )
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(WorkflowRunTable)
+        .values({
+          id: workflowID,
+          type: "visual-build",
+          status: "queued",
+          input: {},
+          budget: {},
+          usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+          session_id: first,
+          version: 0,
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(EventSequenceTable)
+        .values([
+          { aggregate_id: workflowID, seq: 1 },
+          { aggregate_id: first, seq: 0 },
+          { aggregate_id: second, seq: 0 },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(EventTable)
+        .values([
+          {
+            id: EventV2.ID.make("evt_duplicate_history_workflow_second"),
+            aggregate_id: workflowID,
+            seq: 0,
+            batch_id: "evt_duplicate_history_batch",
+            batch_index: 0,
+            batch_size: 4,
+            type: "workflow.created.1",
+            data: { workflowID, sessionID: second },
+          },
+          {
+            id: EventV2.ID.make("evt_duplicate_history_session_second"),
+            aggregate_id: second,
+            seq: 0,
+            batch_id: "evt_duplicate_history_batch",
+            batch_index: 1,
+            batch_size: 4,
+            type: "session.created.1",
+            data: { sessionID: second, visibility: "public" },
+          },
+          {
+            id: EventV2.ID.make("evt_duplicate_history_session_first"),
+            aggregate_id: first,
+            seq: 0,
+            batch_id: "evt_duplicate_history_batch",
+            batch_index: 2,
+            batch_size: 4,
+            type: "session.created.1",
+            data: { sessionID: first, visibility: "public" },
+          },
+          {
+            id: EventV2.ID.make("evt_duplicate_history_workflow_first"),
+            aggregate_id: workflowID,
+            seq: 1,
+            batch_id: "evt_duplicate_history_batch",
+            batch_index: 3,
+            batch_size: 4,
+            type: "workflow.created.1",
+            data: { workflowID, sessionID: first },
+          },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+
+      expect(yield* publicHistory(db, {})).toEqual([])
+    }),
+  )
+
+  it.effect("does not issue a second history query when the fence leaves zero candidates", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      yield* db.insert(EventSequenceTable).values({ aggregate_id: "unrelated", seq: 0 }).run().pipe(Effect.orDie)
+      yield* db
+        .insert(EventTable)
+        .values({
+          id: EventV2.ID.make("evt_zero_candidate_history"),
+          aggregate_id: "unrelated",
+          seq: 0,
+          type: "server.test.1",
+          data: {},
+        })
+        .run()
+        .pipe(Effect.orDie)
+      const observations: number[] = []
+      const instrumented = observeAllRows(db, observations)
+
+      expect(yield* publicHistory(instrumented, { unrelated: 0 })).toEqual([])
+      expect(observations).toEqual([0])
+    }),
+  )
+
+  it.effect("loads only chunk-bounded candidate batches instead of scanning large unrelated history", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const candidateCount = 1_050
+      const unrelatedCount = 5_000
+      yield* db
+        .insert(EventSequenceTable)
+        .values([
+          { aggregate_id: "candidate_history", seq: candidateCount - 1 },
+          { aggregate_id: "unrelated_history", seq: unrelatedCount - 1 },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+      const candidates = Array.from({ length: candidateCount }, (_, index) => ({
+        id: EventV2.ID.make(`evt_candidate_history_${index}`),
+        aggregate_id: "candidate_history",
+        seq: index,
+        batch_id: `evt_candidate_history_batch_${index}`,
+        batch_index: 0,
+        batch_size: 1,
+        type: "server.test.1",
+        data: {},
+      }))
+      const unrelated = Array.from({ length: unrelatedCount }, (_, index) => ({
+        id: EventV2.ID.make(`evt_unrelated_history_${index}`),
+        aggregate_id: "unrelated_history",
+        seq: index,
+        type: "server.test.1",
+        data: {},
+      }))
+      yield* Effect.forEach(
+        chunk([...candidates, ...unrelated], 100),
+        (rows) => db.insert(EventTable).values(rows).run().pipe(Effect.orDie),
+        { discard: true },
+      )
+      const observations: number[] = []
+      const instrumented = observeAllRows(db, observations)
+
+      const rows = yield* publicHistory(instrumented, { unrelated_history: unrelatedCount - 1 })
+      expect(rows).toHaveLength(candidateCount)
+      expect(observations.length).toBeLessThan(10)
+      expect(observations.reduce((total, count) => total + count, 0)).toBe(candidateCount * 2)
     }),
   )
 })

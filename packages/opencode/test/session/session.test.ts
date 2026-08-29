@@ -2,7 +2,7 @@ import { describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2 } from "@opencode-ai/core/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { Deferred, Effect, Exit, Layer } from "effect"
+import { Deferred, Effect, Exit, Layer, Schema } from "effect"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
@@ -23,6 +23,28 @@ import { DateTime } from "effect"
 import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { Event } from "@opencode-ai/schema/event"
+import { WorkflowRunTable } from "@opencode-ai/core/workflow/sql"
+import { ResponseTable } from "@opencode-ai/core/responses/sql"
+
+const ForgedResponseCreated = Event.define({
+  type: "response.created",
+  durable: { version: 1, aggregate: "responseID" },
+  schema: {
+    responseID: Responses.ID,
+    workflowID: Workflow.ID,
+    context: Schema.Array(Schema.Unknown),
+  },
+})
+
+const ForgedWorkflowCreated = Event.define({
+  type: "workflow.created",
+  durable: { version: 1, aggregate: "workflowID" },
+  schema: {
+    workflowID: Workflow.ID,
+    sessionID: Schema.String,
+  },
+})
 
 const it = testEffect(
   AppNodeBuilder.build(
@@ -223,6 +245,99 @@ describe("session.created event", () => {
     }),
   )
 
+  it.instance("rejects a forged complete GlobalBus batch that contradicts stored Response ownership", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const publicSession = yield* session.create({})
+      const hiddenSession = yield* session.create({})
+      const hiddenWorkflowID = Workflow.ID.make("wfl_hidden_authoritative_global")
+      const declaredWorkflowID = Workflow.ID.make("wfl_public_declared_global")
+      const responseID = Responses.ID.make("resp_hidden_authoritative_global")
+      const { db } = yield* Database.Service
+      yield* db
+        .update(SessionTable)
+        .set({ visibility: "workflow" })
+        .where(eq(SessionTable.id, hiddenSession.id))
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(WorkflowRunTable)
+        .values([
+          {
+            id: hiddenWorkflowID,
+            type: "visual-build",
+            status: "queued",
+            input: {},
+            budget: {},
+            usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+            session_id: hiddenSession.id,
+            version: 0,
+            time_created: 1,
+            time_updated: 1,
+          },
+          {
+            id: declaredWorkflowID,
+            type: "visual-build",
+            status: "queued",
+            input: {},
+            budget: {},
+            usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+            session_id: publicSession.id,
+            version: 0,
+            time_created: 1,
+            time_updated: 1,
+          },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(ResponseTable)
+        .values({
+          id: responseID,
+          workflow_id: hiddenWorkflowID,
+          model: "test",
+          status: "queued",
+          background: true,
+          store: true,
+          request_hash: "forged-global-authority",
+          output: [],
+          created_at: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      const received: unknown[] = []
+      const listener = (event: { payload: unknown }) => received.push(event)
+      GlobalBus.on("event", listener)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
+
+      yield* events.publish(
+        ForgedResponseCreated,
+        {
+          responseID,
+          workflowID: declaredWorkflowID,
+          context: [{ type: "message", content: "FORGED_GLOBAL_RECEIPT" }],
+        },
+        {
+          related: [
+            {
+              definition: ForgedWorkflowCreated,
+              data: { workflowID: declaredWorkflowID, sessionID: publicSession.id },
+            },
+            {
+              definition: SessionV1.Event.Updated,
+              data: { sessionID: publicSession.id, info: publicSession },
+            },
+          ],
+        },
+      )
+
+      expect(received).toEqual([])
+      expect(JSON.stringify(received)).not.toContain("FORGED_GLOBAL_RECEIPT")
+    }),
+  )
+
   it.instance("emits a public Session deletion after its projected row is gone", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
@@ -237,7 +352,12 @@ describe("session.created event", () => {
       GlobalBus.on("event", listener)
       yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
 
-      yield* events.publish(SessionV1.Event.Deleted, { sessionID: info.id, info, visibility: "public" })
+      const deleted = yield* events.publish(SessionV1.Event.Deleted, {
+        sessionID: info.id,
+        info,
+        visibility: "public",
+      })
+      expect(deleted.durable?.version).toBe(2)
       expect(yield* awaitDeferred(received, "timed out waiting for public session.deleted")).toBeDefined()
     }),
   )

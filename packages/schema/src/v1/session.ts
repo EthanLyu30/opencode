@@ -593,13 +593,25 @@ const events = {
       info: SessionInfo,
     },
   }),
-  Deleted: define({
+  DeletedV1: define({
     type: "session.deleted",
     ...options,
     schema: {
       sessionID: SessionID,
       info: SessionInfo,
       visibility: optional(Schema.Literals(["public", "workflow"])),
+    },
+  }),
+  Deleted: define({
+    type: "session.deleted",
+    durable: {
+      aggregate: "sessionID",
+      version: 2,
+    },
+    schema: {
+      sessionID: SessionID,
+      info: SessionInfo,
+      visibility: Schema.Literals(["public", "workflow"]),
     },
   }),
   MessageUpdated: define({
@@ -673,6 +685,7 @@ export const Event = {
   Definitions: inventory(
     events.Created,
     events.Updated,
+    events.DeletedV1,
     events.Deleted,
     events.MessageUpdated,
     events.MessageRemoved,
