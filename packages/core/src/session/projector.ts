@@ -23,6 +23,7 @@ const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
 
 export class SessionAlreadyProjected extends Error {}
+class InvalidSessionDeletion extends Error {}
 
 type Usage = {
   cost: number
@@ -213,6 +214,44 @@ function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: 
     .pipe(Effect.orDie)
 }
 
+function deleteSession(db: DatabaseService, event: EventV2.Payload<typeof SessionV1.Event.Deleted>) {
+  return Effect.gen(function* () {
+    const version = event.durable?.version
+    if (version !== undefined && version !== 1 && version !== 2) {
+      return yield* Effect.die(new InvalidSessionDeletion(`Unsupported Session deletion version ${version}`))
+    }
+    const data = event.data as (typeof SessionV1.Event.DeletedV1.Type)["data"]
+    if (version === 2 && data.visibility === undefined) {
+      return yield* Effect.die(new InvalidSessionDeletion("Current Session deletion is missing visibility authority"))
+    }
+    const visibility = data.visibility ?? "public"
+    const stored = yield* db
+      .select({ visibility: SessionTable.visibility })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, event.data.sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    if (!stored) {
+      return yield* Effect.die(new InvalidSessionDeletion("Session deletion has no projected authority"))
+    }
+    if (stored.visibility !== visibility) {
+      return yield* Effect.die(
+        new InvalidSessionDeletion("Session deletion visibility contradicts projected authority"),
+      )
+    }
+    const deleted = yield* db
+      .delete(SessionTable)
+      .where(and(eq(SessionTable.id, event.data.sessionID), eq(SessionTable.visibility, visibility)))
+      .returning({ sessionID: SessionTable.id })
+      .get()
+      .pipe(Effect.orDie)
+    if (!deleted) {
+      return yield* Effect.die(new InvalidSessionDeletion("Session deletion lost projected authority"))
+    }
+    return yield* Effect.void
+  })
+}
+
 const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const events = yield* EventV2.Service
@@ -277,9 +316,7 @@ const layer = Layer.effectDiscard(
         yield* SessionContextEpoch.reset(db, event.data.sessionID)
       }),
     )
-    yield* events.project(SessionV1.Event.Deleted, (event) =>
-      db.delete(SessionTable).where(eq(SessionTable.id, event.data.sessionID)).run().pipe(Effect.orDie),
-    )
+    yield* events.project(SessionV1.Event.Deleted, (event) => deleteSession(db, event))
     yield* events.project(SessionV1.Event.MessageUpdated, (event) =>
       Effect.gen(function* () {
         const time_created = event.data.info.time.created

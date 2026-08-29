@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2 } from "@opencode-ai/core/event"
+import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Deferred, Effect, Exit, Layer, Schema } from "effect"
 import { Session as SessionNs } from "@/session/session"
@@ -27,6 +28,7 @@ import { Event } from "@opencode-ai/schema/event"
 import { WorkflowRunTable } from "@opencode-ai/core/workflow/sql"
 import { ResponseTable } from "@opencode-ai/core/responses/sql"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { publicHistory } from "../../src/server/routes/instance/httpapi/handlers/sync-history"
 
 const ForgedResponseCreated = Event.define({
   type: "response.created",
@@ -446,10 +448,47 @@ describe("session.created event", () => {
     }),
   )
 
+  it.instance("rejects a forged public deletion of a workflow Session before live or history emission", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const info = yield* session.create({})
+      const { db } = yield* Database.Service
+      yield* db
+        .update(SessionTable)
+        .set({ visibility: "workflow" })
+        .where(eq(SessionTable.id, info.id))
+        .run()
+        .pipe(Effect.orDie)
+      const storedEvents = yield* db.select().from(EventTable).all().pipe(Effect.orDie)
+      const storedSequences = yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)
+      const received: unknown[] = []
+      const listener = (event: { payload: unknown }) => {
+        if (JSON.stringify(event).includes(info.id)) received.push(event)
+      }
+      GlobalBus.on("event", listener)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
+
+      const exit = yield* events
+        .publish(SessionV1.Event.Deleted, { sessionID: info.id, info, visibility: "public" })
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.id, info.id)).get().pipe(Effect.orDie),
+      ).toMatchObject({ id: info.id, visibility: "workflow" })
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toEqual(storedEvents)
+      expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual(storedSequences)
+      expect(received).toEqual([])
+      expect(yield* publicHistory(db, {})).toEqual([])
+    }),
+  )
+
   it.instance("emits a public Session deletion after its projected row is gone", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
       const events = yield* EventV2Bridge.Service
+      const { db } = yield* Database.Service
       const info = yield* session.create({})
       const received = yield* Deferred.make<unknown>()
       const listener = (event: { payload: { type?: string; properties?: { sessionID?: string } } }) => {
@@ -467,6 +506,39 @@ describe("session.created event", () => {
       })
       expect(deleted.durable?.version).toBe(2)
       expect(yield* awaitDeferred(received, "timed out waiting for public session.deleted")).toBeDefined()
+      expect((yield* publicHistory(db, {})).map((event) => event.id)).toEqual([deleted.id])
+    }),
+  )
+
+  it.instance("emits a legacy public Session deletion after validated v1 replay", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const { db } = yield* Database.Service
+      const info = yield* session.create({})
+      const eventID = EventV2.ID.make("evt_legacy_public_deletion_global")
+      const received = yield* Deferred.make<unknown>()
+      const listener = (event: { payload: { type?: string; properties?: { sessionID?: string } } }) => {
+        if (event.payload.type === "session.deleted" && event.payload.properties?.sessionID === info.id) {
+          Deferred.doneUnsafe(received, Effect.succeed(event))
+        }
+      }
+      GlobalBus.on("event", listener)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
+
+      yield* events.replay(
+        {
+          id: eventID,
+          aggregateID: info.id,
+          seq: 1,
+          type: EventV2.versionedType(SessionV1.Event.DeletedV1.type, 1),
+          data: { sessionID: info.id, info: Schema.encodeSync(SessionV1.SessionInfo)(info) },
+        },
+        { publish: true },
+      )
+
+      expect(yield* awaitDeferred(received, "timed out waiting for legacy public session.deleted")).toBeDefined()
+      expect((yield* publicHistory(db, {})).map((event) => event.id)).toEqual([eventID])
     }),
   )
 
@@ -491,6 +563,7 @@ describe("session.created event", () => {
 
       yield* events.publish(SessionV1.Event.Deleted, { sessionID: info.id, info, visibility: "workflow" })
       expect(received).toEqual([])
+      expect(yield* publicHistory(db, {})).toEqual([])
     }),
   )
 })
