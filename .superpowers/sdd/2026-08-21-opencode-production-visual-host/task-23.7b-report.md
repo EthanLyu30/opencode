@@ -266,3 +266,74 @@ Implementation commit: `a05d29ab8` (`fix(workflow): close production evidence re
 - No live provider, browser, network, Docker, ACL, deployment, push, or `.env.local` access occurred.
 - Materialized owner/tree/lease directories are deliberately retained when there is no proven exact post-projection cleanup authority. A bounded exact-owner garbage-collection pass for old successful test-only leases remains an operational follow-up; current behavior prefers a D-drive retention leak over unsafe early deletion or deleting bytes needed by evidence recovery.
 - Cleanup verified `D:\OpenCode-Task23.7b-review` and `D:\OpenCode-Task23.7b` as the exact task-owned temporary directories, but the execution safety policy rejected both recursive `Remove-Item` calls. They remain as removable test temp/cache artifacts; no repository file is contained there.
+
+---
+
+## Independent re-review result (fix round 2 input; accurately transcribed)
+
+The re-review kept one Critical and four Important issues open:
+
+> **Critical C2:** the filesystem materialization root remained mutable. A same-user edit/restore race between the pre-use hash and test/capture/static consumption could still make evidence observe bytes other than the exact Snapshot.
+>
+> **Important I1:** staged/reference ambiguity still became `invalid_visual_authority` and a final schema failure rather than a specific typed ambiguity that enters approval/recovery.
+>
+> **Important I2:** the 10,000-page reconciliation cap reset the cursor and could starve the tail forever; progress had to persist fairly across scheduler ticks and wrap only after reaching the end.
+>
+> **Important A:** the materialization root bypassed `HostRootPolicy` and did not sufficiently fence reparse/junction/hardlink identity before cleanup.
+>
+> **Important B:** materializations had no exact acquire/release cleanup authority or bounded fair orphan GC; foreign/ambiguous owners had to be retained.
+
+Controller rulings 11 and 12 made the resolution binding: filesystem materialization is cache only; static preview serves a sealed immutable byte map; frozen tests and script preview import a host-owned content-addressed archive and never bind/reopen the mutable cache; every root is admitted through the existing `HostRootPolicy`; cleanup is exact, repeatedly fenced, leaf-first, non-recursive, lease-authorized, and bounded/fair. No technical pushback was necessary.
+
+## Review fix round 2 — TDD resolution
+
+All commands used pinned Bun `D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe`, with task temp/cache beneath `D:\OpenCode-Task23.7b-round2`. Tests and typechecks ran from their package directories.
+
+| Finding                                | Meaningful RED                                                                                                                                                                                                     | GREEN implementation / proof                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C2 immutable consumption               | The static race regression observed edited bytes from the materialization tree, the frozen test still installed a host bind, and script preview had no sealed archive path.                                        | Core now seals every canonical Snapshot entry into a strict v1 content-addressed archive, validates entry and aggregate identities, exposes fresh immutable byte maps, and emits deterministic ustar bytes. Production static preview serves only that map. Functional tests and script previews copy the archive into the exact owned container before start and have no workspace bind/reopen. Edit/restore race tests prove evidence sees only sealed bytes.       |
+| I1 typed staged/reference ambiguity    | The later-revision regression expected `reference_evidence_ambiguous` but received `invalid_visual_authority`.                                                                                                     | Exact candidate ambiguity plus active/ambiguous ledger ownership now emit `reference_evidence_ambiguous`; the existing executor mapping preserves the code and categorizes it as approval/ambiguity. The post-EventV2 failure/reconcile/next-revision regression passes.                                                                                                                                                                                              |
+| I2 fair bounded cursor                 | The synthetic tail did not advance under a bounded per-tick page budget because the scan cursor was local/reset.                                                                                                   | A scheduler-owned `ReconciliationState` retains `(timeCreated, workflowID)` after a bounded tick, clears only at deterministic end, and wraps on the following tick. The synthetic tail test uses seven workflows and a two-page budget, proving progress without allocating millions of rows.                                                                                                                                                                        |
+| A HostRootPolicy and cleanup fences    | The production resolver's fake root verifier was never called, so hostile root identity could reach materialization.                                                                                               | Production constructs one lazy `HostRootPolicy` verifier for the exact temp/materializations root, repeats root and directory identity checks before create/read/rename/lease operations, rejects linked cache leaves, and uses bounded leaf-first `unlink`/`rmdir` cleanup only. Normal/embedded composition remains environment-lazy.                                                                                                                               |
+| B leases and orphan GC                 | No exact materialization release manager existed; successful and terminal leases had no bounded cleanup path.                                                                                                      | Durable active/released lease records bind root/tree/workflow/stage/revision/Location/Snapshot/manifest/workspace/archive identity. Visual release occurs only after ledger release; test leases require exact durable test/log evidence; failed/cancelled stages are terminal authority. Startup/reconciliation GC retains a fair owner cursor and processes at most 128 owners per tick. Foreign, duplicate, drifted, linked, or ambiguous owners remain untouched. |
+| Self-review: owner/lease cross-binding | Focused command: `bun test test/workflow-production-evidence.test.ts -t "retains a materialization whose durable owner authority differs from its lease"` → **0 pass, 1 fail**; expected `false`, received `true`. | Cleanup now requires exact owner topology, exact owner↔lease↔archive authority, identical archive identity across leases, safe single-link metadata leaves, and an exact cache-entry match before deletion. The same regression is **1 pass, 0 fail, 4 assertions** and additionally proves a multiply-linked lease is retained without changing its outside owner.                                                                                                 |
+
+### Systematic debugging during fix round 2
+
+1. The first Server mandatory run failed only `Workflow route composition > acquires the actual normal and embedded returned route graphs through their application service layer` with `TypeError: Missing required OPENCODE_WORKFLOW_HOST_TEMP` (**139 pass, 1 fail**). The smallest reproduction confirmed the new materialization verifier eagerly read production environment during graph construction. The single fix made HostRootPolicy construction lazy until first materialization and conditioned startup GC on a complete host environment. The exact reproduction and then the full matrix passed.
+2. After the sealed script test was added, the Docker ownership file intermittently failed `does not remove the network before a rejected container create becomes visible and authenticated` (**37 pass, 1 fail**), while the exact focused case passed. Inspection showed the assertion waited for container removal but immediately sampled the independently scheduled network removal. The test's wait boundary was minimally corrected to await both exact cleanup observations; the full owning file then passed **38/38**. No production timeout or cleanup workaround was added.
+3. Changed-file oxlint initially reported **22 task-created warnings** (2 Core and 20 Server), all unnecessary assertions introduced while narrowing new lease/archive data. Each was replaced with proved narrowing/index checks; final native lint is 0 warnings/0 errors. The earlier round-one 28-warning attribution remains unchanged: 21 task/relevant warnings were fixed and 7 base warnings lived in then-changed legacy Git/Snapshot files.
+4. Invoking oxlint from a package directory failed before scanning with `options.typeAware is only supported in the root config`. A minimal run with the same exact rules as an explicit root config passed, and a repository-root invocation using the committed config also passed. Root cause was nested-config discovery from the package cwd, not source or config content. The config was restored byte-for-byte; final lint was run from the repository root while every test/typecheck remained package-local.
+
+## Review fix round 2 — final GREEN
+
+Implementation commit: `2ae474299` (`fix(workflow): seal production evidence materializations`), 17 code/test files, 1,195 insertions and 112 deletions. This report, the progress ledger, and controller rulings 11/12 are committed separately.
+
+- Core matrix 1 from `packages/core`:
+  - `bun test test/snapshot.test.ts test/workflow-business-artifacts.test.ts test/workflow-production-host-plan.test.ts test/workflow-production-evidence.test.ts test/workflow-evidence-settlement.test.ts test/workflow-visual-host.test.ts`
+  - **48 pass, 0 fail, 219 assertions**, 6 files, 68.17 s.
+- Core matrix 2 from `packages/core`:
+  - `bun test test/workflow-role-execution.test.ts test/workflow-design-loop.test.ts test/workflow-routing.test.ts test/workflow-model-state-machine.test.ts test/workflow-location-tools.test.ts test/workflow-execution.test.ts`
+  - **104 pass, 0 fail, 563 assertions**, 6 files, 7.11 s.
+- Server mandatory matrix from `packages/server`:
+  - `bun test test/workflow-production-evidence.test.ts test/workflow-runtime-composition.test.ts test/workflow-command-sandbox.test.ts test/workflow-visual-host.test.ts`
+  - **141 pass, 0 fail, 505 assertions**, 4 files, 10.76 s.
+- Additional owning Server file from `packages/server`:
+  - `bun test test/workflow-docker-process-ownership.test.ts`
+  - **38 pass, 0 fail, 155 assertions**, 1 file, 2.90 s.
+- `bun run typecheck` from each of `packages/schema`, `packages/core`, and `packages/server` → `$ tsgo --noEmit`, exit 0 for all three.
+- Exact 17 changed-file Prettier check → all matched files use Prettier code style, exit 0.
+- Exact 17 changed-file repository-root oxlint → **0 warnings, 0 errors**, 130 rules, exit 0.
+- `git diff --check` and staged diff check → exit 0 (only Git's informational LF→CRLF notices).
+
+## Review fix round 2 — self-review and remaining concerns
+
+- Confirmed no post-seal production consumer reopens or bind-mounts the materialization cache: static uses the immutable byte map; functional/script consumers import exact archive bytes into owned containers before start.
+- Confirmed the lease/archive identity is part of the deep immutable preparation authority and Task23.7A's request binding remains unchanged.
+- Confirmed reference reuse remains a read-only dependency with original Artifact/stage/revision/receipt/time identity; it is never cloned, re-owned, re-emitted, or recaptured.
+- Confirmed reconciliation and materialization GC both retain bounded fair cursors across ticks and keep foreign/ambiguous state rather than broadening authority.
+- Confirmed normal/embedded composition shares the same resolver/materialization owner and remains constructible without production environment.
+- Confirmed no Task23.8–23.12 public surface and no live provider, network, browser, Docker, ACL, deployment, push, or `.env.local` access.
+- Archive import uses deterministic ustar and fails closed for a Snapshot path that cannot be represented by its bounded prefix/name fields. Supporting longer otherwise-valid Windows paths would require a separately reviewed deterministic PAX/extended-header codec.
+- Real Docker/Chromium/ACL and paid-provider acceptance remain deferred to Tasks 23.11/23.12.
+- Cleanup verified `D:\OpenCode-Task23.7b-round2` as the exact round-two task-owned temp/cache directory, but the host safety policy rejected both the recursive removal and the verified leaf-first removal command before execution. The directory remains as a removable temporary artifact and contains no repository deliverable.
