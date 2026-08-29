@@ -213,3 +213,47 @@ Fresh final package-directory gates used pinned Bun `D:\OpenCode-Toolchain\bun-1
 The user-required no-subagent constraint prevented the reviewer-subagent step, so the final scoped review was performed directly against the deletion invariant, every producer/replay path, and the complete diff. No further Critical or Important item was found.
 
 No Task23.9 endpoint, Task23.10 CLI, provider/network/browser/Docker/ACL surface, deployment, push, or `env.local` access changed in this round. The exact task-owned non-reparse `D:\OpenCode-Task23.8-Fix4` root was verified to contain only test/cache artifacts and moved to the Windows Recycle Bin after final verification.
+
+## Independent review fix round 5
+
+The two remaining Session-deletion terminality and production-compaction findings are closed by implementation commit `f961048d0296603fb376256a458a7a7a3c7f3174` (`fix(core): make session deletion terminal`) under controller ruling 10.
+
+### Closed findings
+
+- Current `session.deleted.3` is a strict minimal terminal payload containing only `sessionID`, authoritative `visibility`, and canonical event-supplied `timeDeleted`. It retains no `Session.Info`, title, project, directory, prompt, metadata, or content. Strict v1 and v2 codecs remain registered for historical decode/replay.
+- Generated migration `20260829100035_session_terminal_tombstone` adds the durable minimal `session_tombstone` authority: Session ID, prior visibility, exact deletion event ID/version, and deletion time. The deletion projector derives it from an existing matching Session row inside the same EventV2 transaction, inserts it before a visibility-guarded row deletion, and rolls everything back on missing, mismatched, duplicate, or conflicting authority.
+- `Session.Created` projection checks the tombstone first, permanently reserving a deleted ID. Concurrent create/delete serialization, same-batch delete/create, sequential `/sync/replay` delete/create, duplicate deletion, contradictory deletion, missing authority, forged envelopes, and mismatched tombstones all fail closed. Exact replay of the already persisted deletion remains a notification-free no-op.
+- Public live and history classification no longer trusts a deletion payload after the Session row is gone. It requires the exact persisted tombstone event ID, durable version, visibility, and deletion time. Valid public/legacy deletion remains visible; valid workflow-hidden deletion remains suppressed.
+- Production `Session.remove` publishes the minimal v3 deletion and uses bounded immediate-transaction EventV2 terminal compaction instead of generic `events.remove`. Compaction proves the committed terminal envelope and aggregate sequence, retains the deletion EventTable row plus EventSequence/tombstone, removes prior sensitive unbatched rows, and removes only complete prior related batches as units. Incomplete or malformed related history rolls back without partial batch corruption; the bounded scan is proven beyond 250 prior batch rows.
+- `replayAll` now delegates the validated sequence to the existing atomic `replayBatches` transaction, preventing a later resurrection from leaving a committed deletion prefix. The CLI import's direct Session-row creation path performs its tombstone check and Session/message/part writes in one immediate transaction. The production audit found no other direct Session insertion bypass and no remaining Session producer using generic EventV2 history removal.
+- App, legacy plugin, server, and history consumers read the minimal `sessionID` first while preserving narrow legacy `info` fallback where historical events can still arrive. The production removal regression scans the retained EventTable row and tombstone together and proves that prompt, title, metadata, and `info` secrets are absent.
+
+The migration backfills only discoverable, authoritative terminal v1/v2 or genuinely unversioned legacy deletion rows: the Session must be absent, EventSequence must point exactly at the deletion, the deletion and aggregate position must be unique, no later event or duplicate/recreated Session history may exist, batch metadata must describe a complete batch, IDs and strict payloads must decode, and any unique creation history must agree on identity and visibility. Ambiguous, duplicate, recreate, malformed, or contradictory histories are intentionally left without a guessed tombstone. Legacy deletions whose old generic cleanup erased every durable event trace cannot be reconstructed; this is the bounded historical limitation. Every new deletion and every discoverable unambiguous terminal history is permanently reserved.
+
+### TDD and verification evidence
+
+Meaningful RED was recorded before production changes:
+
+- A hidden deletion followed by a public creation resurrected the same Session ID; same-batch and sequential delete/create and duplicate/contradictory deletion sequences were not terminal, and `replayAll` could commit a prefix non-atomically.
+- Production `Session.remove` first published a valid deletion and then called generic `events.remove`, erasing the deletion EventTable row and EventSequence so offline history could not observe the terminal transition.
+- After row removal, public classification accepted payload visibility without durable tombstone identity; missing, forged, and mismatched direct deletions therefore lacked a permanent authority boundary.
+- The repository had no durable Session tombstone table, migration, guarded direct-import path, or conservative historical backfill.
+
+Fresh final package-directory gates used pinned Bun `D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe` with `TEMP`, `TMP`, and Bun cache below the verified non-reparse `D:\OpenCode-Task23.8-Fix5` root:
+
+- Core Task23.8/EventV2/MoveSession matrix: **183 pass, 0 fail, 547 assertions**.
+- Server live-authority/visibility/sandbox matrix: **94 pass, 0 fail, 311 assertions**.
+- Legacy opencode list/live/history/import matrix: **49 pass, 0 fail, 141 assertions**.
+- Migration and generic Response regressions: **32 pass, 0 fail, 120 assertions**; the migration-only focused rerun passed **17/17, 55 assertions** after the final strict JSON-decoding cleanup.
+- Schema manifest/legacy-version tests: **6 pass, 0 fail, 40 assertions**.
+- App deletion-consumer matrix: **97 pass, 0 fail, 218 assertions**.
+- Schema, Core, Protocol, Server, Client, App, and legacy SDK typechecks: **exit 0**. The opencode typecheck continues to report only the two adjudicated baseline errors at `handlers/sync.ts:70` and `server.ts:276`; no round-5 error was added.
+- Repository migration generation ran from `packages/core` with `bun run script/migration.ts --name session_terminal_tombstone`. The final `bun run script/migration.ts --check` reported no incremental schema change and successfully regenerated the full schema comparison.
+- The required legacy SDK generator ran successfully from `packages/sdk/js` with pinned Bun as `bun ./script/build.ts`. Its output exposed approximately 10,500 lines of unrelated generated baseline drift, so only those exact generator-output diffs were removed under the controller direction; Task23.9 owns reviewed client generation. `git diff --exit-code -- packages/sdk/js` was clean before commit, and no generated client was hand-edited.
+- Exact changed-TypeScript Prettier and `git diff --check`: **exit 0**. Oxlint parsed all **28** changed TypeScript/TSX files with **0 errors**; **0 diagnostics** intersect changed lines. Its 148 whole-file warnings are confined to inherited portions of large legacy/EventV2/App files.
+
+The broader `packages/app/src/context/server-sdk.test.ts` fixture could not start because the existing Solid server build lacks the named `use` export (`solid-js/web/dist/server.js`). The focused deletion consumers and App typecheck are green, so this pre-test baseline loader failure was recorded rather than broadened into Task23.8.
+
+The user-required no-subagent constraint prevented a reviewer-subagent pass. A direct adversarial review covered the migration ambiguity rules, every Session creation and cleanup producer, compaction batch integrity, replay atomicity, exact tombstone classification, retained-payload confidentiality, and the complete staged diff. No further open Critical or Important item was found.
+
+No Task23.9 endpoint, Task23.10 CLI, provider/network/browser/Docker/ACL surface, deployment, push, or `env.local` access changed in this round. The exact task-owned `D:\OpenCode-Task23.8-Fix5` directory was verified as non-reparse and containing only `tmp` and `bun-cache`, then moved to the Windows Recycle Bin after final verification; repository and user inputs were preserved.
