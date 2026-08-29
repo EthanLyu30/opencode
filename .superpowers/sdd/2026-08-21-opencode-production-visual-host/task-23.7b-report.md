@@ -167,3 +167,102 @@ The implementation commit changes 32 files. Principal owning boundaries:
 - Frozen functional tests run in the reviewed read-only test sandbox. Projects whose tests require declared writable outputs need a future versioned host-policy extension; they currently fail closed.
 - Real Docker/Chromium/ACL and paid-provider acceptance remain explicitly deferred to Tasks 23.11/23.12 and require their own authorization.
 - Seven pre-existing lint warnings remain as documented above; Task23.7B introduces no lint warning or error.
+
+---
+
+## Independent review result (fix round 1 input; verbatim)
+
+> ## Summary
+>
+> Task 23.7B is not ready to gate. The patch establishes most intended structures, but two critical integrity gaps let implementation evidence diverge from the workspace identity it claims. Recovery, failure mapping, and delivery-chain validation also have important defects.
+>
+> ## Spec verdict: ❌
+>
+> - Mandatory baseline Snapshot: ❌ Capture occurs during decompose settlement and later stages reuse the persisted ID, but oversized untracked files are silently omitted rather than failing closed.
+> - Exact tree/manifest v2: ❌ The v2 codec and add/modify/delete derivation are strict, sorted, and legacy-v1 compatible. However, the underlying capture is not an exact scoped tree.
+> - Durable functional evidence: ❌ Stage/revision-owned log/result v2 codecs and one-to-one validation are good, but the frozen test runs against the mutable live workspace after its digest was checked.
+> - Reserved host plan/frozen command: ✅ Strict reserved envelope, exact direct Bun argv, configuration verification, and no model shell authority are present.
+> - Production resolver/composition: ❌ Durable owner/revision/location/design/baseline/manifest checks and shared normal/embedded composition exist, but the resolver’s verified workspace is not frozen for preview consumption.
+> - Ordered reference/implementation evidence: ❌ Declared viewport pairing and read-only reference dependencies are implemented correctly, but implementation screenshots can be captured from content different from their claimed manifest identity, and current screenshot receipts are not fully prevalidated before EventV2.
+> - Kimi paired media/no base64 text: ✅ `reviewMessage(spec, images)` is used directly with ordered typed media; prior generic scanning remains in force. Live provider-adapter behavior was intentionally not exercised.
+> - Delivery freshness/chain: ❌ Persistent ordinary edits are caught, but skipped oversized files evade freshness and delivery does not revalidate the required test-log/screenshot chain.
+> - EventV2/evidence ordering: Partial. The code publishes EventV2 before `commitEvidence`/`releaseEvidence`, but receipt mismatch can still be discovered only after the irreversible batch.
+> - Recovery/reconciliation: ❌ Ledger idempotency is used, but startup reconciliation is a one-shot, unpaged scan and cannot guarantee recovery.
+> - Compatibility/scope: ✅ Legacy manifest/test codecs remain decodable, production requires exact versions, no production `WorkflowRender` import was found, and no Task23.8+ public surface was added.
+>
+> Cannot independently verify the reported test/typecheck outputs because the review instructions prohibited rerunning them; they are treated as report evidence. Real provider, browser, Docker, ACL, and network behavior also remains intentionally unverified.
+>
+> ## Findings
+>
+> ### Critical
+>
+> 1. **Oversized untracked files disappear from trusted Snapshot and freshness authority.**
+>    [snapshot.ts](D:/OpenCode-Audit/packages/core/src/snapshot.ts:147) captures with a 2 MiB untracked-file ceiling. [git.ts](D:/OpenCode-Audit/packages/core/src/git.ts:474) classifies larger untracked files as `skipped`, removes them from the snapshot index, and [git.ts](D:/OpenCode-Audit/packages/core/src/git.ts:550) discards the returned `skipped` set when writing the tree. `Snapshot.entries` therefore succeeds on a tree that silently excludes those files. A 3 MiB untracked application asset can be changed after review and remain absent from the manifest and every delivery freshness digest, allowing completion against a stale live workspace. This directly violates mandatory fail-closed oversized-tree and full scoped-workspace authority.
+> 2. **Preview and functional evidence are stamped with a manifest identity but consume the mutable live workspace.**
+>    [production-evidence.ts](D:/OpenCode-Audit/packages/server/src/workflow/production-evidence.ts:100) hashes a current Snapshot and returns the manifest hash, after which [visual-host.ts](D:/OpenCode-Audit/packages/server/src/workflow/visual-host.ts:337) starts static/script preview directly from `plan.locationRoot` while labeling the preview with that earlier manifest identity. Browser capture occurs later. Likewise, [production-evidence.ts](D:/OpenCode-Audit/packages/core/src/workflow/execution/production-evidence.ts:71) checks the workspace before running the frozen test against the live bind mount. A user edit between verification and browser/test consumption can affect screenshots or tests; restoring the file before delivery makes the final freshness check pass. Evidence then claims a source revision it never evaluated. The preview/test input must be an immutable Snapshot materialization or equivalently fenced exact content.
+>
+> ### Important
+>
+> 1. **Typed host failures are erased and do not reach the required approval path.**
+>    [executor.ts](D:/OpenCode-Audit/packages/core/src/workflow/executor.ts:155) and [executor.ts](D:/OpenCode-Audit/packages/core/src/workflow/executor.ts:216) convert every `EvidenceFailure` to `invalidOutcome`; [executor.ts](D:/OpenCode-Audit/packages/core/src/workflow/executor.ts:389) hardcodes category `schema` and code `invalid_role_outcome`. Missing host plans, unavailable baseline Snapshots, stale workspaces, and ambiguous visual authority therefore lose codes such as `preview_configuration_required`, `snapshot_required`, and `workspace_stale`, and become immediate final failures rather than typed approval/ambiguity outcomes.
+> 2. **Durable reconciliation is incomplete above 1,000 workflows and is never retried by the scheduler.**
+>    [local.ts](D:/OpenCode-Audit/packages/core/src/workflow/execution/local.ts:1083) requests only `list({ limit: 1_000 })` with no cursor or continuation. [store.ts](D:/OpenCode-Audit/packages/core/src/workflow/store.ts:182) always returns the oldest rows, while [local.ts](D:/OpenCode-Audit/packages/core/src/workflow/execution/local.ts:994) invokes reconciliation only once at startup; the scheduler loop omits it. A post-EventV2 staged record belonging to workflow 1001+ is never committed/released. A transient reconciliation failure at startup is likewise retained indefinitely until another process restart.
+> 3. **Delivery trusts pass artifacts without revalidating their mandatory durable dependencies.**
+>    [production-evidence.ts](D:/OpenCode-Audit/packages/core/src/workflow/execution/production-evidence.ts:395) decodes only manifest, test result, and review, then validates their digests and current workspace. It never proves that every test log still resolves exactly once, or that every review screenshot/dependency and bound outcome still exists. The final gate in [role-binding.ts](D:/OpenCode-Audit/packages/core/src/workflow/execution/role-binding.ts:301) similarly uses only the three top-level commits. Removing a referenced test-log or screenshot Artifact leaves delivery able to complete despite a broken exact evidence chain.
+> 4. **Current-stage screenshot receipt ownership is not validated before EventV2.**
+>    [visual-review.ts](D:/OpenCode-Audit/packages/core/src/workflow/artifacts/visual-review.ts:201) validates receipt/image facts but not the expected current stage. [role-binding.ts](D:/OpenCode-Audit/packages/core/src/workflow/execution/role-binding.ts:262) validates screenshot pairing and Artifact ownership without requiring each new receipt’s `coordinates.stageID` to equal the current stage or re-deriving its frozen config/source/selector coordinates. A host bug returning a consistent receipt for another stage can pass the pre-batch gate; EventV2 succeeds, then [local.ts](D:/OpenCode-Audit/packages/core/src/workflow/execution/local.ts:1073) discovers the receipt/Artifact conflict only during post-batch evidence binding, leaving a succeeded stage that reconciliation cannot repair.
+>
+> ### Minor
+>
+> - The mandatory RED evidence is incomplete. The focused production-evidence suite contains four scenarios and no successful baseline-reuse case, typed executor error-mapping case, live-workspace race case, or missing delivery-dependency case. The settlement test seeds `order = ["eventv2"]` manually rather than exercising actual EventV2 publication, so it does not itself prove the full crash/order matrix.
+>
+> ## Task-quality verdict: Not approved
+>
+> Strengths include the strict manifest-v2 topology, exact log-v2 URI/hash/bytes ownership, deterministic direct test argv, canonical paired-media ordering, preserved cross-revision Artifact identity, shared production composition, legacy decoding, and explicit EventV2-before-evidence code order.
+>
+> ## Final gate verdict
+>
+> **REJECT — ❌ spec noncompliant, with 2 Critical and 4 Important findings.**
+
+## Review fix round 1 — resolution
+
+All two Critical and four Important findings were reproduced and accepted; no review pushback was necessary.
+
+| Finding                              | Targeted RED                                                                                                                                                           | GREEN implementation and focused evidence                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C1 skipped/oversized untracked input | A scoped untracked file above 2 MiB returned a Snapshot tree instead of failing closed.                                                                                | `Git.tree.capture` now propagates any refresh `skipped` set as a capture failure. The regression passes, and the final Snapshot matrix includes both the oversize rejection and content-digest/materialization cases.                                                                                                                                                                                                                        |
+| C2 verify/use race                   | The functional-test race reached `invalid_role_evidence`; the Server resolver returned no materialization; preview/test could observe edited-then-restored live bytes. | Added a strict v1 `WorkflowWorkspaceMaterialization.Lease`, exact Snapshot materialization, deterministic owner/tree/lease identity, whole-tree rehashing, D-drive containment, and mutation/absence/extra/link rejection. Both frozen tests and static/script preview use the same host-materialized root. Focused test, resolver, command-final-gate, and preview race cases all pass and prove only materialized bytes are consumed.      |
+| I1 typed failure mapping             | `preview_configuration_required`/`workspace_stale`/ambiguous host facts became `schema/invalid_role_outcome`.                                                          | Executor now preserves exact evidence codes and explicit categories; required/unavailable/stale/ambiguous facts enter the ambiguity/approval path. Focused matrix: **1 pass, 8 assertions**.                                                                                                                                                                                                                                                 |
+| I2 durable reconciliation            | A 1,001-workflow case reconciled only 100 in the test page; a transient startup failure was never retried.                                                             | Added deterministic `(timeCreated, workflowID)` cursor pagination, a 1..1,000 page size, a 10,000-page hard bound/nonadvancing-cursor fail-close, and the same reconciliation iteration at startup and every scheduler tick. Focused file: **4 pass, 9 assertions**.                                                                                                                                                                         |
+| I3 delivery chain                    | Removing a referenced log/screenshot/outcome still allowed the top-level delivery facts to validate.                                                                   | Delivery now exact-resolves every v2 manifest/test result/log, ordered reference+implementation screenshot, cross-revision dependency, visual review, and host-bound outcome artifact-set digest; missing/duplicate/foreign/drifted facts reject. Focused chain case: **1 pass, 7 assertions**.                                                                                                                                              |
+| I4 pre-Event receipt authority       | A self-consistent current screenshot receipt naming a foreign stage was accepted before EventV2.                                                                       | Both production settlement and Local's business-artifact gate now rederive current receipt stage/revision/config/source/selector/manifest authority; reference receipts retain original owner identity. The foreign-stage regression passes. A real Local worker test verifies EventV2 projection inside `commitEvidence`, simulates a post-projection commit crash, and observes periodic durable reconciliation: **1 pass, 8 assertions**. |
+
+### Systematic debugging during fix round 1
+
+1. The actual EventV2 integration test first failed with `Service not found: @opencode/v2/WorkflowStore`. The smallest test proved the custom host replacement was a dependency-bearing raw Layer. Replacing only that fixture with a `makeGlobalNode` declaring `WorkflowStore.node` fixed the service graph; the same test then reached its final assertion. A second test-only failure (`UnsafePersistenceError: Only plain JSON objects can be persisted`, path `$.timeCreated`) was caused by passing a full Artifact to an ArtifactCommit decoder; direct exact Artifact/receipt assertions fixed that fixture. The focused integration then passed **1/1, 8 assertions**.
+2. The first Server mandatory run passed **138/139** and failed only actual normal/embedded graph acquisition with `TypeError: Missing required OPENCODE_WORKFLOW_HOST_TEMP`. The root cause was eager materialization-root evaluation while acquiring `productionRoleLayer`. Root resolution was delayed to the first materialization call, preserving fail-closed production behavior while retaining environment-free graph construction. The exact reproduction passed **1/1, 6 assertions**; the complete Server matrix then passed **139/139**.
+
+## Review fix round 1 — final GREEN
+
+All commands used pinned Bun `D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe`, with package-directory working directories and task temp/cache beneath `D:\OpenCode-Task23.7b-review`.
+
+Implementation commit: `a05d29ab8` (`fix(workflow): close production evidence review gaps`), 24 code/test files, 2,011 insertions and 81 deletions. This report and the progress ledger are committed separately.
+
+- Core matrix 1: `bun test test/snapshot.test.ts test/workflow-business-artifacts.test.ts test/workflow-production-host-plan.test.ts test/workflow-production-evidence.test.ts test/workflow-evidence-settlement.test.ts test/workflow-visual-host.test.ts` → **46 pass, 0 fail, 213 assertions**, 6 files, 66.42 s.
+- Core matrix 2: `bun test test/workflow-role-execution.test.ts test/workflow-design-loop.test.ts test/workflow-routing.test.ts test/workflow-model-state-machine.test.ts test/workflow-location-tools.test.ts test/workflow-execution.test.ts` → **104 pass, 0 fail, 561 assertions**, 6 files, 5.90 s.
+- Server matrix: `bun test test/workflow-production-evidence.test.ts test/workflow-runtime-composition.test.ts test/workflow-command-sandbox.test.ts test/workflow-visual-host.test.ts` → **139 pass, 0 fail, 475 assertions**, 4 files, 7.83 s.
+- `bun run typecheck` from each of `packages/schema`, `packages/core`, and `packages/server` → `$ tsgo --noEmit`, exit 0 for all three.
+- Exact changed-file Prettier check → all matched files formatted, exit 0.
+- Exact changed-file oxlint with the repository config → **0 errors, 7 warnings** in Core and **0 errors, 0 warnings** in Server. All Task23.7B-fix warnings were removed. The remaining seven are the same base `consistent-return` forms in legacy portions of `packages/core/src/git.ts` (6) and `packages/core/src/snapshot.ts` restore (1), confirmed at `45f8b2dc6`; they were not refactored.
+- `git diff --check` → exit 0.
+
+## Review fix round 1 — self-review and remaining concerns
+
+- Confirmed the two consumers (functional test and visual preview) receive the same exact Snapshot-tree contract, never the mutable live Location after hashing; final launch/capture gates rehash the materialized root.
+- Confirmed current screenshot receipt authority is checked before the irreversible EventV2 batch, and actual post-batch failure leaves durable stage/Artifact state recoverable without provider/browser rerun.
+- Confirmed bounded pagination is linear per scan with a deterministic cursor and hard upper bound; transient per-workflow failures are retained and retried periodically.
+- Confirmed delivery rejects missing, duplicate, foreign, and drifted evidence dependencies and validates the bound outcome set.
+- Confirmed Task23.7A request immutability, normal/embedded composition parity, and legacy codecs remain intact; no Task23.8+ public surface was added.
+- No live provider, browser, network, Docker, ACL, deployment, push, or `.env.local` access occurred.
+- Materialized owner/tree/lease directories are deliberately retained when there is no proven exact post-projection cleanup authority. A bounded exact-owner garbage-collection pass for old successful test-only leases remains an operational follow-up; current behavior prefers a D-drive retention leak over unsafe early deletion or deleting bytes needed by evidence recovery.
+- Cleanup verified `D:\OpenCode-Task23.7b-review` and `D:\OpenCode-Task23.7b` as the exact task-owned temporary directories, but the execution safety policy rejected both recursive `Remove-Item` calls. They remain as removable test temp/cache artifacts; no repository file is contained there.
