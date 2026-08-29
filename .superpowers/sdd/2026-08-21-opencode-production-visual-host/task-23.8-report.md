@@ -4,7 +4,10 @@
 
 Task 23.8 is implemented on local `dev` from base `9664184bb5f1af8bdad4d9ecc95b1ffffb5aea7e`.
 
-Implementation commit: `a59982774ea0951b171d4bb246da2f3cc9fdfad2` (`feat(workflow): atomically admit visual builds`)
+Implementation commits:
+
+- `a59982774ea0951b171d4bb246da2f3cc9fdfad2` (`feat(workflow): atomically admit visual builds`)
+- `fb7e5b589` (`fix(workflow): tighten admission quality gates`)
 
 The implementation adds `WorkflowAdmission.admitVisualBuild(input, location, idempotencyKey?)`. A winning admission commits one `Workflow.Created` primary event plus related hidden `Session.Created`, stored `Response.Created`, and initial `Stage.Queued` events in one EventV2 transaction. Project creation is projected from the related Session event in the same transaction. No Session, Project, Workflow, Response, Stage, event, or sequence row is written before that batch.
 
@@ -46,6 +49,7 @@ Final fresh gates, using pinned Bun `D:\OpenCode-Toolchain\bun-1.3.14\bun-window
 - Migration and generic Response regressions (`database-migration`, `responses-store`): **31 pass, 0 fail, 119 assertions**.
 - Schema, Core, Protocol, Server, and Client package typechecks: **exit 0**.
 - Generated migration consistency: incremental check reported no schema changes; full regeneration succeeded.
+- Changed-TypeScript oxlint: **0 errors**; 37 warnings remain in pre-existing portions of touched legacy/projector/test files after Task23.8-owned warnings were removed (down from 52 on the first exact changed-file pass).
 - `git diff --check`: clean before the implementation commit.
 
 One broader Core run executed concurrently with other packages observed the pre-existing timing-sensitive workflow-deadline assertion at zero remaining milliseconds. The exact test passed immediately in isolation, and the complete Core Task23.8 matrix then passed 97/97 and finally 99/99 in fresh sequential runs.
