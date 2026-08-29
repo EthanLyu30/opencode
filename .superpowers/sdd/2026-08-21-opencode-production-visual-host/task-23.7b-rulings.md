@@ -60,3 +60,9 @@ These rulings refine the 23.7B brief without weakening reviewed 23.7A authority.
     - Acquire/release records bind the exact root/tree/workflow/stage/revision/Location/Snapshot/manifest/workspace identity. Normal completion releases after durable evidence exists; startup/scheduler recovery performs bounded fair GC.
     - Cleanup enumerates the exact admitted entry/directory set and removes it leaf-first under repeated root/identity fences; no unconstrained recursive deletion follows a caller-controlled or reparseable path.
     - Cost if wrong: bounded stale cache entries remain retained for manual recovery rather than risking deletion outside the trusted D-drive subtree.
+
+13. **Task 23.7B does not persist a filesystem materialization cache when the sealed Snapshot can be rebuilt.**
+    - Build the bounded sealed archive/byte map directly from the durable Git Snapshot object and verify every entry plus the aggregate identity in memory. Functional tests and previews consume that representation, then release it with the owning operation.
+    - On restart, rebuild from the same durable Snapshot ID; staged screenshot bytes and business Artifacts remain the only durable evidence. No cache directory, owner lease, recursive cleanup, or discovery scan is needed in this task.
+    - Ruling 12 remains mandatory if a future performance cache is introduced, but no such cache is authorized for the current production path.
+    - Cost if wrong: large but admitted workspaces incur repeated bounded archive construction; a future content-addressed cache must add a reviewed handle-relative deletion primitive before it can persist.
