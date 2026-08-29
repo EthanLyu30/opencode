@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Location } from "@opencode-ai/core/location"
 import { ProjectV2 } from "@opencode-ai/core/project"
-import { AbsolutePath } from "@opencode-ai/core/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { SessionStore } from "@opencode-ai/core/session/store"
@@ -14,6 +14,8 @@ import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowToolLineage } from "@opencode-ai/core/workflow/tool-lineage"
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/production-host-plan"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
+import { Snapshot } from "@opencode-ai/core/snapshot"
 import { DateTime, Effect, Layer } from "effect"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
@@ -59,6 +61,25 @@ describe("WorkflowCommandSandboxServer", () => {
     const create = fixture.engine.one("container", "create")
     expect(create.argv.slice(-3)).toEqual([image, "bun", "test"])
     expect(fixture.engine.one("container", "start").stdin).toBeUndefined()
+  })
+
+  test("rejects a materialized Snapshot mutation at the final frozen-test launch gate", async () => {
+    await using fixture = await setup("test")
+    const location = fixture.persisted.run.location!
+    const entrypoint = path.join(location.directory, "index.html")
+    await fs.writeFile(entrypoint, "<!doctype html><main>captured</main>")
+    const preview = PreviewPlan.freeze({ authority: "admission", location })
+    const plan = WorkflowProductionHostPlan.freeze({ authority: "admission", location, preview })
+    fixture.persisted.run = {
+      ...fixture.persisted.run,
+      input: WorkflowProductionHostPlan.withPlan({}, plan),
+    }
+    fixture.engine.onCreate = async () => {
+      await fs.writeFile(entrypoint, "mutated after container creation")
+    }
+
+    await expect(fixture.runFrozen(plan)).rejects.toBeInstanceOf(WorkflowCommandSandbox.Rejected)
+    expect(fixture.engine.all("container", "start")).toHaveLength(0)
   })
 
   test("pipes hostile model command only to bash stdin and creates a digest-pinned, least-authority container", async () => {
@@ -1224,8 +1245,9 @@ async function setup(
           Effect.provide(layer),
         ),
       ),
-    runFrozen: (plan: WorkflowProductionHostPlan.Plan) =>
-      Effect.runPromise(
+    runFrozen: async (plan: WorkflowProductionHostPlan.Plan) => {
+      const bytes = await fs.readFile(path.join(workspace, "index.html"))
+      return Effect.runPromise(
         Effect.flatMap(WorkflowCommandSandbox.Service, (sandbox) =>
           sandbox.runFrozenTest!({
             workflowID,
@@ -1235,9 +1257,27 @@ async function setup(
             cwd: plan.functionalTest.cwd,
             policySha256: plan.functionalTest.policySha256,
             configSha256: plan.functionalTest.configSha256,
+            materialization: WorkflowWorkspaceMaterialization.make({
+              workflowID,
+              stageID,
+              revision: 0,
+              location: Location.Ref.make({ directory: AbsolutePath.make(workspace) }),
+              snapshotRef: Snapshot.ID.make("test-materialization"),
+              manifestSha256: "b".repeat(64),
+              workspaceSha256: Snapshot.workspaceSha256([
+                {
+                  path: RelativePath.make("index.html"),
+                  type: "file",
+                  sha256: createHash("sha256").update(bytes).digest("hex"),
+                  size: bytes.byteLength,
+                },
+              ]),
+              root: AbsolutePath.make(workspace),
+            }),
           }),
         ).pipe(Effect.provide(layer)),
-      ),
+      )
+    },
     recover: async () => {
       const current = await authority()
       return WorkflowCommandSandboxServer.recover({

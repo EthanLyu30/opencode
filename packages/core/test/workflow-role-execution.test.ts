@@ -332,8 +332,61 @@ describe("Workflow role business-evidence authority", () => {
     expect(legacy.artifacts?.[0]?.metadata).toEqual(outcomes.design)
 
     const failure = await execute(workflow).catch((error) => error)
-    expect(failure.failure).toMatchObject({ code: "invalid_role_outcome" })
-    expect(failure.failure.message).toContain("role_evidence_unavailable")
+    expect(failure.failure).toMatchObject({ category: "ambiguous", code: "role_evidence_unavailable" })
+    expect(failure.failure.message).toContain("production role evidence resolver is not installed")
+  })
+
+  test("preserves typed evidence codes and maps required host facts to approval ambiguity", async () => {
+    const current = stage("design")
+    const next = Workflow.Stage.make({
+      ...stage("decompose"),
+      status: "pending",
+      attempt: 0,
+      ordinal: 1,
+      time: { created: DateTime.makeUnsafe(1), updated: DateTime.makeUnsafe(1) },
+    })
+    for (const expected of [
+      { code: "preview_configuration_required", category: "ambiguous" as const },
+      { code: "workspace_stale", category: "ambiguous" as const },
+      { code: "evidence_capture_ambiguous", category: "ambiguous" as const },
+      { code: "invalid_visual_authority", category: "visual" as const },
+    ]) {
+      const evidence = Layer.succeed(
+        WorkflowRoleExecution.Service,
+        WorkflowRoleExecution.Service.of({
+          prepare: () =>
+            Effect.fail(
+              new WorkflowRoleExecution.EvidenceFailure({
+                code: expected.code,
+                message: `typed ${expected.code}`,
+                ...(expected.category === "visual" ? { category: expected.category } : {}),
+              }),
+            ),
+          resolve: () => Effect.die("unused"),
+        }),
+      )
+      const failure = await Effect.gen(function* () {
+        return yield* (yield* WorkflowExecutor.Service).execute({
+          workflow,
+          stage: current,
+          stages: [current, next],
+          artifacts: [],
+          lease: { owner: "worker", attempt: 1, expiresAt: DateTime.makeUnsafe(60_000) },
+          saveCheckpoint: () => Effect.void,
+        })
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          WorkflowExecutor.roleLayerWith(evidence).pipe(
+            Layer.provide(WorkflowModelExecution.layerWith(() => Effect.die("provider must not run"))),
+          ),
+        ),
+        Effect.flip,
+        Effect.runPromise,
+      )
+      expect(failure.failure).toMatchObject(expected)
+      expect(failure.failure.message).toBe(`typed ${expected.code}`)
+    }
   })
 
   test("mints and validates a context/contract/artifact-set-bound role settlement", async () => {

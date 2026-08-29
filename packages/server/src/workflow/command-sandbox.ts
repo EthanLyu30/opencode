@@ -11,6 +11,7 @@ import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowToolLineage } from "@opencode-ai/core/workflow/tool-lineage"
 import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/production-host-plan"
 import { WorkflowBusinessArtifact } from "@opencode-ai/core/workflow/artifacts/business"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { DateTime, Effect, Layer } from "effect"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
@@ -161,8 +162,12 @@ export function makeLayer(
             try: () => validatedConfig(options.config),
             catch: () => unavailable("Workflow Docker sandbox configuration is unavailable"),
           })
+          yield* Effect.tryPromise({
+            try: () => WorkflowWorkspaceMaterialization.verifyRoot(request.materialization),
+            catch: () => rejected("Frozen test materialization is missing or mutated"),
+          })
           const paths = yield* Effect.tryPromise({
-            try: () => validatePaths(config, location.directory, request.cwd),
+            try: () => validatePaths(config, request.materialization.root, request.cwd),
             catch: () => rejected("Frozen test path is not canonical and contained by the persisted Location"),
           })
           const ownership = ownershipFor({
@@ -191,14 +196,19 @@ export function makeLayer(
                   )
                   if (current.leaseOwner !== authority.leaseOwner || current.attempt !== authority.attempt)
                     throw rejected("Persisted Workflow Stage lease changed before frozen test launch")
-                  const currentPaths = await validatePaths(config, location.directory, request.cwd).catch(() => {
-                    throw rejected("Frozen test path identity changed before launch")
-                  })
+                  const currentPaths = await validatePaths(config, request.materialization.root, request.cwd).catch(
+                    () => {
+                      throw rejected("Frozen test path identity changed before launch")
+                    },
+                  )
                   if (
                     !sameIdentity(paths.workspace, currentPaths.workspace) ||
                     !sameIdentity(paths.workdir, currentPaths.workdir)
                   )
                     throw rejected("Frozen test workspace identity changed before launch")
+                  await WorkflowWorkspaceMaterialization.verifyRoot(request.materialization).catch(() => {
+                    throw rejected("Frozen test materialization changed before launch")
+                  })
                 },
               ),
             catch: (cause) =>
@@ -422,6 +432,20 @@ const reloadFrozenTestAuthority = Effect.fn("WorkflowCommandSandboxServer.reload
       input.request.policySha256 !== plan.functionalTest.policySha256
     )
       return yield* rejected("Frozen test request differs from admission authority")
+    yield* Effect.try({
+      try: () => {
+        const materialization = WorkflowWorkspaceMaterialization.validate(input.request.materialization)
+        if (
+          materialization.workflowID !== detail.run.id ||
+          materialization.stageID !== stage.id ||
+          materialization.revision !== input.request.revision ||
+          materialization.location.directory !== detail.run.location!.directory ||
+          materialization.location.workspaceID !== detail.run.location!.workspaceID
+        )
+          throw new TypeError("materialization authority mismatch")
+      },
+      catch: () => rejected("Frozen test materialization differs from durable Workflow authority"),
+    })
     return {
       leaseOwner: stage.leaseOwner,
       attempt: stage.attempt,

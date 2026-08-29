@@ -69,6 +69,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
 export class EvidenceFailure extends Data.TaggedError("WorkflowRoleExecution.EvidenceFailure")<{
   readonly code: string
   readonly message: string
+  readonly category?: Workflow.FailureCategory
 }> {}
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }

@@ -1,6 +1,6 @@
 export * as WorkflowStore from "./store"
 
-import { and, asc, eq, gte, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm"
+import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm"
 import { Cause, Context, DateTime, Effect, Layer, Option, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
@@ -19,6 +19,7 @@ export interface Interface {
   readonly list: (input?: {
     readonly status?: Workflow.RunStatus
     readonly limit?: number
+    readonly cursor?: { readonly timeCreated: number; readonly workflowID: Workflow.ID }
   }) => Effect.Effect<Workflow.Info[]>
   readonly get: (workflowID: Workflow.ID) => Effect.Effect<Workflow.Detail | undefined>
   readonly stage: (stageID: Workflow.StageID) => Effect.Effect<Workflow.Stage | undefined>
@@ -182,11 +183,18 @@ const layer = Layer.effect(
       list: Effect.fn("WorkflowStore.list")(function* (input) {
         const status = input?.status
         const limit = input?.limit ?? 50
+        const cursor = input?.cursor
+        const after = cursor
+          ? or(
+              gt(WorkflowRunTable.time_created, cursor.timeCreated),
+              and(eq(WorkflowRunTable.time_created, cursor.timeCreated), gt(WorkflowRunTable.id, cursor.workflowID)),
+            )
+          : undefined
         const rows = yield* db
           .select()
           .from(WorkflowRunTable)
-          .where(status ? eq(WorkflowRunTable.status, status) : undefined)
-          .orderBy(asc(WorkflowRunTable.time_created))
+          .where(and(status ? eq(WorkflowRunTable.status, status) : undefined, after))
+          .orderBy(asc(WorkflowRunTable.time_created), asc(WorkflowRunTable.id))
           .limit(limit)
           .all()
           .pipe(Effect.orDie)

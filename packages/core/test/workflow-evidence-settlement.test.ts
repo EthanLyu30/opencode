@@ -150,4 +150,117 @@ describe("Workflow Local visual evidence settlement", () => {
     expect(postEventFailure.code).toBe("visual_host_unavailable")
     expect((await Effect.runPromise(workflows.get(workflowID)))?.stages[0]?.status).toBe("succeeded")
   })
+
+  test("reconciles every visual workflow through deterministic bounded pages beyond one thousand", async () => {
+    const runs = Array.from({ length: 1_001 }, (_, index) =>
+      WorkflowSchema.Info.make({
+        id: WorkflowSchema.ID.make(`wfl_reconcile_${String(index).padStart(4, "0")}`),
+        type: "visual-build",
+        status: "running",
+        input: {},
+        budget: {},
+        usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
+        version: 1,
+        time: { created: DateTime.makeUnsafe(index + 1), updated: DateTime.makeUnsafe(index + 1) },
+      }),
+    )
+    const details = new Map(runs.map((run) => [run.id, { run, stages: [], artifacts: [] }] as const))
+    const workflows = WorkflowStore.Service.of({
+      list: (input) => {
+        const cursor = input?.cursor
+        const start =
+          cursor === undefined
+            ? 0
+            : runs.findIndex(
+                (run) =>
+                  DateTime.toEpochMillis(run.time.created) > cursor.timeCreated ||
+                  (DateTime.toEpochMillis(run.time.created) === cursor.timeCreated && run.id > cursor.workflowID),
+              )
+        return Effect.succeed(
+          runs.slice(start < 0 ? runs.length : start, (start < 0 ? runs.length : start) + (input?.limit ?? 50)),
+        )
+      },
+      get: (id) => Effect.succeed(details.get(id)),
+      stage: () => Effect.succeed(undefined),
+      artifacts: () => Effect.succeed([]),
+      gateBudget: () => Effect.succeed(false),
+      claimCandidates: () => Effect.succeed([]),
+      claim: () => Effect.succeedNone,
+      renew: () => Effect.succeed(false),
+      expired: () => Effect.succeed([]),
+    })
+    const reconciled: string[] = []
+    const visualHost: WorkflowVisualHost.Interface = {
+      materializeReference: () => Effect.die("unused"),
+      prepareImplementation: () => Effect.die("unused"),
+      capture: () => Effect.die("unused"),
+      lookupEvidence: () => Effect.die("unused"),
+      commitEvidence: () => Effect.die("unused"),
+      releaseEvidence: () => Effect.die("unused"),
+      abandonEvidence: () => Effect.die("unused"),
+      reconcileEvidence: (input) =>
+        Effect.sync(() => {
+          reconciled.push(input.workflowID)
+          return { active: [], committed: [], released: [], abandoned: [], ambiguous: [] }
+        }),
+      recoverExpired: () => Effect.void,
+    }
+
+    await Effect.runPromise(WorkflowExecutionLocal.reconcileDurableEvidence({ workflows, visualHost, limit: 100 }))
+
+    expect(reconciled).toHaveLength(1_001)
+    expect(reconciled).toEqual(runs.map((run) => run.id))
+  })
+
+  test("retries a transient startup reconciliation failure through the shared periodic iteration", async () => {
+    const run = WorkflowSchema.Info.make({
+      id: WorkflowSchema.ID.make("wfl_reconcile_transient"),
+      type: "visual-build",
+      status: "running",
+      input: {},
+      budget: {},
+      usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
+      version: 1,
+      time: { created: DateTime.makeUnsafe(1), updated: DateTime.makeUnsafe(1) },
+    })
+    const workflows = WorkflowStore.Service.of({
+      list: (input) => Effect.succeed(input?.cursor === undefined ? [run] : []),
+      get: () => Effect.succeed({ run, stages: [], artifacts: [] }),
+      stage: () => Effect.succeed(undefined),
+      artifacts: () => Effect.succeed([]),
+      gateBudget: () => Effect.succeed(false),
+      claimCandidates: () => Effect.succeed([]),
+      claim: () => Effect.succeedNone,
+      renew: () => Effect.succeed(false),
+      expired: () => Effect.succeed([]),
+    })
+    let attempts = 0
+    const visualHost: WorkflowVisualHost.Interface = {
+      materializeReference: () => Effect.die("unused"),
+      prepareImplementation: () => Effect.die("unused"),
+      capture: () => Effect.die("unused"),
+      lookupEvidence: () => Effect.die("unused"),
+      commitEvidence: () => Effect.die("unused"),
+      releaseEvidence: () => Effect.die("unused"),
+      abandonEvidence: () => Effect.die("unused"),
+      reconcileEvidence: () => {
+        attempts++
+        return attempts === 1
+          ? Effect.fail(
+              new WorkflowVisualHost.Failure({
+                operation: "reconcile_evidence",
+                code: "visual_host_unavailable",
+                message: "transient startup failure",
+              }),
+            )
+          : Effect.succeed({ active: [], committed: [], released: [], abandoned: [], ambiguous: [] })
+      },
+      recoverExpired: () => Effect.void,
+    }
+
+    await Effect.runPromise(WorkflowExecutionLocal.reconcileEvidenceIteration({ workflows, visualHost }))
+    await Effect.runPromise(WorkflowExecutionLocal.reconcileEvidenceIteration({ workflows, visualHost }))
+
+    expect(attempts).toBe(2)
+  })
 })

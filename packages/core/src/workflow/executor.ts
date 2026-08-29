@@ -164,7 +164,7 @@ const injectedRoleLayer = Layer.effect(
                   checkpoint: input.stage.checkpoint,
                 }).pipe(
                   Effect.provideService(WorkflowRoleExecution.Service, evidence),
-                  Effect.mapError((error) => invalidOutcome(`${error.code}: ${error.message}`, zeroUsage)),
+                  Effect.mapError((error) => roleEvidenceFailure(error, zeroUsage)),
                 )
           const result = yield* models.execute({ ...input, route, preparation }).pipe(Effect.mapError(modelFailure))
           if (result.artifacts?.some((artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND))
@@ -225,9 +225,7 @@ const injectedRoleLayer = Layer.effect(
                   ...(preparation === undefined ? {} : { preparation }),
                 }).pipe(
                   Effect.provideService(WorkflowRoleExecution.Service, evidence),
-                  Effect.mapError((error) =>
-                    invalidOutcome(`${error.code}: ${error.message}`, result.usage, result.responseSettlement),
-                  ),
+                  Effect.mapError((error) => roleEvidenceFailure(error, result.usage, result.responseSettlement)),
                 )
               : undefined
           const outcome = strict
@@ -396,6 +394,37 @@ function invalidOutcome(
       category: "schema",
       code: "invalid_role_outcome",
       message: WorkflowSecretGuard.sanitizeText(message),
+    },
+    usage,
+    settlement,
+  )
+}
+
+function roleEvidenceFailure(
+  error: WorkflowRoleExecution.EvidenceFailure,
+  usage: Workflow.Usage,
+  settlement?: Result["responseSettlement"],
+): ExecutionFailure {
+  const ambiguousCodes = new Set([
+    "role_evidence_unavailable",
+    "preview_configuration_required",
+    "snapshot_required",
+    "workspace_stale",
+    "functional_test_unavailable",
+    "visual_host_unavailable",
+    "delivery_evidence_stale",
+    "evidence_capture_ambiguous",
+  ])
+  const category =
+    error.category ??
+    (ambiguousCodes.has(error.code) || /(?:_required|_unavailable|_stale|_ambiguous)$/.test(error.code)
+      ? "ambiguous"
+      : "schema")
+  return failedOutcome(
+    {
+      category,
+      code: error.code,
+      message: WorkflowSecretGuard.sanitizeText(error.message),
     },
     usage,
     settlement,

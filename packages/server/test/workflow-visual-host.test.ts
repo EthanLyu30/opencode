@@ -1,9 +1,11 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { Location } from "@opencode-ai/core/location"
-import { AbsolutePath } from "@opencode-ai/core/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
+import { Snapshot } from "@opencode-ai/core/snapshot"
 import { WorkflowSchema } from "@opencode-ai/core/workflow"
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { Effect, Fiber } from "effect"
 import { Database } from "bun:sqlite"
 import { createHash } from "node:crypto"
@@ -996,6 +998,64 @@ describe("WorkflowVisualHostServer", () => {
     expect(runtime.fetches).toEqual([{ url: `${dependencyOrigin}/asset.js`, maxRedirects: 0 }])
     expect(runtime.fulfilled).toEqual([`${dependencyOrigin}/asset.js`])
     expect(runtime.aborted).toEqual(["https://example.com/tracker.js"])
+  })
+
+  test("serves immutable Snapshot bytes when the live workspace is edited and restored after resolution", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    await using materializedTemp = await taskTemp()
+    const captured = "<!doctype html><main id=ready>captured</main>"
+    const changed = "<!doctype html><main id=ready>changed</main>"
+    await fs.writeFile(path.join(workspaceTemp.path, "index.html"), captured)
+    await fs.writeFile(path.join(materializedTemp.path, "index.html"), captured)
+    const location = Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) })
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location,
+      preview: { kind: "static", entrypoint: "index.html" },
+    })
+    const workspaceSha256 = Snapshot.workspaceSha256([
+      {
+        path: RelativePath.make("index.html"),
+        type: "file",
+        sha256: createHash("sha256").update(captured).digest("hex"),
+        size: Buffer.byteLength(captured),
+      },
+    ])
+    const materialization = WorkflowWorkspaceMaterialization.make({
+      workflowID,
+      stageID: captureStageID,
+      revision: 2,
+      location,
+      snapshotRef: Snapshot.ID.make("captured-tree"),
+      manifestSha256: implementationSha256,
+      workspaceSha256,
+      root: AbsolutePath.make(materializedTemp.path),
+    })
+
+    const html = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.prepareImplementation({ workflowID, revision: 2, plan })
+          yield* Effect.promise(() => fs.writeFile(path.join(workspaceTemp.path, "index.html"), captured))
+          return yield* Effect.promise(() => fetch(preview.url).then((response) => response.text()))
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolveImplementationContract: async () => {
+              await fs.writeFile(path.join(workspaceTemp.path, "index.html"), changed)
+              return { implementationSha256, readySelector: "#ready", materialization }
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(html).toBe(captured)
   })
 
   test("bounds static responses at 32 MiB and rejects oversize or growth before returning bytes", async () => {

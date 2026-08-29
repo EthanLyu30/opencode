@@ -403,7 +403,7 @@ async function validateStart(
     throw new TypeError("Preview port conflicts with the fixed relay")
   }
   const hostRoot = await canonicalDDirectory(configuredHostRoot)
-  const workspace = await DockerConfig.admitWorkspace(config, input.plan.locationRoot)
+  const workspace = await DockerConfig.admitWorkspace(config, input.workspaceRoot ?? input.plan.locationRoot)
   const cwd = await canonicalDDirectory(input.plan.cwd)
   const capabilityTemp = await canonicalDDirectory(input.tempRoot)
   const expectedTemp = path.join(hostRoot, input.identity.hostID, ".tmp")

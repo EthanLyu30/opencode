@@ -14,6 +14,7 @@ import { LocationMutation } from "../location-mutation"
 import { AppProcess } from "../process"
 import { SessionMessage } from "../session/message"
 import { SessionSchema } from "../session/schema"
+import { WorkflowWorkspaceMaterialization } from "./workspace-materialization"
 
 export interface Request {
   readonly role: WorkflowRole.Role
@@ -43,6 +44,7 @@ export interface FrozenTestRequest {
   readonly cwd: "."
   readonly policySha256: string
   readonly configSha256: string
+  readonly materialization: WorkflowWorkspaceMaterialization.Lease
 }
 
 export class Unavailable extends Schema.TaggedErrorClass<Unavailable>()("WorkflowCommandSandbox.Unavailable", {

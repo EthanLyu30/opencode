@@ -109,22 +109,41 @@ describe("Workflow production evidence Server composition", () => {
       ]
       const detail = { run: workflow, stages: [designStage, decomposeStage, implementStage, reviewStage], artifacts }
       let currentEntries = entries
+      let capturedBytes = source
+      const materializationRoot = `${directory}-materializations`
       const resolver = WorkflowProductionEvidenceServer.makeImplementationResolver({
         getWorkflow: () => Effect.succeed(detail),
-        captureSnapshot: () => Effect.succeed(Snapshot.ID.make("current")),
+        captureSnapshot: () =>
+          Effect.promise(async () => {
+            capturedBytes = await fs.readFile(path.join(directory, "index.html"), "utf8")
+            await fs.writeFile(path.join(directory, "index.html"), "changed after exact Snapshot capture")
+            return Snapshot.ID.make("current")
+          }),
         snapshotEntries: (_location, snapshot) => Effect.succeed(snapshot === baseline ? entries : currentEntries),
-      })
+        materializationRoot: () => materializationRoot,
+        materializeSnapshot: (_location, _snapshot, target) =>
+          Effect.promise(async () => {
+            await fs.mkdir(target, { recursive: true })
+            await fs.writeFile(path.join(target, "index.html"), capturedBytes)
+            await fs.writeFile(path.join(directory, "index.html"), source)
+          }),
+      } as Parameters<typeof WorkflowProductionEvidenceServer.makeImplementationResolver>[0])
       await expect(resolver({ workflowID, revision: 1, plan: preview })).rejects.toThrow("Stage authority")
-      await expect(resolver({ workflowID, revision: 0, plan: preview })).resolves.toEqual({
+      const resolved = await resolver({ workflowID, revision: 0, plan: preview })
+      expect(resolved).toMatchObject({
         implementationSha256: WorkflowImplementationArtifact.hash(manifest),
         readySelector: "main",
       })
+      if (resolved.materialization === undefined) throw new Error("missing exact materialization")
+      expect(await fs.readFile(path.join(resolved.materialization.root, "index.html"), "utf8")).toBe(source)
+      expect(await fs.readFile(path.join(directory, "index.html"), "utf8")).toBe(source)
       currentEntries = Snapshot.canonicalEntries([
         { path: RelativePath.make("index.html"), type: "file", sha256: "f".repeat(64), size: 1 },
       ])
       await expect(resolver({ workflowID, revision: 0, plan: preview })).rejects.toThrow("Current workspace")
     } finally {
       await fs.rm(directory, { recursive: true, force: true })
+      await fs.rm(`${directory}-materializations`, { recursive: true, force: true })
     }
   })
 })

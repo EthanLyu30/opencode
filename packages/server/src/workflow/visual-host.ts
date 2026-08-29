@@ -5,6 +5,7 @@ import { WorkflowDesignArtifact } from "@opencode-ai/core/workflow/artifacts/des
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowSecretGuard } from "@opencode-ai/core/workflow/secret-guard"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { Effect, Layer, Scope } from "effect"
 import { createHash, randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
@@ -29,6 +30,7 @@ interface HostRecord {
   readonly workflowID: string
   readonly directory: string
   readonly workspace?: string
+  materialization?: WorkflowWorkspaceMaterialization.Lease
   readonly createdAt: number
   readySelector?: string
   allowedOrigins: readonly string[]
@@ -64,6 +66,7 @@ export interface Options {
    * design + implementation/snapshot authority; absence fails closed.
    */
   readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
+  readonly requireImplementationMaterialization?: boolean
 }
 
 export function makeLayer(options: Options): Layer.Layer<WorkflowVisualHost.Service, WorkflowVisualHost.Failure> {
@@ -144,6 +147,7 @@ export function productionLayer(input: ProductionLayerOptions) {
         hostRoot: policy.roots.tempRoot,
       }),
       resolveImplementationContract: input.resolveImplementationContract,
+      requireImplementationMaterialization: true,
     })
     return configured.pipe(Layer.catch(() => WorkflowVisualHost.unavailableLayer))
   } catch {
@@ -174,6 +178,7 @@ interface State {
   readonly onStaticFileOpened?: (file: string) => Promise<void>
   readonly onStaticFileRead?: (file: string) => Promise<void>
   readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
+  readonly requireImplementationMaterialization: boolean
 }
 
 async function makeState(options: Options): Promise<State> {
@@ -221,6 +226,7 @@ async function makeState(options: Options): Promise<State> {
     onStaticFileOpened: options.onStaticFileOpened,
     onStaticFileRead: options.onStaticFileRead,
     resolveImplementationContract: options.resolveImplementationContract,
+    requireImplementationMaterialization: options.requireImplementationMaterialization === true,
   }
 }
 
@@ -346,12 +352,50 @@ function prepareImplementation(
                 "Implementation capture authority rejected the durable contract",
               ),
       })
+      const materialization = contract.materialization
+      if (state.requireImplementationMaterialization && materialization === undefined)
+        return yield* failure(
+          "prepare_implementation",
+          "visual_host_unavailable",
+          "Production implementation preview requires an exact Snapshot materialization",
+        )
+      if (materialization !== undefined) {
+        yield* Effect.try({
+          try: () => {
+            const lease = WorkflowWorkspaceMaterialization.validate(materialization)
+            if (
+              lease.workflowID !== input.workflowID ||
+              lease.revision !== input.revision ||
+              lease.location.directory !== input.plan.locationRoot ||
+              lease.manifestSha256 !== contract.implementationSha256
+            )
+              throw new TypeError("materialization authority mismatch")
+          },
+          catch: () =>
+            failure(
+              "prepare_implementation",
+              "invalid_preview_plan",
+              "Implementation materialization differs from the frozen preview authority",
+            ),
+        })
+        yield* Effect.tryPromise({
+          try: () => WorkflowWorkspaceMaterialization.verifyRoot(materialization),
+          catch: () =>
+            failure(
+              "prepare_implementation",
+              "invalid_preview_plan",
+              "Implementation materialization is absent or mutated",
+            ),
+        })
+      }
+      const workspaceRoot = materialization?.root ?? input.plan.locationRoot
       const record = yield* Effect.tryPromise({
-        try: () => createRecord(state, String(input.workflowID), input.plan.locationRoot),
+        try: () => createRecord(state, String(input.workflowID), workspaceRoot),
         catch: () =>
           failure("prepare_implementation", "visual_host_unavailable", "Implementation host could not start"),
       })
       state.active.set(record.hostID, record)
+      record.materialization = materialization
       yield* Effect.addFinalizer(() => Effect.promise(() => release(state, record)).pipe(Effect.ignore))
       if (input.plan.kind === "script") {
         record.processIdentity = { hostID: record.hostID, nonce: randomBytes(32).toString("hex") }
@@ -368,13 +412,18 @@ function prepareImplementation(
       })
       if (input.plan.kind === "static") {
         record.allowedOrigins = input.plan.allowedOrigins
+        const frozenEntrypoint = input.plan.entrypoint ?? ""
+        const materializedEntrypoint =
+          materialization === undefined
+            ? frozenEntrypoint
+            : path.join(workspaceRoot, path.relative(input.plan.locationRoot, frozenEntrypoint))
         yield* Effect.try({
           try: () =>
             startStaticServer(
               record,
-              path.dirname(input.plan.entrypoint ?? ""),
-              input.plan.entrypoint ?? "",
-              input.plan.locationRoot,
+              path.dirname(materializedEntrypoint),
+              materializedEntrypoint,
+              workspaceRoot,
               state.onStaticFileOpened,
               state.onStaticFileRead,
             ),
@@ -394,7 +443,14 @@ function prepareImplementation(
         yield* restore(
           Effect.tryPromise({
             try: (signal) =>
-              spawnPreviewProcess(state, record, input.plan, signal, Date.now() + state.startupTimeoutMs),
+              spawnPreviewProcess(
+                state,
+                record,
+                input.plan,
+                workspaceRoot,
+                signal,
+                Date.now() + state.startupTimeoutMs,
+              ),
             catch: () =>
               failure("prepare_implementation", "visual_host_unavailable", "Preview process could not start"),
           }),
@@ -472,6 +528,15 @@ function capture(
             throw failure("capture", "workflow_evidence_limit_exceeded", "Workflow evidence exceeds 128 MiB")
           }
           const viewport = validateViewport(input.viewport)
+          if (record.materialization !== undefined) {
+            await WorkflowWorkspaceMaterialization.verifyRoot(record.materialization).catch(() => {
+              throw failure(
+                "capture",
+                "invalid_preview_handle",
+                "Implementation materialization changed before capture",
+              )
+            })
+          }
           const bytes = await state.browser.capture({
             url: record.captureURL ?? input.preview.url,
             viewport,
@@ -752,6 +817,7 @@ async function spawnPreviewProcess(
   state: State,
   record: HostRecord,
   plan: PreviewPlan.PreviewPlan,
+  workspaceRoot: string,
   signal: AbortSignal,
   deadline: number,
 ): Promise<void> {
@@ -762,6 +828,7 @@ async function spawnPreviewProcess(
   const owned = await state.processOwnership.start({
     identity: record.processIdentity,
     plan,
+    workspaceRoot,
     tempRoot: runtimeTemp,
     signal,
     deadline,

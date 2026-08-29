@@ -6,6 +6,7 @@ import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { WorkflowTestArtifact as WorkflowTestArtifactSchema } from "@opencode-ai/schema/workflow-test-artifact"
 import { Cause, Effect, Layer, Schema } from "effect"
 import { Snapshot } from "../../snapshot"
+import { Hash } from "../../util/hash"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
 import { WorkflowDecompositionArtifact } from "../artifacts/decomposition"
 import { WorkflowDeliveryArtifact } from "../artifacts/delivery"
@@ -17,6 +18,7 @@ import { WorkflowVisualReviewArtifact } from "../artifacts/visual-review"
 import { WorkflowProductionHostPlan } from "../production-host-plan"
 import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowVisualHost } from "../visual-host"
+import { WorkflowWorkspaceMaterialization } from "../workspace-materialization"
 import { WorkflowRoleContract } from "./contract"
 import { WorkflowRoleExecution } from "./role"
 import * as WorkflowRoleBinding from "./role-binding"
@@ -30,6 +32,7 @@ export interface FunctionalTestRequest {
   readonly cwd: "."
   readonly policySha256: string
   readonly configSha256: string
+  readonly materialization: WorkflowWorkspaceMaterialization.Lease
 }
 
 export interface Dependencies {
@@ -40,6 +43,14 @@ export interface Dependencies {
     location: WorkflowRoleExecution.ResolverInput["location"],
     snapshot: Snapshot.ID,
   ) => Effect.Effect<readonly Snapshot.Entry[], unknown>
+  readonly materializeWorkspace: (input: {
+    readonly workflowID: WorkflowRoleExecution.ResolverInput["workflow"]["id"]
+    readonly stageID: WorkflowRoleExecution.ResolverInput["stage"]["id"]
+    readonly revision: number
+    readonly location: WorkflowRoleExecution.ResolverInput["location"]
+    readonly manifestSha256: string
+    readonly workspaceSha256: string
+  }) => Effect.Effect<WorkflowWorkspaceMaterialization.Lease, unknown>
   readonly runFunctionalTest: (
     input: FunctionalTestRequest,
   ) => Effect.Effect<{ readonly exitCode: number; readonly log: string }, unknown>
@@ -69,10 +80,35 @@ function prepare(
       yield* verifyHostPlan(plan)
       const prior = yield* decodePrior(input.workflow, input.location, input.priorArtifacts)
       const manifest = yield* exactManifest(prior, input.workflow.id, input.location, input.revision)
-      yield* requireCurrentWorkspace(dependencies, input.location, manifest.workspaceSha256)
       const implementationSha256 = WorkflowImplementationArtifact.hash(manifest)
 
       if (role === "test") {
+        const materialization = yield* dependencies
+          .materializeWorkspace({
+            workflowID: input.workflow.id,
+            stageID: input.stage.id,
+            revision: input.revision,
+            location: input.location,
+            manifestSha256: implementationSha256,
+            workspaceSha256: manifest.workspaceSha256,
+          })
+          .pipe(
+            Effect.mapError(() =>
+              evidenceFailure("workspace_stale", "Exact implementation materialization is unavailable"),
+            ),
+          )
+        yield* Effect.try({
+          try: () =>
+            WorkflowWorkspaceMaterialization.assertAuthority(materialization, {
+              workflowID: input.workflow.id,
+              stageID: input.stage.id,
+              revision: input.revision,
+              location: input.location,
+              manifestSha256: implementationSha256,
+              workspaceSha256: manifest.workspaceSha256,
+            }),
+          catch: () => evidenceFailure("workspace_stale", "Exact implementation materialization is invalid"),
+        })
         const executed = yield* dependencies
           .runFunctionalTest({
             workflowID: input.workflow.id,
@@ -83,6 +119,7 @@ function prepare(
             cwd: plan.functionalTest.cwd,
             policySha256: plan.functionalTest.policySha256,
             configSha256: plan.functionalTest.configSha256,
+            materialization,
           })
           .pipe(Effect.mapError(() => evidenceFailure("functional_test_unavailable", "Frozen functional test failed")))
         if (
@@ -124,6 +161,8 @@ function prepare(
           }),
         })
       }
+
+      yield* requireCurrentWorkspace(dependencies, input.location, manifest.workspaceSha256)
 
       const specArtifact = uniquePrior(prior, WorkflowDesignArtifact.SPEC_KIND)
       const referenceArtifact = uniquePrior(prior, WorkflowDesignArtifact.REFERENCE_APP_KIND)
@@ -347,6 +386,35 @@ function resolve(
       if (!specArtifact)
         return yield* evidenceFailure("invalid_visual_authority", "Visual review design authority is missing")
       const spec = WorkflowDesignArtifact.decodeSpec(specArtifact.commit, input.workflow.id)
+      const manifest = yield* exactManifest(input.priorArtifacts, input.workflow.id, input.location, input.revision)
+      const plan = yield* decodeHostPlan(input.workflow)
+      yield* verifyHostPlan(plan)
+      yield* Effect.try({
+        try: () =>
+          validatePreparedScreenshotAuthority({
+            workflowID: input.workflow.id,
+            stageID: input.stage.id,
+            revision: input.revision,
+            screenshots,
+            dependencies: dependencyArtifacts,
+            authority: input.preparation?.authority,
+            implementationSha256: WorkflowImplementationArtifact.hash(manifest),
+            implementationConfigSha256: plan.preview.configSha256,
+            referenceIdentity: WorkflowVisualHost.referenceIdentity(
+              input.workflow.id,
+              WorkflowDesignArtifact.decodeReferenceApp(
+                uniquePrior(input.priorArtifacts, WorkflowDesignArtifact.REFERENCE_APP_KIND)?.commit ??
+                  (() => {
+                    throw new Error("missing reference")
+                  })(),
+                input.workflow.id,
+              ),
+            ),
+            readySelector: spec.referenceApp.readySelector,
+          }),
+        catch: () =>
+          evidenceFailure("invalid_visual_authority", "Current screenshot receipt authority is invalid or drifted"),
+      })
       const images = spec.referenceApp.viewports.flatMap((viewport) => {
         const reference = decoded.filter(
           (image) => image.kind === "reference" && image.viewport === viewport.name && image.revision === 0,
@@ -409,6 +477,17 @@ function resolve(
       input.location,
     )
     const review = WorkflowVisualReviewArtifact.decodeReview(reviewArtifact.commit, input.workflow.id)
+    yield* requireCurrentWorkspace(dependencies, input.location, manifest.workspaceSha256)
+    yield* Effect.try({
+      try: () =>
+        WorkflowRoleBinding.validateDeliveryEvidenceChain(
+          input.workflow,
+          input.location,
+          input.revision,
+          input.priorArtifacts.map((artifact) => artifact.artifact),
+        ),
+      catch: () => evidenceFailure("delivery_evidence_stale", "Delivery evidence dependency chain is incomplete"),
+    })
     yield* requireCurrentWorkspace(dependencies, input.location, manifest.workspaceSha256)
     const delivery = {
       schemaVersion: 1 as const,
@@ -505,6 +584,94 @@ function preparationAuthority(
     ),
     ...(dependencyArtifactSetSha256 === undefined ? {} : { dependencyArtifactSetSha256 }),
   })
+}
+
+function validatePreparedScreenshotAuthority(input: {
+  readonly workflowID: WorkflowRoleExecution.ResolverInput["workflow"]["id"]
+  readonly stageID: WorkflowRoleExecution.ResolverInput["stage"]["id"]
+  readonly revision: number
+  readonly screenshots: readonly WorkflowRoleExecution.ResolverOutput["artifacts"][number][]
+  readonly dependencies: readonly WorkflowRoleExecution.PrepareInput["priorArtifacts"][number][]
+  readonly authority?: WorkflowRoleExecution.PreparationAuthority
+  readonly implementationSha256: string
+  readonly implementationConfigSha256: string
+  readonly referenceIdentity: WorkflowVisualHost.PreviewIdentity
+  readonly readySelector: string
+}) {
+  const authority = Schema.decodeUnknownSync(WorkflowRoleExecution.PreparationAuthority)(input.authority)
+  if (authority.role !== "visual_review" || authority.revision !== input.revision)
+    throw new Error("Visual preparation authority does not match the current stage")
+  const current = input.screenshots.map((artifact) =>
+    WorkflowVisualReviewArtifact.decodeScreenshot(artifact, input.workflowID),
+  )
+  const dependencies = input.dependencies.map((artifact) => ({
+    artifact,
+    image: WorkflowVisualReviewArtifact.decodeScreenshot(toCommit(artifact), input.workflowID),
+  }))
+  const rawReceipts = [
+    ...dependencies.map(({ image }) => image.evidenceReceipt),
+    ...current.map((image) => image.evidenceReceipt),
+  ]
+  if (rawReceipts.some((receipt) => receipt === undefined) || rawReceipts.length !== authority.evidence.length)
+    throw new Error("Visual preparation receipts are missing or excessive")
+  const receipts = rawReceipts.filter((receipt): receipt is WorkflowVisualHost.EvidenceReceipt => receipt !== undefined)
+  const ids = new Set<string>()
+  for (const image of current) {
+    const receipt = image.evidenceReceipt!
+    const expected =
+      image.kind === "implementation"
+        ? {
+            stageID: input.stageID,
+            revision: input.revision,
+            configSha256: input.implementationConfigSha256,
+            sourceSha256: input.implementationSha256,
+            readySelectorSha256: Hash.sha256(input.readySelector),
+          }
+        : {
+            stageID: input.stageID,
+            revision: 0,
+            configSha256: input.referenceIdentity.configSha256,
+            sourceSha256: input.referenceIdentity.sourceSha256,
+            readySelectorSha256: input.referenceIdentity.readySelectorSha256,
+          }
+    if (
+      receipt.coordinates.workflowID !== input.workflowID ||
+      receipt.coordinates.stageID !== expected.stageID ||
+      receipt.coordinates.kind !== image.kind ||
+      receipt.coordinates.revision !== expected.revision ||
+      receipt.coordinates.configSha256 !== expected.configSha256 ||
+      receipt.coordinates.sourceSha256 !== expected.sourceSha256 ||
+      receipt.coordinates.readySelectorSha256 !== expected.readySelectorSha256
+    )
+      throw new Error("Current screenshot receipt differs from frozen preview identity")
+  }
+  for (const { artifact, image } of dependencies) {
+    const receipt = image.evidenceReceipt!
+    if (
+      image.kind !== "reference" ||
+      image.revision !== 0 ||
+      receipt.coordinates.stageID !== artifact.stageID ||
+      receipt.coordinates.configSha256 !== input.referenceIdentity.configSha256 ||
+      receipt.coordinates.sourceSha256 !== input.referenceIdentity.sourceSha256 ||
+      receipt.coordinates.readySelectorSha256 !== input.referenceIdentity.readySelectorSha256
+    )
+      throw new Error("Reference dependency receipt differs from original frozen identity")
+  }
+  for (const receipt of receipts) {
+    if (ids.has(receipt.evidenceID)) throw new Error("Visual preparation receipt is duplicated")
+    ids.add(receipt.evidenceID)
+    const matches = authority.evidence.filter(
+      (candidate) =>
+        candidate.evidenceID === receipt.evidenceID &&
+        candidate.receiptSha256 === WorkflowBusinessArtifact.hash(receipt) &&
+        WorkflowBusinessArtifact.encode(candidate.coordinates) === WorkflowBusinessArtifact.encode(receipt.coordinates),
+    )
+    if (matches.length !== 1) throw new Error("Visual preparation receipt is absent or drifted")
+  }
+  const dependencyDigest =
+    input.dependencies.length === 0 ? undefined : WorkflowRoleBinding.artifactSetDigest(input.dependencies)
+  if (dependencyDigest !== authority.dependencyArtifactSetSha256)
+    throw new Error("Visual preparation dependency authority drifted")
 }
 
 function reusableReferences(

@@ -23,6 +23,8 @@ export interface Service {
   readonly start: (input: {
     readonly identity: Identity
     readonly plan: PreviewPlan.PreviewPlan
+    /** Exact host-materialized Snapshot root; never the mutable admitted Location. */
+    readonly workspaceRoot?: string
     readonly tempRoot: string
     readonly signal: AbortSignal
     readonly deadline: number

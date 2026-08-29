@@ -3,6 +3,7 @@ import { DateTime, Effect, Layer, Option, Stream } from "effect"
 import { eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventTable } from "@opencode-ai/core/event/sql"
 import { WorkflowV2 } from "@opencode-ai/core/workflow"
@@ -20,6 +21,9 @@ import { WorkflowRoleContract } from "@opencode-ai/core/workflow/execution/contr
 import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowGraph } from "@opencode-ai/core/workflow/graph"
+import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
+import { WorkflowVisualReviewArtifact } from "@opencode-ai/core/workflow/artifacts/visual-review"
+import { WorkflowVisualEvidence } from "@opencode-ai/core/workflow/visual-evidence"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { Location } from "@opencode-ai/schema/location"
@@ -96,6 +100,118 @@ const makeWorkerIt = (
   )
 
 const workerIt = makeWorkerIt(successfulExecutor)
+
+const durableEvidenceOrder: string[] = []
+const reconciledEvidence: WorkflowVisualHost.ReconcileEvidenceInput[] = []
+const durableEvidenceExecutor = Layer.succeed(
+  WorkflowExecutor.Service,
+  WorkflowExecutor.Service.of({
+    execute: ({ stage }) => {
+      const viewport = { name: "desktop", width: 16, height: 16 }
+      const bytes = WorkflowVisualHost.deterministicPng(viewport)
+      const coordinates = {
+        schemaVersion: 1 as const,
+        workflowID: stage.workflowID,
+        stageID: stage.id,
+        kind: "implementation" as const,
+        revision: 0,
+        viewport,
+        configSha256: "1".repeat(64),
+        sourceSha256: "2".repeat(64),
+        readySelectorSha256: "3".repeat(64),
+      }
+      const receipt = {
+        evidenceID: WorkflowVisualEvidence.evidenceID(coordinates),
+        coordinates,
+        pngSha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+        width: viewport.width,
+        height: viewport.height,
+        evidenceBytes: bytes.byteLength,
+      }
+      return Effect.succeed({
+        usage: { tokens: 1, turns: 1, toolCalls: 0, attempts: 0 },
+        artifacts: [
+          WorkflowVisualReviewArtifact.commitScreenshot(
+            WorkflowVisualReviewArtifact.capturedImage({
+              workflowID: stage.workflowID,
+              kind: "implementation",
+              viewport: viewport.name,
+              revision: 0,
+              bytes,
+              evidenceReceipt: receipt,
+            }),
+          ),
+        ],
+      })
+    },
+  }),
+)
+
+const durableEvidenceHost = Layer.effect(
+  WorkflowVisualHost.Service,
+  Effect.gen(function* () {
+    const workflows = yield* WorkflowStore.Service
+    return WorkflowVisualHost.Service.of({
+      materializeReference: () => Effect.die("unused"),
+      prepareImplementation: () => Effect.die("unused"),
+      capture: () => Effect.die("unused"),
+      lookupEvidence: () => Effect.die("unused"),
+      commitEvidence: ({ artifact }) =>
+        Effect.gen(function* () {
+          const projected = yield* workflows.get(artifact.workflowID)
+          const exact = projected?.artifacts.filter((candidate) => candidate.id === artifact.id) ?? []
+          if (exact.length !== 1 || exact[0].sha256 !== artifact.sha256) {
+            return yield* Effect.die("commitEvidence ran before the exact EventV2 Artifact projection")
+          }
+          durableEvidenceOrder.push("eventv2-projected", "commit-crash")
+          return yield* Effect.fail(
+            new WorkflowVisualHost.Failure({
+              operation: "commit_evidence",
+              code: "visual_host_unavailable",
+              message: "simulated crash after EventV2 projection",
+            }),
+          )
+        }),
+      releaseEvidence: () => Effect.die("release must not run after a failed commit"),
+      abandonEvidence: () => Effect.die("unused"),
+      reconcileEvidence: (input) =>
+        Effect.sync(() => {
+          if (input.committed.length > 0) {
+            durableEvidenceOrder.push("reconcile")
+            reconciledEvidence.push(input)
+          }
+          return { active: [], committed: [], released: [], abandoned: [], ambiguous: [] }
+        }),
+      recoverExpired: () => Effect.void,
+    })
+  }),
+)
+
+const durableEvidenceHostNode = makeGlobalNode({
+  service: WorkflowVisualHost.Service,
+  layer: durableEvidenceHost,
+  deps: [WorkflowStore.node],
+})
+
+const durableEvidenceIt = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      Database.node,
+      WorkflowV2.node,
+      WorkflowStore.node,
+      WorkflowExecutor.node,
+      WorkflowExecution.node,
+      ResponsesProjector.node,
+      ResponsesStore.node,
+      ResponsesV2.node,
+    ]),
+    [
+      [WorkflowExecution.node, WorkflowExecutionLocal.nodeWith(workerOptions)],
+      [WorkflowExecutor.node, durableEvidenceExecutor],
+      [WorkflowVisualHost.node, durableEvidenceHostNode],
+    ],
+  ),
+)
 
 const duplicateArtifactExecutor = Layer.succeed(
   WorkflowExecutor.Service,
@@ -1169,6 +1285,44 @@ describe("Workflow local execution", () => {
         const detail = yield* workflow.get(input.id!)
         expect(detail.run.status).toBe("succeeded")
         expect(detail.artifacts).toHaveLength(1)
+      }),
+    5_000,
+  )
+
+  durableEvidenceIt.live(
+    "projects screenshot EventV2 before host settlement and reconciles a post-projection crash",
+    () =>
+      Effect.gen(function* () {
+        durableEvidenceOrder.length = 0
+        reconciledEvidence.length = 0
+        const workflow = yield* WorkflowV2.Service
+        const base = createInput("durable_evidence_order")
+        const input: Workflow.CreateInput = { ...base, type: "visual-build" }
+        yield* admit(workflow, input)
+
+        yield* workflow.events({ workflowID: input.id! }).pipe(
+          Stream.filter((event) => event.type === "workflow.succeeded"),
+          Stream.runHead,
+          Effect.timeout("2 seconds"),
+        )
+        for (let attempt = 0; attempt < 100 && reconciledEvidence.length === 0; attempt++) {
+          yield* Effect.sleep(10)
+        }
+
+        const detail = yield* workflow.get(input.id!)
+        expect(detail.run.status).toBe("succeeded")
+        expect(detail.stages[0].status).toBe("succeeded")
+        expect(detail.artifacts).toHaveLength(1)
+        expect(durableEvidenceOrder.slice(0, 3)).toEqual(["eventv2-projected", "commit-crash", "reconcile"])
+        expect(reconciledEvidence[0]?.committed).toHaveLength(1)
+        expect(reconciledEvidence[0]?.committed[0]?.artifact).toEqual(detail.artifacts[0])
+        expect(reconciledEvidence[0]?.committed[0]?.receipt.coordinates).toMatchObject({
+          workflowID: input.id!,
+          stageID: input.stages[0].id,
+          kind: "implementation",
+          revision: 0,
+        })
+        expect(reconciledEvidence[0]?.committed[0]?.release).toBe(true)
       }),
     5_000,
   )

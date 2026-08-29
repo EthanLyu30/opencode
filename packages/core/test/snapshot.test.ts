@@ -141,6 +141,35 @@ describe("Snapshot", () => {
     ),
   )
 
+  testEffect(Layer.empty).live("fails closed when a scoped untracked file exceeds the capture bound", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const project = path.join(tmp.path, "project")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(project)
+            await fs.writeFile(path.join(project, "tracked.txt"), "tracked\n")
+            await $`git init`.cwd(project).quiet()
+            await $`git config core.fsmonitor false`.cwd(project).quiet()
+            await $`git config commit.gpgsign false`.cwd(project).quiet()
+            await $`git config user.email test@opencode.test`.cwd(project).quiet()
+            await $`git config user.name Test`.cwd(project).quiet()
+            await $`git add tracked.txt`.cwd(project).quiet()
+            await $`git commit -m initial`.cwd(project).quiet()
+            await fs.writeFile(path.join(project, "oversized.bin"), Buffer.alloc(2 * 1024 * 1024 + 1, 0x61))
+          })
+
+          expect(
+            yield* Effect.gen(function* () {
+              return yield* (yield* Snapshot.Service).capture()
+            }).pipe(Effect.provide(snapshotLayer(tmp.path, project))),
+          ).toBeUndefined()
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   testEffect(Layer.empty).live("isolates snapshot indexes by canonical Git worktree", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -182,6 +211,40 @@ describe("Snapshot", () => {
           expect(
             yield* Effect.promise(() => fs.stat(path.join(tmp.path, "snapshot", projectID, Hash.fast(linked)))),
           ).toBeDefined()
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  testEffect(Layer.empty).live("materializes exact captured bytes into an empty host-owned directory", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const project = path.join(tmp.path, "project")
+          const target = path.join(tmp.path, "materialized")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(project)
+            await fs.writeFile(path.join(project, "index.html"), "captured\n")
+            await $`git init`.cwd(project).quiet()
+            await $`git config core.fsmonitor false`.cwd(project).quiet()
+            await $`git config commit.gpgsign false`.cwd(project).quiet()
+            await $`git config user.email test@opencode.test`.cwd(project).quiet()
+            await $`git config user.name Test`.cwd(project).quiet()
+            await $`git add .`.cwd(project).quiet()
+            await $`git commit -m initial`.cwd(project).quiet()
+          })
+
+          yield* Effect.gen(function* () {
+            const snapshot = yield* Snapshot.Service
+            const captured = yield* snapshot.capture()
+            expect(captured).toBeDefined()
+            if (!captured) return
+            yield* Effect.promise(() => fs.writeFile(path.join(project, "index.html"), "live edit\n"))
+            yield* snapshot.materialize({ snapshot: captured, directory: AbsolutePath.make(target) })
+            expect(yield* read(path.join(target, "index.html"))).toBe("captured\n")
+            expect(yield* read(path.join(project, "index.html"))).toBe("live edit\n")
+          }).pipe(Effect.provide(snapshotLayer(tmp.path, project)))
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),

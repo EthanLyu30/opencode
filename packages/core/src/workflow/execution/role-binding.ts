@@ -14,6 +14,8 @@ import { WorkflowTestArtifact } from "../artifacts/test"
 import { WorkflowTestLogArtifact } from "../artifacts/test-log"
 import { WorkflowVisualReviewArtifact } from "../artifacts/visual-review"
 import { WorkflowStageMachine } from "../stage-machine"
+import { WorkflowProductionHostPlan } from "../production-host-plan"
+import { WorkflowVisualHost } from "../visual-host"
 import { WorkflowRoleContract } from "./contract"
 import type { DecodedPriorArtifact } from "./role"
 
@@ -278,6 +280,57 @@ export function validateBusinessArtifacts(
     const specArtifact = priorArtifacts.filter((artifact) => artifact.kind === WorkflowDesignArtifact.SPEC_KIND)
     if (specArtifact.length !== 1) throw new Error("Visual review requires one durable design specification")
     const spec = WorkflowDesignArtifact.decodeSpec(toCommit(specArtifact[0]), workflow.id)
+    let productionPlan: WorkflowProductionHostPlan.Plan | undefined
+    try {
+      productionPlan = WorkflowProductionHostPlan.fromWorkflow(workflow)
+    } catch {
+      productionPlan = undefined
+    }
+    if (productionPlan !== undefined) {
+      const referenceArtifact = priorArtifacts.filter(
+        (artifact) => artifact.kind === WorkflowDesignArtifact.REFERENCE_APP_KIND,
+      )
+      const manifestArtifact = priorArtifacts.filter((artifact) => {
+        if (artifact.kind !== WorkflowImplementationArtifact.KIND) return false
+        try {
+          return (
+            WorkflowImplementationArtifact.decodeExact(toCommit(artifact), workflow.id, location).revision === revision
+          )
+        } catch {
+          return false
+        }
+      })
+      if (referenceArtifact.length !== 1 || manifestArtifact.length !== 1)
+        throw new Error("Visual review frozen implementation authority is missing or ambiguous")
+      WorkflowProductionHostPlan.verifyCurrentConfiguration(productionPlan)
+      const manifest = WorkflowImplementationArtifact.decodeExact(toCommit(manifestArtifact[0]), workflow.id, location)
+      const referenceIdentity = WorkflowVisualHost.referenceIdentity(
+        workflow.id,
+        WorkflowDesignArtifact.decodeReferenceApp(toCommit(referenceArtifact[0]), workflow.id),
+      )
+      for (const artifact of screenshots) {
+        const image = WorkflowVisualReviewArtifact.decodeScreenshot(toCommit(artifact), workflow.id)
+        const receipt = image.evidenceReceipt
+        if (receipt === undefined || receipt.coordinates.stageID !== stage.id)
+          throw new Error("Current visual screenshot receipt belongs to a different stage")
+        if (
+          image.kind === "implementation" &&
+          (receipt.coordinates.revision !== revision ||
+            receipt.coordinates.configSha256 !== productionPlan.preview.configSha256 ||
+            receipt.coordinates.sourceSha256 !== WorkflowImplementationArtifact.hash(manifest) ||
+            receipt.coordinates.readySelectorSha256 !== Hash.sha256(spec.referenceApp.readySelector))
+        )
+          throw new Error("Current implementation screenshot receipt differs from frozen authority")
+        if (
+          image.kind === "reference" &&
+          (receipt.coordinates.revision !== 0 ||
+            receipt.coordinates.configSha256 !== referenceIdentity.configSha256 ||
+            receipt.coordinates.sourceSha256 !== referenceIdentity.sourceSha256 ||
+            receipt.coordinates.readySelectorSha256 !== referenceIdentity.readySelectorSha256)
+        )
+          throw new Error("Current reference screenshot receipt differs from frozen authority")
+      }
+    }
     const images = spec.referenceApp.viewports.flatMap((viewport) => {
       const reference = decodedImages.filter(
         (image) => image.kind === "reference" && image.viewport === viewport.name && image.revision === 0,
@@ -302,15 +355,8 @@ export function validateBusinessArtifacts(
   if (deliveries.length !== 1 || artifacts.length !== 1) throw new Error("Delivery evidence requires one artifact")
   const delivery = WorkflowDeliveryArtifact.decode(toCommit(deliveries[0]), workflow.id, location)
   if (delivery.revision !== revision) throw new Error("Delivery revision mismatch")
-  const prior = decodePriorArtifacts(workflow, location, priorArtifacts)
-  const manifestCommit = latestCommit(prior, WorkflowImplementationArtifact.KIND)
-  const testCommit = latestCommit(prior, WorkflowTestArtifact.KIND)
-  const reviewCommit = latestCommit(prior, WorkflowVisualReviewArtifact.REVIEW_KIND)
-  if (!manifestCommit || !testCommit || !reviewCommit) throw new Error("Delivery is missing prior evidence")
-  const manifest = WorkflowImplementationArtifact.decode(manifestCommit, workflow.id, location)
-  const test = WorkflowTestArtifact.decode(testCommit, workflow.id, location)
-  const review = WorkflowVisualReviewArtifact.decodeReview(reviewCommit, workflow.id)
-  WorkflowDeliveryArtifact.validateDelivery({ delivery, manifest, test, review })
+  const chain = validateDeliveryEvidenceChain(workflow, location, revision, priorArtifacts)
+  WorkflowDeliveryArtifact.validateDelivery({ delivery, ...chain })
 }
 
 export function validateDependencies(
@@ -341,6 +387,195 @@ export function validateDependencies(
     if (image.kind !== "reference" || image.revision !== 0 || image.evidenceReceipt === undefined)
       throw new Error("Role dependency is not exact receipt-bound reference evidence")
   }
+}
+
+export function validateDeliveryEvidenceChain(
+  workflow: Workflow.Info,
+  location: Location.Ref,
+  revision: number,
+  artifacts: ReadonlyArray<Workflow.Artifact>,
+): {
+  readonly manifest: ReturnType<typeof WorkflowImplementationArtifact.decodeExact>
+  readonly test: ReturnType<typeof WorkflowTestArtifact.decodeExact>
+  readonly review: ReturnType<typeof WorkflowVisualReviewArtifact.decodeReview>
+} {
+  if (artifacts.some((artifact) => artifact.workflowID !== workflow.id))
+    throw new Error("Delivery evidence contains a foreign Workflow owner")
+  const exactly = <A>(values: readonly A[], message: string): A => {
+    if (values.length !== 1) throw new Error(message)
+    return values[0]
+  }
+  const manifestArtifact = exactly(
+    artifacts.filter((artifact) => {
+      if (artifact.kind !== WorkflowImplementationArtifact.KIND) return false
+      try {
+        return (
+          WorkflowImplementationArtifact.decodeExact(toCommit(artifact), workflow.id, location).revision === revision
+        )
+      } catch {
+        return false
+      }
+    }),
+    "Delivery manifest authority is missing or ambiguous",
+  )
+  const manifest = WorkflowImplementationArtifact.decodeExact(toCommit(manifestArtifact), workflow.id, location)
+  const testArtifact = exactly(
+    artifacts.filter((artifact) => {
+      if (artifact.kind !== WorkflowTestArtifact.KIND) return false
+      try {
+        return (
+          WorkflowTestArtifact.decodeExact(toCommit(artifact), workflow.id, artifact.stageID, location).revision ===
+          revision
+        )
+      } catch {
+        return false
+      }
+    }),
+    "Delivery test authority is missing or ambiguous",
+  )
+  const test = WorkflowTestArtifact.decodeExact(toCommit(testArtifact), workflow.id, testArtifact.stageID, location)
+  const logs = artifacts.filter(
+    (artifact) => artifact.kind === WorkflowTestLogArtifact.KIND && artifact.stageID === testArtifact.stageID,
+  )
+  if (logs.length !== test.tests.length) throw new Error("Delivery test-log dependency count differs from its result")
+  const resolvedLogs = test.tests.map((record) => {
+    const matches = logs.filter(
+      (artifact) =>
+        artifact.uri === record.log.uri && artifact.sha256 === record.log.sha256 && artifact.size === record.log.size,
+    )
+    const artifact = exactly(matches, "Delivery test-log dependency is missing or ambiguous")
+    WorkflowTestLogArtifact.decodeExact(artifact, workflow.id, testArtifact.stageID, revision)
+    return artifact
+  })
+  if (new Set(resolvedLogs.map((artifact) => artifact.id)).size !== resolvedLogs.length)
+    throw new Error("Delivery test-log dependencies are duplicated")
+
+  const reviewArtifact = exactly(
+    artifacts.filter((artifact) => {
+      if (artifact.kind !== WorkflowVisualReviewArtifact.REVIEW_KIND) return false
+      try {
+        return WorkflowVisualReviewArtifact.decodeReview(toCommit(artifact), workflow.id).revision === revision
+      } catch {
+        return false
+      }
+    }),
+    "Delivery visual-review authority is missing or ambiguous",
+  )
+  const review = WorkflowVisualReviewArtifact.decodeReview(toCommit(reviewArtifact), workflow.id)
+  const specArtifact = exactly(
+    artifacts.filter((artifact) => artifact.kind === WorkflowDesignArtifact.SPEC_KIND),
+    "Delivery design viewport authority is missing or ambiguous",
+  )
+  const spec = WorkflowDesignArtifact.decodeSpec(toCommit(specArtifact), workflow.id)
+  const screenshots = artifacts.filter(
+    (artifact) =>
+      artifact.kind === WorkflowVisualReviewArtifact.REFERENCE_SCREENSHOT_KIND ||
+      artifact.kind === WorkflowVisualReviewArtifact.IMPLEMENTATION_SCREENSHOT_KIND,
+  )
+  const used = new Set<Workflow.ArtifactID>()
+  const ordered = spec.referenceApp.viewports.flatMap((viewport) =>
+    (["reference", "implementation"] as const).map((kind) => {
+      const expectedRevision = kind === "reference" ? 0 : revision
+      const matches = screenshots.filter((artifact) => {
+        try {
+          const image = WorkflowVisualReviewArtifact.decodeScreenshot(toCommit(artifact), workflow.id)
+          return image.kind === kind && image.viewport === viewport.name && image.revision === expectedRevision
+        } catch {
+          return false
+        }
+      })
+      const artifact = exactly(matches, "Delivery screenshot dependency is missing or ambiguous")
+      if (used.has(artifact.id)) throw new Error("Delivery screenshot dependency is duplicated")
+      used.add(artifact.id)
+      const image = WorkflowVisualReviewArtifact.decodeScreenshot(toCommit(artifact), workflow.id)
+      const receipt = image.evidenceReceipt
+      if (
+        receipt === undefined ||
+        receipt.coordinates.stageID !== artifact.stageID ||
+        (kind === "implementation" && artifact.stageID !== reviewArtifact.stageID)
+      )
+        throw new Error("Delivery screenshot receipt ownership is foreign or drifted")
+      return { artifact, image }
+    }),
+  )
+  if (
+    ordered.length !== review.evidence.length ||
+    ordered.some(({ image }, index) => {
+      const expected = review.evidence[index]
+      return (
+        expected === undefined ||
+        expected.id !== image.id ||
+        expected.workflowID !== image.workflowID ||
+        expected.kind !== image.kind ||
+        expected.viewport !== image.viewport ||
+        expected.revision !== image.revision ||
+        expected.uri !== image.uri ||
+        expected.mime !== image.mime ||
+        expected.sha256 !== image.sha256 ||
+        expected.size !== image.size
+      )
+    })
+  )
+    throw new Error("Delivery visual-review evidence order or identity drifted")
+
+  validateOutcomeArtifactSet(
+    workflow,
+    artifacts,
+    manifestArtifact.stageID,
+    revision,
+    ["implement", "repair"],
+    [manifestArtifact],
+    [],
+  )
+  validateOutcomeArtifactSet(
+    workflow,
+    artifacts,
+    testArtifact.stageID,
+    revision,
+    ["test"],
+    [testArtifact, ...resolvedLogs],
+    [],
+  )
+  const reviewBusiness = [
+    reviewArtifact,
+    ...ordered.map(({ artifact }) => artifact).filter((a) => a.stageID === reviewArtifact.stageID),
+  ]
+  const reviewDependencies = ordered.map(({ artifact }) => artifact).filter((a) => a.stageID !== reviewArtifact.stageID)
+  validateOutcomeArtifactSet(
+    workflow,
+    artifacts,
+    reviewArtifact.stageID,
+    revision,
+    ["visual_review"],
+    reviewBusiness,
+    reviewDependencies,
+  )
+  return { manifest, test, review }
+}
+
+function validateOutcomeArtifactSet(
+  workflow: Workflow.Info,
+  artifacts: readonly Workflow.Artifact[],
+  stageID: Workflow.StageID,
+  revision: number,
+  roles: readonly WorkflowRole.Role[],
+  business: readonly Workflow.Artifact[],
+  dependencies: readonly Workflow.Artifact[],
+) {
+  const outcomes = artifacts.filter(
+    (artifact) => artifact.stageID === stageID && artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
+  )
+  if (outcomes.length !== 1) throw new Error("Delivery role outcome binding is missing or ambiguous")
+  const binding = WorkflowStageMachine.decodeOutcomeBinding(toCommit(outcomes[0]))
+  if (
+    !roles.includes(binding.outcome.role) ||
+    binding.outcome.revision !== revision ||
+    binding.requiredArtifactSetSha256 !== artifactSetDigest(business) ||
+    binding.dependencyArtifactSetSha256 !== (dependencies.length === 0 ? undefined : artifactSetDigest(dependencies)) ||
+    business.some((artifact) => artifact.workflowID !== workflow.id || artifact.stageID !== stageID) ||
+    dependencies.some((artifact) => artifact.workflowID !== workflow.id || artifact.stageID === stageID)
+  )
+    throw new Error("Delivery role outcome binding differs from its exact evidence set")
 }
 
 function mediaBackedByArtifact(
@@ -426,10 +661,6 @@ function toCommit(artifact: Workflow.Artifact | Workflow.ArtifactCommit): Workfl
     size: artifact.size,
     metadata: artifact.metadata,
   })
-}
-
-function latestCommit(artifacts: readonly DecodedPriorArtifact[], kind: string) {
-  return artifacts.filter((artifact) => artifact.kind === kind).at(-1)?.commit
 }
 
 function imageIdentity(image: {

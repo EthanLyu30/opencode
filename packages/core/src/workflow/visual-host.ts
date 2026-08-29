@@ -12,6 +12,7 @@ import { makeGlobalNode } from "../effect/app-node"
 import { WorkflowDesignArtifact } from "./artifacts/design"
 import { WorkflowVisualReviewArtifact } from "./artifacts/visual-review"
 import { PreviewPlan } from "./preview-plan"
+import { WorkflowWorkspaceMaterialization } from "./workspace-materialization"
 import {
   EvidenceID,
   IMPLEMENTATION_SCREENSHOT_KIND,
@@ -112,6 +113,7 @@ export interface PrepareImplementationInput {
 export interface ImplementationCaptureContract {
   readonly implementationSha256: string
   readonly readySelector: string
+  readonly materialization?: WorkflowWorkspaceMaterialization.Lease
 }
 
 export type ResolveImplementationContract = (
@@ -668,14 +670,23 @@ export function evidenceArtifactBinding(input: BindEvidenceInput): EvidenceArtif
 }
 
 export function validateImplementationCaptureContract(input: unknown): ImplementationCaptureContract {
-  if (!hasExactDataKeys(input, ["implementationSha256", "readySelector"])) {
+  if (
+    !hasExactDataKeys(input, ["implementationSha256", "readySelector"]) &&
+    !hasExactDataKeys(input, ["implementationSha256", "readySelector", "materialization"])
+  ) {
     throw new TypeError("Implementation capture contract shape is not exact")
   }
   const implementationSha256 = Schema.decodeUnknownSync(DesignArtifact.Sha256)(input.implementationSha256)
   if (typeof input.readySelector !== "string" || input.readySelector.length === 0) {
     throw new TypeError("Implementation capture selector is invalid")
   }
-  return Object.freeze({ implementationSha256, readySelector: input.readySelector })
+  const materialization =
+    "materialization" in input ? WorkflowWorkspaceMaterialization.validate(input.materialization) : undefined
+  return Object.freeze({
+    implementationSha256,
+    readySelector: input.readySelector,
+    ...(materialization === undefined ? {} : { materialization }),
+  })
 }
 
 function validatePreviewIdentity(preview: PreparedPreview): PreviewIdentity {

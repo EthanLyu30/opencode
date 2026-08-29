@@ -160,6 +160,12 @@ export interface Interface {
       maximumFileBytes: number
       maximumTotalBytes: number
     }) => Effect.Effect<readonly TreeEntry[], OperationError>
+    readonly read: (input: {
+      repository: Repository
+      tree: TreeID
+      path: RelativePath
+      maximumBytes: number
+    }) => Effect.Effect<Uint8Array, OperationError>
     readonly files: (input: {
       repository: Repository
       from: TreeID
@@ -557,7 +563,14 @@ const layer = Layer.effect(
         locked(
           input.repository,
           Effect.gen(function* () {
-            yield* Effect.forEach(input.scopes, (scope) => refresh({ ...input, scope }), { discard: true })
+            const refreshed = yield* Effect.forEach(input.scopes, (scope) => refresh({ ...input, scope }))
+            const skipped = refreshed.flatMap((result) => result.skipped)
+            if (skipped.length > 0)
+              return yield* new OperationError({
+                operation: "refresh",
+                directory: input.repository.worktree,
+                message: `Git tree capture skipped ${skipped.length} oversized scoped entr${skipped.length === 1 ? "y" : "ies"}`,
+              })
             return yield* writeTree(input.repository)
           }),
         ),
@@ -673,6 +686,31 @@ const layer = Layer.effect(
         }),
       )
       return entries.toSorted((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+    })
+
+    const readTreeEntry = Effect.fn("Git.tree.read")(function* (input: {
+      repository: Repository
+      tree: TreeID
+      path: RelativePath
+      maximumBytes: number
+    }) {
+      const malformed = (message: string, cause?: unknown) =>
+        new OperationError({ operation: "entries", directory: input.repository.worktree, message, cause })
+      if (!Number.isSafeInteger(input.maximumBytes) || input.maximumBytes < 0)
+        return yield* malformed("Git tree read bound is invalid")
+      const result = yield* proc
+        .run(
+          ChildProcess.make("git", repositoryArgs(input.repository, ["show", `${input.tree}:${input.path}`]), {
+            cwd: input.repository.worktree,
+            extendEnv: true,
+            stdin: "ignore",
+          }),
+          { maxOutputBytes: input.maximumBytes + 1, maxErrorBytes: 64 * 1024 },
+        )
+        .pipe(Effect.mapError((cause) => malformed(`Unable to read Git tree entry ${input.path}`, cause)))
+      if (result.exitCode !== 0 || result.stdoutTruncated || result.stdout.byteLength > input.maximumBytes)
+        return yield* malformed(`Git tree entry ${input.path} is unavailable or exceeded its bound`)
+      return result.stdout
     })
 
     const treeDiff = Effect.fn("Git.tree.diff")(function* (input: {
@@ -1045,6 +1083,7 @@ const layer = Layer.effect(
         capture: captureTree,
         write: writeTree,
         entries: treeEntries,
+        read: readTreeEntry,
         files: treeFiles,
         diff: treeDiff,
         preview,
