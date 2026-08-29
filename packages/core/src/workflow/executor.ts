@@ -1,6 +1,6 @@
 export * as WorkflowExecutor from "./executor"
 
-import { LLMError } from "@opencode-ai/llm"
+import { LLMError, Message } from "@opencode-ai/llm"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { Responses } from "@opencode-ai/schema/responses"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
@@ -56,6 +56,10 @@ export interface Result {
   readonly usage: Workflow.Usage
   readonly responseSettlement?: Extract<ResponseSettlement, { readonly type: "completed" }>
   readonly roleReceipt?: WorkflowRoleExecution.Receipt
+  /** Ephemeral trusted media/text used to rebuild the exact contract at Local's settlement gate. */
+  readonly trustedMessages?: readonly Message[]
+  /** Ephemeral exact prior-stage dependencies used by Local's final authority gate. */
+  readonly trustedDependencies?: readonly Workflow.Artifact[]
 }
 
 export interface ExecutionFailure {
@@ -145,7 +149,24 @@ const injectedRoleLayer = Layer.effect(
               ),
             )
 
-          const result = yield* models.execute({ ...input, route }).pipe(Effect.mapError(modelFailure))
+          const preparation =
+            input.workflow.type !== "visual-build"
+              ? undefined
+              : yield* WorkflowRoleExecution.prepare({
+                  workflow: input.workflow,
+                  stage: input.stage,
+                  revision: revisionOf(input.stage),
+                  location:
+                    input.workflow.location ??
+                    (yield* Effect.fail(invalidOutcome("Production visual roles require Location", zeroUsage))),
+                  priorArtifacts: input.artifacts,
+                  admission: { workflowInput: input.workflow.input, stageInput: input.stage.input },
+                  checkpoint: input.stage.checkpoint,
+                }).pipe(
+                  Effect.provideService(WorkflowRoleExecution.Service, evidence),
+                  Effect.mapError((error) => invalidOutcome(`${error.code}: ${error.message}`, zeroUsage)),
+                )
+          const result = yield* models.execute({ ...input, route, preparation }).pipe(Effect.mapError(modelFailure))
           if (result.artifacts?.some((artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND))
             return yield* Effect.fail(
               invalidOutcome(
@@ -201,6 +222,7 @@ const injectedRoleLayer = Layer.effect(
                   settledToolEvidence: result.artifacts ?? [],
                   executionUsage: result.usage,
                   providerUsage: result.providerUsage!,
+                  ...(preparation === undefined ? {} : { preparation }),
                 }).pipe(
                   Effect.provideService(WorkflowRoleExecution.Service, evidence),
                   Effect.mapError((error) =>
@@ -273,6 +295,8 @@ const injectedRoleLayer = Layer.effect(
                 ? [...(result.artifacts ?? []), artifact]
                 : [...(result.artifacts ?? []), ...settlement.artifacts],
             ...(settlement === undefined ? {} : { roleReceipt: settlement.receipt }),
+            ...(preparation?.messages === undefined ? {} : { trustedMessages: preparation.messages }),
+            ...(settlement?.dependencies === undefined ? {} : { trustedDependencies: settlement.dependencies }),
             responseSettlement: result.responseSettlement,
           }
         }),
@@ -284,6 +308,13 @@ export const roleLayer = injectedRoleLayer.pipe(Layer.provide(WorkflowRoleExecut
 
 export const roleLayerWith = (evidence: Layer.Layer<WorkflowRoleExecution.Service>) =>
   injectedRoleLayer.pipe(Layer.provide(evidence))
+
+function revisionOf(stage: Workflow.Stage): number {
+  const revision = stage.input.revision ?? 0
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
+    throw new Error("Role revision is invalid")
+  return revision
+}
 
 function outcomeArtifact(stage: Workflow.Stage, outcome: WorkflowRole.Outcome): Workflow.ArtifactCommit {
   const body = WorkflowStageMachine.encodeOutcome(outcome)

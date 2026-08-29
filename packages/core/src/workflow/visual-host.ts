@@ -68,6 +68,21 @@ export interface PreviewIdentity {
   readonly readySelectorSha256: string
 }
 
+export function referenceIdentity(
+  workflowID: Workflow.ID,
+  referenceApp: WorkflowDesignArtifact.ReferenceApp,
+): PreviewIdentity {
+  const configSha256 = referenceHash(referenceApp)
+  return Object.freeze({
+    workflowID,
+    kind: "reference",
+    revision: 0,
+    configSha256,
+    sourceSha256: configSha256,
+    readySelectorSha256: hash(referenceApp.readySelector),
+  })
+}
+
 export interface CapturedImage {
   readonly bytes: Uint8Array
   readonly viewport: DesignArtifact.Viewport
@@ -307,8 +322,8 @@ export function fakeLayer(options: FakeOptions = {}): Layer.Layer<Service> {
   const service = Service.of({
     materializeReference: (input) =>
       Effect.gen(function* () {
-        const configSha256 = yield* Effect.try({
-          try: () => referenceHash(input.referenceApp),
+        const identity = yield* Effect.try({
+          try: () => referenceIdentity(input.workflowID, input.referenceApp),
           catch: () =>
             new Failure({
               operation: "materialize_reference",
@@ -319,9 +334,9 @@ export function fakeLayer(options: FakeOptions = {}): Layer.Layer<Service> {
         return yield* acquire({
           workflowID: input.workflowID,
           revision: 0,
-          configSha256,
-          sourceSha256: configSha256,
-          readySelectorSha256: hash(input.referenceApp.readySelector),
+          configSha256: identity.configSha256,
+          sourceSha256: identity.sourceSha256,
+          readySelectorSha256: identity.readySelectorSha256,
           kind: "reference",
         })
       }),

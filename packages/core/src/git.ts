@@ -23,6 +23,13 @@ export type ChangeSet = typeof ChangeSet.Type
 export const TreeID = Schema.String.pipe(Schema.brand("Git.TreeID"))
 export type TreeID = typeof TreeID.Type
 
+export interface TreeEntry {
+  readonly path: RelativePath
+  readonly mode: "100644" | "100755"
+  readonly size: number
+  readonly sha256: string
+}
+
 export class OperationError extends Schema.TaggedErrorClass<OperationError>()("Git.OperationError", {
   operation: Schema.Literals([
     "clone",
@@ -32,6 +39,7 @@ export class OperationError extends Schema.TaggedErrorClass<OperationError>()("G
     "create",
     "refresh",
     "write_tree",
+    "entries",
     "list_files",
     "diff",
     "restore",
@@ -144,6 +152,14 @@ export interface Interface {
       maximumUntrackedFileBytes?: number
     }) => Effect.Effect<TreeID, OperationError>
     readonly write: (repository: Repository) => Effect.Effect<TreeID, OperationError>
+    readonly entries: (input: {
+      repository: Repository
+      tree: TreeID
+      scope: RelativePath
+      maximumEntries: number
+      maximumFileBytes: number
+      maximumTotalBytes: number
+    }) => Effect.Effect<readonly TreeEntry[], OperationError>
     readonly files: (input: {
       repository: Repository
       from: TreeID
@@ -564,6 +580,101 @@ const layer = Layer.effect(
         .map((file) => RelativePath.make(file))
     })
 
+    const treeEntries = Effect.fn("Git.tree.entries")(function* (input: {
+      repository: Repository
+      tree: TreeID
+      scope: RelativePath
+      maximumEntries: number
+      maximumFileBytes: number
+      maximumTotalBytes: number
+    }) {
+      const malformed = (message: string, cause?: unknown) =>
+        new OperationError({ operation: "entries", directory: input.repository.worktree, message, cause })
+      if (
+        !Number.isSafeInteger(input.maximumEntries) ||
+        input.maximumEntries < 1 ||
+        !Number.isSafeInteger(input.maximumFileBytes) ||
+        input.maximumFileBytes < 1 ||
+        !Number.isSafeInteger(input.maximumTotalBytes) ||
+        input.maximumTotalBytes < 1
+      ) {
+        return yield* malformed("Git tree entry bounds are invalid")
+      }
+      const listed = yield* proc
+        .run(
+          ChildProcess.make(
+            "git",
+            repositoryArgs(input.repository, [
+              "ls-tree",
+              "-r",
+              "-z",
+              "-l",
+              "--full-tree",
+              input.tree,
+              "--",
+              input.scope,
+            ]),
+            { cwd: input.repository.worktree, extendEnv: true, stdin: "ignore" },
+          ),
+          { maxOutputBytes: Math.min(16 * 1024 * 1024, input.maximumEntries * 1024), maxErrorBytes: 64 * 1024 },
+        )
+        .pipe(Effect.mapError((cause) => malformed("Unable to list bounded Git tree entries", cause)))
+      if (listed.exitCode !== 0 || listed.stdoutTruncated)
+        return yield* malformed("Git tree entry listing failed or exceeded its bound")
+      const parsed: readonly {
+        readonly path: RelativePath
+        readonly mode: TreeEntry["mode"]
+        readonly object: string
+        readonly size: number
+      }[] = yield* Effect.try({
+        try: () => {
+          const records = new TextDecoder("utf-8", { fatal: true }).decode(listed.stdout).split("\0").filter(Boolean)
+          if (records.length > input.maximumEntries) throw new RangeError("too-many-entries")
+          return records.map((record) => {
+            const match = /^(\d+)\s+(\w+)\s+([0-9a-f]+)\s+(\d+|-)\t([\s\S]+)$/.exec(record)
+            if (!match) throw new TypeError("malformed")
+            const mode = match[1] === "100644" ? "100644" : match[1] === "100755" ? "100755" : undefined
+            if (match[2] !== "blob" || mode === undefined || match[4] === "-") throw new TypeError("unsupported")
+            const size = Number(match[4])
+            if (!Number.isSafeInteger(size) || size < 0 || size > input.maximumFileBytes)
+              throw new RangeError("oversized")
+            return {
+              path: RelativePath.make(match[5]),
+              mode,
+              object: match[3],
+              size,
+            } as const
+          })
+        },
+        catch: (cause) => malformed("Git tree entry is malformed, unsupported, or oversized", cause),
+      })
+      if (parsed.reduce((total, entry) => total + entry.size, 0) > input.maximumTotalBytes)
+        return yield* malformed("Git tree exceeds its aggregate content bound")
+      const entries = yield* Effect.forEach(parsed, (entry) =>
+        Effect.gen(function* () {
+          const content = yield* proc
+            .run(
+              ChildProcess.make("git", repositoryArgs(input.repository, ["cat-file", "blob", entry.object]), {
+                cwd: input.repository.worktree,
+                extendEnv: true,
+                stdin: "ignore",
+              }),
+              { maxOutputBytes: entry.size + 1, maxErrorBytes: 64 * 1024 },
+            )
+            .pipe(Effect.mapError((cause) => malformed(`Unable to read bounded Git tree entry ${entry.path}`, cause)))
+          if (content.exitCode !== 0 || content.stdoutTruncated || content.stdout.byteLength !== entry.size)
+            return yield* malformed(`Git tree entry ${entry.path} changed or exceeded its bound`)
+          return {
+            path: entry.path,
+            mode: entry.mode,
+            size: entry.size,
+            sha256: new Bun.CryptoHasher("sha256").update(content.stdout).digest("hex"),
+          } satisfies TreeEntry
+        }),
+      )
+      return entries.toSorted((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+    })
+
     const treeDiff = Effect.fn("Git.tree.diff")(function* (input: {
       repository: Repository
       from: TreeID
@@ -933,6 +1044,7 @@ const layer = Layer.effect(
       tree: {
         capture: captureTree,
         write: writeTree,
+        entries: treeEntries,
         files: treeFiles,
         diff: treeDiff,
         preview,

@@ -459,6 +459,7 @@ describe("Workflow role business-evidence authority", () => {
     const captureLayer = Layer.succeed(
       WorkflowRoleExecution.Service,
       WorkflowRoleExecution.Service.of({
+        prepare: () => Effect.succeed({}),
         resolve: (input) => {
           captured = input
           return Effect.fail(

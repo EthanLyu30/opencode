@@ -12,6 +12,7 @@ import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { WorkflowSchema } from "@opencode-ai/core/workflow"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
+import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
@@ -21,6 +22,7 @@ import { type ApplicationServiceFactory, createEmbeddedRoutes, createRoutes, wor
 import { WorkflowCommandSandboxServer } from "../src/workflow/command-sandbox"
 import { WorkflowRuntimeRecovery } from "../src/workflow/runtime-recovery"
 import { WorkflowVisualHostServer } from "../src/workflow/visual-host"
+import { WorkflowProductionEvidenceServer } from "../src/workflow/production-evidence"
 
 describe("Workflow runtime recovery", () => {
   test("reconstructs exact expired pending-call authority without requiring a Session assistant row", async () => {
@@ -185,9 +187,11 @@ describe("Workflow route composition", () => {
   })
 
   test("uses the exact Server nodes as the default Core Workflow replacements", () => {
+    const production = WorkflowProductionEvidenceServer.compositionNodes()
     expect(workflowReplacements()).toEqual([
-      [WorkflowVisualHost.node, WorkflowVisualHostServer.node],
+      [WorkflowVisualHost.node, production.visualHost],
       [WorkflowCommandSandbox.node, WorkflowCommandSandboxServer.node],
+      [WorkflowRoleExecution.node, production.roleEvidence],
     ])
   })
 

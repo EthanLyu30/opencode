@@ -35,6 +35,16 @@ export interface Result {
   readonly truncated: boolean
 }
 
+export interface FrozenTestRequest {
+  readonly workflowID: Workflow.ID
+  readonly stageID: Workflow.StageID
+  readonly revision: number
+  readonly argv: readonly ["bun", "test"] | readonly ["bun", "run", "test"]
+  readonly cwd: "."
+  readonly policySha256: string
+  readonly configSha256: string
+}
+
 export class Unavailable extends Schema.TaggedErrorClass<Unavailable>()("WorkflowCommandSandbox.Unavailable", {
   message: Schema.String,
 }) {}
@@ -47,6 +57,8 @@ export type Error = Unavailable | Rejected
 
 export interface Interface {
   readonly run: (input: Request) => Effect.Effect<Result, Error>
+  /** Trusted host-selected test plan; no model-authored shell text is accepted. */
+  readonly runFrozenTest?: (input: FrozenTestRequest) => Effect.Effect<Result, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/WorkflowCommandSandbox") {}
@@ -227,7 +239,7 @@ const containsLink = Effect.fn("WorkflowCommandSandbox.containsLink")(function* 
 function windowsToWsl(value: string) {
   const match = /^([A-Za-z]):[\\/](.*)$/.exec(value)
   if (!match) return undefined
-  return `/mnt/${match[1]!.toLowerCase()}/${match[2]!.replaceAll("\\", "/")}`
+  return `/mnt/${match[1].toLowerCase()}/${match[2].replaceAll("\\", "/")}`
 }
 
 function renderWrapper(input: {

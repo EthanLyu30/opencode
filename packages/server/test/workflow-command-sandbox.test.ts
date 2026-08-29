@@ -12,6 +12,8 @@ import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowToolLineage } from "@opencode-ai/core/workflow/tool-lineage"
+import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
+import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/production-host-plan"
 import { DateTime, Effect, Layer } from "effect"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
@@ -37,6 +39,28 @@ afterAll(async () => {
 })
 
 describe("WorkflowCommandSandboxServer", () => {
+  test("installs a separate trusted frozen-test runner instead of accepting model shell text", async () => {
+    await using fixture = await setup("test")
+    expect(await fixture.hasFrozenTestRunner()).toBe(true)
+  })
+
+  test("runs only the admission-frozen argv directly without shell stdin", async () => {
+    await using fixture = await setup("test")
+    const location = fixture.persisted.run.location!
+    await fs.writeFile(path.join(location.directory, "index.html"), "<!doctype html><main>ready</main>")
+    const preview = PreviewPlan.freeze({ authority: "admission", location })
+    const plan = WorkflowProductionHostPlan.freeze({ authority: "admission", location, preview })
+    fixture.persisted.run = {
+      ...fixture.persisted.run,
+      input: WorkflowProductionHostPlan.withPlan({}, plan),
+    }
+    const result = await fixture.runFrozen(plan)
+    expect(result).toEqual({ exit: 0, output: "sandbox output", truncated: false })
+    const create = fixture.engine.one("container", "create")
+    expect(create.argv.slice(-3)).toEqual([image, "bun", "test"])
+    expect(fixture.engine.one("container", "start").stdin).toBeUndefined()
+  })
+
   test("pipes hostile model command only to bash stdin and creates a digest-pinned, least-authority container", async () => {
     const command = `printf '%s' "$HOME"; touch D:\\host; echo --label=evil`
     await using fixture = await setup("implement", { callInput: { command } })
@@ -1194,6 +1218,26 @@ async function setup(
     lookups,
     request,
     authority: () => initial,
+    hasFrozenTestRunner: () =>
+      Effect.runPromise(
+        Effect.map(WorkflowCommandSandbox.Service, (sandbox) => typeof sandbox.runFrozenTest === "function").pipe(
+          Effect.provide(layer),
+        ),
+      ),
+    runFrozen: (plan: WorkflowProductionHostPlan.Plan) =>
+      Effect.runPromise(
+        Effect.flatMap(WorkflowCommandSandbox.Service, (sandbox) =>
+          sandbox.runFrozenTest!({
+            workflowID,
+            stageID,
+            revision: 0,
+            argv: plan.functionalTest.argv,
+            cwd: plan.functionalTest.cwd,
+            policySha256: plan.functionalTest.policySha256,
+            configSha256: plan.functionalTest.configSha256,
+          }),
+        ).pipe(Effect.provide(layer)),
+      ),
     recover: async () => {
       const current = await authority()
       return WorkflowCommandSandboxServer.recover({

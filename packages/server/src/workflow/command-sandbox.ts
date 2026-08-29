@@ -3,11 +3,14 @@ export * as WorkflowCommandSandboxServer from "./command-sandbox"
 import { makeLocationNode } from "@opencode-ai/core/effect/app-node"
 import { Location } from "@opencode-ai/core/location"
 import { SessionStore } from "@opencode-ai/core/session/store"
+import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowToolLineage } from "@opencode-ai/core/workflow/tool-lineage"
+import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/production-host-plan"
+import { WorkflowBusinessArtifact } from "@opencode-ai/core/workflow/artifacts/business"
 import { DateTime, Effect, Layer } from "effect"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
@@ -101,35 +104,107 @@ export function makeLayer(
           })
           return yield* Effect.tryPromise({
             try: (signal) =>
-              runOwned(options.engine, config, request, paths, ownership, signal, async () => {
-                const current = await Effect.runPromise(
-                  reloadAuthority({
-                    request,
-                    workflows,
-                    sessions,
-                    location,
-                    now: options.now ?? Date.now,
-                  }),
-                )
-                if (current.leaseOwner !== authority.leaseOwner || current.attempt !== authority.attempt)
-                  throw rejected("Persisted Workflow Stage lease changed before launch")
-                const currentPaths = await validatePaths(config, location.directory, request.workdir ?? ".").catch(
-                  () => {
+              runOwned(
+                options.engine,
+                config,
+                {
+                  role: request.role,
+                  timeout: request.timeout,
+                  argv: ["/bin/bash", "-se"],
+                  stdin: `${request.command}\n`,
+                },
+                paths,
+                ownership,
+                signal,
+                async () => {
+                  const current = await Effect.runPromise(
+                    reloadAuthority({
+                      request,
+                      workflows,
+                      sessions,
+                      location,
+                      now: options.now ?? Date.now,
+                    }),
+                  )
+                  if (current.leaseOwner !== authority.leaseOwner || current.attempt !== authority.attempt)
+                    throw rejected("Persisted Workflow Stage lease changed before launch")
+                  const currentPaths = await validatePaths(config, location.directory, request.workdir ?? ".").catch(
+                    () => {
+                      throw rejected("Workflow sandbox path identity changed before launch")
+                    },
+                  )
+                  if (
+                    !sameIdentity(paths.workspace, currentPaths.workspace) ||
+                    !sameIdentity(paths.workdir, currentPaths.workdir)
+                  )
                     throw rejected("Workflow sandbox path identity changed before launch")
-                  },
-                )
-                if (
-                  !sameIdentity(paths.workspace, currentPaths.workspace) ||
-                  !sameIdentity(paths.workdir, currentPaths.workdir)
-                )
-                  throw rejected("Workflow sandbox path identity changed before launch")
-                if (current.leaseExpiresAt < (options.now?.() ?? Date.now()))
-                  throw rejected("Persisted Workflow Stage lease expired before launch")
-              }),
+                  if (current.leaseExpiresAt < (options.now?.() ?? Date.now()))
+                    throw rejected("Persisted Workflow Stage lease expired before launch")
+                },
+              ),
             catch: (cause) =>
               cause instanceof WorkflowCommandSandbox.Rejected
                 ? cause
                 : unavailable("Workflow Docker sandbox failed before command settlement"),
+          })
+        }),
+        runFrozenTest: Effect.fn("WorkflowCommandSandboxServer.runFrozenTest")(function* (request) {
+          if (options.recoveryReady?.() === false)
+            return yield* unavailable("Workflow Docker recovery or configuration is unavailable")
+          const authority = yield* reloadFrozenTestAuthority({
+            request,
+            workflows,
+            location,
+            now: options.now ?? Date.now,
+          })
+          const config = yield* Effect.tryPromise({
+            try: () => validatedConfig(options.config),
+            catch: () => unavailable("Workflow Docker sandbox configuration is unavailable"),
+          })
+          const paths = yield* Effect.tryPromise({
+            try: () => validatePaths(config, location.directory, request.cwd),
+            catch: () => rejected("Frozen test path is not canonical and contained by the persisted Location"),
+          })
+          const ownership = ownershipFor({
+            workflowID: request.workflowID,
+            stageID: request.stageID,
+            toolCallID: `host-frozen-test-${request.configSha256.slice(0, 16)}`,
+            role: "test",
+            policyDigest: request.policySha256,
+            sessionID: SessionSchema.ID.make(`ses_host_test_${request.workflowID.slice(4)}`),
+            agent: WorkflowRoleAgents.agentForRole("test"),
+            leaseOwner: authority.leaseOwner,
+            attempt: authority.attempt,
+          })
+          return yield* Effect.tryPromise({
+            try: (signal) =>
+              runOwned(
+                options.engine,
+                config,
+                { role: "test", argv: request.argv },
+                paths,
+                ownership,
+                signal,
+                async () => {
+                  const current = await Effect.runPromise(
+                    reloadFrozenTestAuthority({ request, workflows, location, now: options.now ?? Date.now }),
+                  )
+                  if (current.leaseOwner !== authority.leaseOwner || current.attempt !== authority.attempt)
+                    throw rejected("Persisted Workflow Stage lease changed before frozen test launch")
+                  const currentPaths = await validatePaths(config, location.directory, request.cwd).catch(() => {
+                    throw rejected("Frozen test path identity changed before launch")
+                  })
+                  if (
+                    !sameIdentity(paths.workspace, currentPaths.workspace) ||
+                    !sameIdentity(paths.workdir, currentPaths.workdir)
+                  )
+                    throw rejected("Frozen test workspace identity changed before launch")
+                },
+              ),
+            catch: (cause) =>
+              cause instanceof WorkflowCommandSandbox.Rejected
+                ? cause
+                : unavailable("Workflow frozen test failed before command settlement"),
           })
         }),
       })
@@ -303,10 +378,67 @@ const reloadAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadAuthority"
   }
 })
 
+const reloadFrozenTestAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadFrozenTestAuthority")(
+  function* (input: {
+    readonly request: WorkflowCommandSandbox.FrozenTestRequest
+    readonly workflows: WorkflowStore.Interface
+    readonly location: Location.Interface
+    readonly now: () => number
+  }) {
+    const detail = yield* input.workflows.get(input.request.workflowID)
+    const stage = yield* input.workflows.stage(input.request.stageID)
+    if (
+      detail === undefined ||
+      detail.run.id !== input.request.workflowID ||
+      detail.run.location === undefined ||
+      !sameLocation(detail.run.location, input.location) ||
+      stage === undefined ||
+      stage.workflowID !== detail.run.id ||
+      stage.id !== input.request.stageID ||
+      stage.type !== "test" ||
+      (stage.input.revision ?? 0) !== input.request.revision ||
+      detail.run.status !== "running" ||
+      detail.run.currentStageID !== stage.id ||
+      (stage.status !== "leased" && stage.status !== "running") ||
+      !stage.leaseOwner ||
+      stage.attempt < 1 ||
+      stage.leaseExpiresAt === undefined ||
+      DateTime.toEpochMillis(stage.leaseExpiresAt) < input.now()
+    )
+      return yield* rejected("Persisted frozen-test authority is not current")
+    const plan = yield* Effect.try({
+      try: () => WorkflowProductionHostPlan.fromWorkflow(detail.run),
+      catch: () => rejected("Persisted production host plan is invalid"),
+    })
+    yield* Effect.try({
+      try: () => WorkflowProductionHostPlan.verifyCurrentConfiguration(plan),
+      catch: () => rejected("Admission-frozen test configuration changed"),
+    })
+    if (
+      input.request.cwd !== "." ||
+      WorkflowBusinessArtifact.encode(input.request.argv) !==
+        WorkflowBusinessArtifact.encode(plan.functionalTest.argv) ||
+      input.request.configSha256 !== plan.functionalTest.configSha256 ||
+      input.request.policySha256 !== plan.functionalTest.policySha256
+    )
+      return yield* rejected("Frozen test request differs from admission authority")
+    return {
+      leaseOwner: stage.leaseOwner,
+      attempt: stage.attempt,
+      leaseExpiresAt: DateTime.toEpochMillis(stage.leaseExpiresAt),
+    }
+  },
+)
+
 async function runOwned(
   engine: Docker.Engine,
   config: DockerConfig.ValidatedConfig,
-  request: WorkflowCommandSandbox.Request,
+  request: {
+    readonly role: WorkflowCommandSandbox.Request["role"]
+    readonly timeout?: number
+    readonly argv: readonly string[]
+    readonly stdin?: string
+  },
   paths: { readonly workspace: PathIdentity; readonly workdir: PathIdentity; readonly relativeWorkdir: string },
   ownership: ReturnType<typeof ownershipFor>,
   signal: AbortSignal,
@@ -356,8 +488,7 @@ async function runOwned(
         "--workdir",
         paths.relativeWorkdir === "." ? "/workspace" : `/workspace/${paths.relativeWorkdir}`,
         config.image,
-        "/bin/bash",
-        "-se",
+        ...request.argv,
       ],
       timeoutMs: remaining(callerDeadline, config.limits.engineTimeoutMs),
       signal,
@@ -387,7 +518,7 @@ async function runOwned(
     await finalGate()
     const result = await execute(engine, config, {
       argv: ["container", "start", "--attach", "--interactive", owned.id],
-      stdin: `${request.command}\n`,
+      ...(request.stdin === undefined ? {} : { stdin: request.stdin }),
       timeoutMs: remaining(callerDeadline, config.limits.timeoutMs),
       maxOutputBytes: config.limits.maxOutputBytes,
       signal,

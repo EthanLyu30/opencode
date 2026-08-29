@@ -16,6 +16,7 @@ import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
+import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { HttpRouter, HttpServer } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -28,9 +29,9 @@ import { schemaErrorLayer } from "./middleware/schema-error"
 import { PtyEnvironment } from "./pty-environment"
 import { layer as locationLayer } from "./location"
 import { sessionLocationLayer } from "./middleware/session-location"
-import { WorkflowVisualHostServer } from "./workflow/visual-host"
 import { WorkflowCommandSandboxServer } from "./workflow/command-sandbox"
 import { WorkflowRuntimeRecovery } from "./workflow/runtime-recovery"
+import { WorkflowProductionEvidenceServer } from "./workflow/production-evidence"
 
 const applicationServices = LayerNode.group([
   Database.node,
@@ -143,11 +144,14 @@ export function workflowReplacements(
   input: {
     readonly visualHost?: LayerNode.Node<WorkflowVisualHost.Service, any, any>
     readonly commandSandbox?: LayerNode.Node<WorkflowCommandSandbox.Service, any, any>
+    readonly roleEvidence?: LayerNode.Node<WorkflowRoleExecution.Service, any, any>
   } = {},
 ) {
+  const production = WorkflowProductionEvidenceServer.compositionNodes()
   return [
-    [WorkflowVisualHost.node, input.visualHost ?? WorkflowVisualHostServer.node],
+    [WorkflowVisualHost.node, input.visualHost ?? production.visualHost],
     [WorkflowCommandSandbox.node, input.commandSandbox ?? WorkflowCommandSandboxServer.node],
+    [WorkflowRoleExecution.node, input.roleEvidence ?? production.roleEvidence],
   ] as const
 }
 

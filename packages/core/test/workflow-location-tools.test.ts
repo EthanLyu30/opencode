@@ -293,9 +293,9 @@ const expected = {
   decompose: ["glob", "grep", "read"],
   implement: ["apply_patch", "bash", "edit", "glob", "grep", "read", "write"],
   repair: ["apply_patch", "bash", "edit", "glob", "grep", "read", "write"],
-  test: ["bash", "glob", "grep", "read"],
+  test: ["glob", "grep", "read"],
   visual_review: ["glob", "grep", "read"],
-  deliver: ["bash", "glob", "grep", "read"],
+  deliver: ["glob", "grep", "read"],
 } satisfies Record<WorkflowRole.Role, readonly string[]>
 
 const expectedActions = {
@@ -303,9 +303,9 @@ const expectedActions = {
   decompose: ["read", "glob", "grep"],
   implement: ["read", "glob", "grep", "bash", "edit"],
   repair: ["read", "glob", "grep", "bash", "edit"],
-  test: ["read", "glob", "grep", "bash"],
+  test: ["read", "glob", "grep"],
   visual_review: ["read", "glob", "grep"],
-  deliver: ["read", "glob", "grep", "bash"],
+  deliver: ["read", "glob", "grep"],
 } satisfies Record<WorkflowRole.Role, readonly string[]>
 
 const expectedRules = (role: WorkflowRole.Role) => [
@@ -1218,7 +1218,7 @@ describe("Workflow Location tools", () => {
     ),
   )
 
-  it.live("advertises workflow Bash but fails closed without a sandbox backend", () =>
+  it.live("advertises workflow Bash only to editing roles and fails closed without a sandbox backend", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([workspace, outside]) =>
@@ -1237,7 +1237,12 @@ describe("Workflow Location tools", () => {
               assistantMessageID: SessionMessage.ID.make(`msg_workflow_location_${role}`),
             })
 
-            for (const role of ["implement", "test", "deliver"] as const) {
+            for (const role of ["test", "deliver"] as const) {
+              const filtered = yield* registry.materialize(WorkflowPermissions.forRole(role))
+              expect(filtered.definitions.some((definition) => definition.name === "bash")).toBe(false)
+            }
+
+            for (const role of ["implement"] as const) {
               const filtered = yield* registry.materialize(WorkflowPermissions.forRole(role))
               expect(filtered.definitions.some((definition) => definition.name === "bash")).toBe(true)
               const denied = yield* settleAuthorized(

@@ -1,0 +1,229 @@
+export * as WorkflowProductionEvidenceServer from "./production-evidence"
+
+import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
+import { LocationServiceMap } from "@opencode-ai/core/location-service-map"
+import { Snapshot } from "@opencode-ai/core/snapshot"
+import { WorkflowBusinessArtifact } from "@opencode-ai/core/workflow/artifacts/business"
+import { WorkflowDecompositionArtifact } from "@opencode-ai/core/workflow/artifacts/decomposition"
+import { WorkflowDesignArtifact } from "@opencode-ai/core/workflow/artifacts/design"
+import { WorkflowImplementationArtifact } from "@opencode-ai/core/workflow/artifacts/implementation"
+import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
+import { WorkflowProductionEvidence } from "@opencode-ai/core/workflow/execution/production-evidence"
+import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
+import * as WorkflowRoleBinding from "@opencode-ai/core/workflow/execution/role-binding"
+import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/production-host-plan"
+import { WorkflowStore } from "@opencode-ai/core/workflow/store"
+import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
+import { Effect, Layer } from "effect"
+import { WorkflowVisualHostServer } from "./visual-host"
+
+export interface ResolverDependencies {
+  readonly getWorkflow: (workflowID: WorkflowRoleExecution.ResolverInput["workflow"]["id"]) => Effect.Effect<
+    | {
+        readonly run: WorkflowRoleExecution.ResolverInput["workflow"]
+        readonly stages: readonly WorkflowRoleExecution.ResolverInput["stage"][]
+        readonly artifacts: readonly WorkflowRoleExecution.PrepareInput["priorArtifacts"][number][]
+      }
+    | undefined,
+    unknown
+  >
+  readonly captureSnapshot: (
+    location: WorkflowRoleExecution.ResolverInput["location"],
+  ) => Effect.Effect<Snapshot.ID | undefined, unknown>
+  readonly snapshotEntries: (
+    location: WorkflowRoleExecution.ResolverInput["location"],
+    snapshot: Snapshot.ID,
+  ) => Effect.Effect<readonly Snapshot.Entry[], unknown>
+}
+
+export function makeImplementationResolver(
+  dependencies: ResolverDependencies,
+): WorkflowVisualHost.ResolveImplementationContract {
+  return (input) => Effect.runPromise(resolveImplementationContract(dependencies, input))
+}
+
+export function resolveImplementationContract(
+  dependencies: ResolverDependencies,
+  input: WorkflowVisualHost.PrepareImplementationInput,
+) {
+  return Effect.gen(function* () {
+    const detail = yield* dependencies.getWorkflow(input.workflowID)
+    if (detail === undefined || detail.run.type !== "visual-build" || detail.run.location === undefined)
+      return yield* invalid("Persisted visual Workflow authority is unavailable")
+    const stage = detail.stages.find((candidate) => candidate.id === detail.run.currentStageID)
+    if (
+      stage === undefined ||
+      stage.workflowID !== detail.run.id ||
+      stage.type !== "visual_review" ||
+      (stage.status !== "leased" && stage.status !== "running") ||
+      revisionOf(stage) !== input.revision
+    )
+      return yield* invalid("Persisted visual-review Stage authority is unavailable")
+    const plan = yield* Effect.try({
+      try: () => WorkflowProductionHostPlan.fromWorkflow(detail.run),
+      catch: () => new TypeError("Persisted production host plan is invalid"),
+    })
+    if (WorkflowBusinessArtifact.encode(plan.preview) !== WorkflowBusinessArtifact.encode(input.plan))
+      return yield* invalid("Prepared preview differs from admission authority")
+    yield* Effect.try({
+      try: () => WorkflowProductionHostPlan.verifyCurrentConfiguration(plan),
+      catch: () => new TypeError("Admission-frozen host configuration changed"),
+    })
+    const prior = yield* Effect.try({
+      try: () => WorkflowRoleBinding.decodePriorArtifacts(detail.run, detail.run.location!, detail.artifacts),
+      catch: () => new TypeError("Durable visual artifact authority is invalid"),
+    })
+    const specArtifact = unique(prior, WorkflowDesignArtifact.SPEC_KIND)
+    const referenceArtifact = unique(prior, WorkflowDesignArtifact.REFERENCE_APP_KIND)
+    const decompositionArtifact = unique(prior, WorkflowDecompositionArtifact.KIND)
+    const manifestArtifact = uniqueRevision(prior, WorkflowImplementationArtifact.KIND, input.revision)
+    if (!specArtifact || !referenceArtifact || !decompositionArtifact || !manifestArtifact)
+      return yield* invalid("Durable design, baseline, or implementation authority is missing")
+    const spec = WorkflowDesignArtifact.decodeSpec(specArtifact.commit, detail.run.id)
+    const reference = WorkflowDesignArtifact.decodeReferenceApp(referenceArtifact.commit, detail.run.id)
+    const decomposition = WorkflowDecompositionArtifact.decode(
+      decompositionArtifact.commit,
+      detail.run.id,
+      detail.run.location,
+    )
+    const manifest = WorkflowImplementationArtifact.decodeExact(
+      manifestArtifact.commit,
+      detail.run.id,
+      detail.run.location,
+    )
+    if (
+      reference.entrypoint !== spec.referenceApp.entrypoint ||
+      reference.readySelector !== spec.referenceApp.readySelector ||
+      manifest.snapshotRef !== decomposition.snapshotRef
+    )
+      return yield* invalid("Durable design or baseline lineage differs from the implementation")
+    yield* dependencies.snapshotEntries(detail.run.location, Snapshot.ID.make(decomposition.snapshotRef))
+    const current = yield* dependencies.captureSnapshot(detail.run.location)
+    if (current === undefined) return yield* invalid("Current workspace Snapshot is unavailable")
+    const entries = yield* dependencies.snapshotEntries(detail.run.location, current)
+    if (Snapshot.workspaceSha256(entries) !== manifest.workspaceSha256)
+      return yield* invalid("Current workspace differs from the implementation manifest")
+    return Object.freeze({
+      implementationSha256: WorkflowImplementationArtifact.hash(manifest),
+      readySelector: spec.referenceApp.readySelector,
+    })
+  })
+}
+
+export function productionRoleLayer(): Layer.Layer<
+  WorkflowRoleExecution.Service,
+  never,
+  LocationServiceMap.Service | WorkflowVisualHost.Service
+> {
+  return Layer.effect(
+    WorkflowRoleExecution.Service,
+    Effect.gen(function* () {
+      const locations = yield* LocationServiceMap.Service
+      const visualHost = yield* WorkflowVisualHost.Service
+      const captureSnapshot: WorkflowProductionEvidence.Dependencies["captureSnapshot"] = (location) =>
+        Effect.flatMap(Snapshot.Service, (snapshot) => snapshot.capture()).pipe(Effect.provide(locations.get(location)))
+      const snapshotEntries: WorkflowProductionEvidence.Dependencies["snapshotEntries"] = (location, snapshot) =>
+        Effect.flatMap(Snapshot.Service, (service) => service.entries({ snapshot })).pipe(
+          Effect.provide(locations.get(location)),
+        )
+      return WorkflowRoleExecution.Service.of(
+        WorkflowProductionEvidence.make({
+          captureSnapshot,
+          snapshotEntries,
+          runFunctionalTest: (request) => {
+            return Effect.flatMap(WorkflowCommandSandbox.Service, (command) => {
+              if (command.runFrozenTest === undefined)
+                return Effect.fail(
+                  new WorkflowCommandSandbox.Unavailable({ message: "Frozen test runner is unavailable" }),
+                )
+              return command.runFrozenTest({
+                workflowID: request.workflowID,
+                stageID: request.stageID,
+                revision: request.revision,
+                argv: request.argv,
+                cwd: request.cwd,
+                policySha256: request.policySha256,
+                configSha256: request.configSha256,
+              })
+            })
+              .pipe(Effect.provide(locations.get(request.location)))
+              .pipe(Effect.map((result) => ({ exitCode: result.exit, log: result.output })))
+          },
+          visualHost,
+        }),
+      )
+    }),
+  )
+}
+
+export function productionVisualHostLayer(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): Layer.Layer<WorkflowVisualHost.Service, never, WorkflowStore.Service | LocationServiceMap.Service> {
+  return Layer.unwrap(
+    Effect.gen(function* () {
+      const workflows = yield* WorkflowStore.Service
+      const locations = yield* LocationServiceMap.Service
+      const dependencies: ResolverDependencies = {
+        getWorkflow: workflows.get,
+        captureSnapshot: (location) =>
+          Effect.flatMap(Snapshot.Service, (snapshot) => snapshot.capture()).pipe(
+            Effect.provide(locations.get(location)),
+          ),
+        snapshotEntries: (location, snapshot) =>
+          Effect.flatMap(Snapshot.Service, (service) => service.entries({ snapshot })).pipe(
+            Effect.provide(locations.get(location)),
+          ),
+      }
+      return WorkflowVisualHostServer.productionLayer({
+        environment,
+        resolveImplementationContract: makeImplementationResolver(dependencies),
+      })
+    }),
+  )
+}
+
+export const visualHostNode = makeGlobalNode({
+  service: WorkflowVisualHost.Service,
+  layer: productionVisualHostLayer(),
+  deps: [WorkflowStore.node, LocationServiceMap.node],
+})
+
+export const roleEvidenceNode = makeGlobalNode({
+  service: WorkflowRoleExecution.Service,
+  layer: productionRoleLayer(),
+  deps: [LocationServiceMap.node, WorkflowVisualHost.node],
+})
+
+export function compositionNodes() {
+  return Object.freeze({ visualHost: visualHostNode, roleEvidence: roleEvidenceNode })
+}
+
+function unique(artifacts: readonly WorkflowRoleExecution.DecodedPriorArtifact[], kind: string) {
+  const matches = artifacts.filter((artifact) => artifact.kind === kind)
+  return matches.length === 1 ? matches[0] : undefined
+}
+
+function uniqueRevision(
+  artifacts: readonly WorkflowRoleExecution.DecodedPriorArtifact[],
+  kind: string,
+  revision: number,
+) {
+  const matches = artifacts.filter(
+    (artifact) =>
+      artifact.kind === kind &&
+      artifact.value !== null &&
+      typeof artifact.value === "object" &&
+      Reflect.get(artifact.value, "revision") === revision,
+  )
+  return matches.length === 1 ? matches[0] : undefined
+}
+
+function revisionOf(stage: WorkflowRoleExecution.ResolverInput["stage"]): number {
+  const revision = stage.input.revision ?? 0
+  if (!Number.isSafeInteger(revision) || typeof revision !== "number" || revision < 0) throw new TypeError("revision")
+  return revision
+}
+
+function invalid(message: string): Effect.Effect<never, TypeError> {
+  return Effect.fail(new TypeError(message))
+}

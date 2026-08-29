@@ -67,6 +67,64 @@ describe("Snapshot", () => {
     ),
   )
 
+  testEffect(Layer.empty).live("exposes canonical bounded Location entries with content SHA-256", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const project = path.join(tmp.path, "project")
+          const location = path.join(project, "scope")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(location, "nested"), { recursive: true })
+            await fs.writeFile(path.join(location, "z.txt"), "z\n")
+            await fs.writeFile(path.join(location, "nested", "a.txt"), "alpha\n")
+            await fs.writeFile(path.join(project, "outside.txt"), "outside\n")
+            await $`git init`.cwd(project).quiet()
+            await $`git config core.fsmonitor false`.cwd(project).quiet()
+            await $`git config commit.gpgsign false`.cwd(project).quiet()
+            await $`git config user.email test@opencode.test`.cwd(project).quiet()
+            await $`git config user.name Test`.cwd(project).quiet()
+            await $`git add .`.cwd(project).quiet()
+            await $`git commit -m initial`.cwd(project).quiet()
+          })
+
+          yield* Effect.gen(function* () {
+            const snapshot = yield* Snapshot.Service
+            const captured = yield* snapshot.capture()
+            expect(captured).toBeDefined()
+            if (!captured) return
+            const entriesMethod = Reflect.get(snapshot, "entries") as
+              | ((input: {
+                  readonly snapshot: Snapshot.ID
+                }) => Effect.Effect<readonly Snapshot.Entry[], Snapshot.Error>)
+              | undefined
+            expect(entriesMethod).toBeFunction()
+            if (!entriesMethod) return
+            const entries = yield* entriesMethod({ snapshot: captured })
+            expect(entries).toEqual([
+              {
+                path: RelativePath.make("nested/a.txt"),
+                type: "file",
+                sha256: Hash.sha256(Buffer.from("alpha\n")),
+                size: 6,
+              },
+              {
+                path: RelativePath.make("z.txt"),
+                type: "file",
+                sha256: Hash.sha256(Buffer.from("z\n")),
+                size: 2,
+              },
+            ])
+            expect(Reflect.get(Snapshot, "workspaceSha256")).toBeFunction()
+            expect(
+              (Reflect.get(Snapshot, "workspaceSha256") as (value: readonly Snapshot.Entry[]) => string)(entries),
+            ).toMatch(/^[a-f0-9]{64}$/)
+          }).pipe(Effect.provide(snapshotLayer(tmp.path, location)))
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   testEffect(Layer.empty).live("treats capture outside Git as unavailable", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

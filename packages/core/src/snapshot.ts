@@ -11,12 +11,24 @@ import { Global } from "./global"
 import { Location } from "./location"
 import { AbsolutePath, RelativePath } from "./schema"
 import { Hash } from "./util/hash"
+import { DesignArtifact } from "@opencode-ai/schema/design-artifact"
 
 export const ID = Schema.String.pipe(Schema.brand("Snapshot.ID"))
 export type ID = typeof ID.Type
 
+export interface Entry {
+  readonly path: RelativePath
+  readonly type: "file" | "executable"
+  readonly sha256: string
+  readonly size: number
+}
+
+export const MAX_ENTRIES = 20_000
+export const MAX_FILE_BYTES = 2 * 1024 * 1024
+export const MAX_TREE_BYTES = 64 * 1024 * 1024
+
 export class Error extends Schema.TaggedErrorClass<Error>()("Snapshot.Error", {
-  operation: Schema.Literals(["capture", "files", "diff", "preview", "restore"]),
+  operation: Schema.Literals(["capture", "entries", "files", "diff", "preview", "restore"]),
   message: Schema.String,
   cause: Schema.optional(Schema.Defect()),
 }) {}
@@ -47,6 +59,12 @@ export interface Interface {
    * best-effort capture fails.
    */
   readonly capture: () => Effect.Effect<ID | undefined>
+
+  /**
+   * Read the exact bounded Location-relative file set from a captured tree.
+   * Unsupported entry types and unsafe Windows/path topologies fail closed.
+   */
+  readonly entries: (input: { readonly snapshot: ID }) => Effect.Effect<readonly Entry[], Error>
 
   /**
    * List project-relative paths changed between two captured trees without
@@ -148,6 +166,38 @@ const layer = Layer.effect(
       return { repository: repo, from: Git.TreeID.make(input.from), to: Git.TreeID.make(input.to) }
     })
 
+    const entries = Effect.fn("Snapshot.entries")(function* (input: { readonly snapshot: ID }) {
+      const repo = yield* repository().pipe(Effect.mapError((cause) => failure("entries", cause)))
+      const locationScope = yield* scope().pipe(Effect.mapError((cause) => failure("entries", cause)))
+      const raw = yield* git.tree
+        .entries({
+          repository: repo,
+          tree: Git.TreeID.make(input.snapshot),
+          scope: locationScope,
+          maximumEntries: MAX_ENTRIES,
+          maximumFileBytes: MAX_FILE_BYTES,
+          maximumTotalBytes: MAX_TREE_BYTES,
+        })
+        .pipe(Effect.mapError((cause) => failure("entries", cause)))
+      const prefix = locationScope === "." ? "" : `${locationScope}/`
+      return yield* Effect.try({
+        try: () =>
+          canonicalEntries(
+            raw.map((entry) => {
+              if (prefix && !entry.path.startsWith(prefix))
+                throw new Error({ operation: "entries", message: "Snapshot entry escapes the Location scope" })
+              return {
+                path: RelativePath.make(prefix ? entry.path.slice(prefix.length) : entry.path),
+                type: entry.mode === "100755" ? ("executable" as const) : ("file" as const),
+                sha256: entry.sha256,
+                size: entry.size,
+              }
+            }),
+          ),
+        catch: (cause) => failure("entries", cause),
+      })
+    })
+
     const files = Effect.fn("Snapshot.files")(function* (input: CompareInput) {
       const comparison = yield* compare("files", input)
       const files = yield* git.tree.files(comparison).pipe(Effect.mapError((cause) => failure("files", cause)))
@@ -223,7 +273,7 @@ const layer = Layer.effect(
         .pipe(Effect.mapError((cause) => failure("restore", cause)))
     })
 
-    return Service.of({ capture, files, diff, preview, restore, checkout })
+    return Service.of({ capture, entries, files, diff, preview, restore, checkout })
   }),
 )
 
@@ -239,6 +289,7 @@ export const noopLayer = Layer.succeed(
   Service,
   Service.of({
     capture: () => Effect.succeed(undefined),
+    entries: () => Effect.fail(new Error({ operation: "entries", message: "Snapshots are unavailable" })),
     files: () => Effect.succeed([]),
     diff: () => Effect.succeed([]),
     preview: () => Effect.succeed([]),
@@ -246,6 +297,34 @@ export const noopLayer = Layer.succeed(
     checkout: () => Effect.void,
   }),
 )
+
+export function canonicalEntries(input: readonly Entry[]): readonly Entry[] {
+  if (input.length > MAX_ENTRIES) throw new Error({ operation: "entries", message: "Snapshot tree is oversized" })
+  const entries = input.map((entry) => ({
+    path: RelativePath.make(Schema.decodeUnknownSync(DesignArtifact.SourcePath)(entry.path)),
+    type: Schema.decodeUnknownSync(Schema.Literals(["file", "executable"]))(entry.type),
+    sha256: Schema.decodeUnknownSync(DesignArtifact.Sha256)(entry.sha256),
+    size: Schema.decodeUnknownSync(
+      Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(MAX_FILE_BYTES)),
+    )(entry.size),
+  }))
+  if (entries.reduce((total, entry) => total + entry.size, 0) > MAX_TREE_BYTES)
+    throw new Error({ operation: "entries", message: "Snapshot tree is oversized" })
+  const topology = DesignArtifact.sourceTopologyError(entries.map((entry) => entry.path))
+  if (topology !== undefined) throw new Error({ operation: "entries", message: topology })
+  return Object.freeze(
+    entries
+      .toSorted((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+      .map((entry) => Object.freeze(entry)),
+  )
+}
+
+export function workspaceSha256(input: readonly Entry[]): string {
+  const entries = canonicalEntries(input)
+  return Hash.sha256(
+    Buffer.from(JSON.stringify(entries.map((entry) => [entry.path, entry.type, entry.sha256, entry.size])), "utf8"),
+  )
+}
 
 function failure(operation: Error["operation"], cause: unknown) {
   if (cause instanceof Error && cause.operation === operation) return cause

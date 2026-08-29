@@ -12,9 +12,9 @@ const allowed = {
   decompose: readable,
   implement: mutable,
   repair: mutable,
-  test: executable,
+  test: readable,
   visual_review: readable,
-  deliver: executable,
+  deliver: readable,
 } satisfies Record<WorkflowRole.Role, readonly string[]>
 
 export function forRole(role: WorkflowRole.Role): PermissionV2.Ruleset {

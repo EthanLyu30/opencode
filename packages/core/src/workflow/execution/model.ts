@@ -24,12 +24,14 @@ import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowToolLineage } from "../tool-lineage"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
 import { WorkflowRoleContract } from "./contract"
+import { WorkflowRoleExecution } from "./role"
 import * as WorkflowProviderRequest from "./provider-request"
 
 export { fingerprintProviderRequest } from "./provider-request"
 
 export interface Input extends ExecutionInput {
   readonly route: WorkflowRouting.Route
+  readonly preparation?: WorkflowRoleExecution.Preparation
 }
 
 export interface Output extends Omit<Result, "artifacts"> {
@@ -116,6 +118,7 @@ const ModelContinuation = Schema.Struct({
   providerUsage: Responses.Usage,
   responseOutput: Schema.Array(Responses.ItemPayload),
   artifacts: Schema.Array(Workflow.ArtifactCommit),
+  preparation: Schema.optional(WorkflowRoleExecution.PreparationAuthority),
 })
 type ModelContinuation = typeof ModelContinuation.Type
 const TransientContinuation = Schema.Struct({
@@ -308,12 +311,13 @@ const productionLayer = Layer.effect(
                   Effect.mapError((error) => settleExecutionFailure(response, error)),
                 )
             }
+            const trustedMessages = input.preparation?.messages ?? context
             const contract = WorkflowRoleContract.build({
               workflow: input.workflow,
               stage: input.stage,
               route,
               priorArtifacts: input.artifacts,
-              ...(context === undefined ? {} : { messages: context }),
+              ...(trustedMessages === undefined ? {} : { messages: trustedMessages }),
             })
             const continuation = yield* continuationFromStage(input, responseID, responses, route, contract)
             if (continuation?.activeTurn?.pendingCallID !== undefined) {
@@ -452,6 +456,7 @@ const productionLayer = Layer.effect(
                     providerUsage,
                     responseOutput,
                     artifacts: toolArtifacts,
+                    ...(input.preparation?.authority === undefined ? {} : { preparation: input.preparation.authority }),
                   } satisfies ModelContinuation)
                   const raw = yield* modelClient
                     .generate(requestSnapshot.request)
@@ -493,6 +498,7 @@ const productionLayer = Layer.effect(
                     providerUsage,
                     responseOutput,
                     artifacts: toolArtifacts,
+                    ...(input.preparation?.authority === undefined ? {} : { preparation: input.preparation.authority }),
                   } satisfies ModelContinuation)
                   checkpointedUsage = usage
                 }
@@ -628,6 +634,7 @@ const productionLayer = Layer.effect(
                   providerUsage,
                   responseOutput,
                   artifacts: toolArtifacts,
+                  ...(input.preparation?.authority === undefined ? {} : { preparation: input.preparation.authority }),
                 } satisfies ModelContinuation)
 
                 if (materialization === undefined)
@@ -705,6 +712,7 @@ const productionLayer = Layer.effect(
                   providerUsage,
                   responseOutput,
                   artifacts: toolArtifacts,
+                  ...(input.preparation?.authority === undefined ? {} : { preparation: input.preparation.authority }),
                 } satisfies ModelContinuation)
                 checkpointedUsage = usage
               }
@@ -913,6 +921,8 @@ function decodeAndValidateContinuation(
         continuation.contextDigest !== contract.contextDigest ||
         continuation.routeFingerprint !== contract.routeFingerprint ||
         continuation.responseID !== responseID ||
+        WorkflowBusinessArtifact.encode(continuation.preparation) !==
+          WorkflowBusinessArtifact.encode(input.preparation?.authority) ||
         continuation.completedTurns !== continuation.usage.turns ||
         continuation.completedTurns !== expectedTurns ||
         continuation.usage.toolCalls !== toolCalls + activeResults + pendingCalls ||

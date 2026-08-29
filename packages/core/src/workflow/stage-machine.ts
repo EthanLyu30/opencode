@@ -17,6 +17,7 @@ export const OutcomeBinding = Schema.Struct({
   contractFingerprint: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
   contextDigest: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
   requiredArtifactSetSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  dependencyArtifactSetSha256: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))),
 }).annotate({ identifier: "WorkflowStageMachine.OutcomeBinding", ...exact })
 export interface OutcomeBinding extends Schema.Schema.Type<typeof OutcomeBinding> {}
 
@@ -72,6 +73,9 @@ export function encodeOutcome(input: WorkflowRole.Outcome | OutcomeBinding) {
       contractFingerprint: input.contractFingerprint,
       contextDigest: input.contextDigest,
       requiredArtifactSetSha256: input.requiredArtifactSetSha256,
+      ...(input.dependencyArtifactSetSha256 === undefined
+        ? {}
+        : { dependencyArtifactSetSha256: input.dependencyArtifactSetSha256 }),
     })
   }
   return JSON.stringify({

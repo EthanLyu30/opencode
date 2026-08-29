@@ -65,6 +65,7 @@ const ReceiptFields = Schema.Struct({
   contractFingerprint: Sha256,
   contextDigest: Sha256,
   requiredArtifactSetSha256: Sha256,
+  dependencyArtifactSetSha256: Schema.optional(Sha256),
   outcomeSha256: Sha256,
   authority: ContractAuthority,
 })
@@ -84,6 +85,7 @@ export interface ValidateSettlementInput {
   readonly artifacts: ReadonlyArray<Workflow.Artifact | Workflow.ArtifactCommit>
   readonly receipt?: unknown
   readonly trustedMessages?: readonly Message[]
+  readonly dependencies?: readonly Workflow.Artifact[]
 }
 
 export function requiredKinds(role: WorkflowRole.Role): readonly string[] {
@@ -143,6 +145,7 @@ export function validateSettlement(input: ValidateSettlementInput): void {
     binding.contractFingerprint !== receipt.contractFingerprint ||
     binding.contextDigest !== receipt.contextDigest ||
     binding.requiredArtifactSetSha256 !== receipt.requiredArtifactSetSha256 ||
+    binding.dependencyArtifactSetSha256 !== receipt.dependencyArtifactSetSha256 ||
     outcome.sha256 !== receipt.outcomeSha256 ||
     outcome.uri !== `workflow://${input.workflow.id}/stages/${input.stage.id}/role-outcome.json` ||
     outcome.size !== Buffer.byteLength(encodedOutcome)
@@ -151,16 +154,16 @@ export function validateSettlement(input: ValidateSettlementInput): void {
   const business = input.artifacts.filter(
     (artifact) => artifact.kind !== WorkflowStageMachine.OUTCOME_ARTIFACT_KIND && artifact.kind !== "tool-continuation",
   )
+  const dependencies = input.dependencies ?? []
+  validateDependencies(input.workflow, input.stage, dependencies, input.priorArtifacts)
+  const dependencyDigest = dependencies.length === 0 ? undefined : artifactSetDigest(dependencies)
+  if (dependencyDigest !== receipt.dependencyArtifactSetSha256)
+    throw new Error("Role dependency artifact set does not match its binding")
   for (const media of receipt.authority.media) {
-    if (
-      !business.some(
-        (artifact) =>
-          artifact.mime === media.mediaType && artifact.sha256 === media.sha256 && artifact.size === media.size,
-      )
-    )
+    if (![...business, ...dependencies].some((artifact) => mediaBackedByArtifact(media, artifact, input.workflow.id)))
       throw new Error("Role contract authority media is not backed by trusted business evidence")
   }
-  validateBusinessArtifacts(input.workflow, input.stage, business, input.priorArtifacts, binding.outcome)
+  validateBusinessArtifacts(input.workflow, input.stage, business, input.priorArtifacts, binding.outcome, dependencies)
   if (artifactSetDigest(business) !== receipt.requiredArtifactSetSha256)
     throw new Error("Role business artifact set does not match its binding")
 }
@@ -187,6 +190,7 @@ export function validateBusinessArtifacts(
   artifacts: ReadonlyArray<Workflow.Artifact | Workflow.ArtifactCommit>,
   priorArtifacts: ReadonlyArray<Workflow.Artifact>,
   outcome: WorkflowRole.Outcome,
+  dependencies: ReadonlyArray<Workflow.Artifact> = [],
 ): void {
   const location = workflow.location
   if (location === undefined) throw new Error("Role business evidence requires Location")
@@ -238,13 +242,17 @@ export function validateBusinessArtifacts(
       throw new Error("Test evidence requires one result and every durable log")
     const result = WorkflowTestArtifact.decode(toCommit(results[0]), workflow.id, location)
     if (result.revision !== revision) throw new Error("Test result revision mismatch")
+    if (result.schemaVersion === 2 && result.stageID !== stage.id) throw new Error("Test result stage mismatch")
     if (outcome.role !== "test" || outcome.verdict !== (result.verdict === "pass" ? "pass" : "revise"))
       throw new Error("Test outcome does not match the durable test result")
     const references = new Map(result.tests.map((record) => [record.log.uri, record.log]))
     if (references.size !== result.tests.length || references.size !== logs.length)
       throw new Error("Test logs must map one-to-one to test records")
     for (const log of logs) {
-      const decoded = WorkflowTestLogArtifact.decode(log, workflow.id, revision)
+      const decoded =
+        result.schemaVersion === 2
+          ? WorkflowTestLogArtifact.decodeExact(log, workflow.id, stage.id, revision)
+          : WorkflowTestLogArtifact.decode(log, workflow.id, revision)
       const reference = references.get(log.uri)
       if (!reference || reference.sha256 !== log.sha256 || reference.size !== log.size || decoded === undefined)
         throw new Error("Test log does not match its result reference")
@@ -264,12 +272,29 @@ export function validateBusinessArtifacts(
     if (review.revision !== revision) throw new Error("Visual review revision mismatch")
     if (outcome.role !== "visual_review" || outcome.verdict !== (review.verdict === "pass" ? "pass" : "revise"))
       throw new Error("Visual review outcome does not match the durable review")
-    const images = screenshots.map((artifact) =>
+    const decodedImages = [...dependencies, ...screenshots].map((artifact) =>
       WorkflowVisualReviewArtifact.decodeScreenshot(toCommit(artifact), workflow.id),
     )
-    const expected = review.evidence.map(imageIdentity).sort()
-    const actual = images.map(({ bytes: _, evidenceReceipt: __, ...image }) => imageIdentity(image)).sort()
-    if (JSON.stringify(expected) !== JSON.stringify(actual)) throw new Error("Visual review screenshot set mismatch")
+    const specArtifact = priorArtifacts.filter((artifact) => artifact.kind === WorkflowDesignArtifact.SPEC_KIND)
+    if (specArtifact.length !== 1) throw new Error("Visual review requires one durable design specification")
+    const spec = WorkflowDesignArtifact.decodeSpec(toCommit(specArtifact[0]), workflow.id)
+    const images = spec.referenceApp.viewports.flatMap((viewport) => {
+      const reference = decodedImages.filter(
+        (image) => image.kind === "reference" && image.viewport === viewport.name && image.revision === 0,
+      )
+      const implementation = decodedImages.filter(
+        (image) => image.kind === "implementation" && image.viewport === viewport.name && image.revision === revision,
+      )
+      if (reference.length !== 1 || implementation.length !== 1)
+        throw new Error("Visual review viewport pair is missing or duplicated")
+      return [reference[0], implementation[0]]
+    })
+    if (
+      images.length !== decodedImages.length ||
+      JSON.stringify(review.evidence.map(imageIdentity)) !==
+        JSON.stringify(images.map(({ bytes: _, evidenceReceipt: __, ...image }) => imageIdentity(image)))
+    )
+      throw new Error("Visual review screenshot order or viewport set mismatch")
     return
   }
 
@@ -286,6 +311,56 @@ export function validateBusinessArtifacts(
   const test = WorkflowTestArtifact.decode(testCommit, workflow.id, location)
   const review = WorkflowVisualReviewArtifact.decodeReview(reviewCommit, workflow.id)
   WorkflowDeliveryArtifact.validateDelivery({ delivery, manifest, test, review })
+}
+
+export function validateDependencies(
+  workflow: Workflow.Info,
+  stage: Workflow.Stage,
+  dependencies: ReadonlyArray<Workflow.Artifact>,
+  priorArtifacts: ReadonlyArray<Workflow.Artifact>,
+): void {
+  if (dependencies.length === 0) return
+  if (stage.type !== "visual_review") throw new Error("Only visual review may consume role dependencies")
+  const prior = new Map(priorArtifacts.map((artifact) => [artifact.id, artifact] as const))
+  const ids = new Set<string>()
+  for (const dependency of dependencies) {
+    if (!Schema.is(Workflow.Artifact)(dependency) || dependency.workflowID !== workflow.id)
+      throw new Error("Role dependency belongs to a different workflow")
+    if (dependency.stageID === stage.id || dependency.kind !== WorkflowVisualReviewArtifact.REFERENCE_SCREENSHOT_KIND)
+      throw new Error("Role dependency is not a prior reference screenshot")
+    const persisted = prior.get(dependency.id)
+    if (
+      ids.has(dependency.id) ||
+      persisted === undefined ||
+      WorkflowBusinessArtifact.encode(Schema.encodeSync(Workflow.Artifact)(persisted)) !==
+        WorkflowBusinessArtifact.encode(Schema.encodeSync(Workflow.Artifact)(dependency))
+    )
+      throw new Error("Role dependency identity is not an exact prior Artifact")
+    ids.add(dependency.id)
+    const image = WorkflowVisualReviewArtifact.decodeScreenshot(toCommit(dependency), workflow.id)
+    if (image.kind !== "reference" || image.revision !== 0 || image.evidenceReceipt === undefined)
+      throw new Error("Role dependency is not exact receipt-bound reference evidence")
+  }
+}
+
+function mediaBackedByArtifact(
+  media: { readonly mediaType: string; readonly sha256: string; readonly size: number },
+  artifact: Workflow.Artifact | Workflow.ArtifactCommit,
+  workflowID: Workflow.ID,
+): boolean {
+  if (artifact.mime !== media.mediaType) return false
+  if (
+    artifact.kind === WorkflowVisualReviewArtifact.REFERENCE_SCREENSHOT_KIND ||
+    artifact.kind === WorkflowVisualReviewArtifact.IMPLEMENTATION_SCREENSHOT_KIND
+  ) {
+    try {
+      const image = WorkflowVisualReviewArtifact.decodeScreenshot(toCommit(artifact), workflowID)
+      return image.sha256 === media.sha256 && image.size === media.size
+    } catch {
+      return false
+    }
+  }
+  return artifact.sha256 === media.sha256 && artifact.size === media.size
 }
 
 export function decodePriorArtifacts(

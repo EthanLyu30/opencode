@@ -35,6 +35,9 @@ import { WorkflowStageMachine } from "../stage-machine"
 import { WorkflowGraph } from "../graph"
 import { WorkflowStore } from "../store"
 import { WorkflowRoleExecution } from "./role"
+import { WorkflowVisualHost } from "../visual-host"
+import { WorkflowVisualReviewArtifact } from "../artifacts/visual-review"
+import { WorkflowBusinessArtifact } from "../artifacts/business"
 
 class CancelRequested extends Data.TaggedError("CancelRequested")<{
   readonly workflowID: Workflow.ID
@@ -66,6 +69,7 @@ export const layerWith = (options: Options) =>
       const responses = yield* ResponsesV2.Service
       const executor = yield* WorkflowExecutor.Service
       const store = yield* WorkflowStore.Service
+      const visualHost = yield* WorkflowVisualHost.Service
       const db = (yield* Database.Service).db
       const wake = yield* Effect.acquireRelease(PubSub.sliding<void>(1), PubSub.shutdown)
       const fibers = new Map<Workflow.ID, Set<Fiber.Fiber<void>>>()
@@ -699,6 +703,12 @@ export const layerWith = (options: Options) =>
                 priorArtifacts: initial.artifacts,
                 artifacts: committedArtifacts,
                 receipt: executionResult.roleReceipt,
+                ...(executionResult.trustedMessages === undefined
+                  ? {}
+                  : { trustedMessages: executionResult.trustedMessages }),
+                ...(executionResult.trustedDependencies === undefined
+                  ? {}
+                  : { dependencies: executionResult.trustedDependencies }),
               }),
             catch: () => undefined,
           }).pipe(
@@ -901,6 +911,14 @@ export const layerWith = (options: Options) =>
                 usage: responseSettlement.usage,
               })
             }
+            if (initial.run.type === "visual-build") {
+              yield* settleProjectedEvidence({
+                workflowID: initial.run.id,
+                expectedArtifacts: committedArtifacts,
+                workflows: store,
+                visualHost,
+              })
+            }
           }),
         )
 
@@ -975,6 +993,9 @@ export const layerWith = (options: Options) =>
 
       yield* settlePersistedCancellations
       yield* settleExpiredLeases
+      yield* reconcileDurableEvidence({ workflows: store, visualHost }).pipe(
+        Effect.catchCause((cause) => Effect.logWarning("Workflow visual evidence reconciliation deferred", cause)),
+      )
 
       yield* Stream.merge(Stream.fromPubSub(wake), Stream.tick(options.pollIntervalMs)).pipe(
         Stream.runForEach(() =>
@@ -1008,6 +1029,7 @@ export const nodeWith = (options: Options) =>
       WorkflowProjector.node,
       WorkflowStore.node,
       WorkflowExecutor.node,
+      WorkflowVisualHost.node,
     ],
   })
 
@@ -1020,6 +1042,98 @@ function addUsage(left: Workflow.Usage, right: Workflow.Usage): Workflow.Usage {
     toolCalls: left.toolCalls + right.toolCalls,
     attempts: left.attempts + right.attempts,
   }
+}
+
+export function settleProjectedEvidence(input: {
+  readonly workflowID: Workflow.ID
+  readonly expectedArtifacts: readonly Workflow.Artifact[]
+  readonly workflows: WorkflowStore.Interface
+  readonly visualHost: WorkflowVisualHost.Interface
+}) {
+  return Effect.gen(function* () {
+    const screenshots = input.expectedArtifacts.filter(isScreenshot)
+    if (screenshots.length === 0) return
+    const projected = yield* input.workflows
+      .get(input.workflowID)
+      .pipe(
+        Effect.flatMap((detail) =>
+          detail === undefined
+            ? Effect.die(new Error("Projected Workflow is unavailable after EventV2"))
+            : Effect.succeed(detail),
+        ),
+      )
+    for (const expected of screenshots) {
+      const matches = projected.artifacts.filter((artifact) => artifact.id === expected.id)
+      if (
+        matches.length !== 1 ||
+        WorkflowBusinessArtifact.encode(matches[0]) !== WorkflowBusinessArtifact.encode(expected)
+      )
+        yield* Effect.die(new Error("Projected screenshot Artifact identity differs after EventV2"))
+      const artifact = matches[0]
+      const image = WorkflowVisualReviewArtifact.decodeScreenshot(toArtifactCommit(artifact), input.workflowID)
+      const receipt = yield* image.evidenceReceipt === undefined
+        ? Effect.die(new Error("Projected production screenshot has no evidence receipt"))
+        : Effect.succeed(image.evidenceReceipt)
+      yield* input.visualHost.commitEvidence({ receipt, artifact })
+      yield* input.visualHost.releaseEvidence({ receipt, artifact })
+    }
+  })
+}
+
+export function reconcileDurableEvidence(input: {
+  readonly workflows: WorkflowStore.Interface
+  readonly visualHost: WorkflowVisualHost.Interface
+  readonly limit?: number
+}) {
+  return Effect.gen(function* () {
+    const runs = yield* input.workflows.list({ limit: input.limit ?? 1_000 })
+    yield* Effect.forEach(
+      runs.filter((run) => run.type === "visual-build"),
+      (run) =>
+        Effect.gen(function* () {
+          const detail = yield* input.workflows.get(run.id)
+          if (detail === undefined) return
+          const stages = new Map(detail.stages.map((stage) => [stage.id, stage] as const))
+          const committed = detail.artifacts.flatMap((artifact) => {
+            if (!isScreenshot(artifact) || stages.get(artifact.stageID)?.status !== "succeeded") return []
+            const image = WorkflowVisualReviewArtifact.decodeScreenshot(toArtifactCommit(artifact), run.id)
+            if (image.evidenceReceipt === undefined) return []
+            return [{ receipt: image.evidenceReceipt, artifact, release: true as const }]
+          })
+          yield* input.visualHost.reconcileEvidence({
+            workflowID: run.id,
+            active: [],
+            abandoned: [],
+            committed,
+          })
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Workflow visual evidence reconciliation retained ambiguous evidence", cause).pipe(
+              Effect.annotateLogs({ workflowID: run.id }),
+            ),
+          ),
+        ),
+      { discard: true },
+    )
+  })
+}
+
+function isScreenshot(artifact: Workflow.Artifact): boolean {
+  return (
+    artifact.kind === WorkflowVisualReviewArtifact.REFERENCE_SCREENSHOT_KIND ||
+    artifact.kind === WorkflowVisualReviewArtifact.IMPLEMENTATION_SCREENSHOT_KIND
+  )
+}
+
+function toArtifactCommit(artifact: Workflow.Artifact): Workflow.ArtifactCommit {
+  return Workflow.ArtifactCommit.make({
+    kind: artifact.kind,
+    uri: artifact.uri,
+    mime: artifact.mime,
+    sha256: artifact.sha256,
+    size: artifact.size,
+    metadata: artifact.metadata,
+  })
 }
 
 function checkpointFailure(code: string, message: string): ExecutionFailure {
