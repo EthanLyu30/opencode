@@ -141,3 +141,39 @@ Fresh final gates used pinned Bun `D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-
 The first Core matrix inherited the Windows C-drive temp and reproduced the documented timing-sensitive deadline probe at exactly zero remaining milliseconds (**165/166**). That exact test passed immediately in isolation, the next complete matrix passed **166/166**, and the final requirement-compliant D-drive-temp matrix passed **166/166**. No production change was made for the unrelated timing probe.
 
 No admission clock/envelope semantics, Task23.9 endpoint, Task23.10 CLI, provider/network/browser/Docker/ACL surface, deployment, push, or `env.local` access changed in this round. The exact task-owned non-reparse `D:\OpenCode-Task23.8-Fix2` temp/cache root was verified to contain only `tmp` and `bun-cache`, then moved to the Windows Recycle Bin after final verification.
+
+## Independent review fix round 3
+
+The remaining exact-duplicate declaration, live Server authority, deletion-codec discrimination, and sync-history authority-loading findings are closed by implementation commit `2ad7365e5cedc8399826b96014e3e36ef26108a9` (`fix(workflow): harden public event authority`).
+
+### Closed findings
+
+- The complete-batch classifier counts Session, Workflow, and Response ownership declarations by authority identity before following any relationship. A second declaration is rejected even when it repeats the same owner; divergent Response context/input/receipt content therefore cannot hide behind set de-duplication. Contradictory declarations remain fail-closed.
+- Session authority must exist and exactly match any declared visibility for `session.created`, `session.updated`, and every non-deletion Session event. Only a valid `session.deleted` tombstone may use its immutable visibility after projection removed the row. Current v2, explicit legacy v1, and genuinely unversioned legacy deletion compatibility remain isolated from new creation/update events.
+- The actual packages/server `/api/event` handler now supplies `PublicEventVisibility.databaseAuthority` from the application Database layer. Legitimate public Workflow lifecycle and generic Response lifecycle events are delivered; hidden owners, forged links, exact duplicate declarations, and receipt sentinels are suppressed. No Task23.9 admission route was introduced.
+- Sync history preloads candidate-closure Response-to-Workflow, Workflow-to-Session, and Session-visibility authority into maps using indexed `IN` queries in sequential chunks of 250. Filtering performs no per-batch point reads. A 1,050-owned-Response regression plus 5,000 unrelated events observes zero `.get` calls, 21 total candidate/closure/authority query terminals, preserves sequence order, and stays below SQLite parameter limits.
+- Every durable `Event.define` codec now discriminates its envelope with the definition's exact version literal. Consequently, a v2 `session.deleted` payload missing visibility cannot structurally decode through the v1 union branch, while explicit v1 decoding remains supported.
+
+### TDD and verification evidence
+
+Meaningful RED was recorded before production changes:
+
+- Server live classification and the opencode GlobalBus emitted exact duplicate same-owner Response declarations, including hidden receipt sentinels; sync history returned the same forged batch.
+- `session.created` with no authoritative projected Session remained visible on live, GlobalBus, and history surfaces.
+- The real embedded `/api/event` route emitted `server.connected` but timed out waiting for a legitimate public `workflow.started` event because the handler had only Session lookup authority.
+- The 1,050-owned-Response history fixture exposed per-batch point authority loading, and the v2 deletion omission decoded successfully through the generic v1 envelope branch.
+
+Fresh package-directory gates used pinned Bun `D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe` with `TEMP`, `TMP`, and Bun cache below the verified non-reparse `D:\OpenCode-Task23.8-Fix3` root:
+
+- Core Task23.8/EventV2/MoveSession matrix: **166 pass, 0 fail, 484 assertions**.
+- Server live-authority/visibility/sandbox matrix: **94 pass, 0 fail, 311 assertions**.
+- Legacy opencode list/live/history matrix: **35 pass, 0 fail, 84 assertions**.
+- Migration and generic Response regressions: **31 pass, 0 fail, 119 assertions**.
+- Schema manifest/legacy-version tests: **6 pass, 0 fail, 35 assertions**.
+- Schema, Core, Protocol, Server, and Client typechecks: **exit 0**. The opencode typecheck still reports exactly the two adjudicated pre-existing errors at `handlers/sync.ts:70` and `server.ts:276`, with no new visibility or bulk-authority compile error.
+- Generated migration consistency: `migration --check` reported no schema changes and successfully regenerated the full schema comparison below the task-owned D-drive temp root. No migration was required.
+- Exact changed-TypeScript Prettier and `git diff --check`: **exit 0**. Oxlint reports **0 errors**; its 13 warnings are all demonstrably present at base `5b5a55e1e` in previously touched legacy test lines. The new embedded event-handler test is independently **0 warnings, 0 errors**.
+
+The user-required no-subagent constraint prevented the reviewer-subagent step, so the final review was performed directly against the round-3 payload, rulings, and diff. No open Critical or Important item was found in that scoped self-review.
+
+No admission/idempotency/migration semantics, Task23.9 endpoint, Task23.10 CLI, provider/network/browser/Docker/ACL surface, deployment, push, or `env.local` access changed in this round. The exact task-owned non-reparse `D:\OpenCode-Task23.8-Fix3` root was verified to contain only `tmp` and `bun-cache` and moved to the Windows Recycle Bin after verification.
