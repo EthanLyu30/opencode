@@ -177,3 +177,39 @@ Fresh package-directory gates used pinned Bun `D:\OpenCode-Toolchain\bun-1.3.14\
 The user-required no-subagent constraint prevented the reviewer-subagent step, so the final review was performed directly against the round-3 payload, rulings, and diff. No open Critical or Important item was found in that scoped self-review.
 
 No admission/idempotency/migration semantics, Task23.9 endpoint, Task23.10 CLI, provider/network/browser/Docker/ACL surface, deployment, push, or `env.local` access changed in this round. The exact task-owned non-reparse `D:\OpenCode-Task23.8-Fix3` root was verified to contain only `tmp` and `bun-cache` and moved to the Windows Recycle Bin after verification.
+
+## Independent review fix round 4
+
+The remaining Session-deletion projection-authority finding is closed by implementation commit `a9d6928dd07bcb3487100d1bfd9d657a6548cc3d` (`fix(workflow): validate session deletion authority`).
+
+### Closed finding
+
+- The Session deletion projector now loads the authoritative existing Session visibility inside the same immediate EventV2 transaction that projects the batch, advances aggregate sequences, and inserts durable event rows. A current `session.deleted.2` must carry visibility exactly equal to that stored value. Legacy v1 and genuinely unversioned tombstones may omit visibility only for an existing public Session.
+- A missing Session, unsupported deletion version, missing current visibility, visibility mismatch, or second duplicate/contradictory deletion authority fails the projector. The visibility-qualified `DELETE ... RETURNING` is also required to remove exactly one row. Any failure rolls back the Session deletion, EventTable insertions, and EventSequence updates together, and post-commit live notification does not run.
+- Correct hidden deletion succeeds durably but remains suppressed from public live, GlobalBus, and sync-history surfaces. Correct current-public and legacy-public deletion remain visible. Exact replay of an already-persisted deletion remains an idempotent no-op and is not republished.
+
+No durable deletion-authority table or migration was required. All production EventTable writes are owned by EventV2; new replay batches run the projector before event persistence, while exact stored replays are accepted only after EventV2 proves byte-identical persisted authority and do not publish again. Thus every new deletion tombstone that can reach public live, GlobalBus, or history has first passed the transactional Session-row comparison. Task23.8 remains local and undeployed, so there is no deployed interval containing pre-fix hidden tombstones. The producer audit found one current producer, legacy `Session.remove`: it resolves a public Session first and emits explicit v2 `public` visibility. Sync/replay ingress also routes through EventV2 projection.
+
+### TDD and verification evidence
+
+Meaningful RED was recorded before production changes:
+
+- The new Core projector suite passed four compatibility/idempotency cases but failed six authority cases: a forged public v2 tombstone deleted a hidden row; a legacy omission deleted a hidden row; missing-row direct publish and replay both succeeded; and duplicate plus contradictory same-batch deletions succeeded instead of rolling back.
+- The legacy opencode regression observed the forged hidden-row deletion succeed and expose public notification/history behavior instead of failing atomically.
+
+Fresh final package-directory gates used pinned Bun `D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe` with `TEMP`, `TMP`, and Bun cache below the verified non-reparse `D:\OpenCode-Task23.8-Fix4` root:
+
+- New Core Session-deletion projector suite: **10 pass, 0 fail, 38 assertions**.
+- Full legacy opencode Session suite: **16 pass, 0 fail, 45 assertions**.
+- Core Task23.8/EventV2/MoveSession matrix: **184 pass, 0 fail, 542 assertions**.
+- Server live-authority/visibility/sandbox matrix: **94 pass, 0 fail, 311 assertions**.
+- Legacy opencode list/live/history matrix: **37 pass, 0 fail, 94 assertions**.
+- Migration and generic Response regressions: **31 pass, 0 fail, 119 assertions**.
+- Schema manifest/legacy-version tests: **6 pass, 0 fail, 35 assertions**.
+- Schema, Core, Protocol, Server, and Client typechecks: **exit 0**. The opencode typecheck continues to report only the two adjudicated pre-existing errors at `handlers/sync.ts:70` and `server.ts:276`; no Task23.8 error was added.
+- Generated migration consistency: `migration --check` reported no schema changes and successfully regenerated the full schema comparison. No migration was required.
+- Exact changed-TypeScript Prettier and `git diff --check`: **exit 0**. Oxlint reports **0 errors**; its 18 warnings are confined to pre-existing portions of the touched projector and legacy Session test. The new projector test and new production lines are warning-free.
+
+The user-required no-subagent constraint prevented the reviewer-subagent step, so the final scoped review was performed directly against the deletion invariant, every producer/replay path, and the complete diff. No further Critical or Important item was found.
+
+No Task23.9 endpoint, Task23.10 CLI, provider/network/browser/Docker/ACL surface, deployment, push, or `env.local` access changed in this round. The exact task-owned non-reparse `D:\OpenCode-Task23.8-Fix4` root was verified to contain only test/cache artifacts and moved to the Windows Recycle Bin after final verification.
