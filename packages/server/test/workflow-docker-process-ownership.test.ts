@@ -48,6 +48,50 @@ describe("DockerProcessOwnership", () => {
     await fixture.service.stop({ identity: fixture.identity, process: owned })
   })
 
+  test("runs a sealed package script at its exact relative workdir and rejects an absent archive workdir", async () => {
+    await using fixture = await setup()
+    const app = path.join(fixture.workspace, "packages", "app")
+    await fs.mkdir(app, { recursive: true })
+    const captured = Buffer.from("setInterval(() => 'package', 60_000)\n")
+    await fs.writeFile(path.join(app, "server.mjs"), captured)
+    const location = Location.Ref.make({ directory: AbsolutePath.make(fixture.workspace) })
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location,
+      preview: { kind: "script", cwd: "packages/app", argv: ["node.exe", "server.mjs"] },
+      allowedOrigins: [`http://127.0.0.1:${fixture.port}`],
+    })
+    const entry = {
+      path: RelativePath.make("packages/app/server.mjs"),
+      type: "file" as const,
+      sha256: createHash("sha256").update(captured).digest("hex"),
+      size: captured.byteLength,
+    }
+    const archive = await WorkflowWorkspaceMaterialization.seal([entry], async () => captured)
+    const owned = await fixture.service.start({ ...fixture.startInput(), plan, archive })
+
+    expect(valueAfter(fixture.engine.one("container", "create").argv, "--workdir")).toBe("/workspace/packages/app")
+    await fixture.service.stop({ identity: fixture.identity, process: owned })
+
+    const rootBytes = Buffer.from("root")
+    const rootArchive = await WorkflowWorkspaceMaterialization.seal(
+      [
+        {
+          path: RelativePath.make("server.mjs"),
+          type: "file",
+          sha256: createHash("sha256").update(rootBytes).digest("hex"),
+          size: rootBytes.byteLength,
+        },
+      ],
+      async () => rootBytes,
+    )
+    fixture.engine.invocations.splice(0)
+    await expect(fixture.service.start({ ...fixture.startInput(), plan, archive: rootArchive })).rejects.toThrow(
+      "workdir is absent",
+    )
+    expect(fixture.engine.invocations).toEqual([])
+  })
+
   test("creates an exact-label internal-network preview with only admitted mounts and one loopback publication", async () => {
     await using fixture = await setup()
 

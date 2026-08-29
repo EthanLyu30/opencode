@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/production-host-plan"
+import { WorkflowBusinessArtifact } from "@opencode-ai/core/workflow/artifacts/business"
 import { Location } from "@opencode-ai/schema/location"
 import { AbsolutePath } from "@opencode-ai/schema/schema"
 import fs from "node:fs/promises"
@@ -44,5 +45,38 @@ describe("Workflow production host plan", () => {
     expect(
       WorkflowProductionHostPlan.freeze({ authority: "admission", location, preview }).functionalTest.argv,
     ).toEqual(["bun", "test"])
+  })
+
+  test("freezes the preview package cwd and package configuration relative to the admitted Location", async () => {
+    await using tmp = await tmpdir()
+    const app = path.join(tmp.path, "packages", "app")
+    await fs.mkdir(app, { recursive: true })
+    await fs.writeFile(path.join(app, "index.html"), "<!doctype html><title>package</title>")
+    await fs.writeFile(path.join(app, "package.json"), JSON.stringify({ scripts: { test: "bun test unit" } }))
+    const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+    const preview = PreviewPlan.freeze({
+      authority: "admission",
+      location,
+      preview: { kind: "static", cwd: "packages/app", entrypoint: "index.html" },
+    })
+
+    const plan = WorkflowProductionHostPlan.freeze({ authority: "admission", location, preview })
+    expect(plan.functionalTest).toMatchObject({
+      argv: ["bun", "run", "test"],
+      cwd: "packages/app",
+      configFiles: [{ path: "packages/app/package.json" }],
+    })
+    for (const cwd of ["../escape", "C:/foreign"] as const) {
+      const functionalTest = {
+        ...plan.functionalTest,
+        cwd,
+        policySha256: WorkflowBusinessArtifact.hash({
+          argv: plan.functionalTest.argv,
+          cwd,
+          configSha256: plan.functionalTest.configSha256,
+        }),
+      }
+      expect(() => WorkflowProductionHostPlan.decode({ ...plan, functionalTest }, location)).toThrow()
+    }
   })
 })

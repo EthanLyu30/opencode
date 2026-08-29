@@ -60,10 +60,11 @@ describe("WorkflowCommandSandboxServer", () => {
     expect(result).toEqual({ exit: 0, output: "sandbox output", truncated: false })
     const create = fixture.engine.one("container", "create")
     expect(create.argv.slice(-3)).toEqual([image, "bun", "test"])
+    expect(valueAfter(create.argv, "--workdir")).toBe("/workspace")
     expect(fixture.engine.one("container", "start").stdin).toBeUndefined()
   })
 
-  test("imports sealed Snapshot bytes even when the mutable cache is edited after container creation", async () => {
+  test("imports sealed Snapshot bytes even when the live workspace is edited and restored after container creation", async () => {
     await using fixture = await setup("test")
     const location = fixture.persisted.run.location!
     const entrypoint = path.join(location.directory, "index.html")
@@ -84,6 +85,27 @@ describe("WorkflowCommandSandboxServer", () => {
     const imported = fixture.engine.one("container", "cp")
     expect(imported.argv).toEqual(["container", "cp", "-", `${fixture.engine.containerID}:/`])
     expect(Buffer.from(imported.stdin!).includes(Buffer.from("<!doctype html><main>captured</main>"))).toBe(true)
+  })
+
+  test("runs a frozen package test from its exact sealed archive workdir", async () => {
+    await using fixture = await setup("test")
+    const location = fixture.persisted.run.location!
+    const app = path.join(location.directory, "packages", "app")
+    await fs.mkdir(app, { recursive: true })
+    await fs.writeFile(path.join(location.directory, "index.html"), "<!doctype html><main>root</main>")
+    await fs.writeFile(path.join(app, "index.html"), "<!doctype html><main>package</main>")
+    await fs.writeFile(path.join(app, "package.json"), JSON.stringify({ scripts: { test: "bun test unit" } }))
+    const preview = PreviewPlan.freeze({
+      authority: "admission",
+      location,
+      preview: { kind: "static", cwd: "packages/app", entrypoint: "index.html" },
+    })
+    const plan = WorkflowProductionHostPlan.freeze({ authority: "admission", location, preview })
+    fixture.persisted.run = { ...fixture.persisted.run, input: WorkflowProductionHostPlan.withPlan({}, plan) }
+
+    await fixture.runFrozen(plan)
+
+    expect(valueAfter(fixture.engine.one("container", "create").argv, "--workdir")).toBe("/workspace/packages/app")
   })
 
   test("pipes hostile model command only to bash stdin and creates a digest-pinned, least-authority container", async () => {
@@ -1250,16 +1272,24 @@ async function setup(
         ),
       ),
     runFrozen: async (plan: WorkflowProductionHostPlan.Plan) => {
-      const bytes = await fs.readFile(path.join(workspace, "index.html"))
-      const entries = [
-        {
-          path: RelativePath.make("index.html"),
-          type: "file" as const,
-          sha256: createHash("sha256").update(bytes).digest("hex"),
-          size: bytes.byteLength,
-        },
-      ]
-      const archive = await WorkflowWorkspaceMaterialization.seal(entries, async () => bytes)
+      const paths = new Set<string>(["index.html", ...plan.functionalTest.configFiles.map((file) => file.path)])
+      if (plan.preview.entrypoint !== undefined)
+        paths.add(path.relative(workspace, plan.preview.entrypoint).replaceAll("\\", "/"))
+      const content = new Map(
+        await Promise.all(
+          [...paths].map(
+            async (relative) =>
+              [RelativePath.make(relative), await fs.readFile(path.join(workspace, relative))] as const,
+          ),
+        ),
+      )
+      const entries = [...content].map(([relative, bytes]) => ({
+        path: relative,
+        type: "file" as const,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.byteLength,
+      }))
+      const archive = await WorkflowWorkspaceMaterialization.seal(entries, async (relative) => content.get(relative)!)
       return Effect.runPromise(
         Effect.flatMap(WorkflowCommandSandbox.Service, (sandbox) =>
           sandbox.runFrozenTest!({
@@ -1270,7 +1300,7 @@ async function setup(
             cwd: plan.functionalTest.cwd,
             policySha256: plan.functionalTest.policySha256,
             configSha256: plan.functionalTest.configSha256,
-            materialization: WorkflowWorkspaceMaterialization.make({
+            sealedSnapshot: WorkflowWorkspaceMaterialization.bind({
               workflowID,
               stageID,
               revision: 0,
@@ -1278,7 +1308,6 @@ async function setup(
               snapshotRef: Snapshot.ID.make("test-materialization"),
               manifestSha256: "b".repeat(64),
               workspaceSha256: Snapshot.workspaceSha256(entries),
-              root: AbsolutePath.make(workspace),
               archive,
             }),
           }),

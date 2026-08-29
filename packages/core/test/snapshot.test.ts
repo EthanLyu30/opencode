@@ -9,12 +9,13 @@ import { Location } from "@opencode-ai/core/location"
 import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { Hash } from "@opencode-ai/core/util/hash"
+import { WorkflowSchema } from "@opencode-ai/core/workflow"
 import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 
 describe("Snapshot", () => {
-  test("seals exact Snapshot bytes independently from the mutable materialization cache", async () => {
+  test("seals exact Snapshot bytes without creating a filesystem cache", async () => {
     const source = Buffer.from("sealed implementation\n")
     const entries = [
       {
@@ -25,6 +26,16 @@ describe("Snapshot", () => {
       },
     ]
     const archive = await WorkflowWorkspaceMaterialization.seal(entries, async () => source)
+    const sealed = WorkflowWorkspaceMaterialization.bind({
+      workflowID: WorkflowSchema.ID.make("wfl_sealed_snapshot"),
+      stageID: WorkflowSchema.StageID.make("wfs_sealed_snapshot"),
+      revision: 0,
+      location: Location.Ref.make({ directory: AbsolutePath.make("D:\\sealed-snapshot") }),
+      snapshotRef: Snapshot.ID.make("sealed-tree"),
+      manifestSha256: "1".repeat(64),
+      workspaceSha256: archive.workspaceSha256,
+      archive,
+    })
 
     source.fill(0)
 
@@ -32,6 +43,9 @@ describe("Snapshot", () => {
       Buffer.from("sealed implementation\n"),
     )
     expect(archive.workspaceSha256).toBe(Snapshot.workspaceSha256(entries))
+    expect(sealed).not.toHaveProperty("root")
+    expect(sealed).not.toHaveProperty("leaseID")
+    expect(WorkflowWorkspaceMaterialization.validate(sealed)).toEqual(sealed)
     expect(() =>
       WorkflowWorkspaceMaterialization.validateArchive({
         ...archive,
@@ -146,6 +160,23 @@ describe("Snapshot", () => {
             expect(
               (Reflect.get(Snapshot, "workspaceSha256") as (value: readonly Snapshot.Entry[]) => string)(entries),
             ).toMatch(/^[a-f0-9]{64}$/)
+            const contentsMethod = Reflect.get(snapshot, "contents") as
+              | ((input: {
+                  readonly snapshot: Snapshot.ID
+                }) => Effect.Effect<readonly Snapshot.Content[], Snapshot.Error>)
+              | undefined
+            expect(contentsMethod).toBeFunction()
+            if (!contentsMethod) return
+            const contents = yield* contentsMethod({ snapshot: captured })
+            expect(
+              contents.map(({ bytes, ...entry }) => ({ ...entry, text: Buffer.from(bytes).toString("utf8") })),
+            ).toEqual([
+              { ...entries[0], text: "alpha\n" },
+              { ...entries[1], text: "z\n" },
+            ])
+            contents[0]?.bytes.fill(0)
+            const reread = yield* contentsMethod({ snapshot: captured })
+            expect(Buffer.from(reread[0]?.bytes ?? []).toString("utf8")).toBe("alpha\n")
           }).pipe(Effect.provide(snapshotLayer(tmp.path, location)))
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
@@ -238,40 +269,6 @@ describe("Snapshot", () => {
           expect(
             yield* Effect.promise(() => fs.stat(path.join(tmp.path, "snapshot", projectID, Hash.fast(linked)))),
           ).toBeDefined()
-        }),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ),
-  )
-
-  testEffect(Layer.empty).live("materializes exact captured bytes into an empty host-owned directory", () =>
-    Effect.acquireUseRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) =>
-        Effect.gen(function* () {
-          const project = path.join(tmp.path, "project")
-          const target = path.join(tmp.path, "materialized")
-          yield* Effect.promise(async () => {
-            await fs.mkdir(project)
-            await fs.writeFile(path.join(project, "index.html"), "captured\n")
-            await $`git init`.cwd(project).quiet()
-            await $`git config core.fsmonitor false`.cwd(project).quiet()
-            await $`git config commit.gpgsign false`.cwd(project).quiet()
-            await $`git config user.email test@opencode.test`.cwd(project).quiet()
-            await $`git config user.name Test`.cwd(project).quiet()
-            await $`git add .`.cwd(project).quiet()
-            await $`git commit -m initial`.cwd(project).quiet()
-          })
-
-          yield* Effect.gen(function* () {
-            const snapshot = yield* Snapshot.Service
-            const captured = yield* snapshot.capture()
-            expect(captured).toBeDefined()
-            if (!captured) return
-            yield* Effect.promise(() => fs.writeFile(path.join(project, "index.html"), "live edit\n"))
-            yield* snapshot.materialize({ snapshot: captured, directory: AbsolutePath.make(target) })
-            expect(yield* read(path.join(target, "index.html"))).toBe("captured\n")
-            expect(yield* read(path.join(project, "index.html"))).toBe("live edit\n")
-          }).pipe(Effect.provide(snapshotLayer(tmp.path, project)))
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),

@@ -29,10 +29,10 @@ export interface FunctionalTestRequest {
   readonly revision: number
   readonly location: WorkflowRoleExecution.ResolverInput["location"]
   readonly argv: WorkflowProductionHostPlan.FunctionalTest["argv"]
-  readonly cwd: "."
+  readonly cwd: WorkflowProductionHostPlan.FunctionalTest["cwd"]
   readonly policySha256: string
   readonly configSha256: string
-  readonly materialization: WorkflowWorkspaceMaterialization.Lease
+  readonly sealedSnapshot: WorkflowWorkspaceMaterialization.Sealed
 }
 
 export interface Dependencies {
@@ -43,14 +43,14 @@ export interface Dependencies {
     location: WorkflowRoleExecution.ResolverInput["location"],
     snapshot: Snapshot.ID,
   ) => Effect.Effect<readonly Snapshot.Entry[], unknown>
-  readonly materializeWorkspace: (input: {
+  readonly sealWorkspace: (input: {
     readonly workflowID: WorkflowRoleExecution.ResolverInput["workflow"]["id"]
     readonly stageID: WorkflowRoleExecution.ResolverInput["stage"]["id"]
     readonly revision: number
     readonly location: WorkflowRoleExecution.ResolverInput["location"]
     readonly manifestSha256: string
     readonly workspaceSha256: string
-  }) => Effect.Effect<WorkflowWorkspaceMaterialization.Lease, unknown>
+  }) => Effect.Effect<WorkflowWorkspaceMaterialization.Sealed, unknown>
   readonly runFunctionalTest: (
     input: FunctionalTestRequest,
   ) => Effect.Effect<{ readonly exitCode: number; readonly log: string }, unknown>
@@ -83,8 +83,8 @@ function prepare(
       const implementationSha256 = WorkflowImplementationArtifact.hash(manifest)
 
       if (role === "test") {
-        const materialization = yield* dependencies
-          .materializeWorkspace({
+        const sealedSnapshot = yield* dependencies
+          .sealWorkspace({
             workflowID: input.workflow.id,
             stageID: input.stage.id,
             revision: input.revision,
@@ -94,12 +94,12 @@ function prepare(
           })
           .pipe(
             Effect.mapError(() =>
-              evidenceFailure("workspace_stale", "Exact implementation materialization is unavailable"),
+              evidenceFailure("workspace_stale", "Exact implementation sealed Snapshot is unavailable"),
             ),
           )
         yield* Effect.try({
           try: () =>
-            WorkflowWorkspaceMaterialization.assertAuthority(materialization, {
+            WorkflowWorkspaceMaterialization.assertAuthority(sealedSnapshot, {
               workflowID: input.workflow.id,
               stageID: input.stage.id,
               revision: input.revision,
@@ -107,7 +107,7 @@ function prepare(
               manifestSha256: implementationSha256,
               workspaceSha256: manifest.workspaceSha256,
             }),
-          catch: () => evidenceFailure("workspace_stale", "Exact implementation materialization is invalid"),
+          catch: () => evidenceFailure("workspace_stale", "Exact implementation sealed Snapshot is invalid"),
         })
         const executed = yield* dependencies
           .runFunctionalTest({
@@ -119,7 +119,7 @@ function prepare(
             cwd: plan.functionalTest.cwd,
             policySha256: plan.functionalTest.policySha256,
             configSha256: plan.functionalTest.configSha256,
-            materialization,
+            sealedSnapshot,
           })
           .pipe(Effect.mapError(() => evidenceFailure("functional_test_unavailable", "Frozen functional test failed")))
         if (

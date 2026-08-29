@@ -23,12 +23,16 @@ export interface Entry {
   readonly size: number
 }
 
+export interface Content extends Entry {
+  readonly bytes: Uint8Array
+}
+
 export const MAX_ENTRIES = 20_000
 export const MAX_FILE_BYTES = 2 * 1024 * 1024
 export const MAX_TREE_BYTES = 64 * 1024 * 1024
 
 export class Error extends Schema.TaggedErrorClass<Error>()("Snapshot.Error", {
-  operation: Schema.Literals(["capture", "entries", "files", "diff", "preview", "restore", "materialize"]),
+  operation: Schema.Literals(["capture", "entries", "contents", "files", "diff", "preview", "restore"]),
   message: Schema.String,
   cause: Schema.optional(Schema.Defect()),
 }) {}
@@ -66,11 +70,8 @@ export interface Interface {
    */
   readonly entries: (input: { readonly snapshot: ID }) => Effect.Effect<readonly Entry[], Error>
 
-  /** Copy an exact bounded captured tree into a new empty host-owned directory. */
-  readonly materialize: (input: {
-    readonly snapshot: ID
-    readonly directory: AbsolutePath
-  }) => Effect.Effect<void, Error>
+  /** Read fresh, exact bytes for every canonical Location-scoped entry directly from the durable tree. */
+  readonly contents: (input: { readonly snapshot: ID }) => Effect.Effect<readonly Content[], Error>
 
   /**
    * List project-relative paths changed between two captured trees without
@@ -204,49 +205,29 @@ const layer = Layer.effect(
       })
     })
 
-    const materialize = Effect.fn("Snapshot.materialize")(function* (input: {
-      readonly snapshot: ID
-      readonly directory: AbsolutePath
-    }) {
-      const target = path.resolve(input.directory)
-      if (target === path.parse(target).root || FSUtil.contains(worktree, target) || (yield* fs.existsSafe(target)))
-        yield* new Error({
-          operation: "materialize",
-          message: "Snapshot materialization target is unsafe or not empty",
-        })
-      const repo = yield* repository().pipe(Effect.mapError((cause) => failure("materialize", cause)))
-      const locationScope = yield* scope().pipe(Effect.mapError((cause) => failure("materialize", cause)))
-      const exact = yield* entries({ snapshot: input.snapshot }).pipe(
-        Effect.mapError((cause) => failure("materialize", cause)),
+    const contents = Effect.fn("Snapshot.contents")(function* (input: { readonly snapshot: ID }) {
+      const repo = yield* repository().pipe(Effect.mapError((cause) => failure("contents", cause)))
+      const locationScope = yield* scope().pipe(Effect.mapError((cause) => failure("contents", cause)))
+      const exact = yield* entries(input).pipe(Effect.mapError((cause) => failure("contents", cause)))
+      return yield* Effect.forEach(exact, (entry) =>
+        Effect.gen(function* () {
+          const projectPath = RelativePath.make(locationScope === "." ? entry.path : `${locationScope}/${entry.path}`)
+          const bytes = yield* git.tree
+            .read({
+              repository: repo,
+              tree: Git.TreeID.make(input.snapshot),
+              path: projectPath,
+              maximumBytes: entry.size,
+            })
+            .pipe(Effect.mapError((cause) => failure("contents", cause)))
+          if (bytes.byteLength !== entry.size || Hash.sha256(Buffer.from(bytes)) !== entry.sha256)
+            return yield* new Error({
+              operation: "contents",
+              message: "Snapshot content bytes differ from the canonical entry",
+            })
+          return Object.freeze({ ...entry, bytes: Uint8Array.from(bytes) })
+        }),
       )
-      yield* fs.ensureDir(target).pipe(Effect.mapError((cause) => failure("materialize", cause)))
-      yield* Effect.forEach(
-        exact,
-        (entry) =>
-          Effect.gen(function* () {
-            const destination = path.resolve(target, ...entry.path.split("/"))
-            if (!FSUtil.contains(target, destination) || destination === target)
-              yield* new Error({ operation: "materialize", message: "Snapshot entry escaped its target" })
-            const projectPath = RelativePath.make(locationScope === "." ? entry.path : `${locationScope}/${entry.path}`)
-            const bytes = yield* git.tree
-              .read({
-                repository: repo,
-                tree: Git.TreeID.make(input.snapshot),
-                path: projectPath,
-                maximumBytes: entry.size,
-              })
-              .pipe(Effect.mapError((cause) => failure("materialize", cause)))
-            if (bytes.byteLength !== entry.size || Hash.sha256(Buffer.from(bytes)) !== entry.sha256)
-              yield* new Error({
-                operation: "materialize",
-                message: "Snapshot materialization bytes differ from the captured entry",
-              })
-            yield* fs
-              .writeWithDirs(destination, bytes, entry.type === "executable" ? 0o755 : 0o644)
-              .pipe(Effect.mapError((cause) => failure("materialize", cause)))
-          }),
-        { discard: true },
-      ).pipe(Effect.tapError(() => fs.remove(target, { recursive: true, force: true }).pipe(Effect.ignore)))
     })
 
     const files = Effect.fn("Snapshot.files")(function* (input: CompareInput) {
@@ -324,7 +305,7 @@ const layer = Layer.effect(
         .pipe(Effect.mapError((cause) => failure("restore", cause)))
     })
 
-    return Service.of({ capture, entries, materialize, files, diff, preview, restore, checkout })
+    return Service.of({ capture, entries, contents, files, diff, preview, restore, checkout })
   }),
 )
 
@@ -341,7 +322,7 @@ export const noopLayer = Layer.succeed(
   Service.of({
     capture: () => Effect.succeed(undefined),
     entries: () => Effect.fail(new Error({ operation: "entries", message: "Snapshots are unavailable" })),
-    materialize: () => Effect.fail(new Error({ operation: "materialize", message: "Snapshots are unavailable" })),
+    contents: () => Effect.fail(new Error({ operation: "contents", message: "Snapshots are unavailable" })),
     files: () => Effect.succeed([]),
     diff: () => Effect.succeed([]),
     preview: () => Effect.succeed([]),

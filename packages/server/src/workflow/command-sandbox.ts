@@ -164,9 +164,7 @@ export function makeLayer(
           })
           const archive = yield* Effect.try({
             try: () => {
-              const value = request.materialization.archive
-              if (value === undefined) throw new TypeError("missing sealed archive")
-              return WorkflowWorkspaceMaterialization.validateArchive(value)
+              return WorkflowWorkspaceMaterialization.validateArchive(request.sealedSnapshot.archive)
             },
             catch: () => rejected("Frozen test requires exact host-sealed Snapshot bytes"),
           })
@@ -190,7 +188,7 @@ export function makeLayer(
                 {
                   workspace: { canonical: "", device: 0, inode: 0 },
                   workdir: { canonical: "", device: 0, inode: 0 },
-                  relativeWorkdir: ".",
+                  relativeWorkdir: request.cwd,
                 },
                 ownership,
                 signal,
@@ -417,7 +415,7 @@ const reloadFrozenTestAuthority = Effect.fn("WorkflowCommandSandboxServer.reload
       catch: () => rejected("Admission-frozen test configuration changed"),
     })
     if (
-      input.request.cwd !== "." ||
+      input.request.cwd !== plan.functionalTest.cwd ||
       WorkflowBusinessArtifact.encode(input.request.argv) !==
         WorkflowBusinessArtifact.encode(plan.functionalTest.argv) ||
       input.request.configSha256 !== plan.functionalTest.configSha256 ||
@@ -426,17 +424,22 @@ const reloadFrozenTestAuthority = Effect.fn("WorkflowCommandSandboxServer.reload
       return yield* rejected("Frozen test request differs from admission authority")
     yield* Effect.try({
       try: () => {
-        const materialization = WorkflowWorkspaceMaterialization.validate(input.request.materialization)
+        const sealedSnapshot = WorkflowWorkspaceMaterialization.validate(input.request.sealedSnapshot)
         if (
-          materialization.workflowID !== detail.run.id ||
-          materialization.stageID !== stage.id ||
-          materialization.revision !== input.request.revision ||
-          materialization.location.directory !== detail.run.location!.directory ||
-          materialization.location.workspaceID !== detail.run.location!.workspaceID
+          sealedSnapshot.workflowID !== detail.run.id ||
+          sealedSnapshot.stageID !== stage.id ||
+          sealedSnapshot.revision !== input.request.revision ||
+          sealedSnapshot.location.directory !== detail.run.location!.directory ||
+          sealedSnapshot.location.workspaceID !== detail.run.location!.workspaceID
         )
-          throw new TypeError("materialization authority mismatch")
+          throw new TypeError("sealed Snapshot authority mismatch")
+        if (
+          input.request.cwd !== "." &&
+          !sealedSnapshot.archive.entries.some((entry) => entry.path.startsWith(`${input.request.cwd}/`))
+        )
+          throw new TypeError("sealed Snapshot workdir is absent")
       },
-      catch: () => rejected("Frozen test materialization differs from durable Workflow authority"),
+      catch: () => rejected("Frozen test sealed Snapshot differs from durable Workflow authority"),
     })
     return {
       leaseOwner: stage.leaseOwner,

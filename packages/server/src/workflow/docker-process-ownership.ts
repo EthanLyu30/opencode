@@ -419,16 +419,17 @@ async function validateStart(
   const hostRoot = await canonicalDDirectory(configuredHostRoot)
   const archive =
     input.archive === undefined ? undefined : WorkflowWorkspaceMaterialization.validateArchive(input.archive)
+  const archivedRelativeCwd = archive === undefined ? undefined : sealedRelativeWorkdir(input.plan, archive)
   const workspace =
     archive === undefined
       ? await DockerConfig.admitWorkspace(config, input.workspaceRoot ?? input.plan.locationRoot)
       : ""
-  const cwd = archive === undefined ? await canonicalDDirectory(input.plan.cwd) : path.resolve(input.plan.cwd)
+  const cwd = archive === undefined ? await canonicalDDirectory(input.plan.cwd) : ""
   const capabilityTemp = await canonicalDDirectory(input.tempRoot)
   const expectedTemp = path.join(hostRoot, input.identity.hostID, ".tmp")
   if (
     path.resolve(expectedTemp) !== capabilityTemp ||
-    (archive === undefined ? !contains(workspace, cwd) : !contains(path.resolve(input.plan.locationRoot), cwd)) ||
+    (archive === undefined && !contains(workspace, cwd)) ||
     (archive === undefined && overlap(hostRoot, workspace)) ||
     (archive === undefined && overlap(config.dockerConfig, workspace)) ||
     (archive === undefined && overlap(config.temp, workspace)) ||
@@ -447,9 +448,26 @@ async function validateStart(
         ? cwd === workspace
           ? "."
           : path.relative(workspace, cwd).replaceAll("\\", "/")
-        : path.relative(path.resolve(input.plan.locationRoot), cwd).replaceAll("\\", "/") || ".",
+        : archivedRelativeCwd!,
     snapshot,
   }
+}
+
+function sealedRelativeWorkdir(
+  plan: PreviewPlan.PreviewPlan,
+  archive: WorkflowWorkspaceMaterialization.Archive,
+): string {
+  if (!path.isAbsolute(plan.locationRoot) || !path.isAbsolute(plan.cwd))
+    throw new TypeError("Sealed preview roots must be absolute")
+  if (path.parse(plan.locationRoot).root.toLowerCase() !== path.parse(plan.cwd).root.toLowerCase())
+    throw new TypeError("Sealed preview workdir must share the Location volume")
+  const relative = path.relative(plan.locationRoot, plan.cwd)
+  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`))
+    throw new TypeError("Sealed preview workdir escapes the Location")
+  const canonical = relative === "" ? "." : relative.replaceAll("\\", "/")
+  if (canonical !== "." && !archive.entries.some((entry) => entry.path.startsWith(`${canonical}/`)))
+    throw new TypeError("Sealed preview workdir is absent from the exact Snapshot")
+  return canonical
 }
 
 async function revalidate(

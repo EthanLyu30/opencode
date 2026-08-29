@@ -1003,28 +1003,38 @@ describe("WorkflowVisualHostServer", () => {
   test("serves immutable Snapshot bytes when the live workspace is edited and restored after resolution", async () => {
     await using temp = await taskTemp()
     await using workspaceTemp = await taskTemp()
-    await using materializedTemp = await taskTemp()
     const captured = "<!doctype html><main id=ready>captured</main>"
     const changed = "<!doctype html><main id=ready>changed</main>"
-    await fs.writeFile(path.join(workspaceTemp.path, "index.html"), captured)
-    await fs.writeFile(path.join(materializedTemp.path, "index.html"), captured)
+    const asset = "export const sealed = true\n"
+    const app = path.join(workspaceTemp.path, "packages", "app")
+    await fs.mkdir(app, { recursive: true })
+    await fs.writeFile(path.join(app, "index.html"), captured)
+    await fs.writeFile(path.join(app, "asset.js"), asset)
     const location = Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) })
     const plan = PreviewPlan.freeze({
       authority: "admission",
       location,
-      preview: { kind: "static", entrypoint: "index.html" },
+      preview: { kind: "static", cwd: "packages/app", entrypoint: "index.html" },
     })
     const entries = [
       {
-        path: RelativePath.make("index.html"),
+        path: RelativePath.make("packages/app/index.html"),
         type: "file",
         sha256: createHash("sha256").update(captured).digest("hex"),
         size: Buffer.byteLength(captured),
       },
+      {
+        path: RelativePath.make("packages/app/asset.js"),
+        type: "file",
+        sha256: createHash("sha256").update(asset).digest("hex"),
+        size: Buffer.byteLength(asset),
+      },
     ] as const
     const workspaceSha256 = Snapshot.workspaceSha256(entries)
-    const archive = await WorkflowWorkspaceMaterialization.seal(entries, async () => Buffer.from(captured))
-    const materialization = WorkflowWorkspaceMaterialization.make({
+    const archive = await WorkflowWorkspaceMaterialization.seal(entries, async (relative) =>
+      Buffer.from(relative.endsWith("asset.js") ? asset : captured),
+    )
+    const sealedSnapshot = WorkflowWorkspaceMaterialization.bind({
       workflowID,
       stageID: captureStageID,
       revision: 2,
@@ -1032,7 +1042,6 @@ describe("WorkflowVisualHostServer", () => {
       snapshotRef: Snapshot.ID.make("captured-tree"),
       manifestSha256: implementationSha256,
       workspaceSha256,
-      root: AbsolutePath.make(materializedTemp.path),
       archive,
     })
 
@@ -1041,11 +1050,11 @@ describe("WorkflowVisualHostServer", () => {
         Effect.gen(function* () {
           const host = yield* WorkflowVisualHost.Service
           const preview = yield* host.prepareImplementation({ workflowID, revision: 2, plan })
-          yield* Effect.promise(() => fs.writeFile(path.join(workspaceTemp.path, "index.html"), captured))
-          yield* Effect.promise(() => fs.writeFile(path.join(materializedTemp.path, "index.html"), changed))
-          const result = yield* Effect.promise(() => fetch(preview.url).then((response) => response.text()))
-          yield* Effect.promise(() => fs.writeFile(path.join(materializedTemp.path, "index.html"), captured))
-          return result
+          yield* Effect.promise(() => fs.writeFile(path.join(app, "index.html"), captured))
+          return yield* Effect.promise(async () => ({
+            html: await fetch(preview.url).then((response) => response.text()),
+            asset: await fetch(new URL("asset.js", preview.url)).then((response) => response.text()),
+          }))
         }),
       ).pipe(
         Effect.provide(
@@ -1053,15 +1062,15 @@ describe("WorkflowVisualHostServer", () => {
             hostRoot: temp.path,
             browser: browserRuntime().runtime,
             resolveImplementationContract: async () => {
-              await fs.writeFile(path.join(workspaceTemp.path, "index.html"), changed)
-              return { implementationSha256, readySelector: "#ready", materialization }
+              await fs.writeFile(path.join(app, "index.html"), changed)
+              return { implementationSha256, readySelector: "#ready", sealedSnapshot }
             },
           }),
         ),
       ),
     )
 
-    expect(html).toBe(captured)
+    expect(html).toEqual({ html: captured, asset })
   })
 
   test("bounds static responses at 32 MiB and rejects oversize or growth before returning bytes", async () => {

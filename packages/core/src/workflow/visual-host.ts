@@ -113,7 +113,7 @@ export interface PrepareImplementationInput {
 export interface ImplementationCaptureContract {
   readonly implementationSha256: string
   readonly readySelector: string
-  readonly materialization?: WorkflowWorkspaceMaterialization.Lease
+  readonly sealedSnapshot?: WorkflowWorkspaceMaterialization.Sealed
 }
 
 export type ResolveImplementationContract = (
@@ -672,7 +672,7 @@ export function evidenceArtifactBinding(input: BindEvidenceInput): EvidenceArtif
 export function validateImplementationCaptureContract(input: unknown): ImplementationCaptureContract {
   if (
     !hasExactDataKeys(input, ["implementationSha256", "readySelector"]) &&
-    !hasExactDataKeys(input, ["implementationSha256", "readySelector", "materialization"])
+    !hasExactDataKeys(input, ["implementationSha256", "readySelector", "sealedSnapshot"])
   ) {
     throw new TypeError("Implementation capture contract shape is not exact")
   }
@@ -680,12 +680,12 @@ export function validateImplementationCaptureContract(input: unknown): Implement
   if (typeof input.readySelector !== "string" || input.readySelector.length === 0) {
     throw new TypeError("Implementation capture selector is invalid")
   }
-  const materialization =
-    "materialization" in input ? WorkflowWorkspaceMaterialization.validate(input.materialization) : undefined
+  const sealedSnapshot =
+    "sealedSnapshot" in input ? WorkflowWorkspaceMaterialization.validate(input.sealedSnapshot) : undefined
   return Object.freeze({
     implementationSha256,
     readySelector: input.readySelector,
-    ...(materialization === undefined ? {} : { materialization }),
+    ...(sealedSnapshot === undefined ? {} : { sealedSnapshot }),
   })
 }
 

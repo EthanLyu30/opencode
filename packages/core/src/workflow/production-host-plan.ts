@@ -3,7 +3,7 @@ export * as WorkflowProductionHostPlan from "./production-host-plan"
 import { DesignArtifact } from "@opencode-ai/schema/design-artifact"
 import { Location } from "@opencode-ai/schema/location"
 import { Workflow } from "@opencode-ai/schema/workflow"
-import { AbsolutePath } from "@opencode-ai/schema/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/schema/schema"
 import { Schema } from "effect"
 import { lstatSync, readFileSync, realpathSync } from "node:fs"
 import path from "node:path"
@@ -17,7 +17,7 @@ const MAX_PACKAGE_BYTES = 16 * 1024 * 1024
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 
 const FrozenConfigurationFile = Schema.Struct({
-  path: Schema.Literal("package.json"),
+  path: RelativePath,
   sha256: DesignArtifact.Sha256,
   size: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(MAX_PACKAGE_BYTES)),
 }).annotate({ identifier: "WorkflowProductionHostPlan.FrozenConfigurationFile", ...exact })
@@ -27,7 +27,7 @@ const FunctionalTest = Schema.Struct({
     Schema.Tuple([Schema.Literal("bun"), Schema.Literal("test")]),
     Schema.Tuple([Schema.Literal("bun"), Schema.Literal("run"), Schema.Literal("test")]),
   ]),
-  cwd: Schema.Literal("."),
+  cwd: RelativePath,
   configFiles: Schema.Array(FrozenConfigurationFile),
   configSha256: DesignArtifact.Sha256,
   policySha256: DesignArtifact.Sha256,
@@ -43,8 +43,8 @@ const Envelope = Schema.Struct({
 
 export interface FunctionalTest {
   readonly argv: readonly ["bun", "test"] | readonly ["bun", "run", "test"]
-  readonly cwd: "."
-  readonly configFiles: readonly { readonly path: "package.json"; readonly sha256: string; readonly size: number }[]
+  readonly cwd: RelativePath
+  readonly configFiles: readonly { readonly path: RelativePath; readonly sha256: string; readonly size: number }[]
   readonly configSha256: string
   readonly policySha256: string
 }
@@ -70,7 +70,7 @@ export function freeze(input: {
   if (input.authority !== "admission" || !PreviewPlan.isFrozen(input.preview)) throw invalid()
   const location = Schema.decodeUnknownSync(Location.Ref)(input.location)
   if (comparisonKey(realpathSync(location.directory)) !== comparisonKey(input.preview.locationRoot)) throw invalid()
-  const functionalTest = freezeFunctionalTest(location)
+  const functionalTest = freezeFunctionalTest(location, input.preview.cwd)
   return validate(
     {
       kind: KIND,
@@ -100,7 +100,10 @@ export function withPlan(input: Readonly<Record<string, unknown>>, plan: Plan): 
 
 export function verifyCurrentConfiguration(plan: Plan): void {
   PreviewPlan.verifyConfiguration(plan.preview)
-  const current = freezeFunctionalTest(Location.Ref.make({ directory: AbsolutePath.make(plan.preview.locationRoot) }))
+  const current = freezeFunctionalTest(
+    Location.Ref.make({ directory: AbsolutePath.make(plan.preview.locationRoot) }),
+    plan.preview.cwd,
+  )
   if (WorkflowBusinessArtifact.encode(current) !== WorkflowBusinessArtifact.encode(plan.functionalTest)) throw invalid()
 }
 
@@ -118,6 +121,7 @@ function validate(input: unknown, location: Location.Ref): Plan {
       envelope.locationSha256 !== WorkflowBusinessArtifact.locationSha256(location) ||
       envelope.previewConfigSha256 !== preview.configSha256 ||
       comparisonKey(realpathSync(location.directory)) !== comparisonKey(preview.locationRoot) ||
+      functionalTest.cwd !== relativeWorkdir(location, preview.cwd) ||
       functionalTest.configSha256 !== WorkflowBusinessArtifact.hash(configFiles) ||
       functionalTest.policySha256 !==
         WorkflowBusinessArtifact.hash({
@@ -143,8 +147,10 @@ function validate(input: unknown, location: Location.Ref): Plan {
   }
 }
 
-function freezeFunctionalTest(location: Location.Ref): FunctionalTest {
-  const packageFile = path.join(realpathSync(location.directory), "package.json")
+function freezeFunctionalTest(location: Location.Ref, frozenCwd: string): FunctionalTest {
+  const cwd = relativeWorkdir(location, frozenCwd)
+  const packageFile = path.join(realpathSync(location.directory), ...cwd.split("/"), "package.json")
+  const packagePath = RelativePath.make(cwd === "." ? "package.json" : `${cwd}/package.json`)
   const configFiles = (() => {
     try {
       const stat = lstatSync(packageFile)
@@ -159,7 +165,7 @@ function freezeFunctionalTest(location: Location.Ref): FunctionalTest {
       if (bytes.byteLength !== stat.size) throw invalid()
       return Object.freeze([
         Object.freeze({
-          path: "package.json" as const,
+          path: packagePath,
           sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
           size: bytes.byteLength,
         }),
@@ -190,11 +196,22 @@ function freezeFunctionalTest(location: Location.Ref): FunctionalTest {
   const configSha256 = WorkflowBusinessArtifact.hash(configFiles)
   return Object.freeze({
     argv,
-    cwd: ".",
+    cwd,
     configFiles,
     configSha256,
-    policySha256: WorkflowBusinessArtifact.hash({ argv, cwd: ".", configSha256 }),
+    policySha256: WorkflowBusinessArtifact.hash({ argv, cwd, configSha256 }),
   })
+}
+
+function relativeWorkdir(location: Location.Ref, frozenCwd: string): RelativePath {
+  const root = realpathSync.native(location.directory)
+  const cwd = realpathSync.native(frozenCwd)
+  if (!lstatSync(root).isDirectory() || !lstatSync(cwd).isDirectory()) throw invalid()
+  if (comparisonKey(path.parse(root).root) !== comparisonKey(path.parse(cwd).root)) throw invalid()
+  const relative = path.relative(root, cwd)
+  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`) || relative.includes(":"))
+    throw invalid()
+  return RelativePath.make(relative === "" ? "." : relative.replaceAll(path.sep, "/"))
 }
 
 function freezePreview(input: unknown): PreviewPlan.PreviewPlan {

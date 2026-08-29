@@ -59,7 +59,7 @@ describe("Workflow production evidence", () => {
     const service = WorkflowProductionEvidence.make({
       captureSnapshot: () => Effect.succeed(undefined),
       snapshotEntries: () => Effect.die("unused"),
-      materializeWorkspace: () => Effect.die("unused"),
+      sealWorkspace: () => Effect.die("unused"),
       runFunctionalTest: () => Effect.die("unused"),
       visualHost: unavailableVisualHost(),
     })
@@ -141,7 +141,7 @@ describe("Workflow production evidence", () => {
           const service = WorkflowProductionEvidence.make({
             captureSnapshot: () => Effect.succeed(Snapshot.ID.make("current")),
             snapshotEntries: () => Effect.succeed(entries),
-            materializeWorkspace: () => Effect.die("unused"),
+            sealWorkspace: () => Effect.die("unused"),
             runFunctionalTest: () => Effect.die("unused"),
             visualHost: host,
           })
@@ -184,13 +184,10 @@ describe("Workflow production evidence", () => {
     expect(captures).toBe(4)
   })
 
-  test("runs the frozen test from materialized Snapshot bytes while the live workspace changes and is restored", async () => {
+  test("runs the frozen test from sealed Snapshot bytes while the live workspace changes and is restored", async () => {
     const fixture = await workflowFixture()
     const implementationStage = roleStage("implement", fixture.workflow)
     const testStage = roleStage("test", fixture.workflow)
-    const materializedRoot = path.join(fixture.tmp.path, "materialized")
-    await fs.mkdir(materializedRoot)
-    await fs.writeFile(path.join(materializedRoot, "index.html"), source)
     const entries = Snapshot.canonicalEntries([
       { path: RelativePath.make("index.html"), type: "file", sha256: sourceSha256, size: Buffer.byteLength(source) },
     ])
@@ -210,9 +207,10 @@ describe("Workflow production evidence", () => {
     const service = WorkflowProductionEvidence.make({
       captureSnapshot: () => Effect.succeed(Snapshot.ID.make("current")),
       snapshotEntries: () => Effect.succeed(entries),
-      materializeWorkspace: () =>
-        Effect.succeed(
-          WorkflowWorkspaceMaterialization.make({
+      sealWorkspace: () =>
+        Effect.promise(async () => {
+          const archive = await WorkflowWorkspaceMaterialization.seal(entries, async () => Buffer.from(source))
+          return WorkflowWorkspaceMaterialization.bind({
             workflowID,
             stageID: testStage.id,
             revision: 0,
@@ -220,13 +218,17 @@ describe("Workflow production evidence", () => {
             snapshotRef: Snapshot.ID.make("current"),
             manifestSha256: WorkflowImplementationArtifact.hash(manifestValue),
             workspaceSha256: manifestValue.workspaceSha256,
-            root: AbsolutePath.make(materializedRoot),
-          }),
-        ),
+            archive,
+          })
+        }),
       runFunctionalTest: (request) =>
         Effect.promise(async () => {
           await fs.writeFile(path.join(fixture.tmp.path, "index.html"), "changed during test\n")
-          observed = await fs.readFile(path.join(request.materialization.root, "index.html"), "utf8")
+          observed = Buffer.from(
+            WorkflowWorkspaceMaterialization.bytes(request.sealedSnapshot.archive).get(
+              RelativePath.make("index.html"),
+            ) ?? [],
+          ).toString("utf8")
           await fs.writeFile(path.join(fixture.tmp.path, "index.html"), source)
           return { exitCode: 0, log: "pass\n" }
         }),
@@ -300,7 +302,7 @@ describe("Workflow production evidence", () => {
           const service = WorkflowProductionEvidence.make({
             captureSnapshot: () => Effect.succeed(Snapshot.ID.make("current")),
             snapshotEntries: () => Effect.succeed(currentEntries),
-            materializeWorkspace: () => Effect.die("unused"),
+            sealWorkspace: () => Effect.die("unused"),
             runFunctionalTest: () => Effect.die("unused"),
             visualHost: host,
           })
@@ -571,7 +573,7 @@ describe("Workflow production evidence", () => {
         return Effect.succeed(Snapshot.ID.make("stale-current"))
       },
       snapshotEntries: () => Effect.succeed(changedEntries),
-      materializeWorkspace: () => Effect.die("unused"),
+      sealWorkspace: () => Effect.die("unused"),
       runFunctionalTest: () => Effect.die("unused"),
       visualHost: unavailableVisualHost(),
     })

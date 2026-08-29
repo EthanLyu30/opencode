@@ -14,6 +14,7 @@ import { LocationMutation } from "../location-mutation"
 import { AppProcess } from "../process"
 import { SessionMessage } from "../session/message"
 import { SessionSchema } from "../session/schema"
+import { WorkflowProductionHostPlan } from "./production-host-plan"
 import { WorkflowWorkspaceMaterialization } from "./workspace-materialization"
 
 export interface Request {
@@ -41,10 +42,10 @@ export interface FrozenTestRequest {
   readonly stageID: Workflow.StageID
   readonly revision: number
   readonly argv: readonly ["bun", "test"] | readonly ["bun", "run", "test"]
-  readonly cwd: "."
+  readonly cwd: WorkflowProductionHostPlan.FunctionalTest["cwd"]
   readonly policySha256: string
   readonly configSha256: string
-  readonly materialization: WorkflowWorkspaceMaterialization.Lease
+  readonly sealedSnapshot: WorkflowWorkspaceMaterialization.Sealed
 }
 
 export class Unavailable extends Schema.TaggedErrorClass<Unavailable>()("WorkflowCommandSandbox.Unavailable", {

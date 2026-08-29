@@ -31,7 +31,6 @@ interface HostRecord {
   readonly workflowID: string
   readonly directory: string
   readonly workspace?: string
-  materialization?: WorkflowWorkspaceMaterialization.Lease
   readonly createdAt: number
   readySelector?: string
   allowedOrigins: readonly string[]
@@ -67,9 +66,7 @@ export interface Options {
    * design + implementation/snapshot authority; absence fails closed.
    */
   readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
-  readonly requireImplementationMaterialization?: boolean
-  readonly onEvidenceReleased?: (input: WorkflowVisualHost.BindEvidenceInput) => Promise<void>
-  readonly onEvidenceReconciled?: (input: WorkflowVisualHost.ReconcileEvidenceInput) => Promise<void>
+  readonly requireImplementationSealedSnapshot?: boolean
 }
 
 export function makeLayer(options: Options): Layer.Layer<WorkflowVisualHost.Service, WorkflowVisualHost.Failure> {
@@ -108,8 +105,6 @@ export interface ProductionLayerOptions {
   readonly aclProbe?: HostRootPolicy.Probe
   readonly browser?: PlaywrightCapture.Runtime
   readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
-  readonly onEvidenceReleased?: (input: WorkflowVisualHost.BindEvidenceInput) => Promise<void>
-  readonly onEvidenceReconciled?: (input: WorkflowVisualHost.ReconcileEvidenceInput) => Promise<void>
 }
 
 export function productionLayer(input: ProductionLayerOptions) {
@@ -152,9 +147,7 @@ export function productionLayer(input: ProductionLayerOptions) {
         hostRoot: policy.roots.tempRoot,
       }),
       resolveImplementationContract: input.resolveImplementationContract,
-      requireImplementationMaterialization: true,
-      onEvidenceReleased: input.onEvidenceReleased,
-      onEvidenceReconciled: input.onEvidenceReconciled,
+      requireImplementationSealedSnapshot: true,
     })
     return configured.pipe(Layer.catch(() => WorkflowVisualHost.unavailableLayer))
   } catch {
@@ -185,9 +178,7 @@ interface State {
   readonly onStaticFileOpened?: (file: string) => Promise<void>
   readonly onStaticFileRead?: (file: string) => Promise<void>
   readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
-  readonly requireImplementationMaterialization: boolean
-  readonly onEvidenceReleased?: (input: WorkflowVisualHost.BindEvidenceInput) => Promise<void>
-  readonly onEvidenceReconciled?: (input: WorkflowVisualHost.ReconcileEvidenceInput) => Promise<void>
+  readonly requireImplementationSealedSnapshot: boolean
 }
 
 async function makeState(options: Options): Promise<State> {
@@ -235,9 +226,7 @@ async function makeState(options: Options): Promise<State> {
     onStaticFileOpened: options.onStaticFileOpened,
     onStaticFileRead: options.onStaticFileRead,
     resolveImplementationContract: options.resolveImplementationContract,
-    requireImplementationMaterialization: options.requireImplementationMaterialization === true,
-    onEvidenceReleased: options.onEvidenceReleased,
-    onEvidenceReconciled: options.onEvidenceReconciled,
+    requireImplementationSealedSnapshot: options.requireImplementationSealedSnapshot === true,
   }
 }
 
@@ -363,52 +352,41 @@ function prepareImplementation(
                 "Implementation capture authority rejected the durable contract",
               ),
       })
-      const materialization = contract.materialization
-      if (state.requireImplementationMaterialization && materialization === undefined)
+      const sealedSnapshot = contract.sealedSnapshot
+      if (state.requireImplementationSealedSnapshot && sealedSnapshot === undefined)
         return yield* failure(
           "prepare_implementation",
           "visual_host_unavailable",
-          "Production implementation preview requires an exact Snapshot materialization",
+          "Production implementation preview requires exact sealed Snapshot bytes",
         )
-      if (materialization !== undefined) {
+      if (sealedSnapshot !== undefined) {
         yield* Effect.try({
           try: () => {
-            const lease = WorkflowWorkspaceMaterialization.validate(materialization)
+            const authority = WorkflowWorkspaceMaterialization.validate(sealedSnapshot)
             if (
-              lease.workflowID !== input.workflowID ||
-              lease.revision !== input.revision ||
-              lease.location.directory !== input.plan.locationRoot ||
-              lease.manifestSha256 !== contract.implementationSha256
+              authority.workflowID !== input.workflowID ||
+              authority.revision !== input.revision ||
+              authority.location.directory !== input.plan.locationRoot ||
+              authority.manifestSha256 !== contract.implementationSha256
             )
-              throw new TypeError("materialization authority mismatch")
+              throw new TypeError("sealed Snapshot authority mismatch")
           },
           catch: () =>
             failure(
               "prepare_implementation",
               "invalid_preview_plan",
-              "Implementation materialization differs from the frozen preview authority",
+              "Implementation sealed Snapshot differs from the frozen preview authority",
             ),
         })
-        if (state.requireImplementationMaterialization && materialization.archive === undefined)
-          return yield* failure(
-            "prepare_implementation",
-            "invalid_preview_plan",
-            "Production implementation preview requires exact host-sealed Snapshot bytes",
-          )
       }
-      const workspaceRoot = materialization?.root ?? input.plan.locationRoot
+      const workspaceRoot = input.plan.locationRoot
       const record = yield* Effect.tryPromise({
         try: () =>
-          createRecord(
-            state,
-            String(input.workflowID),
-            materialization?.archive === undefined ? workspaceRoot : undefined,
-          ),
+          createRecord(state, String(input.workflowID), sealedSnapshot === undefined ? workspaceRoot : undefined),
         catch: () =>
           failure("prepare_implementation", "visual_host_unavailable", "Implementation host could not start"),
       })
       state.active.set(record.hostID, record)
-      record.materialization = materialization
       yield* Effect.addFinalizer(() => Effect.promise(() => release(state, record)).pipe(Effect.ignore))
       if (input.plan.kind === "script") {
         record.processIdentity = { hostID: record.hostID, nonce: randomBytes(32).toString("hex") }
@@ -426,20 +404,16 @@ function prepareImplementation(
       if (input.plan.kind === "static") {
         record.allowedOrigins = input.plan.allowedOrigins
         const frozenEntrypoint = input.plan.entrypoint ?? ""
-        const materializedEntrypoint =
-          materialization === undefined
-            ? frozenEntrypoint
-            : path.join(workspaceRoot, path.relative(input.plan.locationRoot, frozenEntrypoint))
         yield* Effect.try({
           try: () =>
             startStaticServer(
               record,
-              path.dirname(materializedEntrypoint),
-              materializedEntrypoint,
+              path.dirname(frozenEntrypoint),
+              frozenEntrypoint,
               workspaceRoot,
               state.onStaticFileOpened,
               state.onStaticFileRead,
-              materialization?.archive,
+              sealedSnapshot?.archive,
             ),
           catch: () =>
             failure("prepare_implementation", "visual_host_unavailable", "Static implementation host could not start"),
@@ -464,7 +438,7 @@ function prepareImplementation(
                 workspaceRoot,
                 signal,
                 Date.now() + state.startupTimeoutMs,
-                materialization?.archive,
+                sealedSnapshot?.archive,
               ),
             catch: () =>
               failure("prepare_implementation", "visual_host_unavailable", "Preview process could not start"),
@@ -598,15 +572,12 @@ function bindEvidence(
   input: WorkflowVisualHost.BindEvidenceInput,
 ): Effect.Effect<WorkflowVisualHost.EvidenceSummary, WorkflowVisualHost.Failure> {
   return Effect.tryPromise({
-    try: async () => {
-      const summary = evidenceSummary(
+    try: async () =>
+      evidenceSummary(
         operation === "commit"
           ? await state.evidence.commit(input, state.now())
           : await state.evidence.release(input, state.now()),
-      )
-      if (operation === "release") await state.onEvidenceReleased?.(input)
-      return summary
-    },
+      ),
     catch: (cause) => evidenceFailure(operation === "commit" ? "commit_evidence" : "release_evidence", cause),
   })
 }
@@ -626,11 +597,7 @@ function reconcileEvidence(
   input: WorkflowVisualHost.ReconcileEvidenceInput,
 ): Effect.Effect<WorkflowVisualHost.ReconcileEvidenceResult, WorkflowVisualHost.Failure> {
   return Effect.tryPromise({
-    try: async () => {
-      const result = await state.evidence.reconcile(input, state.now())
-      await state.onEvidenceReconciled?.(input)
-      return result
-    },
+    try: () => state.evidence.reconcile(input, state.now()),
     catch: (cause) => evidenceFailure("reconcile_evidence", cause),
   })
 }
@@ -782,6 +749,7 @@ function startStaticServer(
 ): void {
   const frozen = archive === undefined ? undefined : WorkflowWorkspaceMaterialization.bytes(archive)
   const frozenEntrypoint = path.relative(containmentRoot, entrypoint).replaceAll("\\", "/")
+  const frozenRoot = path.relative(containmentRoot, root).replaceAll("\\", "/")
   record.server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -789,7 +757,8 @@ function startStaticServer(
       const relative = capabilityPath(request.url, record.hostID)
       if (relative === undefined) return new Response("Not found", { status: 404 })
       if (frozen !== undefined) {
-        const sourcePath = relative === "" ? frozenEntrypoint : relative
+        const sourcePath =
+          relative === "" ? frozenEntrypoint : frozenRoot === "" ? relative : `${frozenRoot}/${relative}`
         if (!validSourcePath(sourcePath)) return new Response("Not found", { status: 404 })
         const bytes = frozen.get(RelativePath.make(sourcePath))
         if (bytes === undefined) return new Response("Not found", { status: 404 })
