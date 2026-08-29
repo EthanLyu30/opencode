@@ -397,3 +397,5 @@ Implementation commit: `e7e1a3c54` (`fix(workflow): rebuild evidence from sealed
 ## Review fix round 3 — independent scoped re-review
 
 The fresh reviewer examined `deb9be88c..e4d02e7ca` and returned **CLEAN**. Unsafe reparse-following cleanup and crash-unsafe/unbounded lease GC were fully removed with the filesystem materialization cache; production now seals bounded bytes directly from durable Git Snapshot objects. Admission-frozen package `cwd` is canonicalized and enforced for functional, script, and static consumers. No new Critical or Important breakage was found.
+
+After review closure, the exact task-owned directories `D:\OpenCode-Task23.7b`, `D:\OpenCode-Task23.7b-round2`, and `D:\OpenCode-Task23.7b-round3` were revalidated as in-scope, non-reparse trees and removed leaf-first with single-file and empty-directory operations. No recursive deletion was used, and all three paths were verified absent afterward.
