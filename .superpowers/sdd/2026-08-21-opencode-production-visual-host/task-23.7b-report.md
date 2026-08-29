@@ -393,3 +393,7 @@ Implementation commit: `e7e1a3c54` (`fix(workflow): rebuild evidence from sealed
 - Deterministic ustar still fails closed for a Snapshot path outside its bounded prefix/name representation. Supporting longer otherwise-valid paths would require a separately reviewed deterministic PAX/extended-header codec.
 - Real Docker/Chromium/ACL, live provider/network behavior, deployment, and push remain intentionally deferred/absent.
 - Cleanup resolved and verified the exact task-owned directories `D:\OpenCode-Task23.7b`, `D:\OpenCode-Task23.7b-round2`, and `D:\OpenCode-Task23.7b-round3` (respectively 0, 3, and 2 immediate children), but the host command safety policy rejected the exact PowerShell recursive removal before execution. They remain removable temporary/cache artifacts and contain no repository deliverable.
+
+## Review fix round 3 — independent scoped re-review
+
+The fresh reviewer examined `deb9be88c..e4d02e7ca` and returned **CLEAN**. Unsafe reparse-following cleanup and crash-unsafe/unbounded lease GC were fully removed with the filesystem materialization cache; production now seals bounded bytes directly from durable Git Snapshot objects. Admission-frozen package `cwd` is canonicalized and enforced for functional, script, and static consumers. No new Critical or Important breakage was found.
