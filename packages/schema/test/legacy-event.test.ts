@@ -7,10 +7,11 @@ import { PermissionV1 } from "../src/permission-v1"
 import { QuestionV1 } from "../src/question-v1"
 import { Project } from "../src/project"
 import { SessionV1 } from "../src/session-v1"
+import { SessionID } from "../src/session-id"
 
 describe("legacy public event schemas", () => {
   const deletion = {
-    sessionID: "ses_legacy_delete",
+    sessionID: SessionID.make("ses_legacy_delete"),
     info: {
       id: "ses_legacy_delete",
       slug: "legacy-delete",
@@ -28,6 +29,7 @@ describe("legacy public event schemas", () => {
       "session.updated",
       "session.deleted",
       "session.deleted",
+      "session.deleted",
       "message.updated",
       "message.removed",
       "message.part.updated",
@@ -37,9 +39,9 @@ describe("legacy public event schemas", () => {
       "session.error",
     ])
     const durable = SessionV1.Event.Definitions.filter((event) => event.durable !== undefined)
-    expect(durable).toHaveLength(8)
     expect(durable.every((event) => event.durable?.aggregate === "sessionID")).toBe(true)
-    expect(durable.map((event) => event.durable?.version)).toEqual([1, 1, 1, 2, 1, 1, 1, 1])
+    expect(durable).toHaveLength(9)
+    expect(durable.map((event) => event.durable?.version)).toEqual([1, 1, 1, 2, 3, 1, 1, 1, 1])
   })
 
   test("owns the legacy transient public definitions", () => {
@@ -68,17 +70,34 @@ describe("legacy public event schemas", () => {
     ])
   })
 
-  test("requires visibility on the current deletion while retaining explicit legacy v1 decoding", () => {
-    expect(SessionV1.Event.Deleted.durable?.version).toBe(2)
+  test("requires visibility and canonical deletion time on v3 while retaining v1 and v2 decoding", () => {
+    expect(SessionV1.Event.Deleted.durable?.version).toBe(3)
     expect(Result.isFailure(Schema.decodeUnknownResult(SessionV1.Event.Deleted.data)(deletion))).toBe(true)
+    expect(
+      Result.isFailure(Schema.decodeUnknownResult(SessionV1.Event.Deleted.data)({ ...deletion, visibility: "public" })),
+    ).toBe(true)
+    expect(
+      Schema.decodeUnknownSync(SessionV1.Event.Deleted.data)({
+        ...deletion,
+        visibility: "public",
+        timeDeleted: 123,
+      }),
+    ).toEqual({
+      sessionID: deletion.sessionID,
+      visibility: "public",
+      timeDeleted: 123,
+    })
 
     const legacy = Durable.get("session.deleted.1")
     expect(legacy?.durable?.version).toBe(1)
     expect(Result.isSuccess(Schema.decodeUnknownResult(legacy!.data)(deletion))).toBe(true)
-    expect(Durable.get("session.deleted.2")).toBe(SessionV1.Event.Deleted)
+    const v2 = Durable.get("session.deleted.2")
+    expect(v2?.durable?.version).toBe(2)
+    expect(Result.isSuccess(Schema.decodeUnknownResult(v2!.data)({ ...deletion, visibility: "public" }))).toBe(true)
+    expect(Durable.get("session.deleted.3")).toBe(SessionV1.Event.Deleted)
   })
 
-  test("does not decode a v2 deletion without visibility through the legacy v1 branch", () => {
+  test("does not decode a v3 deletion without current authority through legacy branches", () => {
     const publicEvent = Schema.Union(EventManifest.ServerDefinitions)
     const payload = {
       id: "evt_legacy_delete_version_guard",
@@ -86,12 +105,20 @@ describe("legacy public event schemas", () => {
       durable: {
         aggregateID: deletion.sessionID,
         seq: 0,
-        version: 2,
+        version: 3,
       },
       data: deletion,
     }
 
     expect(Result.isFailure(Schema.decodeUnknownResult(publicEvent)(payload))).toBe(true)
+    expect(
+      Result.isFailure(
+        Schema.decodeUnknownResult(publicEvent)({
+          ...payload,
+          durable: { ...payload.durable, version: 2 },
+        }),
+      ),
+    ).toBe(true)
     expect(
       Result.isSuccess(
         Schema.decodeUnknownResult(publicEvent)({

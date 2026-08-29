@@ -9,21 +9,29 @@ import type { Database } from "../database/database"
 import type { EventV2 } from "../event"
 import { ResponseTable } from "../responses/sql"
 import { SessionSchema } from "../session/schema"
-import { SessionTable } from "../session/sql"
+import { SessionTable, SessionTombstoneTable } from "../session/sql"
 import { WorkflowRunTable } from "../workflow/sql"
 
 type Visibility = SessionSchema.Visibility
 type Member = {
+  readonly id?: EventV2.ID
   readonly type: string
   readonly data: unknown
   readonly version?: number
   readonly legacy?: boolean
+}
+export interface SessionTombstoneAuthority {
+  readonly visibility: Visibility
+  readonly eventID: EventV2.ID
+  readonly version: number
+  readonly timeDeleted: number
 }
 const UnknownRecord = Schema.Record(Schema.String, Schema.Unknown)
 const authorityChunkSize = 250
 
 export interface Authority {
   readonly session: (sessionID: SessionSchema.ID) => Effect.Effect<Visibility | undefined>
+  readonly tombstone: (sessionID: SessionSchema.ID) => Effect.Effect<SessionTombstoneAuthority | undefined>
   readonly workflow: (workflowID: Workflow.ID) => Effect.Effect<SessionSchema.ID | undefined>
   readonly response: (responseID: Responses.ID) => Effect.Effect<Workflow.ID | undefined>
 }
@@ -48,6 +56,7 @@ const eventType = (type: string) => definition(type)?.type ?? type
 function storedMember(row: StoredEvent): Member {
   const durable = definition(row.type)
   return {
+    id: row.id,
     type: durable?.type ?? row.type,
     data: row.data,
     ...(durable?.durable ? { version: durable.durable.version } : {}),
@@ -67,6 +76,18 @@ export function databaseAuthority(db: Database.Interface["db"]): Authority {
           Effect.orDie,
           Effect.map((row) => row?.visibility),
         ),
+    tombstone: (sessionID) =>
+      db
+        .select({
+          visibility: SessionTombstoneTable.visibility,
+          eventID: SessionTombstoneTable.deletion_event_id,
+          version: SessionTombstoneTable.deletion_version,
+          timeDeleted: SessionTombstoneTable.time_deleted,
+        })
+        .from(SessionTombstoneTable)
+        .where(eq(SessionTombstoneTable.session_id, sessionID))
+        .get()
+        .pipe(Effect.orDie),
     workflow: (workflowID) =>
       db
         .select({ sessionID: WorkflowRunTable.session_id })
@@ -153,9 +174,28 @@ export function preloadDatabaseAuthority(db: Database.Interface["db"], events: R
       { concurrency: 1 },
     )).flat()
     const sessions = new Map(sessionRows.map((row) => [row.sessionID, row.visibility] as const))
+    const tombstoneRows = (yield* Effect.forEach(
+      chunks([...sessionIDs], authorityChunkSize),
+      (ids) =>
+        db
+          .select({
+            sessionID: SessionTombstoneTable.session_id,
+            visibility: SessionTombstoneTable.visibility,
+            eventID: SessionTombstoneTable.deletion_event_id,
+            version: SessionTombstoneTable.deletion_version,
+            timeDeleted: SessionTombstoneTable.time_deleted,
+          })
+          .from(SessionTombstoneTable)
+          .where(inArray(SessionTombstoneTable.session_id, ids))
+          .all()
+          .pipe(Effect.orDie),
+      { concurrency: 1 },
+    )).flat()
+    const tombstones = new Map(tombstoneRows.map(({ sessionID, ...row }) => [sessionID, row] as const))
 
     return {
       session: (sessionID: SessionSchema.ID) => Effect.succeed(sessions.get(sessionID)),
+      tombstone: (sessionID: SessionSchema.ID) => Effect.succeed(tombstones.get(sessionID)),
       workflow: (workflowID: Workflow.ID) => Effect.succeed(workflows.get(workflowID)),
       response: (responseID: Responses.ID) => Effect.succeed(responses.get(responseID)),
     } satisfies Authority
@@ -164,10 +204,12 @@ export function preloadDatabaseAuthority(db: Database.Interface["db"], events: R
 
 export function isPublic(
   event: {
+    readonly id?: EventV2.ID
     readonly type?: string
     readonly data?: unknown
     readonly durable?: {
       readonly aggregateID: string
+      readonly seq?: number
       readonly version?: number
       readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
       readonly related?: ReadonlyArray<Member>
@@ -181,9 +223,10 @@ export function isPublic(
     const members: ReadonlyArray<Member> = event.durable?.related
       ? event.durable.related.map((member, index) => ({
           ...member,
+          ...(batch?.index === index && event.id !== undefined ? { id: event.id } : {}),
           ...(batch?.index === index && event.durable?.version !== undefined ? { version: event.durable.version } : {}),
         }))
-      : [{ type: event.type ?? "", data: event.data, version: event.durable?.version }]
+      : [{ id: event.id, type: event.type ?? "", data: event.data, version: event.durable?.version }]
     return yield* classify(members, event.durable?.aggregateID, authority)
   })
 }
@@ -254,7 +297,7 @@ function classify(members: ReadonlyArray<Member>, aggregateID: string | undefine
     const workflowSessions = new Map<Workflow.ID, Set<SessionSchema.ID>>()
     const responseWorkflows = new Map<Responses.ID, Set<Workflow.ID>>()
     const explicit = new Map<SessionSchema.ID, Set<Visibility>>()
-    const deletionTombstones = new Set<SessionSchema.ID>()
+    const deletions = new Map<SessionSchema.ID, SessionTombstoneAuthority>()
     let owned = false
     let invalid = false
 
@@ -298,15 +341,31 @@ function classify(members: ReadonlyArray<Member>, aggregateID: string | undefine
         if (!Schema.is(SessionSchema.ID)(sessionID)) {
           invalid = true
         } else {
-          if (type === "session.deleted") deletionTombstones.add(sessionID)
-          if (data?.visibility === "public" || data?.visibility === "workflow") {
-            addExplicit(sessionID, data.visibility)
-          } else if (type === "session.created" || member.version === 1 || member.legacy === true) {
-            // Visibility predates legacy Session events. Only the legacy deletion
-            // schema and unversioned historical deletion rows retain that default.
-            addExplicit(sessionID, "public")
-          } else {
-            invalid = true
+          const visibility =
+            data?.visibility === "public" || data?.visibility === "workflow"
+              ? data.visibility
+              : type === "session.created" || member.version === 1 || member.legacy === true
+                ? "public"
+                : undefined
+          if (visibility) addExplicit(sessionID, visibility)
+          else invalid = true
+          if (type === "session.deleted") {
+            const version = member.version ?? (member.legacy === true ? 1 : undefined)
+            const legacyInfo = record(data?.info)
+            const legacyTime = record(legacyInfo?.time)?.updated
+            const timeDeleted = version === 3 ? data?.timeDeleted : legacyTime
+            if (
+              member.id === undefined ||
+              visibility === undefined ||
+              (version !== 1 && version !== 2 && version !== 3) ||
+              typeof timeDeleted !== "number" ||
+              !Number.isSafeInteger(timeDeleted) ||
+              timeDeleted < 0
+            ) {
+              invalid = true
+            } else {
+              deletions.set(sessionID, { visibility, eventID: member.id, version, timeDeleted })
+            }
           }
         }
       }
@@ -354,10 +413,24 @@ function classify(members: ReadonlyArray<Member>, aggregateID: string | undefine
     for (const sessionID of sessions) {
       const declared = explicit.get(sessionID)
       const projected = yield* authority.session(sessionID)
-      if (projected === undefined) {
-        if (!deletionTombstones.has(sessionID) || declared?.size !== 1) return false
-        for (const visibility of declared) visibilities.add(visibility)
+      const deletion = deletions.get(sessionID)
+      if (deletion) {
+        if (projected !== undefined) return false
+        const tombstone = yield* authority.tombstone(sessionID)
+        if (
+          !tombstone ||
+          tombstone.visibility !== deletion.visibility ||
+          tombstone.eventID !== deletion.eventID ||
+          tombstone.version !== deletion.version ||
+          tombstone.timeDeleted !== deletion.timeDeleted
+        ) {
+          return false
+        }
+        visibilities.add(tombstone.visibility)
         continue
+      }
+      if (projected === undefined) {
+        return false
       }
       if (declared && (declared.size !== 1 || !declared.has(projected))) return false
       visibilities.add(projected)

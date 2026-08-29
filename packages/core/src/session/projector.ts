@@ -14,7 +14,14 @@ import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { SessionContextEpoch } from "./context-epoch"
-import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
+import {
+  MessageTable,
+  PartTable,
+  SessionInputTable,
+  SessionMessageTable,
+  SessionTable,
+  SessionTombstoneTable,
+} from "./sql"
 import { AbsolutePath, type DeepMutable } from "../schema"
 
 type DatabaseService = Database.Interface["db"]
@@ -23,6 +30,7 @@ const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
 
 export class SessionAlreadyProjected extends Error {}
+export class SessionTerminallyDeleted extends Error {}
 class InvalidSessionDeletion extends Error {}
 
 type Usage = {
@@ -217,11 +225,14 @@ function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: 
 function deleteSession(db: DatabaseService, event: EventV2.Payload<typeof SessionV1.Event.Deleted>) {
   return Effect.gen(function* () {
     const version = event.durable?.version
-    if (version !== undefined && version !== 1 && version !== 2) {
+    if (version !== undefined && version !== 1 && version !== 2 && version !== 3) {
       return yield* Effect.die(new InvalidSessionDeletion(`Unsupported Session deletion version ${version}`))
     }
-    const data = event.data as (typeof SessionV1.Event.DeletedV1.Type)["data"]
-    if (version === 2 && data.visibility === undefined) {
+    const data = event.data as
+      | (typeof SessionV1.Event.DeletedV1.Type)["data"]
+      | (typeof SessionV1.Event.DeletedV2.Type)["data"]
+      | (typeof SessionV1.Event.Deleted.Type)["data"]
+    if ((version === 2 || version === 3) && data.visibility === undefined) {
       return yield* Effect.die(new InvalidSessionDeletion("Current Session deletion is missing visibility authority"))
     }
     const visibility = data.visibility ?? "public"
@@ -238,6 +249,22 @@ function deleteSession(db: DatabaseService, event: EventV2.Payload<typeof Sessio
       return yield* Effect.die(
         new InvalidSessionDeletion("Session deletion visibility contradicts projected authority"),
       )
+    }
+    const tombstone = yield* db
+      .insert(SessionTombstoneTable)
+      .values({
+        session_id: data.sessionID,
+        visibility,
+        deletion_event_id: event.id,
+        deletion_version: version ?? 1,
+        time_deleted: "timeDeleted" in data ? data.timeDeleted : data.info.time.updated,
+      })
+      .onConflictDoNothing()
+      .returning({ sessionID: SessionTombstoneTable.session_id })
+      .get()
+      .pipe(Effect.orDie)
+    if (!tombstone) {
+      return yield* Effect.die(new InvalidSessionDeletion("Session deletion conflicts with terminal authority"))
     }
     const deleted = yield* db
       .delete(SessionTable)
@@ -258,9 +285,16 @@ const layer = Layer.effectDiscard(
     const { db } = yield* Database.Service
     yield* events.project(SessionV1.Event.Created, (event) =>
       Effect.gen(function* () {
+        const tombstone = yield* db
+          .select({ sessionID: SessionTombstoneTable.session_id })
+          .from(SessionTombstoneTable)
+          .where(eq(SessionTombstoneTable.session_id, event.data.sessionID))
+          .get()
+          .pipe(Effect.orDie)
+        if (tombstone) yield* Effect.die(new SessionTerminallyDeleted())
         if (event.data.project) {
           if (event.data.project.id !== event.data.info.projectID) {
-            return yield* Effect.die(new Error("Session project identity does not match its creation event"))
+            yield* Effect.die(new Error("Session project identity does not match its creation event"))
           }
           yield* db
             .insert(ProjectTable)
@@ -281,7 +315,7 @@ const layer = Layer.effectDiscard(
           .returning({ sessionID: SessionTable.id })
           .get()
           .pipe(Effect.orDie)
-        if (!stored) return yield* Effect.die(new SessionAlreadyProjected())
+        if (!stored) yield* Effect.die(new SessionAlreadyProjected())
         if (event.data.info.workspaceID) {
           yield* db
             .update(WorkspaceTable)

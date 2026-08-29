@@ -18,7 +18,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { InstanceStore } from "@/project/instance-store"
 import { InstanceBootstrap } from "@/project/bootstrap"
 import { Database } from "@opencode-ai/core/database/database"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionTable, SessionTombstoneTable } from "@opencode-ai/core/session/sql"
 import { eq } from "drizzle-orm"
 import { DateTime } from "effect"
 import { ResponseEvent } from "@opencode-ai/schema/response-event"
@@ -28,6 +28,8 @@ import { Event } from "@opencode-ai/schema/event"
 import { WorkflowRunTable } from "@opencode-ai/core/workflow/sql"
 import { ResponseTable } from "@opencode-ai/core/responses/sql"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import { publicHistory } from "../../src/server/routes/instance/httpapi/handlers/sync-history"
 
 const ForgedResponseCreated = Event.define({
@@ -470,7 +472,11 @@ describe("session.created event", () => {
       yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
 
       const exit = yield* events
-        .publish(SessionV1.Event.Deleted, { sessionID: info.id, info, visibility: "public" })
+        .publish(SessionV1.Event.Deleted, {
+          sessionID: info.id,
+          visibility: "public",
+          timeDeleted: 300,
+        })
         .pipe(Effect.exit)
 
       expect(Exit.isFailure(exit)).toBe(true)
@@ -501,10 +507,10 @@ describe("session.created event", () => {
 
       const deleted = yield* events.publish(SessionV1.Event.Deleted, {
         sessionID: info.id,
-        info,
         visibility: "public",
+        timeDeleted: 301,
       })
-      expect(deleted.durable?.version).toBe(2)
+      expect(deleted.durable?.version).toBe(3)
       expect(yield* awaitDeferred(received, "timed out waiting for public session.deleted")).toBeDefined()
       expect((yield* publicHistory(db, {})).map((event) => event.id)).toEqual([deleted.id])
     }),
@@ -561,9 +567,221 @@ describe("session.created event", () => {
       GlobalBus.on("event", listener)
       yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", listener)))
 
-      yield* events.publish(SessionV1.Event.Deleted, { sessionID: info.id, info, visibility: "workflow" })
+      yield* events.publish(SessionV1.Event.Deleted, {
+        sessionID: info.id,
+        visibility: "workflow",
+        timeDeleted: 302,
+      })
       expect(received).toEqual([])
       expect(yield* publicHistory(db, {})).toEqual([])
+    }),
+  )
+
+  it.instance("retains terminal deletion history when production Session removal compacts prior events", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const { db } = yield* Database.Service
+      const info = yield* session.create({
+        title: "SENSITIVE_SESSION_TITLE",
+        metadata: { secret: "SENSITIVE_SESSION_METADATA" },
+      })
+
+      const messageID = MessageID.ascending()
+      yield* session.updateMessage({
+        id: messageID,
+        sessionID: info.id,
+        role: "user",
+        time: { created: 1 },
+        agent: "user",
+        model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+        tools: {},
+      } satisfies SessionV1.User)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID: info.id,
+        messageID,
+        type: "text",
+        text: "SENSITIVE_PRIOR_PROMPT",
+      })
+      yield* session.remove(info.id)
+
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.id, info.id)).get().pipe(Effect.orDie),
+      ).toBeUndefined()
+      const history = yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, info.id)).all()
+      expect(history).toHaveLength(1)
+      expect(history[0]).toMatchObject({ aggregate_id: info.id, seq: 3, type: "session.deleted.3" })
+      expect(
+        yield* db.select().from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, info.id)).get(),
+      ).toMatchObject({ aggregate_id: info.id, seq: 3 })
+      const tombstone = yield* db
+        .select()
+        .from(SessionTombstoneTable)
+        .where(eq(SessionTombstoneTable.session_id, info.id))
+        .get()
+      const authority = tombstone ?? (yield* Effect.die("Terminal tombstone was not stored"))
+      expect(authority).toMatchObject({ session_id: info.id, visibility: "public", deletion_version: 3 })
+      expect(Object.keys(authority).sort()).toEqual([
+        "deletion_event_id",
+        "deletion_version",
+        "session_id",
+        "time_deleted",
+        "visibility",
+      ])
+      expect(history[0].data).toEqual({
+        sessionID: info.id,
+        visibility: "public",
+        timeDeleted: authority.time_deleted,
+      })
+      const retained = JSON.stringify({ history, tombstone: authority })
+      expect(retained).not.toContain("SENSITIVE_PRIOR_PROMPT")
+      expect(retained).not.toContain("SENSITIVE_SESSION_TITLE")
+      expect(retained).not.toContain("SENSITIVE_SESSION_METADATA")
+      expect(retained).not.toContain('"info"')
+      expect((yield* publicHistory(db, {})).map((event) => event.id)).toEqual([history[0].id])
+    }),
+  )
+
+  it.instance("fails closed on a forged terminal envelope before compacting history", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const { db } = yield* Database.Service
+      const info = yield* session.create({})
+      const deleted = yield* events.publish(SessionV1.Event.Deleted, {
+        sessionID: info.id,
+        visibility: "public",
+        timeDeleted: 401,
+      })
+
+      const forged = {
+        ...deleted,
+        durable: { ...deleted.durable!, version: 2 },
+      } as typeof deleted
+      const exit = yield* events.compactTerminal(SessionV1.Event.Deleted, forged).pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Failure")
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, info.id)).all()).toHaveLength(2)
+      yield* events.compactTerminal(SessionV1.Event.Deleted, deleted)
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, info.id)).all()).toEqual([
+        expect.objectContaining({ id: deleted.id, type: "session.deleted.3" }),
+      ])
+    }),
+  )
+
+  it.instance("removes complete prior batches instead of leaving related EventV2 members orphaned", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const { db } = yield* Database.Service
+      const info = yield* session.create({})
+      const relatedID = SessionV2.ID.make("ses_compaction_related_member")
+      const batchID = EventV2.ID.make("evt_compaction_complete_batch")
+
+      yield* events.publish(
+        SessionV1.Event.Updated,
+        { sessionID: info.id, info: { ...info, title: "batched update" } },
+        {
+          id: batchID,
+          related: [
+            {
+              definition: SessionV1.Event.Created,
+              data: {
+                sessionID: relatedID,
+                info: { ...info, id: relatedID, slug: "related-member", title: "Related member" },
+                visibility: "public",
+              },
+            },
+          ],
+        },
+      )
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.batch_id, batchID)).all()).toHaveLength(2)
+
+      yield* session.remove(info.id)
+
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.batch_id, batchID)).all()).toEqual([])
+      expect(
+        yield* db.select().from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, relatedID)).get(),
+      ).toMatchObject({ aggregate_id: relatedID, seq: 0 })
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.id, relatedID)).get().pipe(Effect.orDie),
+      ).toMatchObject({ id: relatedID, visibility: "public" })
+    }),
+  )
+
+  it.instance("rolls back compaction when prior related-batch history is incomplete", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const { db } = yield* Database.Service
+      const info = yield* session.create({})
+      const relatedID = SessionV2.ID.make("ses_compaction_incomplete_member")
+      const batchID = EventV2.ID.make("evt_compaction_incomplete_batch")
+
+      yield* events.publish(
+        SessionV1.Event.Updated,
+        { sessionID: info.id, info: { ...info, title: "incomplete batch" } },
+        {
+          id: batchID,
+          related: [
+            {
+              definition: SessionV1.Event.Created,
+              data: {
+                sessionID: relatedID,
+                info: { ...info, id: relatedID, slug: "incomplete-member", title: "Incomplete member" },
+                visibility: "public",
+              },
+            },
+          ],
+        },
+      )
+      yield* db.delete(EventTable).where(eq(EventTable.aggregate_id, relatedID)).run().pipe(Effect.orDie)
+      const deleted = yield* events.publish(SessionV1.Event.Deleted, {
+        sessionID: info.id,
+        visibility: "public",
+        timeDeleted: 402,
+      })
+
+      const exit = yield* events.compactTerminal(SessionV1.Event.Deleted, deleted).pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Failure")
+      expect(
+        (yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, info.id)).all())
+          .map((row) => row.seq)
+          .sort((left, right) => left - right),
+      ).toEqual([0, 1, 2])
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.batch_id, batchID)).all()).toHaveLength(1)
+    }),
+  )
+
+  it.instance("compacts terminal history across more than one bounded batch page", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const { db } = yield* Database.Service
+      const info = yield* session.create({})
+
+      yield* Effect.forEach(
+        Array.from({ length: 251 }, (_, index) => index),
+        (index) =>
+          events.publish(SessionV1.Event.Updated, {
+            sessionID: info.id,
+            info: { ...info, title: `SENSITIVE_PAGE_${index}` },
+          }),
+        { concurrency: 1, discard: true },
+      )
+      const deleted = yield* events.publish(SessionV1.Event.Deleted, {
+        sessionID: info.id,
+        visibility: "public",
+        timeDeleted: 403,
+      })
+
+      yield* events.compactTerminal(SessionV1.Event.Deleted, deleted)
+
+      const history = yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, info.id)).all()
+      expect(history).toEqual([expect.objectContaining({ id: deleted.id, seq: 252, type: "session.deleted.3" })])
+      expect(JSON.stringify(history)).not.toContain("SENSITIVE_PAGE_")
+      expect(yield* EventV2.latestSequence(db, info.id)).toBe(252)
     }),
   )
 })

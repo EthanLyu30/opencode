@@ -265,6 +265,15 @@ export default {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`session_tombstone\` (
+          \`session_id\` text PRIMARY KEY,
+          \`visibility\` text NOT NULL,
+          \`deletion_event_id\` text NOT NULL,
+          \`deletion_version\` integer NOT NULL,
+          \`time_deleted\` integer NOT NULL
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`todo\` (
           \`session_id\` text NOT NULL,
           \`content\` text NOT NULL,
@@ -393,6 +402,9 @@ export default {
       yield* tx.run(`CREATE INDEX \`session_project_idx\` ON \`session\` (\`project_id\`);`)
       yield* tx.run(`CREATE INDEX \`session_workspace_idx\` ON \`session\` (\`workspace_id\`);`)
       yield* tx.run(`CREATE INDEX \`session_parent_idx\` ON \`session\` (\`parent_id\`);`)
+      yield* tx.run(
+        `CREATE UNIQUE INDEX \`session_tombstone_deletion_event_idx\` ON \`session_tombstone\` (\`deletion_event_id\`);`,
+      )
       yield* tx.run(`CREATE INDEX \`todo_session_idx\` ON \`todo\` (\`session_id\`);`)
       yield* tx.run(
         `CREATE UNIQUE INDEX \`workflow_artifact_stage_kind_sha_idx\` ON \`workflow_artifact\` (\`stage_id\`,\`kind\`,\`sha256\`);`,

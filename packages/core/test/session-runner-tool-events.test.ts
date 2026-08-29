@@ -36,6 +36,7 @@ const capture = () => {
     replayBatches: () => Effect.void,
     latestSequence: () => Effect.succeed(-1),
     remove: () => Effect.void,
+    compactTerminal: () => Effect.void,
     claim: () => Effect.void,
   })
   return {

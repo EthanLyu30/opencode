@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
+import { EventV2 } from "@opencode-ai/core/event"
 import { PublicEventVisibility } from "@opencode-ai/core/event/public-visibility"
 import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { SessionV2 } from "@opencode-ai/core/session"
@@ -10,7 +11,10 @@ import { InvalidRequestError } from "@opencode-ai/protocol/errors"
 import { reservedAgent } from "../src/handlers/session"
 import { publicSessionEvent } from "../src/handlers/event"
 
-function sessionAuthority(sessions: Pick<SessionV2.Interface, "get">): PublicEventVisibility.Authority {
+function sessionAuthority(
+  sessions: Pick<SessionV2.Interface, "get">,
+  tombstones = new Map<SessionV2.ID, PublicEventVisibility.SessionTombstoneAuthority>(),
+): PublicEventVisibility.Authority {
   return {
     session: (sessionID) =>
       sessions.get(sessionID).pipe(
@@ -19,6 +23,7 @@ function sessionAuthority(sessions: Pick<SessionV2.Interface, "get">): PublicEve
       ),
     workflow: () => Effect.succeed(undefined),
     response: () => Effect.succeed(undefined),
+    tombstone: (sessionID) => Effect.succeed(tombstones.get(sessionID)),
   }
 }
 
@@ -112,6 +117,8 @@ describe("SessionHandler", () => {
 
   test("delivers immutable public deletion tombstones after the Session row is gone", async () => {
     const deletedID = SessionV2.ID.make("ses_deleted_public")
+    const eventID = EventV2.ID.make("evt_deleted_public")
+    const timeDeleted = 123
     const sessions = {
       get: () => Effect.fail(new SessionV2.NotFoundError({ sessionID: deletedID })),
     } as Pick<SessionV2.Interface, "get">
@@ -119,11 +126,12 @@ describe("SessionHandler", () => {
     const visible = await Effect.runPromise(
       publicSessionEvent(
         {
-          durable: { aggregateID: deletedID },
+          id: eventID,
+          durable: { aggregateID: deletedID, version: 3 },
           type: "session.deleted",
-          data: { sessionID: deletedID, visibility: "public" },
+          data: { sessionID: deletedID, visibility: "public", timeDeleted },
         },
-        sessionAuthority(sessions),
+        sessionAuthority(sessions, new Map([[deletedID, { visibility: "public", eventID, version: 3, timeDeleted }]])),
       ),
     )
 
@@ -135,26 +143,34 @@ describe("SessionHandler", () => {
     const sessions = {
       get: () => Effect.fail(new SessionV2.NotFoundError({ sessionID: deletedID })),
     } as Pick<SessionV2.Interface, "get">
-    const deletion = { sessionID: deletedID }
+    const eventID = EventV2.ID.make("evt_deleted_versioned")
+    const timeDeleted = 456
+    const deletion = { sessionID: deletedID, info: { time: { updated: timeDeleted } } }
+    const authority = sessionAuthority(
+      sessions,
+      new Map([[deletedID, { visibility: "public", eventID, version: 1, timeDeleted }]]),
+    )
 
     const legacy = await Effect.runPromise(
       publicSessionEvent(
         {
+          id: eventID,
           durable: { aggregateID: deletedID, version: 1 },
           type: "session.deleted",
           data: deletion,
         },
-        sessionAuthority(sessions),
+        authority,
       ),
     )
     const current = await Effect.runPromise(
       publicSessionEvent(
         {
+          id: eventID,
           durable: { aggregateID: deletedID, version: 2 },
           type: "session.deleted",
           data: deletion,
         },
-        sessionAuthority(sessions),
+        authority,
       ),
     )
 
@@ -248,6 +264,7 @@ describe("SessionHandler", () => {
           session: () => Effect.succeed("public"),
           workflow: () => Effect.succeed(first),
           response: () => Effect.succeed(undefined),
+          tombstone: () => Effect.succeed(undefined),
         },
       ),
     )
@@ -286,6 +303,7 @@ describe("SessionHandler", () => {
           session: () => Effect.succeed("public"),
           workflow: () => Effect.succeed(sessionID),
           response: () => Effect.succeed(workflowID),
+          tombstone: () => Effect.succeed(undefined),
         },
       ),
     )
@@ -306,6 +324,7 @@ describe("SessionHandler", () => {
           session: () => Effect.succeed(undefined),
           workflow: () => Effect.succeed(undefined),
           response: () => Effect.succeed(undefined),
+          tombstone: () => Effect.succeed(undefined),
         },
       ),
     )
@@ -337,6 +356,7 @@ describe("SessionHandler", () => {
           session: () => Effect.succeed("public"),
           workflow: () => Effect.succeed(sessionID),
           response: () => Effect.succeed(workflowID),
+          tombstone: () => Effect.succeed(undefined),
         },
       ),
     )

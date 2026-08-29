@@ -35,7 +35,7 @@ test("shows the not found fallback when the viewed session is deleted", async ({
 
   events.push({
     directory,
-    payload: { type: "session.deleted", properties: { info: childSession() } },
+    payload: { type: "session.deleted", properties: { sessionID: childSession().id } },
   })
 
   await expect(page.getByText("This session cannot be found")).toBeVisible()

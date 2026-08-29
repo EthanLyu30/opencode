@@ -12,7 +12,7 @@ import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionTable, SessionTombstoneTable } from "@opencode-ai/core/session/sql"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { testEffect } from "./lib/effect"
 
@@ -85,7 +85,11 @@ describe("Session deletion projection authority", () => {
       yield* collectPublic(events, db, received)
 
       const exit = yield* events
-        .publish(SessionV1.Event.Deleted, { sessionID, info: info(sessionID), visibility: "public" })
+        .publish(SessionV1.Event.Deleted, {
+          sessionID,
+          visibility: "public",
+          timeDeleted: 100,
+        })
         .pipe(Effect.exit)
 
       expect(exit._tag).toBe("Failure")
@@ -110,16 +114,30 @@ describe("Session deletion projection authority", () => {
 
       const deleted = yield* events.publish(SessionV1.Event.Deleted, {
         sessionID,
-        info: info(sessionID),
         visibility: "public",
+        timeDeleted: 101,
       })
 
-      expect(deleted.durable?.version).toBe(2)
+      expect(deleted.durable?.version).toBe(3)
       expect(
         yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie),
       ).toBeUndefined()
       expect(received.map((event) => event.id)).toEqual([deleted.id])
       expect((yield* publicHistory(db)).map((event) => event.id)).toEqual([deleted.id])
+      expect(
+        yield* db
+          .select()
+          .from(SessionTombstoneTable)
+          .where(eq(SessionTombstoneTable.session_id, sessionID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({
+        session_id: sessionID,
+        visibility: "public",
+        deletion_event_id: deleted.id,
+        deletion_version: 3,
+        time_deleted: 101,
+      })
     }),
   )
 
@@ -134,8 +152,8 @@ describe("Session deletion projection authority", () => {
 
       yield* events.publish(SessionV1.Event.Deleted, {
         sessionID,
-        info: info(sessionID),
         visibility: "workflow",
+        timeDeleted: 102,
       })
 
       expect(
@@ -176,6 +194,43 @@ describe("Session deletion projection authority", () => {
     }),
   )
 
+  it.effect("replays a strict v2 workflow deletion into exact terminal authority", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const sessionID = SessionV2.ID.make("ses_delete_v2_workflow")
+      const eventID = EventV2.ID.make("evt_delete_v2_workflow")
+      yield* seed(db, sessionID, "workflow")
+
+      yield* events.replay({
+        id: eventID,
+        aggregateID: sessionID,
+        seq: 0,
+        type: EventV2.versionedType(SessionV1.Event.DeletedV2.type, 2),
+        data: { sessionID, info: info(sessionID), visibility: "workflow" },
+      })
+
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie),
+      ).toBeUndefined()
+      expect(
+        yield* db
+          .select()
+          .from(SessionTombstoneTable)
+          .where(eq(SessionTombstoneTable.session_id, sessionID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({
+        session_id: sessionID,
+        visibility: "workflow",
+        deletion_event_id: eventID,
+        deletion_version: 2,
+        time_deleted: 0,
+      })
+      expect(yield* publicHistory(db)).toEqual([])
+    }),
+  )
+
   it.effect("rejects legacy visibility omission for a workflow-hidden Session", () =>
     Effect.gen(function* () {
       const { db } = yield* Database.Service
@@ -212,7 +267,11 @@ describe("Session deletion projection authority", () => {
       const sessionID = SessionV2.ID.make("ses_delete_missing_direct")
 
       const exit = yield* events
-        .publish(SessionV1.Event.Deleted, { sessionID, info: info(sessionID), visibility: "public" })
+        .publish(SessionV1.Event.Deleted, {
+          sessionID,
+          visibility: "public",
+          timeDeleted: 103,
+        })
         .pipe(Effect.exit)
 
       expect(exit._tag).toBe("Failure")
@@ -233,8 +292,8 @@ describe("Session deletion projection authority", () => {
             id: EventV2.ID.make("evt_delete_missing_replay"),
             aggregateID: sessionID,
             seq: 0,
-            type: EventV2.versionedType(SessionV1.Event.Deleted.type, 2),
-            data: { sessionID, info: info(sessionID), visibility: "public" },
+            type: EventV2.versionedType(SessionV1.Event.Deleted.type, 3),
+            data: { sessionID, visibility: "public", timeDeleted: 104 },
           },
           { publish: true },
         )
@@ -258,7 +317,7 @@ describe("Session deletion projection authority", () => {
 
       yield* events.publish(
         SessionV1.Event.Deleted,
-        { sessionID, info: info(sessionID), visibility: "public" },
+        { sessionID, visibility: "public", timeDeleted: 105 },
         { id: eventID },
       )
       const stored = yield* db.select().from(EventTable).where(eq(EventTable.id, eventID)).get().pipe(Effect.orDie)
@@ -290,7 +349,7 @@ describe("Session deletion projection authority", () => {
       const { db } = yield* Database.Service
       const events = yield* EventV2.Service
       const sessionID = SessionV2.ID.make("ses_delete_duplicate_batch")
-      const data = { sessionID, info: info(sessionID), visibility: "public" as const }
+      const data = { sessionID, visibility: "public" as const, timeDeleted: 106 }
       yield* seed(db, sessionID, "public")
 
       const exit = yield* events
@@ -318,12 +377,12 @@ describe("Session deletion projection authority", () => {
       const exit = yield* events
         .publish(
           SessionV1.Event.Deleted,
-          { sessionID, info: info(sessionID), visibility: "public" },
+          { sessionID, visibility: "public", timeDeleted: 107 },
           {
             related: [
               {
                 definition: SessionV1.Event.Deleted,
-                data: { sessionID, info: info(sessionID), visibility: "workflow" },
+                data: { sessionID, visibility: "workflow", timeDeleted: 107 },
               },
             ],
           },
@@ -336,6 +395,191 @@ describe("Session deletion projection authority", () => {
       ).toMatchObject({ id: sessionID, visibility: "public" })
       expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toEqual([])
       expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual([])
+    }),
+  )
+
+  it.effect("permanently reserves a deleted Session ID against a later creation event", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const sessionID = SessionV2.ID.make("ses_delete_then_create")
+      const deletionID = EventV2.ID.make("evt_delete_then_create_deleted")
+      yield* seed(db, sessionID, "workflow")
+
+      yield* events.publish(
+        SessionV1.Event.Deleted,
+        { sessionID, visibility: "workflow", timeDeleted: 200 },
+        { id: deletionID },
+      )
+      const exit = yield* events
+        .publish(SessionV1.Event.Created, {
+          sessionID,
+          info: info(sessionID),
+          visibility: "public",
+        })
+        .pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Failure")
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie),
+      ).toBeUndefined()
+      expect((yield* db.select().from(EventTable).all().pipe(Effect.orDie)).map((row) => row.id)).toEqual([deletionID])
+      expect(yield* EventV2.latestSequence(db, sessionID)).toBe(0)
+    }),
+  )
+
+  it.effect("serializes concurrent creation and deletion with deletion terminal", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const sessionID = SessionV2.ID.make("ses_delete_create_concurrent")
+      yield* seed(db, sessionID, "public")
+
+      const [deleted, created] = yield* Effect.all(
+        [
+          events
+            .publish(SessionV1.Event.Deleted, {
+              sessionID,
+              visibility: "public",
+              timeDeleted: 200,
+            })
+            .pipe(Effect.exit),
+          events
+            .publish(SessionV1.Event.Created, {
+              sessionID,
+              info: info(sessionID),
+              visibility: "public",
+            })
+            .pipe(Effect.exit),
+        ],
+        { concurrency: "unbounded" },
+      )
+
+      expect(deleted._tag).toBe("Success")
+      expect(created._tag).toBe("Failure")
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie),
+      ).toBeUndefined()
+      expect(
+        yield* db
+          .select()
+          .from(SessionTombstoneTable)
+          .where(eq(SessionTombstoneTable.session_id, sessionID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toMatchObject({ session_id: sessionID, visibility: "public", deletion_version: 3 })
+      expect(yield* EventV2.latestSequence(db, sessionID)).toBe(0)
+    }),
+  )
+
+  it.effect("rejects delete then create members in one batch without deleting the live Session", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const sessionID = SessionV2.ID.make("ses_delete_create_batch")
+      yield* seed(db, sessionID, "public")
+
+      const exit = yield* events
+        .publish(
+          SessionV1.Event.Deleted,
+          { sessionID, visibility: "public", timeDeleted: 201 },
+          {
+            related: [
+              {
+                definition: SessionV1.Event.Created,
+                data: { sessionID, info: info(sessionID), visibility: "public" },
+              },
+            ],
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Failure")
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie),
+      ).toMatchObject({ id: sessionID, visibility: "public" })
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toEqual([])
+      expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual([])
+    }),
+  )
+
+  it.effect("rolls back sequential replay when deletion is followed by resurrection", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const sessionID = SessionV2.ID.make("ses_delete_create_replay")
+      yield* seed(db, sessionID, "public")
+
+      const exit = yield* events
+        .replayAll([
+          {
+            id: EventV2.ID.make("evt_delete_create_replay_deleted"),
+            aggregateID: sessionID,
+            seq: 0,
+            type: EventV2.versionedType(SessionV1.Event.Deleted.type, 3),
+            data: { sessionID, visibility: "public", timeDeleted: 202 },
+          },
+          {
+            id: EventV2.ID.make("evt_delete_create_replay_created"),
+            aggregateID: sessionID,
+            seq: 1,
+            type: EventV2.versionedType(SessionV1.Event.Created.type, 1),
+            data: { sessionID, info: info(sessionID), visibility: "public" },
+          },
+        ])
+        .pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Failure")
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie),
+      ).toMatchObject({ id: sessionID, visibility: "public" })
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toEqual([])
+      expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual([])
+    }),
+  )
+
+  it.effect("requires exact persisted tombstone identity to expose a deleted Session", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const sessionID = SessionV2.ID.make("ses_delete_exact_visibility")
+      yield* seed(db, sessionID, "public")
+      const deleted = yield* events.publish(
+        SessionV1.Event.Deleted,
+        { sessionID, visibility: "public", timeDeleted: 203 },
+        { id: EventV2.ID.make("evt_delete_exact_visibility") },
+      )
+      const authority = PublicEventVisibility.databaseAuthority(db)
+
+      expect(yield* PublicEventVisibility.isPublic(deleted, authority)).toBe(true)
+      expect(
+        yield* PublicEventVisibility.isPublic(
+          { ...deleted, id: EventV2.ID.make("evt_delete_forged_visibility") },
+          authority,
+        ),
+      ).toBe(false)
+      expect(
+        yield* PublicEventVisibility.isPublic({ ...deleted, durable: { ...deleted.durable!, version: 2 } }, authority),
+      ).toBe(false)
+    }),
+  )
+
+  it.effect("suppresses a deletion payload when no durable tombstone authority exists", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const sessionID = SessionV2.ID.make("ses_delete_no_tombstone")
+
+      expect(
+        yield* PublicEventVisibility.isPublic(
+          {
+            id: EventV2.ID.make("evt_delete_no_tombstone"),
+            type: SessionV1.Event.Deleted.type,
+            data: { sessionID, visibility: "public", timeDeleted: 204 },
+            durable: { aggregateID: sessionID, seq: 0, version: 3 },
+          },
+          PublicEventVisibility.databaseAuthority(db),
+        ),
+      ).toBe(false)
     }),
   )
 })

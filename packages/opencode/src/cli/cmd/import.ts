@@ -1,10 +1,9 @@
 import type { Session as SDKSession, Message, Part } from "@opencode-ai/sdk/v2"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Session } from "@/session/session"
-import { MessageV2 } from "../../session/message-v2"
 import { CliError, effectCmd } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
-import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
+import { SessionTable, SessionTombstoneTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
@@ -12,6 +11,7 @@ import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, Schema } from "effect"
 import type { InstanceContext } from "@/project/instance-context"
+import { eq } from "drizzle-orm"
 
 const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
 const decodePart = Schema.decodeUnknownSync(SessionV1.Part)
@@ -47,6 +47,21 @@ export function formatImportFileError(file: string, error: FSUtil.Error) {
 
   const detail = error.cause instanceof Error ? error.cause.message : error.message
   return `Invalid JSON in ${file}: ${detail}`
+}
+
+export function assertImportableSession(
+  db: Database.Interface["db"],
+  sessionID: (typeof SessionTable.$inferSelect)["id"],
+) {
+  return Effect.gen(function* () {
+    const tombstone = yield* db
+      .select({ sessionID: SessionTombstoneTable.session_id })
+      .from(SessionTombstoneTable)
+      .where(eq(SessionTombstoneTable.session_id, sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    if (tombstone) yield* new CliError({ message: `Cannot import permanently deleted session: ${sessionID}` })
+  })
 }
 
 /**
@@ -184,46 +199,57 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
   }) as Session.Info
   const row = Session.toRow(info)
   yield* db
-    .insert(SessionTable)
-    .values(row)
-    .onConflictDoUpdate({
-      target: SessionTable.id,
-      set: { project_id: row.project_id, directory: row.directory, path: row.path },
-    })
-    .run()
-    .pipe(Effect.orDie)
+    .transaction(
+      () =>
+        Effect.gen(function* () {
+          yield* assertImportableSession(db, row.id)
 
-  for (const msg of exportData.messages) {
-    const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
-    const { id, sessionID: _, ...msgData } = msgInfo
-    yield* db
-      .insert(MessageTable)
-      .values({
-        id,
-        session_id: row.id,
-        time_created: msgInfo.time?.created ?? Date.now(),
-        data: msgData as never,
-      })
-      .onConflictDoNothing()
-      .run()
-      .pipe(Effect.orDie)
+          yield* db
+            .insert(SessionTable)
+            .values(row)
+            .onConflictDoUpdate({
+              target: SessionTable.id,
+              set: { project_id: row.project_id, directory: row.directory, path: row.path },
+            })
+            .run()
+            .pipe(Effect.orDie)
 
-    for (const part of msg.parts) {
-      const partInfo = decodePart(part) as SessionV1.Part
-      const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
-      yield* db
-        .insert(PartTable)
-        .values({
-          id: partId,
-          message_id: messageID,
-          session_id: row.id,
-          data: partData,
-        })
-        .onConflictDoNothing()
-        .run()
-        .pipe(Effect.orDie)
-    }
-  }
+          for (const msg of exportData.messages) {
+            const msgInfo = decodeMessageInfo(msg.info)
+            const { id, sessionID: _, ...msgData } = msgInfo
+            yield* db
+              .insert(MessageTable)
+              .values({
+                id,
+                session_id: row.id,
+                time_created: msgInfo.time?.created ?? Date.now(),
+                // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Runtime decoding validates the payload; Drizzle cannot select a readonly union overload.
+                data: msgData as never,
+              })
+              .onConflictDoNothing()
+              .run()
+              .pipe(Effect.orDie)
+
+            for (const part of msg.parts) {
+              const partInfo = decodePart(part)
+              const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
+              yield* db
+                .insert(PartTable)
+                .values({
+                  id: partId,
+                  message_id: messageID,
+                  session_id: row.id,
+                  data: partData,
+                })
+                .onConflictDoNothing()
+                .run()
+                .pipe(Effect.orDie)
+            }
+          }
+        }),
+      { behavior: "immediate" },
+    )
+    .pipe(Effect.catchTag("SqlError", Effect.die))
 
   process.stdout.write(`Imported session: ${exportData.info.id}`)
   process.stdout.write(EOL)

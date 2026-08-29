@@ -289,7 +289,7 @@ describe("applyDirectoryEvent", () => {
       applyDirectoryEvent({
         event: {
           type: "session.deleted",
-          properties: item.current ? { sessionID: item.info.id } : { info: item.info },
+          properties: item.current ? { sessionID: item.info.id } : { sessionID: item.info.id, info: item.info },
         },
         store,
         setStore,

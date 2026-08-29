@@ -14,6 +14,7 @@ import { Timestamps } from "../database/schema.sql"
 import type { SystemContext } from "../system-context/index"
 import { AgentV2 } from "../agent"
 import type { Revert } from "@opencode-ai/schema/revert"
+import type { EventV2 } from "../event"
 
 type SessionMessageData = Omit<(typeof SessionMessage.Message)["Encoded"], "type" | "id">
 type V1MessageData = Omit<SessionV1.Info, "id" | "sessionID">
@@ -64,6 +65,18 @@ export const SessionTable = sqliteTable(
     index("session_workspace_idx").on(table.workspace_id),
     index("session_parent_idx").on(table.parent_id),
   ],
+)
+
+export const SessionTombstoneTable = sqliteTable(
+  "session_tombstone",
+  {
+    session_id: text().$type<SessionSchema.ID>().primaryKey(),
+    visibility: text().$type<SessionSchema.Visibility>().notNull(),
+    deletion_event_id: text().$type<EventV2.ID>().notNull(),
+    deletion_version: integer().notNull(),
+    time_deleted: integer().notNull(),
+  },
+  (table) => [uniqueIndex("session_tombstone_deletion_event_idx").on(table.deletion_event_id)],
 )
 
 export const MessageTable = sqliteTable(

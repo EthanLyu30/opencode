@@ -1,9 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "ef20b85d-e94d-4ca3-b070-6a6836c1ce4f",
+  "id": "4eaf8f24-f680-4c9e-91a4-e280b4239559",
   "prevIds": [
-    "ded4be51-1a2f-468a-9127-bdf896773dcf"
+    "ef20b85d-e94d-4ca3-b070-6a6836c1ce4f"
   ],
   "ddl": [
     {
@@ -88,6 +88,10 @@
     },
     {
       "name": "session",
+      "entityType": "tables"
+    },
+    {
+      "name": "session_tombstone",
       "entityType": "tables"
     },
     {
@@ -1692,6 +1696,56 @@
     },
     {
       "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "table": "session_tombstone"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "visibility",
+      "entityType": "columns",
+      "table": "session_tombstone"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "deletion_event_id",
+      "entityType": "columns",
+      "table": "session_tombstone"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "deletion_version",
+      "entityType": "columns",
+      "table": "session_tombstone"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_deleted",
+      "entityType": "columns",
+      "table": "session_tombstone"
+    },
+    {
+      "type": "text",
       "notNull": true,
       "autoincrement": false,
       "default": null,
@@ -2793,6 +2847,15 @@
         "session_id"
       ],
       "nameExplicit": false,
+      "name": "session_tombstone_pk",
+      "table": "session_tombstone",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "session_id"
+      ],
+      "nameExplicit": false,
       "name": "session_share_pk",
       "table": "session_share",
       "entityType": "pks"
@@ -3247,6 +3310,20 @@
       "name": "session_parent_idx",
       "entityType": "indexes",
       "table": "session"
+    },
+    {
+      "columns": [
+        {
+          "value": "deletion_event_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "session_tombstone_deletion_event_idx",
+      "entityType": "indexes",
+      "table": "session_tombstone"
     },
     {
       "columns": [

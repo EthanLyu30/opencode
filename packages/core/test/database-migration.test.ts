@@ -16,6 +16,7 @@ import contextEpochAgentMigration from "@opencode-ai/core/database/migration/202
 import simplifyIntegrationCredentialsMigration from "@opencode-ai/core/database/migration/20260611192811_lush_chimera"
 import simplifySessionInputMigration from "@opencode-ai/core/database/migration/20260622202450_simplify_session_input"
 import sessionVisibilityMigration from "@opencode-ai/core/database/migration/20260829061350_session_visibility"
+import sessionTerminalTombstoneMigration from "@opencode-ai/core/database/migration/20260829100035_session_terminal_tombstone"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -125,6 +126,329 @@ describe("DatabaseMigration", () => {
         expect(yield* db.get(sql`SELECT visibility FROM session WHERE id = 'ses_legacy_public'`)).toEqual({
           visibility: "public",
         })
+      }),
+    )
+  })
+
+  test("backfills only unambiguous terminal persisted Session deletions", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* db.run(sql`CREATE TABLE session (id text PRIMARY KEY)`)
+        yield* db.run(sql`
+          CREATE TABLE event_sequence (
+            aggregate_id text PRIMARY KEY,
+            seq integer NOT NULL,
+            owner_id text
+          )
+        `)
+        yield* db.run(sql`
+          CREATE TABLE event (
+            id text PRIMARY KEY,
+            aggregate_id text NOT NULL,
+            seq integer NOT NULL,
+            batch_id text,
+            batch_index integer,
+            batch_size integer,
+            type text NOT NULL,
+            data text NOT NULL
+          )
+        `)
+        yield* db.run(sql`INSERT INTO session (id) VALUES ('ses_live')`)
+        yield* db.run(sql`
+          INSERT INTO event_sequence (aggregate_id, seq) VALUES
+            ('ses_valid_v1', 0),
+            ('ses_valid_v2', 0),
+            ('ses_valid_unversioned', 0),
+            ('ses_live', 0),
+            ('ses_duplicate', 1),
+            ('ses_recreated', 1),
+            ('ses_mismatch', 0),
+            ('ses_invalid_v2', 0),
+            ('ses_partial_batch', 0),
+            ('ses_contradictory_visibility', 1),
+            ('ses_duplicate_create', 2),
+            ('ses_malformed_info', 0),
+            ('ses_malformed_json', 0)
+        `)
+        const deletionInfo = (id: string, updated: number) => ({
+          id,
+          slug: id,
+          projectID: "global",
+          directory: "/project",
+          title: id,
+          version: "test",
+          time: { created: 0, updated },
+        })
+        const rows: Array<{
+          id: string
+          aggregateID: string
+          seq: number
+          batchID: string | null
+          batchIndex: number | null
+          batchSize: number | null
+          type: string
+          data: unknown
+        }> = [
+          {
+            id: "evt_valid_v1",
+            aggregateID: "ses_valid_v1",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.1",
+            data: { sessionID: "ses_valid_v1", info: deletionInfo("ses_valid_v1", 11) },
+          },
+          {
+            id: "evt_valid_v2",
+            aggregateID: "ses_valid_v2",
+            seq: 0,
+            batchID: "evt_valid_v2",
+            batchIndex: 0,
+            batchSize: 1,
+            type: "session.deleted.2",
+            data: {
+              sessionID: "ses_valid_v2",
+              visibility: "workflow",
+              info: deletionInfo("ses_valid_v2", 22),
+            },
+          },
+          {
+            id: "evt_valid_unversioned",
+            aggregateID: "ses_valid_unversioned",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted",
+            data: {
+              sessionID: "ses_valid_unversioned",
+              info: deletionInfo("ses_valid_unversioned", 23),
+            },
+          },
+          {
+            id: "evt_live",
+            aggregateID: "ses_live",
+            seq: 0,
+            batchID: "evt_live",
+            batchIndex: 0,
+            batchSize: 1,
+            type: "session.deleted.2",
+            data: { sessionID: "ses_live", visibility: "public", info: deletionInfo("ses_live", 33) },
+          },
+          {
+            id: "evt_duplicate_1",
+            aggregateID: "ses_duplicate",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.1",
+            data: { sessionID: "ses_duplicate", info: deletionInfo("ses_duplicate", 44) },
+          },
+          {
+            id: "evt_duplicate_2",
+            aggregateID: "ses_duplicate",
+            seq: 1,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.2",
+            data: {
+              sessionID: "ses_duplicate",
+              visibility: "public",
+              info: deletionInfo("ses_duplicate", 45),
+            },
+          },
+          {
+            id: "evt_recreated_delete",
+            aggregateID: "ses_recreated",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.1",
+            data: { sessionID: "ses_recreated", info: deletionInfo("ses_recreated", 55) },
+          },
+          {
+            id: "evt_recreated_create",
+            aggregateID: "ses_recreated",
+            seq: 1,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.created.1",
+            data: { sessionID: "ses_recreated" },
+          },
+          {
+            id: "evt_mismatch",
+            aggregateID: "ses_mismatch",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.1",
+            data: { sessionID: "ses_other", info: deletionInfo("ses_other", 66) },
+          },
+          {
+            id: "evt_invalid_v2",
+            aggregateID: "ses_invalid_v2",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.2",
+            data: { sessionID: "ses_invalid_v2", info: deletionInfo("ses_invalid_v2", 77) },
+          },
+          {
+            id: "evt_partial_batch",
+            aggregateID: "ses_partial_batch",
+            seq: 0,
+            batchID: "evt_partial_batch",
+            batchIndex: 0,
+            batchSize: 2,
+            type: "session.deleted.2",
+            data: {
+              sessionID: "ses_partial_batch",
+              visibility: "public",
+              info: deletionInfo("ses_partial_batch", 88),
+            },
+          },
+          {
+            id: "evt_contradictory_visibility_created",
+            aggregateID: "ses_contradictory_visibility",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.created.1",
+            data: {
+              sessionID: "ses_contradictory_visibility",
+              visibility: "workflow",
+              info: deletionInfo("ses_contradictory_visibility", 89),
+            },
+          },
+          {
+            id: "evt_contradictory_visibility_deleted",
+            aggregateID: "ses_contradictory_visibility",
+            seq: 1,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.1",
+            data: {
+              sessionID: "ses_contradictory_visibility",
+              info: deletionInfo("ses_contradictory_visibility", 90),
+            },
+          },
+          {
+            id: "evt_duplicate_create_1",
+            aggregateID: "ses_duplicate_create",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.created.1",
+            data: {
+              sessionID: "ses_duplicate_create",
+              visibility: "public",
+              info: deletionInfo("ses_duplicate_create", 91),
+            },
+          },
+          {
+            id: "evt_duplicate_create_2",
+            aggregateID: "ses_duplicate_create",
+            seq: 1,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.created.1",
+            data: {
+              sessionID: "ses_duplicate_create",
+              visibility: "public",
+              info: deletionInfo("ses_duplicate_create", 92),
+            },
+          },
+          {
+            id: "evt_duplicate_create_deleted",
+            aggregateID: "ses_duplicate_create",
+            seq: 2,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.2",
+            data: {
+              sessionID: "ses_duplicate_create",
+              visibility: "public",
+              info: deletionInfo("ses_duplicate_create", 93),
+            },
+          },
+          {
+            id: "evt_malformed_info",
+            aggregateID: "ses_malformed_info",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.1",
+            data: { sessionID: "ses_malformed_info", info: { time: { updated: 99 } } },
+          },
+          {
+            id: "evt_malformed_json",
+            aggregateID: "ses_malformed_json",
+            seq: 0,
+            batchID: null,
+            batchIndex: null,
+            batchSize: null,
+            type: "session.deleted.1",
+            data: "{",
+          },
+        ]
+        yield* Effect.forEach(
+          rows,
+          (row) =>
+            db.run(sql`
+              INSERT INTO event (id, aggregate_id, seq, batch_id, batch_index, batch_size, type, data)
+              VALUES (
+                ${row.id}, ${row.aggregateID}, ${row.seq}, ${row.batchID}, ${row.batchIndex}, ${row.batchSize},
+                ${row.type}, ${typeof row.data === "string" ? row.data : JSON.stringify(row.data)}
+              )
+            `),
+          { discard: true },
+        )
+
+        yield* DatabaseMigration.applyOnly(db, [sessionTerminalTombstoneMigration])
+
+        expect(
+          yield* db.all(sql`
+            SELECT session_id, visibility, deletion_event_id, deletion_version, time_deleted
+            FROM session_tombstone
+            ORDER BY session_id
+          `),
+        ).toEqual([
+          {
+            session_id: "ses_valid_unversioned",
+            visibility: "public",
+            deletion_event_id: "evt_valid_unversioned",
+            deletion_version: 1,
+            time_deleted: 23,
+          },
+          {
+            session_id: "ses_valid_v1",
+            visibility: "public",
+            deletion_event_id: "evt_valid_v1",
+            deletion_version: 1,
+            time_deleted: 11,
+          },
+          {
+            session_id: "ses_valid_v2",
+            visibility: "workflow",
+            deletion_event_id: "evt_valid_v2",
+            deletion_version: 2,
+            time_deleted: 22,
+          },
+        ])
       }),
     )
   })

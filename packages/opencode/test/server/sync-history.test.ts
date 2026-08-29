@@ -8,7 +8,7 @@ import { ProjectV2 } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionTable, SessionTombstoneTable } from "@opencode-ai/core/session/sql"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { ResponseTable } from "@opencode-ai/core/responses/sql"
@@ -154,6 +154,10 @@ describe("public sync history", () => {
       const hiddenID = SessionV2.ID.make("ses_hidden_deletion_history")
       const invalidCurrentID = SessionV2.ID.make("ses_invalid_current_deletion_history")
       const unversionedID = SessionV2.ID.make("ses_unversioned_deletion_history")
+      const publicEventID = EventV2.ID.make("evt_public_deletion_history")
+      const legacyEventID = EventV2.ID.make("evt_legacy_deletion_history")
+      const hiddenEventID = EventV2.ID.make("evt_hidden_deletion_history")
+      const unversionedEventID = EventV2.ID.make("evt_unversioned_deletion_history")
       yield* db
         .insert(EventSequenceTable)
         .values(
@@ -168,39 +172,73 @@ describe("public sync history", () => {
         .insert(EventTable)
         .values([
           {
-            id: EventV2.ID.make("evt_public_deletion_history"),
+            id: publicEventID,
             aggregate_id: publicID,
             seq: 0,
-            type: "session.deleted.1",
-            data: { sessionID: publicID, info: {}, visibility: "public" },
+            type: "session.deleted.3",
+            data: { sessionID: publicID, visibility: "public", timeDeleted: 11 },
           },
           {
-            id: EventV2.ID.make("evt_legacy_deletion_history"),
+            id: legacyEventID,
             aggregate_id: legacyID,
             seq: 0,
             type: "session.deleted.1",
-            data: { sessionID: legacyID, info: {} },
+            data: { sessionID: legacyID, info: { time: { updated: 22 } } },
           },
           {
-            id: EventV2.ID.make("evt_hidden_deletion_history"),
+            id: hiddenEventID,
             aggregate_id: hiddenID,
             seq: 0,
-            type: "session.deleted.1",
-            data: { sessionID: hiddenID, info: {}, visibility: "workflow" },
+            type: "session.deleted.3",
+            data: { sessionID: hiddenID, visibility: "workflow", timeDeleted: 33 },
           },
           {
             id: EventV2.ID.make("evt_invalid_current_deletion_history"),
             aggregate_id: invalidCurrentID,
             seq: 0,
             type: "session.deleted.2",
-            data: { sessionID: invalidCurrentID, info: {} },
+            data: { sessionID: invalidCurrentID, info: { time: { updated: 44 } } },
           },
           {
-            id: EventV2.ID.make("evt_unversioned_deletion_history"),
+            id: unversionedEventID,
             aggregate_id: unversionedID,
             seq: 0,
             type: "session.deleted",
-            data: { sessionID: unversionedID, info: {} },
+            data: { sessionID: unversionedID, info: { time: { updated: 55 } } },
+          },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTombstoneTable)
+        .values([
+          {
+            session_id: publicID,
+            visibility: "public",
+            deletion_event_id: publicEventID,
+            deletion_version: 3,
+            time_deleted: 11,
+          },
+          {
+            session_id: legacyID,
+            visibility: "public",
+            deletion_event_id: legacyEventID,
+            deletion_version: 1,
+            time_deleted: 22,
+          },
+          {
+            session_id: hiddenID,
+            visibility: "workflow",
+            deletion_event_id: hiddenEventID,
+            deletion_version: 3,
+            time_deleted: 33,
+          },
+          {
+            session_id: unversionedID,
+            visibility: "public",
+            deletion_event_id: unversionedEventID,
+            deletion_version: 1,
+            time_deleted: 55,
           },
         ])
         .run()
@@ -766,7 +804,7 @@ describe("public sync history", () => {
       expect(rows).toHaveLength(candidateCount)
       expect(rows.map((row) => row.id)).toEqual(candidates.map((row) => row.id))
       expect(observations.filter((observation) => observation.method === "get")).toEqual([])
-      expect(observations).toHaveLength(21)
+      expect(observations).toHaveLength(26)
       expect(observations.reduce((total, observation) => total + observation.rows, 0)).toBe(candidateCount * 5)
     }),
   )

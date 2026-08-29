@@ -861,7 +861,7 @@ export function createServerSession(
 
   const eventSessionID = (event: { type: string; properties?: unknown }) => {
     const properties = event.properties
-    if (!properties || typeof properties !== "object") return
+    if (!properties || typeof properties !== "object") return undefined
     if ("sessionID" in properties && typeof properties.sessionID === "string") return properties.sessionID
     if (
       "info" in properties &&
@@ -872,6 +872,15 @@ export function createServerSession(
     )
       return properties.info.sessionID
     if (
+      event.type === "session.deleted" &&
+      "info" in properties &&
+      properties.info &&
+      typeof properties.info === "object" &&
+      "id" in properties.info &&
+      typeof properties.info.id === "string"
+    )
+      return properties.info.id
+    if (
       "part" in properties &&
       properties.part &&
       typeof properties.part === "object" &&
@@ -879,6 +888,7 @@ export function createServerSession(
       typeof properties.part.sessionID === "string"
     )
       return properties.part.sessionID
+    return undefined
   }
 
   const projectV2 = (reduction: V2SessionReduction) => {
@@ -1007,8 +1017,7 @@ export function createServerSession(
         return
       }
       case "session.deleted": {
-        const properties = event.properties as { sessionID?: string; info?: Session }
-        const sessionID = properties.info?.id ?? properties.sessionID
+        const sessionID = eventSessionID(event)
         if (!sessionID) return
         infoSeen.delete(sessionID)
         setData(

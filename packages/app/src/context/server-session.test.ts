@@ -688,7 +688,7 @@ describe("server session", () => {
     store.apply({ type: "message.removed", properties: { sessionID: "child", messageID: message.id } })
     store.apply({
       type: "session.deleted",
-      properties: { sessionID: "child", info: session("child", "root") },
+      properties: { sessionID: "child" },
     })
     const second = store.sync("child")
 
@@ -708,7 +708,7 @@ describe("server session", () => {
     const first = store.sync("child")
     store.apply({
       type: "session.deleted",
-      properties: { sessionID: "child", info: session("child", "root") },
+      properties: { sessionID: "child" },
     })
     const second = store.sync("child")
 

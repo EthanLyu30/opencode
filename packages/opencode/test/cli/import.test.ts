@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test"
 import {
+  assertImportableSession,
   formatImportFileError,
   parseShareUrl,
   shouldAttachShareAuthHeaders,
@@ -8,6 +9,15 @@ import {
 } from "../../src/cli/cmd/import"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { PlatformError } from "effect"
+import { Effect } from "effect"
+import { Database } from "@opencode-ai/core/database/database"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { EventV2 } from "@opencode-ai/core/event"
+import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionTombstoneTable } from "@opencode-ai/core/session/sql"
+import { testEffect } from "../lib/effect"
+
+const it = testEffect(LayerNode.compile(Database.node))
 
 test("formats import file errors", () => {
   expect(
@@ -88,3 +98,26 @@ test("returns null for invalid share data", () => {
   expect(transformShareData([{ type: "message", data: {} as any }])).toBeNull()
   expect(transformShareData([{ type: "session", data: { id: "s" } as any }])).toBeNull() // no messages
 })
+
+it.effect("rejects importing a permanently deleted Session identity", () =>
+  Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const sessionID = SessionV2.ID.make("ses_import_terminal")
+    yield* db
+      .insert(SessionTombstoneTable)
+      .values({
+        session_id: sessionID,
+        visibility: "public",
+        deletion_event_id: EventV2.ID.make("evt_import_terminal"),
+        deletion_version: 3,
+        time_deleted: 1,
+      })
+      .run()
+      .pipe(Effect.orDie)
+
+    const exit = yield* assertImportableSession(db, sessionID).pipe(Effect.exit)
+
+    expect(exit._tag).toBe("Failure")
+    expect(exit._tag === "Failure" && String(exit.cause)).toContain("Cannot import permanently deleted session")
+  }),
+)

@@ -33,6 +33,20 @@ const SESSION_CONTENT_EVENTS = new Set([
   "question.rejected",
 ])
 
+function sessionDeletionIdentity(properties: unknown) {
+  if (!properties || typeof properties !== "object") return {}
+  const info =
+    "info" in properties && properties.info && typeof properties.info === "object" ? properties.info : undefined
+  const sessionID =
+    "sessionID" in properties && typeof properties.sessionID === "string"
+      ? properties.sessionID
+      : info && "id" in info && typeof info.id === "string"
+        ? info.id
+        : undefined
+  const parentID = info && "parentID" in info && typeof info.parentID === "string" ? info.parentID : undefined
+  return { sessionID, parentID }
+}
+
 export function applyGlobalEvent(input: {
   event: { type: string; properties?: unknown }
   project: Project[]
@@ -171,11 +185,11 @@ export function applyDirectoryEvent(input: {
       break
     }
     case "session.deleted": {
-      const properties = event.properties as { sessionID?: string; info?: Session }
-      const sessionID = properties.info?.id ?? properties.sessionID
+      const properties = sessionDeletionIdentity(event.properties)
+      const sessionID = properties.sessionID
       if (!sessionID) break
       const result = Binary.search(input.store.session, sessionID, (s) => s.id)
-      const info = properties.info ?? (result.found ? input.store.session[result.index] : undefined)
+      const parentID = properties.parentID ?? (result.found ? input.store.session[result.index]?.parentID : undefined)
       if (result.found) {
         input.setStore(
           "session",
@@ -185,7 +199,7 @@ export function applyDirectoryEvent(input: {
         )
       }
       cleanupSessionCaches(input.setStore, sessionID, input.setSessionTodo)
-      if (info?.parentID) break
+      if (parentID) break
       input.setStore("sessionTotal", (value) => Math.max(0, value - 1))
       break
     }

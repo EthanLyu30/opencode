@@ -623,7 +623,7 @@ const layer: Layer.Layer<
     })
 
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
-      const session = yield* get(sessionID)
+      yield* get(sessionID)
       try {
         // `remove` needs to work in all cases, such as broken sessions that
         // run cleanup without instance state.
@@ -638,8 +638,12 @@ const layer: Layer.Layer<
           yield* remove(child.id)
         }
 
-        yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session, visibility: "public" })
-        yield* events.remove(sessionID)
+        const deleted = yield* events.publish(SessionV1.Event.Deleted, {
+          sessionID,
+          visibility: "public",
+          timeDeleted: Date.now(),
+        })
+        yield* events.compactTerminal(SessionV1.Event.Deleted, deleted)
       } catch (error) {
         yield* Effect.logError("failed to remove session", { sessionID, error })
       }
