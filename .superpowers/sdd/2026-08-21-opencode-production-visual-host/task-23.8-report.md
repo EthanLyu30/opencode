@@ -106,3 +106,38 @@ The first combined legacy opencode test invocation used Bun's 5-second default a
 `packages/opencode` typecheck continues to report exactly the two adjudicated pre-existing errors: the `InvalidReplayBatchError` HTTP union at `handlers/sync.ts:70` and its cascading route-layer error at `server.ts:276`. No Task23.8 visibility compile error remains.
 
 No migration change was required in this fix round. The exact task-owned non-reparse root `D:\OpenCode-Task23.8-Fix1` was verified and moved to the Windows Recycle Bin after final verification. No Task23.9 endpoint, Task23.10 CLI, provider/network/browser/Docker/ACL action, deployment, push, or `env.local` access was added or performed.
+
+## Independent review fix round 2
+
+The remaining visibility-authority, deletion-versioning, and sync-history performance findings are closed by implementation commit `2559f42d47b97cb4c4313e6c3555268920754e24` (`fix(workflow): reconcile event visibility authority`). Ruling 9 adjudicates byte-identical clock timestamps and EventV2 envelope IDs after a fully rolled-back attempt as out of scope: Task23.8 retains deterministic aggregate IDs and receipt authority, exact committed-winner reconciliation, and byte-deterministic builders for identical explicit IDs/timestamps without adding a standalone clock reservation or hash-derived fake time.
+
+### Closed findings
+
+- Public event classification now always resolves authoritative Response-to-Workflow and Workflow-to-Session relationships when those resources exist. Declared complete-batch links must equal authority, and multiple contradictory declarations are retained as sets and rejected rather than overwritten. Missing relationship authority fails closed. The Core/opencode bridge and sync history use durable database authority; the separate Server live surface has no Workflow/Response store and therefore intentionally suppresses authority-requiring events instead of trusting caller-visible declarations.
+- Forged complete batches that relabel a hidden Response/Workflow as public are suppressed on live Server classification, legacy GlobalBus, and sync history. The GlobalBus regression captures every event after publication, proving no receipt sentinel, Location, aggregate ID, or related ID is emitted. A matching authoritative public Response batch remains visible.
+- Session deletion has explicit durable schema versions. `session.deleted.2` requires immutable `public | workflow` visibility and is the only current producer. Durable v1 and genuinely unversioned historical deletion rows retain legacy-public omission compatibility; a v2 omission fails schema decoding and visibility classification. Public v2 deletion still emits after the Session row is removed, while hidden deletion is suppressed. Existing v1 decode/replay remains registered.
+- `/sync/history` returns immediately when the candidate query is empty. Otherwise it loads only complete batches named by the candidate set, in sequential chunks of 250 batch IDs using the existing `(batch_id, batch_index)` index. A regression with 1,050 candidate batches and 5,000 unrelated rows observes 2,100 returned query rows (candidate rows plus their bounded closures), not a full-history scan, and stays below ten queries. No database migration was required.
+
+### TDD evidence
+
+Meaningful RED was observed before production changes:
+
+- Server live classification allowed a complete Workflow/Response batch despite missing relationship authority and allowed contradictory duplicate Workflow ownership.
+- A forged GlobalBus batch emitted `FORGED_GLOBAL_RECEIPT`; sync history returned the forged batch and also allowed duplicate ownership.
+- Current `SessionV1.Event.Deleted` still produced durable v1, so the new required-visibility decode expectation failed.
+- Zero-candidate history executed a second full scan (`[0, 1]` observed row counts), while 1,050 candidate batches plus 5,000 unrelated rows returned 7,100 query rows instead of the bounded 2,100.
+
+Fresh final gates used pinned Bun `D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe` from package directories with `TEMP`, `TMP`, and Bun cache rooted below the verified non-reparse `D:\OpenCode-Task23.8-Fix2` directory:
+
+- Core Task23.8/EventV2/MoveSession matrix: **166 pass, 0 fail, 484 assertions**, including post-commit wake-crash recovery and periodic queued-workflow polling recovery.
+- Server visibility/sandbox matrix: **91 pass, 0 fail, 302 assertions**.
+- Legacy opencode list/live/history matrix: **31 pass, 0 fail, 76 assertions**.
+- Migration and generic Response regressions: **31 pass, 0 fail, 119 assertions**.
+- Schema manifest/legacy-version tests: **5 pass, 0 fail, 33 assertions**.
+- Schema, Core, Protocol, Server, and Client typechecks: **exit 0**. The opencode typecheck reports exactly the two adjudicated pre-existing errors at `handlers/sync.ts:70` and `server.ts:276`, with no Task23.8 visibility error.
+- Generated migration consistency: `migration --check` reported no schema changes and regenerated the full schema comparison successfully under the D-drive task temp root.
+- Exact eight changed-TypeScript Prettier and oxlint checks plus `git diff --check`: **exit 0**, with no lint warning or error output.
+
+The first Core matrix inherited the Windows C-drive temp and reproduced the documented timing-sensitive deadline probe at exactly zero remaining milliseconds (**165/166**). That exact test passed immediately in isolation, the next complete matrix passed **166/166**, and the final requirement-compliant D-drive-temp matrix passed **166/166**. No production change was made for the unrelated timing probe.
+
+No admission clock/envelope semantics, Task23.9 endpoint, Task23.10 CLI, provider/network/browser/Docker/ACL surface, deployment, push, or `env.local` access changed in this round. The exact task-owned non-reparse `D:\OpenCode-Task23.8-Fix2` temp/cache root was verified to contain only `tmp` and `bun-cache`, then moved to the Windows Recycle Bin after final verification.
