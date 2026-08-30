@@ -3,8 +3,9 @@ export * as PublicEventVisibility from "./public-visibility"
 import { Responses } from "@opencode-ai/schema/responses"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { Durable } from "@opencode-ai/schema/durable-event-manifest"
-import { Effect, Schema } from "effect"
+import { Effect, Schema, Semaphore } from "effect"
 import { eq, inArray } from "drizzle-orm"
+import { isDeepStrictEqual } from "node:util"
 import type { Database } from "../database/database"
 import type { EventV2 } from "../event"
 import { ResponseTable } from "../responses/sql"
@@ -19,6 +20,7 @@ type Member = {
   readonly data: unknown
   readonly version?: number
   readonly legacy?: boolean
+  readonly aggregateID?: string
 }
 export interface SessionTombstoneAuthority {
   readonly visibility: Visibility
@@ -59,6 +61,7 @@ function storedMember(row: StoredEvent): Member {
     id: row.id,
     type: durable?.type ?? row.type,
     data: row.data,
+    aggregateID: row.aggregate_id,
     ...(durable?.durable ? { version: durable.durable.version } : {}),
     ...(!durable && row.type === "session.deleted" ? { legacy: true } : {}),
   }
@@ -225,10 +228,165 @@ export function isPublic(
           ...member,
           ...(batch?.index === index && event.id !== undefined ? { id: event.id } : {}),
           ...(batch?.index === index && event.durable?.version !== undefined ? { version: event.durable.version } : {}),
+          ...(batch?.index === index && event.durable?.aggregateID !== undefined
+            ? { aggregateID: event.durable.aggregateID }
+            : {}),
         }))
-      : [{ id: event.id, type: event.type ?? "", data: event.data, version: event.durable?.version }]
-    return yield* classify(members, event.durable?.aggregateID, authority)
+      : [
+          {
+            id: event.id,
+            type: event.type ?? "",
+            data: event.data,
+            version: event.durable?.version,
+            aggregateID: event.durable?.aggregateID,
+          },
+        ]
+    return yield* classify(members, authority)
   })
+}
+
+const maxLiveBatchSize = 4_096
+const maxRejectedLiveBatches = 256
+
+function validLiveBatch(events: ReadonlyArray<EventV2.Payload>): ReadonlyArray<EventV2.Payload> | undefined {
+  if (events.length === 0) return undefined
+  const firstBatch = events[0]?.durable?.batch
+  if (firstBatch === undefined) return events.length === 1 ? events : undefined
+  if (
+    firstBatch.id.length === 0 ||
+    !Number.isInteger(firstBatch.index) ||
+    !Number.isInteger(firstBatch.size) ||
+    firstBatch.size < 1 ||
+    firstBatch.size > maxLiveBatchSize ||
+    firstBatch.index !== 0 ||
+    events.length !== firstBatch.size
+  ) {
+    return undefined
+  }
+  const ordered = [...events].sort(
+    (left, right) => (left.durable?.batch?.index ?? -1) - (right.durable?.batch?.index ?? -1),
+  )
+  const ids = new Set<EventV2.ID>()
+  const related = ordered[0]?.durable?.related
+  if (firstBatch.size > 1 && related?.length !== firstBatch.size) return undefined
+  for (const [index, event] of ordered.entries()) {
+    const batch = event.durable?.batch
+    if (
+      batch === undefined ||
+      batch.id !== firstBatch.id ||
+      batch.size !== firstBatch.size ||
+      batch.index !== index ||
+      ids.has(event.id) ||
+      !isDeepStrictEqual(event.location, ordered[0]?.location) ||
+      !isDeepStrictEqual(event.metadata, ordered[0]?.metadata) ||
+      !isDeepStrictEqual(event.durable?.related, related) ||
+      (related !== undefined &&
+        !isDeepStrictEqual(related[index], {
+          type: event.type,
+          data: event.data,
+        }))
+    ) {
+      return undefined
+    }
+    ids.add(event.id)
+  }
+  const byAggregate = Map.groupBy(
+    ordered.filter((event) => event.durable !== undefined),
+    (event) => event.durable!.aggregateID,
+  )
+  for (const members of byAggregate.values()) {
+    const sequences = members.map((event) => event.durable!.seq)
+    if (sequences.some((sequence, index) => index > 0 && sequence !== sequences[index - 1] + 1)) return undefined
+  }
+  return ordered
+}
+
+export function isPublicBatch(events: ReadonlyArray<EventV2.Payload>, authority: Authority) {
+  const valid = validLiveBatch(events)
+  if (!valid) return Effect.succeed(false)
+  return classify(
+    valid.map((event) => ({
+      id: event.id,
+      type: event.type,
+      data: event.data,
+      version: event.durable?.version,
+      aggregateID: event.durable?.aggregateID,
+    })),
+    authority,
+  )
+}
+
+/**
+ * Buffers one subscriber's durable notifications until their complete batch
+ * has arrived. Any partial, duplicate, misindexed, or divergent batch is
+ * permanently rejected for this bounded subscriber window; a following
+ * unrelated event is processed immediately and keeps its original order.
+ */
+export function makeLiveBatchFilter(authority: Authority) {
+  let pending:
+    | {
+        readonly id: string
+        readonly size: number
+        readonly events: EventV2.Payload[]
+      }
+    | undefined
+  const rejected = new Set<string>()
+  const rejectedOrder: string[] = []
+  const lock = Semaphore.makeUnsafe(1)
+
+  const reject = (batchID: string) => {
+    if (rejected.has(batchID)) return
+    rejected.add(batchID)
+    rejectedOrder.push(batchID)
+    const expired = rejectedOrder.length > maxRejectedLiveBatches ? rejectedOrder.shift() : undefined
+    if (expired !== undefined) rejected.delete(expired)
+  }
+
+  const push = (event: EventV2.Payload): Effect.Effect<ReadonlyArray<EventV2.Payload>> =>
+    Effect.gen(function* () {
+      const batch = event.durable?.batch
+      if (batch && rejected.has(batch.id)) return []
+
+      if (pending) {
+        if (
+          batch === undefined ||
+          batch.id !== pending.id ||
+          batch.size !== pending.size ||
+          batch.index !== pending.events.length
+        ) {
+          const rejectedID = pending.id
+          pending = undefined
+          reject(rejectedID)
+          if (batch?.id === rejectedID) return []
+          return yield* push(event)
+        }
+        pending.events.push(event)
+        if (pending.events.length < pending.size) return []
+        const complete = pending.events
+        pending = undefined
+        const visible = yield* isPublicBatch(complete, authority)
+        if (!visible) reject(batch.id)
+        return visible ? complete : []
+      }
+
+      if (batch === undefined || batch.size === 1) {
+        return (yield* isPublicBatch([event], authority)) ? [event] : []
+      }
+      if (
+        batch.id.length === 0 ||
+        batch.index !== 0 ||
+        !Number.isInteger(batch.size) ||
+        batch.size < 2 ||
+        batch.size > maxLiveBatchSize
+      ) {
+        reject(batch.id)
+        return []
+      }
+      pending = { id: batch.id, size: batch.size, events: [event] }
+      return []
+    })
+
+  return (event: EventV2.Payload) => lock.withPermits(1)(push(event))
 }
 
 export function filterHistory(
@@ -261,7 +419,7 @@ export function filterHistory(
                 member.batch_index < expected,
             ) &&
             new Set(related.map((member) => member.batch_index)).size === expected)
-        visible = valid ? yield* classify(related.map(storedMember), row.aggregate_id, authority) : false
+        visible = valid ? yield* classify(related.map(storedMember), authority) : false
         decisions.set(key, visible)
       }
       if (visible) output.push(row)
@@ -270,7 +428,7 @@ export function filterHistory(
   })
 }
 
-function classify(members: ReadonlyArray<Member>, aggregateID: string | undefined, authority: Authority) {
+function classify(members: ReadonlyArray<Member>, authority: Authority) {
   const declarations = new Map<string, number>()
   for (const member of members) {
     const type = eventType(member.type)
@@ -337,6 +495,19 @@ function classify(members: ReadonlyArray<Member>, aggregateID: string | undefine
       if (Schema.is(Workflow.ID)(workflowID)) workflows.add(workflowID)
       if (Schema.is(Responses.ID)(responseID)) responses.add(responseID)
 
+      if (member.aggregateID !== undefined) {
+        if (Schema.is(SessionSchema.ID)(member.aggregateID)) {
+          owned = true
+          sessions.add(member.aggregateID)
+        } else if (Schema.is(Workflow.ID)(member.aggregateID)) {
+          owned = true
+          workflows.add(member.aggregateID)
+        } else if (Schema.is(Responses.ID)(member.aggregateID)) {
+          owned = true
+          responses.add(member.aggregateID)
+        }
+      }
+
       if (type === "session.created" || type === "session.deleted") {
         if (!Schema.is(SessionSchema.ID)(sessionID)) {
           invalid = true
@@ -379,18 +550,6 @@ function classify(members: ReadonlyArray<Member>, aggregateID: string | undefine
       }
     }
 
-    if (aggregateID !== undefined) {
-      if (Schema.is(SessionSchema.ID)(aggregateID)) {
-        owned = true
-        sessions.add(aggregateID)
-      } else if (Schema.is(Workflow.ID)(aggregateID)) {
-        owned = true
-        workflows.add(aggregateID)
-      } else if (Schema.is(Responses.ID)(aggregateID)) {
-        owned = true
-        responses.add(aggregateID)
-      }
-    }
     if (!owned) return true
     if (invalid) return false
 

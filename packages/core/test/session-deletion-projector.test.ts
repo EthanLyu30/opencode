@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { asc, eq } from "drizzle-orm"
-import { Effect } from "effect"
+import { DateTime, Effect, Exit, Layer } from "effect"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -14,9 +14,24 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionTable, SessionTombstoneTable } from "@opencode-ai/core/session/sql"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionMessage } from "@opencode-ai/schema/session-message"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
+
+let interruptTerminalCompaction = true
+const databaseLayer = LayerNode.compile(Database.node)
+const interruptedEventLayer = EventV2.layerWith({
+  beforeTerminalCompaction: () =>
+    interruptTerminalCompaction ? Effect.die("injected terminal compaction interruption") : Effect.void,
+}).pipe(Layer.provide(databaseLayer))
+const interruptedIt = testEffect(
+  AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node]), [
+    [Database.node, databaseLayer],
+    [EventV2.node, interruptedEventLayer],
+  ]),
+)
 
 function info(sessionID: SessionV2.ID) {
   return SessionV1.SessionInfo.make({
@@ -425,6 +440,114 @@ describe("Session deletion projection authority", () => {
       ).toBeUndefined()
       expect((yield* db.select().from(EventTable).all().pipe(Effect.orDie)).map((row) => row.id)).toEqual([deletionID])
       expect(yield* EventV2.latestSequence(db, sessionID)).toBe(0)
+    }),
+  )
+
+  it.effect("rejects every durable, legacy deletion, and live Session event after the tombstone", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const sessionID = SessionV2.ID.make("ses_terminal_all_event_kinds")
+      const deletionID = EventV2.ID.make("evt_terminal_all_event_kinds")
+      const received: EventV2.Payload[] = []
+      yield* seed(db, sessionID, "public")
+      yield* events.listen((event) => Effect.sync(() => received.push(event)))
+
+      yield* events.publish(
+        SessionV1.Event.Deleted,
+        { sessionID, visibility: "public", timeDeleted: 108 },
+        { id: deletionID, terminal: true },
+      )
+
+      const attempts: ReadonlyArray<Effect.Effect<unknown>> = [
+        events.publish(SessionV1.Event.Created, {
+          sessionID,
+          info: info(sessionID),
+          visibility: "public",
+        }),
+        events.publish(SessionV1.Event.Updated, { sessionID, info: info(sessionID) }),
+        events.publish(SessionV1.Event.MessageRemoved, {
+          sessionID,
+          messageID: SessionV1.MessageID.ascending("msg_terminal_message_removed"),
+        }),
+        events.publish(SessionEvent.Moved, {
+          sessionID,
+          timestamp: DateTime.makeUnsafe(109),
+          location: { directory: AbsolutePath.make("/project/moved") },
+        }),
+        events.publish(SessionEvent.Text.Delta, {
+          sessionID,
+          timestamp: DateTime.makeUnsafe(110),
+          assistantMessageID: SessionMessage.ID.make("msg_terminal_text_delta"),
+          textID: "terminal-text",
+          delta: "must not publish",
+        }),
+        events.publish(SessionV1.Event.DeletedV1, {
+          sessionID,
+          info: info(sessionID),
+          visibility: "public",
+        }),
+        events.publish(SessionV1.Event.DeletedV2, {
+          sessionID,
+          info: info(sessionID),
+          visibility: "public",
+        }),
+        events.publish(SessionV1.Event.Deleted, {
+          sessionID,
+          visibility: "public",
+          timeDeleted: 111,
+        }),
+      ]
+      for (const attempt of attempts) expect(Exit.isFailure(yield* attempt.pipe(Effect.exit))).toBe(true)
+
+      expect(received.map((event) => event.id)).toEqual([deletionID])
+      expect(yield* EventV2.latestSequence(db, sessionID)).toBe(0)
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all()).toEqual([
+        expect.objectContaining({ id: deletionID, seq: 0, type: "session.deleted.3" }),
+      ])
+    }),
+  )
+
+  interruptedIt.effect("rolls back an interrupted deletion and atomically compacts on retry", () =>
+    Effect.gen(function* () {
+      interruptTerminalCompaction = true
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const sessionID = SessionV2.ID.make("ses_terminal_compaction_interruption")
+      yield* seed(db, sessionID, "public")
+      yield* events.publish(SessionV1.Event.Updated, { sessionID, info: info(sessionID) })
+      const beforeEvents = yield* db.select().from(EventTable).all().pipe(Effect.orDie)
+      const beforeSequences = yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)
+
+      const interrupted = yield* events
+        .publish(SessionV1.Event.Deleted, { sessionID, visibility: "public", timeDeleted: 112 }, { terminal: true })
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(interrupted)).toBe(true)
+      expect(
+        yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie),
+      ).toMatchObject({ id: sessionID, visibility: "public" })
+      expect(
+        yield* db
+          .select()
+          .from(SessionTombstoneTable)
+          .where(eq(SessionTombstoneTable.session_id, sessionID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toBeUndefined()
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toEqual(beforeEvents)
+      expect(yield* db.select().from(EventSequenceTable).all().pipe(Effect.orDie)).toEqual(beforeSequences)
+
+      interruptTerminalCompaction = false
+      const deleted = yield* events.publish(
+        SessionV1.Event.Deleted,
+        { sessionID, visibility: "public", timeDeleted: 113 },
+        { terminal: true },
+      )
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all()).toEqual([
+        expect.objectContaining({ id: deleted.id, seq: 1, type: "session.deleted.3" }),
+      ])
+      expect(yield* EventV2.latestSequence(db, sessionID)).toBe(1)
     }),
   )
 

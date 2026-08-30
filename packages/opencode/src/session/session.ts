@@ -638,12 +638,22 @@ const layer: Layer.Layer<
           yield* remove(child.id)
         }
 
-        const deleted = yield* events.publish(SessionV1.Event.Deleted, {
-          sessionID,
-          visibility: "public",
-          timeDeleted: Date.now(),
-        })
-        yield* events.compactTerminal(SessionV1.Event.Deleted, deleted)
+        const authority = yield* db
+          .select({ visibility: SessionTable.visibility })
+          .from(SessionTable)
+          .where(eq(SessionTable.id, sessionID))
+          .get()
+          .pipe(Effect.orDie)
+        if (!authority) return
+        yield* events.publish(
+          SessionV1.Event.Deleted,
+          {
+            sessionID,
+            visibility: authority.visibility,
+            timeDeleted: Date.now(),
+          },
+          { terminal: true },
+        )
       } catch (error) {
         yield* Effect.logError("failed to remove session", { sessionID, error })
       }

@@ -2,6 +2,7 @@ import { describe, expect } from "bun:test"
 import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
 import { test } from "bun:test"
 import { EventV2 } from "@opencode-ai/core/event"
+import { PublicEventVisibility } from "@opencode-ai/core/event/public-visibility"
 import { Event } from "@opencode-ai/schema/event"
 import { Session } from "@opencode-ai/schema/session"
 import { SessionEvent } from "@opencode-ai/schema/session-event"
@@ -11,7 +12,7 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { Location } from "@opencode-ai/core/location"
-import { AbsolutePath } from "@opencode-ai/core/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { eq, sql } from "drizzle-orm"
 import path from "node:path"
@@ -130,6 +131,104 @@ describe("EventV2", () => {
       expect(related?.location).toEqual(primary.location)
       expect(related?.metadata).toEqual(primary.metadata)
       expect(related?.data).toEqual({ messageID: "sync_related_child", text: "related" })
+    }),
+  )
+
+  it.effect("uses one canonical primary and related envelope for projection, storage, notification, and replay", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const primaryID = Session.ID.create()
+      const relatedID = Session.ID.create()
+      const primaryTimestamp = DateTime.makeUnsafe(1_001)
+      const relatedTimestamp = DateTime.makeUnsafe(1_002)
+      const rawPrimary = {
+        sessionID: primaryID,
+        timestamp: primaryTimestamp,
+        location: { directory: AbsolutePath.make("project/primary"), ignoredNested: true },
+        subdirectory: RelativePath.make("primary"),
+        ignoredTop: true,
+      }
+      const rawRelated = {
+        sessionID: relatedID,
+        timestamp: relatedTimestamp,
+        location: { directory: AbsolutePath.make("project/related"), ignoredNested: true },
+        subdirectory: RelativePath.make("related"),
+        ignoredTop: true,
+      }
+      const canonicalPrimary = {
+        sessionID: primaryID,
+        timestamp: primaryTimestamp,
+        location: { directory: AbsolutePath.make("project/primary") },
+        subdirectory: RelativePath.make("primary"),
+      }
+      const canonicalRelated = {
+        sessionID: relatedID,
+        timestamp: relatedTimestamp,
+        location: { directory: AbsolutePath.make("project/related") },
+        subdirectory: RelativePath.make("related"),
+      }
+      const projected = new Array<EventV2.Payload>()
+      const notified = new Array<EventV2.Payload>()
+      yield* events.project(SessionEvent.Moved, (event) => Effect.sync(() => projected.push(event)))
+      yield* events.listen((event) => Effect.sync(() => notified.push(event)))
+
+      const published = yield* events.publish(SessionEvent.Moved, rawPrimary, {
+        related: [{ definition: SessionEvent.Moved, data: rawRelated }],
+      })
+
+      expect(published.data).toEqual(canonicalPrimary)
+      expect(projected.map((event) => event.data)).toEqual([canonicalPrimary, canonicalRelated])
+      expect(notified.map((event) => event.data)).toEqual([canonicalPrimary, canonicalRelated])
+      expect(notified.map((event) => event.durable?.related?.map((related) => related.data))).toEqual([
+        [canonicalPrimary, canonicalRelated],
+        [canonicalPrimary, canonicalRelated],
+      ])
+      expect(rawPrimary).toHaveProperty("ignoredTop", true)
+      expect(rawRelated.location).toHaveProperty("ignoredNested", true)
+
+      const rows = yield* db.select().from(EventTable).all().pipe(Effect.orDie)
+      const rowsByAggregate = new Map(rows.map((row) => [row.aggregate_id, row]))
+      expect(rowsByAggregate.get(primaryID)?.data).toEqual(
+        Schema.encodeUnknownSync(SessionEvent.Moved.data)(canonicalPrimary),
+      )
+      expect(rowsByAggregate.get(relatedID)?.data).toEqual(
+        Schema.encodeUnknownSync(SessionEvent.Moved.data)(canonicalRelated),
+      )
+
+      yield* events.remove(primaryID)
+      yield* events.remove(relatedID)
+      projected.length = 0
+      notified.length = 0
+      const decodeRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))
+      yield* events.replayBatches(
+        rows.map((row) => {
+          const data = decodeRecord(row.data)
+          const location = decodeRecord(data.location)
+          return {
+            id: EventV2.ID.make(row.id),
+            type: row.type,
+            seq: row.seq,
+            aggregateID: row.aggregate_id,
+            data: {
+              ...data,
+              location: { ...location, ignoredNested: true },
+              ignoredTop: true,
+            },
+            batchID: row.batch_id ?? undefined,
+            batchIndex: row.batch_index ?? undefined,
+            batchSize: row.batch_size ?? undefined,
+          }
+        }),
+        { publish: true },
+      )
+
+      expect(projected.map((event) => event.data)).toEqual([canonicalPrimary, canonicalRelated])
+      expect(notified.map((event) => event.data)).toEqual([canonicalPrimary, canonicalRelated])
+      expect(notified.map((event) => event.durable?.related?.map((related) => related.data))).toEqual([
+        [canonicalPrimary, canonicalRelated],
+        [canonicalPrimary, canonicalRelated],
+      ])
     }),
   )
 
@@ -298,6 +397,65 @@ describe("EventV2", () => {
 
       expect(event.type).toBe("test.versioned")
       expect(event.durable?.version).toBe(2)
+    }),
+  )
+
+  it.effect("buffers complete live batches and fails closed without reordering later public events", () =>
+    Effect.gen(function* () {
+      const authority: PublicEventVisibility.Authority = {
+        session: () => Effect.succeed("public"),
+        tombstone: () => Effect.succeed(undefined),
+        workflow: () => Effect.succeed(undefined),
+        response: () => Effect.succeed(undefined),
+      }
+      const filter = PublicEventVisibility.makeLiveBatchFilter(authority)
+      const ordinary = {
+        id: EventV2.ID.make("evt_live_batch_ordinary"),
+        type: Message.type,
+        data: { text: "ordinary" },
+      } satisfies EventV2.Payload<typeof Message>
+      const primary = {
+        id: EventV2.ID.make("evt_live_batch_primary"),
+        type: SyncMessage.type,
+        data: { id: "live_batch_primary", text: "primary" },
+        durable: {
+          aggregateID: "live_batch_primary",
+          seq: 0,
+          version: 1,
+          batch: { id: "evt_live_batch_primary", index: 0, size: 2 },
+          related: [
+            { type: SyncMessage.type, data: { id: "live_batch_primary", text: "primary" } },
+            { type: SyncSent.type, data: { messageID: "live_batch_related", text: "related" } },
+          ],
+        },
+      } satisfies EventV2.Payload<typeof SyncMessage>
+      const related = {
+        id: EventV2.ID.make("evt_live_batch_related"),
+        type: SyncSent.type,
+        data: { messageID: "live_batch_related", text: "related" },
+        durable: {
+          aggregateID: "live_batch_related",
+          seq: 0,
+          version: 1,
+          batch: { id: "evt_live_batch_primary", index: 1, size: 2 },
+          related: primary.durable.related,
+        },
+      } satisfies EventV2.Payload<typeof SyncSent>
+
+      expect(yield* filter(primary)).toEqual([])
+      expect(yield* filter(ordinary)).toEqual([ordinary])
+      expect(yield* filter(related)).toEqual([])
+
+      const duplicateFilter = PublicEventVisibility.makeLiveBatchFilter(authority)
+      expect(yield* duplicateFilter(primary)).toEqual([])
+      expect(
+        yield* duplicateFilter({ ...related, durable: { ...related.durable, batch: primary.durable.batch } }),
+      ).toEqual([])
+      expect(yield* duplicateFilter(related)).toEqual([])
+
+      const completeFilter = PublicEventVisibility.makeLiveBatchFilter(authority)
+      expect(yield* completeFilter(primary)).toEqual([])
+      expect(yield* completeFilter(related)).toEqual([primary, related])
     }),
   )
 

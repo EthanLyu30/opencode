@@ -2,6 +2,8 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { GlobalBus } from "@/bus/global"
 import { EventV2 } from "@opencode-ai/core/event"
+import { PublicEventVisibility } from "@opencode-ai/core/event/public-visibility"
+import { Database } from "@opencode-ai/core/database/database"
 import { Effect, Queue } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerResponse } from "effect/unstable/http"
@@ -26,10 +28,17 @@ function eventResponse(events: EventV2.Interface) {
   return Effect.gen(function* () {
     const instance = yield* InstanceState.context
     const workspaceID = yield* InstanceState.workspaceID
+    const { db } = yield* Database.Service
+    const publicEvents = PublicEventVisibility.makeLiveBatchFilter(PublicEventVisibility.databaseAuthority(db))
     // Listener registration is eager, so events published after this point cannot
     // be lost while the HTTP body fiber is starting or emitting server.connected.
     const queue = yield* Queue.unbounded<EventV2.Payload>()
-    const unsubscribe = yield* events.listen((event) => Effect.sync(() => Queue.offerUnsafe(queue, event)))
+    const unsubscribe = yield* events.listen((event) =>
+      publicEvents(event).pipe(
+        Effect.tap((batch) => Effect.sync(() => batch.forEach((item) => Queue.offerUnsafe(queue, item)))),
+        Effect.asVoid,
+      ),
+    )
     yield* Effect.addFinalizer(() => unsubscribe)
     const stream = Stream.fromQueue(queue).pipe(
       Stream.filter(

@@ -19,6 +19,7 @@ const layer = Layer.effect(
     const events = yield* EventV2.Service
     const { db } = yield* Database.Service
     const visibility = PublicEventVisibility.databaseAuthority(db)
+    const publicEvents = PublicEventVisibility.makeLiveBatchFilter(visibility)
 
     const publish: EventV2.Interface["publish"] = (definition, data, options) =>
       Effect.gen(function* () {
@@ -36,34 +37,42 @@ const layer = Layer.effect(
         })
       })
 
-    const unsubscribe = yield* events.listen((event) =>
-      Effect.gen(function* () {
-        if (!(yield* PublicEventVisibility.isPublic(event, visibility))) return
-        const ctx = yield* InstanceRef
-        const workspaceID = (yield* WorkspaceRef) ?? event.location?.workspaceID
-        GlobalBus.emit("event", {
-          directory: event.location?.directory ?? ctx?.directory,
-          project: ctx?.project.id,
-          workspace: workspaceID,
-          payload: { id: event.id, type: event.type, properties: event.data },
-        })
-        if (event.durable === undefined) return
-        GlobalBus.emit("event", {
-          directory: event.location?.directory ?? ctx?.directory,
-          project: ctx?.project.id,
-          workspace: workspaceID,
-          payload: {
-            type: "sync",
-            syncEvent: {
-              id: event.id,
-              type: EventV2.versionedType(event.type, event.durable.version),
-              seq: event.durable.seq,
-              aggregateID: event.durable.aggregateID,
-              data: event.data,
-            },
-          },
-        })
-      }),
+    const unsubscribe = yield* events.listen((input) =>
+      publicEvents(input).pipe(
+        Effect.flatMap((batch) =>
+          Effect.forEach(
+            batch,
+            (event) =>
+              Effect.gen(function* () {
+                const ctx = yield* InstanceRef
+                const workspaceID = (yield* WorkspaceRef) ?? event.location?.workspaceID
+                GlobalBus.emit("event", {
+                  directory: event.location?.directory ?? ctx?.directory,
+                  project: ctx?.project.id,
+                  workspace: workspaceID,
+                  payload: { id: event.id, type: event.type, properties: event.data },
+                })
+                if (event.durable === undefined) return
+                GlobalBus.emit("event", {
+                  directory: event.location?.directory ?? ctx?.directory,
+                  project: ctx?.project.id,
+                  workspace: workspaceID,
+                  payload: {
+                    type: "sync",
+                    syncEvent: {
+                      id: event.id,
+                      type: EventV2.versionedType(event.type, event.durable.version),
+                      seq: event.durable.seq,
+                      aggregateID: event.durable.aggregateID,
+                      data: event.data,
+                    },
+                  },
+                })
+              }),
+            { discard: true },
+          ),
+        ),
+      ),
     )
     yield* Effect.addFinalizer(() => unsubscribe)
 

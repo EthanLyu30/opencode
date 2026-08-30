@@ -31,6 +31,7 @@ export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers)
     const events = yield* EventV2.Service
     const { db } = yield* Database.Service
     const authority = PublicEventVisibility.databaseAuthority(db)
+    const publicEvents = PublicEventVisibility.makeLiveBatchFilter(authority)
     return handlers.handleRaw("event.subscribe", () =>
       Effect.gen(function* () {
         const connected = {
@@ -43,7 +44,7 @@ export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers)
             // Acquiring the bounded stream installs its listener before readiness is observable.
             const live = yield* EventV2.allBounded(events, subscriberCapacity)
             return Stream.make(connected).pipe(
-              Stream.concat(live.pipe(Stream.filterEffect((event) => publicSessionEvent(event, authority)))),
+              Stream.concat(live.pipe(Stream.mapEffect(publicEvents), Stream.flattenIterable)),
             )
           }),
         ).pipe(Stream.map(eventData), Stream.pipeThroughChannel(Sse.encode()))

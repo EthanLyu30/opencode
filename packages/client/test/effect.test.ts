@@ -321,6 +321,7 @@ const session = {
       updated: 1_717_171_717_000,
     },
     title: "Test",
+    visibility: "public" as const,
     location: { directory: "/tmp/project" },
   },
 }

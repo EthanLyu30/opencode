@@ -18,6 +18,7 @@ import { errorMessage } from "../util/error"
 import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
 import { useCommandShortcut } from "../keymap"
 import { useEvent } from "../context/event"
+import { deletedSessionID } from "../util/session-event"
 
 type SessionListFilter = { scope?: "project"; path?: string }
 
@@ -94,7 +95,8 @@ export function DialogSessionList() {
 
   onCleanup(
     event.on("session.deleted", (event) => {
-      setDeleted((current) => new Set(current).add(event.properties.info.id))
+      const sessionID = deletedSessionID(event.properties)
+      if (sessionID) setDeleted((current) => new Set(current).add(sessionID))
     }),
   )
 

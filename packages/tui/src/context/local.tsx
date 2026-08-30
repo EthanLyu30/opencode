@@ -13,6 +13,7 @@ import { useTheme } from "./theme"
 import { useToast } from "../ui/toast"
 import { useRoute } from "./route"
 import { usePermission } from "./permission"
+import { deletedSessionID } from "../util/session-event"
 
 export type LocalTheme = {
   secondary: RGBA
@@ -467,7 +468,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
 
       event.on("session.deleted", (evt) => {
-        prune(evt.properties.info.id)
+        const sessionID = deletedSessionID(evt.properties)
+        if (sessionID) prune(sessionID)
       })
 
       return {

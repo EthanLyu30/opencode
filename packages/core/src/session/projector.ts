@@ -14,6 +14,7 @@ import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { SessionContextEpoch } from "./context-epoch"
+import { ID as SessionID } from "./schema"
 import {
   MessageTable,
   PartTable,
@@ -28,6 +29,9 @@ type DatabaseService = Database.Interface["db"]
 
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
+const sessionEventTypes = new Set<string>(
+  [...SessionV1.Event.Definitions, ...SessionEvent.Definitions].map((definition) => definition.type),
+)
 
 export class SessionAlreadyProjected extends Error {}
 export class SessionTerminallyDeleted extends Error {}
@@ -283,15 +287,24 @@ const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const events = yield* EventV2.Service
     const { db } = yield* Database.Service
-    yield* events.project(SessionV1.Event.Created, (event) =>
-      Effect.gen(function* () {
+    yield* events.guard((event) => {
+      if (!sessionEventTypes.has(event.type)) return Effect.void
+      const sessionID =
+        typeof event.data === "object" && event.data !== null ? Reflect.get(event.data, "sessionID") : undefined
+      if (typeof sessionID !== "string") return Effect.void
+      const typedSessionID = SessionID.make(sessionID)
+      return Effect.gen(function* () {
         const tombstone = yield* db
           .select({ sessionID: SessionTombstoneTable.session_id })
           .from(SessionTombstoneTable)
-          .where(eq(SessionTombstoneTable.session_id, event.data.sessionID))
+          .where(eq(SessionTombstoneTable.session_id, typedSessionID))
           .get()
           .pipe(Effect.orDie)
         if (tombstone) yield* Effect.die(new SessionTerminallyDeleted())
+      })
+    })
+    yield* events.project(SessionV1.Event.Created, (event) =>
+      Effect.gen(function* () {
         if (event.data.project) {
           if (event.data.project.id !== event.data.info.projectID) {
             yield* Effect.die(new Error("Session project identity does not match its creation event"))

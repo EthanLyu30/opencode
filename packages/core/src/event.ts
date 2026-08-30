@@ -128,6 +128,13 @@ function terminalCompactionError(type: string, message: string): never {
   throw new InvalidDurableEventError({ type, message })
 }
 
+function canonicalData<D extends Definition>(definition: D, data: Data<D>): Data<D>
+function canonicalData(definition: Definition, data: unknown): unknown
+function canonicalData(definition: Definition, data: unknown) {
+  const encoded = Schema.encodeUnknownSync(definition.data)(data)
+  return Schema.decodeUnknownSync(definition.data)(encoded)
+}
+
 function decodeReplayBatches(events: ReadonlyArray<SerializedEvent>) {
   const ids = new Set<string>()
   const positions = new Set<string>()
@@ -249,6 +256,8 @@ export interface PublishOptions {
     readonly data: unknown
     readonly id?: ID
   }>
+  /** Atomically compact the durable aggregate to this standalone terminal event. */
+  readonly terminal?: boolean
 }
 
 type RelatedInput = NonNullable<PublishOptions["related"]>[number] & {
@@ -271,6 +280,8 @@ export interface Interface {
   readonly durable: (input: { readonly aggregateID: string; readonly after?: number }) => Stream.Stream<Payload>
   /** @deprecated Use `all()` and consume the returned stream. */
   readonly listen: (listener: Subscriber) => Effect.Effect<Unsubscribe>
+  /** Reject an event before projection, sequencing, persistence, or notification. */
+  readonly guard: (guard: Subscriber) => Effect.Effect<Unsubscribe>
   readonly project: <D extends Definition>(definition: D, projector: Subscriber<D>) => Effect.Effect<void>
   readonly replay: (
     event: SerializedEvent,
@@ -312,6 +323,7 @@ export const allBounded = (events: Interface, capacity: number) =>
 
 export interface LayerOptions {
   readonly beforeAggregateRead?: (aggregateID: string) => Effect.Effect<void>
+  readonly beforeTerminalCompaction?: (aggregateID: string) => Effect.Effect<void>
 }
 
 export const layerWith = (options?: LayerOptions) =>
@@ -331,7 +343,10 @@ export const layerWith = (options?: LayerOptions) =>
       let notificationDraining = false
       // TODO: Bind durable projectors to exact type+version before supporting incompatible historical payloads.
       const listeners = new Array<Subscriber>()
+      const guards = new Array<Subscriber>()
       const { db } = yield* Database.Service
+
+      const assertGuards = (event: Payload) => Effect.forEach(guards, (guard) => guard(event), { discard: true })
 
       const getOrCreate = (definition: Definition) =>
         Effect.gen(function* () {
@@ -454,6 +469,7 @@ export const layerWith = (options?: LayerOptions) =>
               batch,
             },
           } as Payload
+          yield* assertGuards(event)
           for (const projector of projectors.get(definition.type) ?? []) {
             yield* projector(event)
           }
@@ -502,10 +518,19 @@ export const layerWith = (options?: LayerOptions) =>
         related?: ReadonlyArray<RelatedInput>,
         batch?: DurableBatch,
         withinTransaction = false,
+        terminal = false,
       ) {
         return Effect.gen(function* () {
           const durable = definition?.durable
           if (durable) {
+            if (terminal && (input || related?.length || (batch && (batch.index !== 0 || batch.size !== 1)))) {
+              return yield* Effect.die(
+                new InvalidDurableEventError({
+                  type: event.type,
+                  message: "Terminal events must be newly published standalone durable events",
+                }),
+              )
+            }
             const aggregateID = (event.data as Record<string, unknown>)[durable.aggregate]
             if (typeof aggregateID !== "string") {
               yield* Effect.die(
@@ -618,6 +643,7 @@ export const layerWith = (options?: LayerOptions) =>
                         ...(batch ? { batch } : {}),
                       },
                     } as Payload
+                    yield* assertGuards(committed)
                     for (const projector of list) {
                       yield* projector(committed)
                     }
@@ -658,6 +684,10 @@ export const layerWith = (options?: LayerOptions) =>
                         size: batch?.size ?? relatedBatch.length + 1,
                       }),
                     )
+                    if (options?.beforeTerminalCompaction && terminal) {
+                      yield* options.beforeTerminalCompaction(aggregateID)
+                    }
+                    if (terminal) yield* compactTerminal(definition, committed, true)
                     return { aggregateID, seq, relatedEvents }
                   })
                   const committed = withinTransaction
@@ -684,7 +714,7 @@ export const layerWith = (options?: LayerOptions) =>
 
       function publishEvent<D extends Definition>(definition: D, event: Payload<D>, options?: PublishOptions) {
         return Effect.gen(function* () {
-          if (!definition?.durable && (options?.commit || options?.related?.length))
+          if (!definition?.durable && (options?.commit || options?.related?.length || options?.terminal))
             return yield* Effect.die(
               new InvalidDurableEventError({
                 type: event.type,
@@ -700,6 +730,8 @@ export const layerWith = (options?: LayerOptions) =>
               options?.commit,
               options?.related,
               batch,
+              false,
+              options?.terminal,
             )
             if (committed) {
               event = {
@@ -723,6 +755,7 @@ export const layerWith = (options?: LayerOptions) =>
               return event
             }
           }
+          yield* assertGuards(event as Payload)
           yield* notify(event as Payload, false)
           return event
         })
@@ -783,22 +816,28 @@ export const layerWith = (options?: LayerOptions) =>
 
       function publish<D extends Definition>(definition: D, data: Data<D>, options?: PublishOptions) {
         return Effect.gen(function* () {
+          const canonical = canonicalData(definition, data)
+          const related = options?.related?.map((item) => ({
+            ...item,
+            data: canonicalData(item.definition, item.data),
+          }))
+          const canonicalOptions = related ? { ...options, related } : options
           const serviceLocation = Option.getOrUndefined(yield* Effect.serviceOption(Location.Service))
           const location =
-            options?.location ??
+            canonicalOptions?.location ??
             (serviceLocation
               ? { directory: serviceLocation.directory, workspaceID: serviceLocation.workspaceID }
               : undefined)
           return yield* publishEvent(
             definition,
             {
-              id: options?.id ?? ID.create(),
-              ...(options?.metadata ? { metadata: options.metadata } : {}),
+              id: canonicalOptions?.id ?? ID.create(),
+              ...(canonicalOptions?.metadata ? { metadata: canonicalOptions.metadata } : {}),
               type: definition.type,
               ...(location ? { location } : {}),
-              data,
+              data: canonical,
             } as Payload<D>,
-            options,
+            canonicalOptions,
           )
         })
       }
@@ -1173,7 +1212,7 @@ export const layerWith = (options?: LayerOptions) =>
           .pipe(Effect.orDie)
       }
 
-      function compactTerminal<D extends Definition>(definition: D, event: Payload<D>) {
+      function compactTerminal<D extends Definition>(definition: D, event: Payload<D>, withinTransaction = false) {
         return Effect.gen(function* () {
           const durable = definition.durable
           if (
@@ -1192,117 +1231,108 @@ export const layerWith = (options?: LayerOptions) =>
             terminalCompactionError(definition.type, "Terminal compaction aggregate authority does not match")
           }
           const encoded = Schema.encodeUnknownSync(definition.data)(event.data)
-          yield* db
-            .transaction(
-              () =>
-                Effect.gen(function* () {
-                  const retained = yield* db
-                    .select()
-                    .from(EventTable)
-                    .where(eq(EventTable.id, event.id))
-                    .get()
-                    .pipe(Effect.orDie)
-                  const batch = event.durable!.batch
-                  if (
-                    !retained ||
-                    retained.aggregate_id !== aggregateID ||
-                    retained.seq !== event.durable!.seq ||
-                    retained.type !== versionedType(definition.type, durable.version) ||
-                    !isDeepStrictEqual(retained.data, encoded) ||
-                    retained.batch_id !== (batch?.id ?? null) ||
-                    retained.batch_index !== (batch?.index ?? null) ||
-                    retained.batch_size !== (batch?.size ?? null)
-                  ) {
-                    terminalCompactionError(definition.type, "Terminal compaction event does not match durable history")
-                  }
-                  const sequence = yield* db
-                    .select({ seq: EventSequenceTable.seq })
-                    .from(EventSequenceTable)
-                    .where(eq(EventSequenceTable.aggregate_id, aggregateID))
-                    .get()
-                    .pipe(Effect.orDie)
-                  if (sequence?.seq !== retained.seq) {
-                    terminalCompactionError(definition.type, "Terminal compaction event is not the aggregate terminus")
-                  }
-                  if (
-                    retained.batch_id !== null &&
-                    (retained.batch_id !== retained.id || retained.batch_index !== 0 || retained.batch_size !== 1)
-                  ) {
-                    terminalCompactionError(
-                      definition.type,
-                      "Terminal compaction event must be a standalone complete batch",
-                    )
-                  }
-                  yield* db
-                    .delete(EventTable)
-                    .where(
-                      and(
-                        eq(EventTable.aggregate_id, aggregateID),
-                        lt(EventTable.seq, retained.seq),
-                        isNull(EventTable.batch_id),
-                      ),
-                    )
-                    .run()
-                    .pipe(Effect.orDie)
-                  while (true) {
-                    const prior = yield* db
-                      .select({ batchID: EventTable.batch_id })
-                      .from(EventTable)
-                      .where(
-                        and(
-                          eq(EventTable.aggregate_id, aggregateID),
-                          lt(EventTable.seq, retained.seq),
-                          isNotNull(EventTable.batch_id),
-                        ),
-                      )
-                      .limit(250)
-                      .all()
-                      .pipe(Effect.orDie)
-                    const batchIDs = [...new Set(prior.flatMap((row) => (row.batchID === null ? [] : [row.batchID])))]
-                    if (batchIDs.length === 0) break
-                    const summaries = yield* db
-                      .select({
-                        batchID: EventTable.batch_id,
-                        rows: sql<number>`count(*)`,
-                        indexes: sql<number>`count(${EventTable.batch_index})`,
-                        distinctIndexes: sql<number>`count(distinct ${EventTable.batch_index})`,
-                        sizes: sql<number>`count(${EventTable.batch_size})`,
-                        minIndex: sql<number | null>`min(${EventTable.batch_index})`,
-                        maxIndex: sql<number | null>`max(${EventTable.batch_index})`,
-                        minSize: sql<number | null>`min(${EventTable.batch_size})`,
-                        maxSize: sql<number | null>`max(${EventTable.batch_size})`,
-                      })
-                      .from(EventTable)
-                      .where(inArray(EventTable.batch_id, batchIDs))
-                      .groupBy(EventTable.batch_id)
-                      .all()
-                      .pipe(Effect.orDie)
-                    const byBatch = new Map(summaries.map((summary) => [summary.batchID, summary] as const))
-                    for (const batchID of batchIDs) {
-                      const summary = byBatch.get(batchID)
-                      if (
-                        !summary ||
-                        summary.rows < 1 ||
-                        summary.indexes !== summary.rows ||
-                        summary.distinctIndexes !== summary.rows ||
-                        summary.sizes !== summary.rows ||
-                        summary.minIndex !== 0 ||
-                        summary.maxIndex !== summary.rows - 1 ||
-                        summary.minSize !== summary.rows ||
-                        summary.maxSize !== summary.rows
-                      ) {
-                        terminalCompactionError(
-                          definition.type,
-                          `Terminal compaction found incomplete batch ${batchID}`,
-                        )
-                      }
-                    }
-                    yield* db.delete(EventTable).where(inArray(EventTable.batch_id, batchIDs)).run().pipe(Effect.orDie)
-                  }
-                }),
-              { behavior: "immediate" },
-            )
-            .pipe(Effect.orDie)
+          const operation = Effect.gen(function* () {
+            const retained = yield* db
+              .select()
+              .from(EventTable)
+              .where(eq(EventTable.id, event.id))
+              .get()
+              .pipe(Effect.orDie)
+            const batch = event.durable!.batch
+            if (
+              !retained ||
+              retained.aggregate_id !== aggregateID ||
+              retained.seq !== event.durable!.seq ||
+              retained.type !== versionedType(definition.type, durable.version) ||
+              !isDeepStrictEqual(retained.data, encoded) ||
+              retained.batch_id !== (batch?.id ?? null) ||
+              retained.batch_index !== (batch?.index ?? null) ||
+              retained.batch_size !== (batch?.size ?? null)
+            ) {
+              terminalCompactionError(definition.type, "Terminal compaction event does not match durable history")
+            }
+            const sequence = yield* db
+              .select({ seq: EventSequenceTable.seq })
+              .from(EventSequenceTable)
+              .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+              .get()
+              .pipe(Effect.orDie)
+            if (sequence?.seq !== retained.seq) {
+              terminalCompactionError(definition.type, "Terminal compaction event is not the aggregate terminus")
+            }
+            if (
+              retained.batch_id !== null &&
+              (retained.batch_id !== retained.id || retained.batch_index !== 0 || retained.batch_size !== 1)
+            ) {
+              terminalCompactionError(definition.type, "Terminal compaction event must be a standalone complete batch")
+            }
+            yield* db
+              .delete(EventTable)
+              .where(
+                and(
+                  eq(EventTable.aggregate_id, aggregateID),
+                  lt(EventTable.seq, retained.seq),
+                  isNull(EventTable.batch_id),
+                ),
+              )
+              .run()
+              .pipe(Effect.orDie)
+            while (true) {
+              const prior = yield* db
+                .select({ batchID: EventTable.batch_id })
+                .from(EventTable)
+                .where(
+                  and(
+                    eq(EventTable.aggregate_id, aggregateID),
+                    lt(EventTable.seq, retained.seq),
+                    isNotNull(EventTable.batch_id),
+                  ),
+                )
+                .limit(250)
+                .all()
+                .pipe(Effect.orDie)
+              const batchIDs = [...new Set(prior.flatMap((row) => (row.batchID === null ? [] : [row.batchID])))]
+              if (batchIDs.length === 0) break
+              const summaries = yield* db
+                .select({
+                  batchID: EventTable.batch_id,
+                  rows: sql<number>`count(*)`,
+                  indexes: sql<number>`count(${EventTable.batch_index})`,
+                  distinctIndexes: sql<number>`count(distinct ${EventTable.batch_index})`,
+                  sizes: sql<number>`count(${EventTable.batch_size})`,
+                  minIndex: sql<number | null>`min(${EventTable.batch_index})`,
+                  maxIndex: sql<number | null>`max(${EventTable.batch_index})`,
+                  minSize: sql<number | null>`min(${EventTable.batch_size})`,
+                  maxSize: sql<number | null>`max(${EventTable.batch_size})`,
+                })
+                .from(EventTable)
+                .where(inArray(EventTable.batch_id, batchIDs))
+                .groupBy(EventTable.batch_id)
+                .all()
+                .pipe(Effect.orDie)
+              const byBatch = new Map(summaries.map((summary) => [summary.batchID, summary] as const))
+              for (const batchID of batchIDs) {
+                const summary = byBatch.get(batchID)
+                if (
+                  !summary ||
+                  summary.rows < 1 ||
+                  summary.indexes !== summary.rows ||
+                  summary.distinctIndexes !== summary.rows ||
+                  summary.sizes !== summary.rows ||
+                  summary.minIndex !== 0 ||
+                  summary.maxIndex !== summary.rows - 1 ||
+                  summary.minSize !== summary.rows ||
+                  summary.maxSize !== summary.rows
+                ) {
+                  terminalCompactionError(definition.type, `Terminal compaction found incomplete batch ${batchID}`)
+                }
+              }
+              yield* db.delete(EventTable).where(inArray(EventTable.batch_id, batchIDs)).run().pipe(Effect.orDie)
+            }
+          })
+          yield* withinTransaction
+            ? operation
+            : db.transaction(() => operation, { behavior: "immediate" }).pipe(Effect.orDie)
         })
       }
 
@@ -1399,6 +1429,15 @@ export const layerWith = (options?: LayerOptions) =>
           })
         })
 
+      const guard = (guard: Subscriber): Effect.Effect<Unsubscribe> =>
+        Effect.sync(() => {
+          guards.push(guard)
+          return Effect.sync(() => {
+            const index = guards.indexOf(guard)
+            if (index >= 0) guards.splice(index, 1)
+          })
+        })
+
       const project = <D extends Definition>(definition: D, projector: Subscriber<D>): Effect.Effect<void> =>
         Effect.sync(() => {
           const list = projectors.get(definition.type) ?? []
@@ -1412,6 +1451,7 @@ export const layerWith = (options?: LayerOptions) =>
         all: streamAll,
         durable,
         listen,
+        guard,
         project,
         replay,
         replayAll,

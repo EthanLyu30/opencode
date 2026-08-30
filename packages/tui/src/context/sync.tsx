@@ -32,6 +32,7 @@ import { batch, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
+import { deletedSessionID } from "../util/session-event"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -265,7 +266,9 @@ export const {
           break
 
         case "session.deleted": {
-          const result = search(store.session, event.properties.info.id, (s) => s.id)
+          const sessionID = deletedSessionID(event.properties)
+          if (!sessionID) break
+          const result = search(store.session, sessionID, (s) => s.id)
           if (result.found) {
             setStore(
               "session",
