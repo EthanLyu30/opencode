@@ -52,3 +52,10 @@ The fifth Task23.8 fix round exhausted its review budget with four real, load-be
 10. **Update all minimal-v3 Session deletion consumers and generated types.**
     - The four production TUI listeners must use v3 `sessionID` and explicitly preserve legacy v1/v2 handling where those versions remain supported; normal deletion must not throw and must clear navigation, list, and local/sync indexes.
     - Regenerate any public SDK/client type that still requires `properties.info` from its authoritative source. Generated artifacts remain codegen-only: do not hand-edit them, and prove deterministic regeneration or explicitly isolate an unrelated pre-existing generator baseline without hiding the v3 type correction.
+
+## Scoped-review closure ruling
+
+11. **Do not expand Task23.9 into a repository-wide portable-filter provenance redesign.**
+    - `checksPortable` treated repository-authored `meta` plus `arbitrary.constraint` as the reconstruction contract before Task23.9. Code generation consumes trusted local source, not request/runtime input; a source author able to forge those annotations can already edit the generator or generated output.
+    - Fix2 removes the newly introduced `isPropertyNames` exception entirely. The visual-build environment now uses the existing genuine built-in `isPattern` contract through a keyed `Schema.Record`; its runtime, Effect client, OpenAPI, and authoritative SDK representations are verified equal.
+    - A custom filter that spoofs an existing built-in's complete metadata remains a real pre-existing architectural limitation, but it is not a new Task23.9 path or a user-input security boundary. If repository schema authors become untrusted, handle that as a cross-cutting codegen-provenance task covering every portable filter.
