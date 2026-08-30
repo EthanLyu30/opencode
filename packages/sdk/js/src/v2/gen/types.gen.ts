@@ -6961,7 +6961,7 @@ export type WorkflowVisualBuildScriptPreviewInput = {
   cwd?: WorkflowVisualBuildProjectDirectory
   argv: Array<string>
   env?: {
-    [key: string]: unknown | unknown
+    [key: string]: string
   }
 }
 

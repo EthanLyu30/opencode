@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test"
 import fs from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import { OpenCode as PromiseOpenCode } from "@opencode-ai/client"
 import { OpenCode as EffectOpenCode } from "@opencode-ai/client/effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
@@ -19,8 +21,8 @@ import { WorkflowRuntimeRecovery } from "@opencode-ai/server/workflow/runtime-re
 import { Context, Effect, Layer, LayerMap } from "effect"
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http"
 
-const locationA = "D:\\OpenCode-Task23.9\\sdk-location-a"
-const locationB = "D:\\OpenCode-Task23.9\\sdk-location-b"
+const locationA = path.join(tmpdir(), "opencode-sdk-visual-build-location-a")
+const locationB = path.join(tmpdir(), "opencode-sdk-visual-build-location-b")
 
 const input = (delivery: "background" | "foreground" = "background") => ({
   prompt: "Build the visual experience",
@@ -105,6 +107,16 @@ test("generated Promise and Effect clients share one location-scoped visual-buil
       body: JSON.stringify({ ...input(), directory: locationB }),
     })
     expect(strictBody.status).toBe(400)
+
+    const numericEnvironment = await fetch("http://opencode.local/api/workflow/visual-build", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-opencode-directory": locationA },
+      body: JSON.stringify({
+        ...input(),
+        preview: { kind: "script", argv: ["bun", "run", "preview"], env: { PORT: 4096 } },
+      }),
+    })
+    expect(numericEnvironment.status).toBe(400)
 
     const strictHeader = await fetch("http://opencode.local/api/workflow/visual-build", {
       method: "POST",

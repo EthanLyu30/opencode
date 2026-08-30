@@ -5,9 +5,13 @@ import { PublicApi } from "../../src/server/routes/instance/httpapi/public"
 type Method = "get" | "post" | "put" | "delete" | "patch"
 type OpenApiSchema = {
   readonly $ref?: string
+  readonly additionalProperties?: boolean | OpenApiSchema
+  readonly allOf?: ReadonlyArray<OpenApiSchema>
   readonly anyOf?: ReadonlyArray<OpenApiSchema>
   readonly type?: string
   readonly enum?: readonly unknown[]
+  readonly pattern?: string
+  readonly propertyNames?: OpenApiSchema
   readonly properties?: Record<string, OpenApiSchema>
   readonly required?: readonly string[]
   readonly contentSchema?: OpenApiSchema
@@ -149,6 +153,14 @@ describe("PublicApi OpenAPI v2 errors", () => {
       },
     })
     expect(Object.keys(operation?.responses ?? {}).sort()).toEqual(["200", "400", "401", "409"])
+    expect(spec.components.schemas.WorkflowVisualBuildScriptPreviewInput.properties?.env).toEqual({
+      type: "object",
+      additionalProperties: { type: "string", pattern: "^[^\\u0000\\r\\n]*$" },
+      propertyNames: {
+        type: "string",
+        allOf: [{ pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }],
+      },
+    })
   })
 
   test("documents references separately from filesystem routes", () => {

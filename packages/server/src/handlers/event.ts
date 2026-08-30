@@ -31,9 +31,9 @@ export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers)
     const events = yield* EventV2.Service
     const { db } = yield* Database.Service
     const authority = PublicEventVisibility.databaseAuthority(db)
-    const publicEvents = PublicEventVisibility.makeLiveBatchFilter(authority)
     return handlers.handleRaw("event.subscribe", () =>
       Effect.gen(function* () {
+        const publicEvents = PublicEventVisibility.makeLiveBatchFilter(authority)
         const connected = {
           id: EventV2.ID.create(),
           type: "server.connected",

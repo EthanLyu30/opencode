@@ -895,9 +895,25 @@ describe("HttpApiCodegen.generate", () => {
     )
   })
 
+  test("preserves built-in property-name checks", () => {
+    const EnvironmentName = Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))
+    const Environment = Schema.Record(Schema.String, Schema.String).check(Schema.isPropertyNames(EnvironmentName))
+
+    const output = compile(api(HttpApiEndpoint.get("get", "/session", { success: Environment })))
+    const source = output.files.find((file) => file.path === "session.ts")?.content
+
+    expect(source).toContain("Schema.isPropertyNames")
+    expect(source).toContain("Schema.isPattern")
+  })
+
   test("rejects spoofed and aborted validation checks", () => {
     const Spoofed = Schema.Number.check(
       Schema.makeFilter(() => "always fails", { meta: { _tag: "isFinite" }, arbitrary: {} }),
+    )
+    const SpoofedPropertyNames = Schema.Record(Schema.String, Schema.String).check(
+      Schema.makeFilter(() => "always fails", {
+        meta: { _tag: "isPropertyNames", propertyNames: Schema.String.ast },
+      }),
     )
     const Aborted = Schema.Number.check(Schema.isFinite().abort())
 
@@ -907,6 +923,9 @@ describe("HttpApiCodegen.generate", () => {
     expect(() => compile(api(HttpApiEndpoint.get("aborted", "/session", { success: Aborted })))).toThrow(
       "Unportable schema: session.aborted.success",
     )
+    expect(() =>
+      compile(api(HttpApiEndpoint.get("spoofedPropertyNames", "/session", { success: SpoofedPropertyNames }))),
+    ).toThrow("Unportable schema: session.spoofedPropertyNames.success")
   })
 
   test("rejects altered wire-side schemas even when the codec transformation is canonical", () => {

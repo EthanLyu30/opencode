@@ -892,7 +892,9 @@ function assertPortable(schema: Schema.Top, path: string, portable: Map<SchemaAS
   }
   const visitCurrent = (ast: SchemaAST.AST): boolean => {
     if (!annotationsPortable(ast.annotations)) return false
-    if (!checksPortable(ast.checks) || ("encodingChecks" in ast && !checksPortable(ast.encodingChecks))) return false
+    if (!checksPortable(ast.checks, visit) || ("encodingChecks" in ast && !checksPortable(ast.encodingChecks, visit))) {
+      return false
+    }
     if (SchemaAST.isDeclaration(ast)) {
       return generationPortable(ast.annotations?.generation) && ast.typeParameters.every(visit)
     }
@@ -914,7 +916,7 @@ function assertPortable(schema: Schema.Top, path: string, portable: Map<SchemaAS
   if (taggedError !== undefined && SchemaAST.isDeclaration(schema.ast)) {
     if (
       schema.ast.checks !== undefined ||
-      ("encodingChecks" in schema.ast && !checksPortable(schema.ast.encodingChecks)) ||
+      ("encodingChecks" in schema.ast && !checksPortable(schema.ast.encodingChecks, visit)) ||
       schema.ast.typeParameters.some((ast) => ast.checks !== undefined) ||
       !schema.ast.typeParameters.every(visit)
     ) {
@@ -925,24 +927,36 @@ function assertPortable(schema: Schema.Top, path: string, portable: Map<SchemaAS
   if (!visit(schema.ast)) throw new GenerationError({ reason: `Unportable schema: ${path}` })
 }
 
-function checksPortable(checks: SchemaAST.Checks | undefined): boolean {
+function checksPortable(checks: SchemaAST.Checks | undefined, visit: (ast: SchemaAST.AST) => boolean): boolean {
   if (checks === undefined) return true
-  return checks.every((check) =>
-    check._tag === "Filter"
-      ? !check.aborted &&
-        check.annotations?.meta !== undefined &&
-        typeof check.annotations.arbitrary === "object" &&
-        check.annotations.arbitrary !== null &&
-        "constraint" in check.annotations.arbitrary
-      : checksPortable(check.checks),
-  )
+  return checks.every((check) => {
+    if (check._tag !== "Filter") return checksPortable(check.checks, visit)
+    const annotations = check.annotations
+    if (check.aborted || annotations === undefined) return false
+    const meta = annotations.meta
+    if (meta === undefined) return false
+    if (meta._tag === "isPropertyNames") {
+      return (
+        annotations["~structural"] === true &&
+        annotations.arbitrary === undefined &&
+        SchemaAST.isAST(meta.propertyNames) &&
+        visit(meta.propertyNames)
+      )
+    }
+    return (
+      typeof annotations.arbitrary === "object" &&
+      annotations.arbitrary !== null &&
+      "constraint" in annotations.arbitrary
+    )
+  })
 }
 
 function metadataPortable(ast: SchemaAST.AST, seen: Set<SchemaAST.AST>): boolean {
   if (seen.has(ast)) return true
   seen.add(ast)
-  if (!annotationsPortable(ast.annotations) || !checksPortable(ast.checks)) return false
-  if ("encodingChecks" in ast && !checksPortable(ast.encodingChecks)) return false
+  const visit = (item: SchemaAST.AST) => metadataPortable(item, seen)
+  if (!annotationsPortable(ast.annotations) || !checksPortable(ast.checks, visit)) return false
+  if ("encodingChecks" in ast && !checksPortable(ast.encodingChecks, visit)) return false
   if (ast.encoding?.some((link) => !metadataPortable(link.to, seen))) return false
   if (SchemaAST.isDeclaration(ast)) return ast.typeParameters.every((item) => metadataPortable(item, seen))
   if (SchemaAST.isSuspend(ast)) return metadataPortable(ast.thunk(), seen)

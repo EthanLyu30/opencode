@@ -36,6 +36,25 @@ describe("Workflow protocol group", () => {
     expect(() => Schema.decodeUnknownSync(VisualBuildHeaders)({ "idempotency-key": "x".repeat(129) })).toThrow()
   })
 
+  test("accepts only safe string values in visual-build preview environments", () => {
+    const withEnvironment = (env: Record<string, unknown>) => ({
+      ...visualBuild,
+      preview: { kind: "script", argv: ["bun", "run", "preview"], env },
+    })
+
+    const decoded = Schema.decodeUnknownSync(WorkflowVisualBuild.CreateInput)(withEnvironment({ NODE_ENV: "test" }))
+    expect(decoded.preview?.kind).toBe("script")
+    if (decoded.preview?.kind !== "script") throw new Error("expected a script preview")
+    expect(decoded.preview.env).toEqual({ NODE_ENV: "test" })
+    expect(() => Schema.decodeUnknownSync(WorkflowVisualBuild.CreateInput)(withEnvironment({ PORT: 4096 }))).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowVisualBuild.CreateInput)(withEnvironment({ "BAD-NAME": "x" })),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowVisualBuild.CreateInput)(withEnvironment({ NODE_OPTIONS: "x\ny" })),
+    ).toThrow()
+  })
+
   test.each(["directory", "workspaceID", "url", "model", "provider", "command", "placement", "idempotencyKey"])(
     "strictly rejects public visual-build field %s",
     (field) => {

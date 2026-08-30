@@ -33,7 +33,7 @@ const ResponseInProgress = EventV2.define({
 })
 
 describe("public event route authority", () => {
-  test("delivers public Workflow and Response lifecycle events while suppressing hidden owners", async () => {
+  test("delivers each concurrent subscriber a complete public batch while suppressing hidden owners", async () => {
     const captured: { database?: Database.Interface; events?: EventV2.Interface } = {}
     const routeGraph = createEmbeddedRoutes({ buildApplicationServices: applicationFactory(captured) })
     const web = HttpRouter.toWebHandler(routeGraph.pipe(Layer.provide(HttpServer.layerServices)), {
@@ -47,16 +47,26 @@ describe("public event route authority", () => {
         remove: () => Effect.die("unused"),
       }),
     )
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+    let readerA: ReadableStreamDefaultReader<Uint8Array> | undefined
+    let readerB: ReadableStreamDefaultReader<Uint8Array> | undefined
+    let controlledEvents: ReturnType<typeof controlEventListeners> | undefined
     try {
-      const response = await web.handler(new Request("http://localhost/api/event"), requestServices)
-      expect(response.status).toBe(200)
-      reader = response.body?.getReader()
-      if (!reader) throw new Error("event route did not return a readable body")
-      const sse = sseReader(reader)
-      expect((await sse.next()).type).toBe("server.connected")
-
+      const [responseA, responseB] = await Promise.all([
+        web.handler(new Request("http://localhost/api/event"), requestServices),
+        web.handler(new Request("http://localhost/api/event"), requestServices),
+      ])
+      expect(responseA.status).toBe(200)
+      expect(responseB.status).toBe(200)
+      readerA = responseA.body?.getReader()
+      readerB = responseB.body?.getReader()
+      if (!readerA || !readerB) throw new Error("event route did not return two readable bodies")
       if (!captured.database || !captured.events) throw new Error("event route did not acquire application authority")
+      controlledEvents = controlEventListeners(captured.events)
+      const sseA = sseReader(readerA)
+      const sseB = sseReader(readerB)
+      expect((await sseA.next()).type).toBe("server.connected")
+      expect((await sseB.next()).type).toBe("server.connected")
+
       const { db } = captured.database
       const publicSessionID = SessionV2.ID.make("ses_public_event_route")
       const hiddenSessionID = SessionV2.ID.make("ses_hidden_event_route")
@@ -178,45 +188,92 @@ describe("public event route authority", () => {
         ),
       ).toBe(false)
 
-      await Effect.runPromise(
-        captured.events.publish(WorkflowStarted, {
-          workflowID: publicWorkflowID,
-          timestamp: DateTime.makeUnsafe(2),
-        }),
-      )
-      expect((await sse.next()).type).toBe("workflow.started")
+      const workflowStartedData = { workflowID: publicWorkflowID, timestamp: DateTime.makeUnsafe(2) }
+      const responseInProgressData = { responseID: publicResponseID, timestamp: DateTime.makeUnsafe(3) }
+      const publicRelated = [
+        {
+          type: WorkflowStarted.type,
+          data: workflowStartedData,
+        },
+        {
+          type: ResponseInProgress.type,
+          data: responseInProgressData,
+        },
+      ] as const
+      const primary = {
+        id: EventV2.ID.make("evt_concurrent_public_workflow"),
+        type: WorkflowStarted.type,
+        data: workflowStartedData,
+        durable: {
+          aggregateID: publicWorkflowID,
+          seq: 0,
+          version: 1,
+          batch: { id: "evt_concurrent_public_batch", index: 0, size: 2 },
+          related: publicRelated,
+        },
+      } satisfies EventV2.Payload<typeof WorkflowStarted>
+      const related = {
+        id: EventV2.ID.make("evt_concurrent_public_response"),
+        type: ResponseInProgress.type,
+        data: responseInProgressData,
+        durable: {
+          aggregateID: publicResponseID,
+          seq: 0,
+          version: 1,
+          batch: { id: "evt_concurrent_public_batch", index: 1, size: 2 },
+          related: publicRelated,
+        },
+      } satisfies EventV2.Payload<typeof ResponseInProgress>
 
-      await Effect.runPromise(
-        captured.events.publish(ResponseInProgress, {
-          responseID: publicResponseID,
-          timestamp: DateTime.makeUnsafe(3),
-        }),
-      )
-      expect((await sse.next()).type).toBe("response.in_progress")
+      const concurrentBatches = Promise.all([readTypes(sseA, 2), readTypes(sseB, 2)])
+      await controlledEvents.waitForListeners(2)
+      // Each response owns listener 0 or 1. Deliver A0 -> B0 -> A1 -> B1 so
+      // sharing one stateful batch filter deterministically rejects the batch.
+      await controlledEvents.emitTo(0, primary)
+      await controlledEvents.emitTo(1, primary)
+      await controlledEvents.emitTo(0, related)
+      await controlledEvents.emitTo(1, related)
+      expect(await concurrentBatches).toEqual([
+        ["workflow.started", "response.in_progress"],
+        ["workflow.started", "response.in_progress"],
+      ])
 
-      await Effect.runPromise(
-        captured.events.publish(WorkflowStarted, {
+      await controlledEvents.emitAll({
+        id: EventV2.ID.make("evt_hidden_workflow"),
+        type: WorkflowStarted.type,
+        data: {
           workflowID: hiddenWorkflowID,
           timestamp: DateTime.makeUnsafe(4),
-        }),
-      )
-      await Effect.runPromise(
-        captured.events.publish(ResponseInProgress, {
+        },
+        durable: { aggregateID: hiddenWorkflowID, seq: 0, version: 1 },
+      })
+      await controlledEvents.emitAll({
+        id: EventV2.ID.make("evt_hidden_response"),
+        type: ResponseInProgress.type,
+        data: {
           responseID: hiddenResponseID,
           timestamp: DateTime.makeUnsafe(5),
-        }),
-      )
-      await Effect.runPromise(
-        captured.events.publish(ResponseInProgress, {
+        },
+        durable: { aggregateID: hiddenResponseID, seq: 0, version: 1 },
+      })
+      await controlledEvents.emitAll({
+        id: EventV2.ID.make("evt_public_marker"),
+        type: ResponseInProgress.type,
+        data: {
           responseID: markerResponseID,
           timestamp: DateTime.makeUnsafe(6),
-        }),
-      )
-      const marker = await sse.next()
-      expect(marker.type).toBe("response.in_progress")
-      expect(marker.data.responseID).toBe(markerResponseID)
+        },
+        durable: { aggregateID: markerResponseID, seq: 0, version: 1 },
+      })
+      const [markerA, markerB] = await Promise.all([sseA.next(), sseB.next()])
+      expect(markerA.type).toBe("response.in_progress")
+      expect(markerA.data.responseID).toBe(markerResponseID)
+      expect(markerB.type).toBe("response.in_progress")
+      expect(markerB.data.responseID).toBe(markerResponseID)
     } finally {
-      await reader?.cancel()
+      await readerA?.cancel()
+      await readerB?.cancel()
+      controlledEvents?.restore()
       await web.dispose()
     }
   }, 30_000)
@@ -284,6 +341,49 @@ function sseReader(reader: ReadableStreamDefaultReader<Uint8Array>) {
         if (chunk.done) throw new Error("event stream ended before the expected event")
         buffer += decoder.decode(chunk.value, { stream: true }).replaceAll("\r\n", "\n")
       }
+    },
+  }
+}
+
+async function readTypes(reader: ReturnType<typeof sseReader>, count: number) {
+  const types = new Array<string>()
+  while (types.length < count) types.push((await reader.next()).type)
+  return types
+}
+
+function controlEventListeners(events: EventV2.Interface) {
+  const mutable = events as { listen: EventV2.Interface["listen"] }
+  const original = mutable.listen
+  const listeners = new Array<EventV2.Subscriber>()
+  mutable.listen = (listener) =>
+    Effect.sync(() => {
+      listeners.push(listener)
+      return Effect.sync(() => {
+        const index = listeners.indexOf(listener)
+        if (index >= 0) listeners.splice(index, 1)
+      })
+    })
+
+  const handoff = () => new Promise<void>((resolve) => setTimeout(resolve, 10))
+  return {
+    async waitForListeners(count: number) {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (listeners.length === count) return
+        await handoff()
+      }
+      throw new Error(`expected ${count} event listeners, received ${listeners.length}`)
+    },
+    async emitTo(index: number, event: EventV2.Payload) {
+      const listener = listeners[index]
+      if (!listener) throw new Error(`event listener ${index} is not registered`)
+      await Effect.runPromise(listener(event))
+      await handoff()
+    },
+    async emitAll(event: EventV2.Payload) {
+      for (let index = 0; index < listeners.length; index++) await this.emitTo(index, event)
+    },
+    restore() {
+      mutable.listen = original
     },
   }
 }
