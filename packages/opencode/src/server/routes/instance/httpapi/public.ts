@@ -41,8 +41,10 @@ type OpenApiSchema = {
   minimum?: number
   oneOf?: OpenApiSchema[]
   pattern?: string
+  patternProperties?: Record<string, OpenApiSchema | boolean>
   prefixItems?: OpenApiSchema[]
   properties?: Record<string, OpenApiSchema>
+  propertyNames?: OpenApiSchema
   required?: string[]
   type?: string
 }
@@ -93,7 +95,9 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
   // but the legacy SDK expected plain `T` for optional fields. Strip null
   // from all component schemas so both request and response types match.
   for (const [name, schema] of Object.entries(spec.components?.schemas ?? {})) {
-    spec.components!.schemas![name] = stripOptionalNull(structuredClone(schema))
+    const normalized = structuredClone(schema)
+    normalizeAnchoredPatternRecords(normalized)
+    spec.components!.schemas![name] = stripOptionalNull(normalized)
   }
   normalizeComponentNames(spec)
   collapseDuplicateComponents(spec)
@@ -112,7 +116,11 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
         // Keep that SDK surface stable while the HttpApi spec is tightened.
         if (!isV2Api) delete operation.requestBody.required
         const body = operation.requestBody.content?.["application/json"]
-        if (body?.schema) body.schema = stripOptionalNull(structuredClone(body.schema))
+        if (body?.schema) {
+          body.schema = structuredClone(body.schema)
+          normalizeAnchoredPatternRecords(body.schema)
+          body.schema = stripOptionalNull(body.schema)
+        }
         if (path === "/experimental/workspace" && method === "post") {
           // Workspace creation fields `branch` and `extra` are Schema.NullOr —
           // genuinely nullable, not just optional. Re-add the null that the
@@ -140,7 +148,11 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
       }
       for (const response of Object.values(operation.responses ?? {})) {
         for (const content of Object.values(response.content ?? {})) {
-          if (content.schema) content.schema = stripOptionalNull(structuredClone(content.schema))
+          if (content.schema) {
+            content.schema = structuredClone(content.schema)
+            normalizeAnchoredPatternRecords(content.schema)
+            content.schema = stripOptionalNull(content.schema)
+          }
         }
       }
       if (!isV2Api) {
@@ -175,6 +187,37 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
   }
   deleteUnusedLegacyErrorComponents(spec)
   return input
+}
+
+function normalizeAnchoredPatternRecords(schema: OpenApiSchema): void {
+  schema.allOf?.forEach(normalizeAnchoredPatternRecords)
+  schema.anyOf?.forEach(normalizeAnchoredPatternRecords)
+  schema.oneOf?.forEach(normalizeAnchoredPatternRecords)
+  schema.prefixItems?.forEach(normalizeAnchoredPatternRecords)
+  if (schema.items) normalizeAnchoredPatternRecords(schema.items)
+  Object.values(schema.properties ?? {}).forEach(normalizeAnchoredPatternRecords)
+  if (typeof schema.additionalProperties === "object") normalizeAnchoredPatternRecords(schema.additionalProperties)
+  for (const value of Object.values(schema.patternProperties ?? {})) {
+    if (typeof value === "object") normalizeAnchoredPatternRecords(value)
+  }
+  if (schema.propertyNames) normalizeAnchoredPatternRecords(schema.propertyNames)
+
+  if (schema.type !== "object" || schema.properties !== undefined || schema.additionalProperties !== undefined) return
+  const entries = Object.entries(schema.patternProperties ?? {})
+  if (entries.length !== 1) return
+  const [pattern, value] = entries[0]
+  if (!isFullyAnchoredPattern(pattern)) return
+
+  delete schema.patternProperties
+  schema.additionalProperties = value
+  schema.propertyNames = { type: "string", allOf: [{ pattern }] }
+}
+
+function isFullyAnchoredPattern(pattern: string) {
+  if (!pattern.startsWith("^") || !pattern.endsWith("$")) return false
+  let precedingBackslashes = 0
+  for (let index = pattern.length - 2; index >= 0 && pattern[index] === "\\"; index--) precedingBackslashes++
+  return precedingBackslashes % 2 === 0
 }
 
 function isV2ApiPath(path: string) {
@@ -513,6 +556,7 @@ function flattenOptions(options: OpenApiSchema[] | undefined): OpenApiSchema[] |
 
 function normalizeParameter(param: OpenApiParameter, route: string) {
   if (!param.schema || typeof param.schema !== "object") return
+  normalizeAnchoredPatternRecords(param.schema)
   if (param.in === "path") {
     param.schema = stripOptionalNull(param.schema)
     return

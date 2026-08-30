@@ -895,15 +895,29 @@ describe("HttpApiCodegen.generate", () => {
     )
   })
 
-  test("preserves built-in property-name checks", () => {
+  test("rejects property-name checks whose runtime source cannot be proven", () => {
     const EnvironmentName = Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))
     const Environment = Schema.Record(Schema.String, Schema.String).check(Schema.isPropertyNames(EnvironmentName))
 
-    const output = compile(api(HttpApiEndpoint.get("get", "/session", { success: Environment })))
-    const source = output.files.find((file) => file.path === "session.ts")?.content
+    expect(() => compile(api(HttpApiEndpoint.get("get", "/session", { success: Environment })))).toThrow(
+      "Unportable schema: session.get.success",
+    )
+  })
 
-    expect(source).toContain("Schema.isPropertyNames")
-    expect(source).toContain("Schema.isPattern")
+  test("rejects custom property-name checks with fully spoofed built-in metadata", () => {
+    const EnvironmentName = Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))
+    const SpoofedPropertyNames = Schema.Record(Schema.String, Schema.String).check(
+      Schema.makeFilter(() => "always fails", {
+        meta: { _tag: "isPropertyNames", propertyNames: EnvironmentName.ast },
+        "~structural": true,
+        arbitrary: undefined,
+      }),
+    )
+
+    expect(Schema.is(SpoofedPropertyNames)({ SAFE_NAME: "value" })).toBe(false)
+    expect(() =>
+      compile(api(HttpApiEndpoint.get("fullySpoofedPropertyNames", "/session", { success: SpoofedPropertyNames }))),
+    ).toThrow("Unportable schema: session.fullySpoofedPropertyNames.success")
   })
 
   test("rejects spoofed and aborted validation checks", () => {

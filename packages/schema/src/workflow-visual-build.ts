@@ -31,7 +31,7 @@ export type ProjectDirectory = typeof ProjectDirectory.Type
 
 const EnvironmentName = Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))
 const EnvironmentValue = Schema.String.check(Schema.isPattern(/^[^\u0000\r\n]*$/))
-const Environment = Schema.Record(Schema.String, EnvironmentValue).check(Schema.isPropertyNames(EnvironmentName))
+const Environment = Schema.Record(EnvironmentName, EnvironmentValue)
 
 const StaticPreviewInput = Schema.Struct({
   kind: Schema.Literal("static"),

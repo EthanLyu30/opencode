@@ -11,6 +11,7 @@ type OpenApiSchema = {
   readonly type?: string
   readonly enum?: readonly unknown[]
   readonly pattern?: string
+  readonly patternProperties?: Record<string, OpenApiSchema | boolean>
   readonly propertyNames?: OpenApiSchema
   readonly properties?: Record<string, OpenApiSchema>
   readonly required?: readonly string[]
@@ -161,6 +162,11 @@ describe("PublicApi OpenAPI v2 errors", () => {
         allOf: [{ pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }],
       },
     })
+    const activeSessions =
+      spec.paths["/api/session/active"]?.get?.responses?.["200"]?.content?.["application/json"]?.schema?.properties
+        ?.data
+    expect(activeSessions?.patternProperties).toHaveProperty("^ses")
+    expect(activeSessions?.propertyNames).toBeUndefined()
   })
 
   test("documents references separately from filesystem routes", () => {
