@@ -5,6 +5,7 @@ import { DesignArtifact } from "./design-artifact"
 import { NonNegativeInt, optional, PositiveInt } from "./schema"
 import { VisualReview } from "./visual-review"
 import { Workflow } from "./workflow"
+import { Responses } from "./responses"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 
@@ -29,11 +30,7 @@ export const ProjectDirectory = Schema.Union([Schema.Literal("."), DesignArtifac
 export type ProjectDirectory = typeof ProjectDirectory.Type
 
 const EnvironmentName = Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))
-const EnvironmentValue = Schema.String.check(
-  Schema.makeFilter<string>((value) =>
-    value.includes("\0") || /[\r\n]/.test(value) ? "Preview environment values must be single-line strings" : undefined,
-  ),
-)
+const EnvironmentValue = Schema.String.check(Schema.isPattern(/^[^\u0000\r\n]*$/))
 
 const StaticPreviewInput = Schema.Struct({
   kind: Schema.Literal("static"),
@@ -41,11 +38,7 @@ const StaticPreviewInput = Schema.Struct({
   entrypoint: DesignArtifact.SourcePath,
 }).annotate({ identifier: "WorkflowVisualBuild.StaticPreviewInput", ...exact })
 
-const ScriptArgv = Schema.NonEmptyArray(Schema.NonEmptyString).check(
-  Schema.makeFilter<readonly [string, ...string[]]>((value) =>
-    value.some((argument) => argument.includes("\0")) ? "Preview argv must not contain NUL bytes" : undefined,
-  ),
-)
+const ScriptArgv = Schema.NonEmptyArray(Schema.NonEmptyString.check(Schema.isPattern(/^[^\u0000]*$/)))
 
 const ScriptPreviewInput = Schema.Struct({
   kind: Schema.Literal("script"),
@@ -71,3 +64,9 @@ export const CreateInput = Schema.Struct({
   delivery: Schema.Literals(["foreground", "background"]),
 }).annotate({ identifier: "WorkflowVisualBuild.CreateInput", ...exact })
 export interface CreateInput extends Schema.Schema.Type<typeof CreateInput> {}
+
+export const Admission = Schema.Struct({
+  workflow: Workflow.Info,
+  response: Responses.Resource,
+}).annotate({ identifier: "WorkflowVisualBuild.Admission" })
+export interface Admission extends Schema.Schema.Type<typeof Admission> {}

@@ -66,6 +66,11 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import * as SessionExecutionLocal from "@opencode-ai/core/session/execution/local"
+import { ResponsesV2 } from "@opencode-ai/core/responses"
+import { WorkflowV2 } from "@opencode-ai/core/workflow"
+import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
+import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
+import { WorkflowAdmission } from "@opencode-ai/core/workflow/admission"
 import { lazy } from "@/util/lazy"
 import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@opencode-ai/server/cors"
 import { serveUIEffect } from "@/server/shared/ui"
@@ -115,6 +120,7 @@ import { corsVaryFix } from "./middleware/cors-vary"
 import { errorLayer } from "./middleware/error"
 import { fenceLayer } from "./middleware/fence"
 import { schemaErrorLayer } from "./middleware/schema-error"
+import { workflowReplacements } from "@opencode-ai/server/routes"
 
 export const context = Context.makeUnsafe<unknown>(new Map())
 
@@ -266,10 +272,18 @@ const app = LayerNode.group([
   ProjectV2.node,
   ProjectCopy.node,
   PtyTicket.node,
+  SessionV2.node,
+  WorkflowV2.node,
+  ResponsesV2.node,
+  WorkflowExecution.node,
+  WorkflowAdmission.node,
 ])
 
 export function createRoutes(
   corsOptions?: CorsOptions,
+  composition: {
+    readonly workflowExecution?: LayerNode.Node<WorkflowExecution.Service, any, any>
+  } = {},
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
   const locationServiceMapV2 = buildLocationServiceMap()
 
@@ -302,8 +316,14 @@ export function createRoutes(
       ]),
     ),
     Layer.provide(locationServiceMapV2),
-
-    Layer.provide(AppNodeBuilderV1.build(app)),
+    Layer.provide(
+      AppNodeBuilderV1.build(app, [
+        [LocationServiceMap.node, locationServiceMapV2],
+        [SessionExecution.node, SessionExecutionLocal.node],
+        [WorkflowExecution.node, composition.workflowExecution ?? WorkflowExecutionLocal.node],
+        ...workflowReplacements(),
+      ]),
+    ),
     // Must stay last: layers provided later in this pipe build beneath earlier ones,
     // so Observability must come after every service graph. Otherwise eagerly forked
     // fibers (e.g. the ModelsDev background refresh) capture Effect's default stdout

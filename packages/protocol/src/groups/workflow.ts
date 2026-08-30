@@ -1,8 +1,9 @@
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { WorkflowVisualBuild } from "@opencode-ai/schema/workflow-visual-build"
 import { NonNegativeInt, PositiveInt } from "@opencode-ai/schema/schema"
-import { Schema } from "effect"
-import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
+import { Context, Schema } from "effect"
+import { HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
 import {
   InvalidRequestError,
   WorkflowConflictError,
@@ -21,6 +22,12 @@ export const WorkflowHistoryQuery = Schema.Struct({
 const WorkflowListQuery = Schema.Struct({
   status: Workflow.RunStatus.pipe(Schema.optional),
   limit: Schema.NumberFromString.pipe(Schema.decodeTo(WorkflowListLimit), Schema.optional),
+})
+
+const IdempotencyKey = Schema.NonEmptyString.check(Schema.isMaxLength(128), Schema.isPattern(/^[A-Za-z0-9._~:+/=-]+$/))
+
+export const VisualBuildHeaders = Schema.Struct({
+  "idempotency-key": IdempotencyKey.pipe(Schema.optional),
 })
 
 export const WorkflowGroup = HttpApiGroup.make("server.workflow")
@@ -107,7 +114,9 @@ export const WorkflowGroup = HttpApiGroup.make("server.workflow")
       payload: Schema.Struct({ budget: Workflow.Budget }),
       success: Schema.Struct({ data: Workflow.Info }),
       error: [WorkflowNotFoundError, WorkflowConflictError, InvalidRequestError],
-    }).annotateMerge(OpenApi.annotations({ identifier: "v2.workflow.updateBudget", summary: "Update workflow budget" })),
+    }).annotateMerge(
+      OpenApi.annotations({ identifier: "v2.workflow.updateBudget", summary: "Update workflow budget" }),
+    ),
   )
   .add(
     HttpApiEndpoint.post("workflow.resolveRecovery", "/api/workflow/:workflowID/stage/:stageID/recovery", {
@@ -120,3 +129,23 @@ export const WorkflowGroup = HttpApiGroup.make("server.workflow")
     ),
   )
   .annotateMerge(OpenApi.annotations({ title: "workflows", description: "Durable workflow routes." }))
+
+export const makeWorkflowGroup = <LocationId extends HttpApiMiddleware.AnyId, LocationService>(
+  locationMiddleware: Context.Key<LocationId, LocationService>,
+) =>
+  WorkflowGroup.add(
+    HttpApiEndpoint.post("workflow.visualBuildCreate", "/api/workflow/visual-build", {
+      headers: VisualBuildHeaders,
+      payload: WorkflowVisualBuild.CreateInput,
+      success: Schema.Struct({ data: WorkflowVisualBuild.Admission }),
+      error: [InvalidRequestError, WorkflowConflictError],
+    })
+      .middleware(locationMiddleware)
+      .annotateMerge(
+        OpenApi.annotations({
+          identifier: "workflow.visualBuildCreate",
+          summary: "Admit a visual build",
+          description: "Durably admit one location-scoped visual-build Workflow and its Response.",
+        }),
+      ),
+  )

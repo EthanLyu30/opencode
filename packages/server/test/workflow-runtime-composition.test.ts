@@ -12,6 +12,7 @@ import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { WorkflowSchema } from "@opencode-ai/core/workflow"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
+import { WorkflowAdmission } from "@opencode-ai/core/workflow/admission"
 import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
@@ -20,11 +21,37 @@ import { Context, DateTime, Effect, Layer } from "effect"
 import { HttpRouter, HttpServer } from "effect/unstable/http"
 import { type ApplicationServiceFactory, createEmbeddedRoutes, createRoutes, workflowReplacements } from "../src/routes"
 import { WorkflowCommandSandboxServer } from "../src/workflow/command-sandbox"
+import { DockerConfig } from "../src/workflow/docker-config"
 import { WorkflowRuntimeRecovery } from "../src/workflow/runtime-recovery"
 import { WorkflowVisualHostServer } from "../src/workflow/visual-host"
 import { WorkflowProductionEvidenceServer } from "../src/workflow/production-evidence"
 
 describe("Workflow runtime recovery", () => {
+  test("starts unhealthy when Docker recovery configuration is unavailable", async () => {
+    const fixture = persistedFixture()
+    let executed = 0
+    const service = await Effect.gen(function* () {
+      return yield* WorkflowRuntimeRecovery.Service
+    }).pipe(
+      Effect.provide(
+        WorkflowRuntimeRecovery.makeLayer({
+          engine: {
+            execute: async () => {
+              executed++
+              throw new Error("must not execute without validated Docker configuration")
+            },
+          },
+          config: DockerConfig.fromEnvironment({}),
+        }),
+      ),
+      Effect.provideService(WorkflowStore.Service, fixture.store),
+      Effect.runPromise,
+    )
+
+    expect(service).toEqual({ healthy: false, recovered: 0, skipped: 0, ready: false })
+    expect(executed).toBe(0)
+  })
+
   test("reconstructs exact expired pending-call authority without requiring a Session assistant row", async () => {
     const fixture = persistedFixture()
     let recovered: WorkflowCommandSandboxServer.RecoveryAuthority | undefined
@@ -282,12 +309,22 @@ describe("Workflow route composition", () => {
     }
   })
 
-  test("acquires the actual normal and embedded returned route graphs through their application service layer", async () => {
+  test("acquires WorkflowAdmission from the actual normal and embedded returned route graphs", async () => {
     for (const mode of ["normal", "embedded"] as const) {
       const fixture = routeReplacementFixture(mode)
+      let admissionAcquired = false
+      const build = routeApplicationFactory()
       const composition = {
         workflow: { visualHost: fixture.visualNode, commandSandbox: fixture.commandNode },
-        buildApplicationServices: routeApplicationFactory(),
+        buildApplicationServices: ((services, replacements) =>
+          build(services, replacements).pipe(
+            Layer.tap((context) =>
+              Effect.sync(() => {
+                Context.get(context, WorkflowAdmission.Service)
+                admissionAcquired = true
+              }),
+            ),
+          )) satisfies ApplicationServiceFactory,
       }
       const routeGraph = mode === "normal" ? createRoutes(undefined, composition) : createEmbeddedRoutes(composition)
 
@@ -308,6 +345,7 @@ describe("Workflow route composition", () => {
         expect(response.status).toBe(200)
         expect(await response.json()).toEqual({ healthy: true })
         expect(fixture.visualAcquired()).toBe(true)
+        expect(admissionAcquired).toBe(true)
       } finally {
         await web.dispose()
       }

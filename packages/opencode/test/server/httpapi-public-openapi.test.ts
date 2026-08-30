@@ -18,11 +18,17 @@ type OpenApiResponse = {
   readonly content?: Record<string, { readonly schema?: OpenApiSchema }>
 }
 type OpenApiOperation = {
+  readonly operationId?: string
   readonly parameters?: ReadonlyArray<{
     readonly name: string
     readonly in: string
     readonly required?: boolean
-    readonly schema?: { readonly type?: string }
+    readonly schema?: {
+      readonly type?: string
+      readonly minLength?: number
+      readonly maxLength?: number
+      readonly pattern?: string
+    }
   }>
   readonly responses?: Record<string, OpenApiResponse>
   readonly requestBody?: { readonly required?: boolean }
@@ -123,6 +129,26 @@ describe("PublicApi OpenAPI v2 errors", () => {
       expect(route.operation.responses?.["401"], `${route.method.toUpperCase()} ${route.path}`).toBeDefined()
       expect(route.operation.security, `${route.method.toUpperCase()} ${route.path}`).toEqual([])
     }
+  })
+
+  test("documents the exact visual-build admission operation and bounded header", () => {
+    const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
+    const operation = spec.paths["/api/workflow/visual-build"]?.post
+
+    expect(operation?.operationId).toBe("workflow.visualBuildCreate")
+    expect(operation?.requestBody?.required).toBe(true)
+    expect(operation?.parameters).toContainEqual({
+      name: "idempotency-key",
+      in: "header",
+      required: false,
+      schema: {
+        type: "string",
+        minLength: 1,
+        maxLength: 128,
+        pattern: "^[A-Za-z0-9._~:+/=-]+$",
+      },
+    })
+    expect(Object.keys(operation?.responses ?? {}).sort()).toEqual(["200", "400", "401", "409"])
   })
 
   test("documents references separately from filesystem routes", () => {

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { Effect, Option, Scope, Stream } from "effect"
+import { Effect, Fiber, Option, Scope, Stream } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -53,16 +53,30 @@ test("embedded gateway handles foreground and background contracts without dropp
           },
         ],
       })
-
-      const foreground = yield* opencode.responses.create({
-        id: foregroundID,
-        workflowID,
-        model: "deepseek-v4-pro",
-        background: false,
-        store: true,
-        requestHash: `sha256:${foregroundID}`,
-        input: [{ type: "message", role: "user", content: "foreground" }],
+      const foregroundFiber = yield* opencode.responses
+        .create({
+          id: foregroundID,
+          workflowID,
+          model: "deepseek-v4-pro",
+          background: false,
+          store: true,
+          requestHash: `sha256:${foregroundID}`,
+          input: [{ type: "message", role: "user", content: "foreground" }],
+        })
+        .pipe(Effect.forkScoped)
+      const admitted = yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 100; attempt++) {
+          const response = yield* opencode.responses.get({ responseID: foregroundID }).pipe(
+            Effect.map(Option.some),
+            Effect.catchTag("ResponseNotFoundError", () => Effect.succeed(Option.none())),
+          )
+          if (Option.isSome(response)) return response.value
+          yield* Effect.sleep(10)
+        }
+        return yield* Effect.die("Foreground Response was not admitted")
       })
+      const cancelled = yield* opencode.responses.cancel({ responseID: foregroundID })
+      const foreground = yield* Fiber.join(foregroundFiber)
       if (Stream.isStream(foreground)) return yield* Effect.die("Expected JSON, received SSE")
       const inputItems = yield* opencode.responses.inputItems({ responseID: foregroundID })
 
@@ -114,7 +128,7 @@ test("embedded gateway handles foreground and background contracts without dropp
       const generated = yield* opencode.responses.create({
         workflowID: generatedWorkflowID,
         model: "deepseek-v4-pro",
-        background: false,
+        background: true,
         store: true,
         requestHash: `sha256:generated:${crypto.randomUUID()}`,
         input: [{ type: "message", role: "user", content: "generated id" }],
@@ -143,7 +157,7 @@ test("embedded gateway handles foreground and background contracts without dropp
         id: proID,
         workflowID: proWorkflowID,
         model: "deepseek-v4-pro",
-        background: false,
+        background: true,
         store: true,
         requestHash: `sha256:${proID}`,
         input: [{ type: "message", role: "user", content: "native pro" }],
@@ -172,14 +186,16 @@ test("embedded gateway handles foreground and background contracts without dropp
         })
         .pipe(Effect.flip)
 
-      expect(foreground).toMatchObject({ id: foregroundID, background: false, status: "failed" })
+      expect(admitted).toMatchObject({ id: foregroundID, background: false, status: "queued" })
+      expect(cancelled).toMatchObject({ id: foregroundID, background: false, status: "cancelled" })
+      expect(foreground).toEqual(cancelled)
       expect(inputItems.map((item) => [item.ordinal, item.kind, item.payload.content])).toEqual([
         [0, "input", "foreground"],
       ])
       expect(background).toMatchObject({ id: backgroundID, background: true, status: "queued" })
       expect(retrieved.id).toBe(backgroundID)
-      expect(generated.id).toStartWith("resp_")
-      expect(pro).toMatchObject({ id: proID, model: "deepseek-v4-pro", status: "failed" })
+      expect(generated).toMatchObject({ id: expect.stringMatching(/^resp_/), background: true, status: "queued" })
+      expect(pro).toMatchObject({ id: proID, model: "deepseek-v4-pro", background: true, status: "queued" })
       expect(unsupported).toMatchObject({ _tag: "UnsupportedCapabilityError", capability: "tools" })
       expect(unsupportedModel).toMatchObject({
         _tag: "UnsupportedModelCapabilityError",

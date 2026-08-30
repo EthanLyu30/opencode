@@ -88,18 +88,21 @@ export function makeLayer(input: {
     Service,
     Effect.gen(function* () {
       const store = yield* WorkflowStore.Service
-      const result = yield* Effect.tryPromise({
-        try: async () => {
-          const config = await DockerConfig.validate(input.config)
-          return recoverExpired({
-            store,
-            now: input.now ?? Date.now,
-            recover: ({ authority, finalGate }) =>
-              WorkflowCommandSandboxServer.recover({ engine: input.engine, config, authority, finalGate }),
-          })
-        },
-        catch: () => undefined,
-      }).pipe(Effect.map((value) => value ?? { healthy: false, recovered: 0, skipped: 0 }))
+      const config = yield* Effect.tryPromise({
+        try: () => DockerConfig.validate(input.config),
+        catch: (error) => error,
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)))
+      if (config === undefined) {
+        return Service.of({ healthy: false, recovered: 0, skipped: 0, ready: false })
+      }
+      const result = yield* Effect.promise(() =>
+        recoverExpired({
+          store,
+          now: input.now ?? Date.now,
+          recover: ({ authority, finalGate }) =>
+            WorkflowCommandSandboxServer.recover({ engine: input.engine, config, authority, finalGate }),
+        }),
+      )
       return Service.of({ ...result, ready: result.healthy })
     }),
   )

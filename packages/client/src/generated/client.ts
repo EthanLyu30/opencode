@@ -55,6 +55,8 @@ import type {
   WorkflowsUpdateBudgetOutput,
   WorkflowsResolveRecoveryInput,
   WorkflowsResolveRecoveryOutput,
+  WorkflowsVisualBuildCreateInput,
+  WorkflowsVisualBuildCreateOutput,
   ResponsesCreateInput,
   ResponsesCreateOutput,
   ResponsesGetInput,
@@ -658,6 +660,25 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ),
+      visualBuildCreate: (input: WorkflowsVisualBuildCreateInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: WorkflowsVisualBuildCreateOutput }>(
+          {
+            method: "POST",
+            path: `/api/workflow/visual-build`,
+            headers: { "idempotency-key": input["idempotency-key"] },
+            body: {
+              prompt: input["prompt"],
+              budget: input["budget"],
+              visual: input["visual"],
+              preview: input["preview"],
+              delivery: input["delivery"],
+            },
+            successStatus: 200,
+            declaredStatuses: [400, 409, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
     },
     responses: {
       create: (input: ResponsesCreateInput, requestOptions?: RequestOptions): Promise<ResponsesCreateOutput> =>

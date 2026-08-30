@@ -43,31 +43,11 @@ export function sourceTopologyError(paths: ReadonlyArray<string>): string | unde
   return undefined
 }
 
+const PortableSourceSegment =
+  "(?!(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\.|/|$))[A-Za-z0-9_](?:[A-Za-z0-9._@+()\\[\\]-]*[A-Za-z0-9_@+()\\[\\]-])?"
+
 export const SourcePath = Schema.NonEmptyString.check(
-  Schema.makeFilter<string>((value) => {
-    if (
-      value.includes("\\") ||
-      value.includes(":") ||
-      value.includes("%") ||
-      value !== value.normalize("NFC") ||
-      value.startsWith("/") ||
-      /^[A-Za-z]:/.test(value) ||
-      /[\u0000-\u001f\u007f]/.test(value)
-    )
-      return "Source path must be a normalized relative POSIX path"
-    const segments = value.split("/")
-    if (segments.some((segment) => segment === "" || segment === "." || segment === ".."))
-      return "Source path must not contain empty, dot, or parent segments"
-    for (const segment of segments) {
-      if (!/^[A-Za-z0-9_][A-Za-z0-9._@+()[\]-]*$/.test(segment))
-        return "Source path segments must use the portable ASCII subset"
-      if (/[. ]$/.test(segment)) return "Source path segments must not end in a dot or space"
-      const basename = segment.split(".")[0].toUpperCase()
-      if (/^(?:CON|PRN|AUX|NUL|COM(?:[1-9]|¹|²|³)|LPT(?:[1-9]|¹|²|³))$/.test(basename))
-        return "Source path must not contain a Windows device name"
-    }
-    return undefined
-  }),
+  Schema.isPattern(new RegExp(`^(?:${PortableSourceSegment})(?:/(?:${PortableSourceSegment}))*$`, "i")),
 ).annotate({ identifier: "DesignArtifact.SourcePath" })
 
 export const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)).annotate({

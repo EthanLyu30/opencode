@@ -14,6 +14,7 @@ import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
+import { WorkflowAdmission } from "@opencode-ai/core/workflow/admission"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
 import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
@@ -41,6 +42,7 @@ const applicationServices = LayerNode.group([
   SessionV2.node,
   WorkflowV2.node,
   WorkflowExecution.node,
+  WorkflowAdmission.node,
   ResponsesV2.node,
   PermissionSaved.node,
   PtyTicket.node,

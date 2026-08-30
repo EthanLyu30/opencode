@@ -21,7 +21,7 @@ import { LocationGroup } from "./groups/location"
 import { IntegrationGroup } from "./groups/integration"
 import { CredentialGroup } from "./groups/credential"
 import { ProjectCopyGroup } from "./groups/project-copy"
-import { WorkflowGroup } from "./groups/workflow"
+import { makeWorkflowGroup } from "./groups/workflow"
 import { ResponsesGroup } from "./groups/responses"
 import { ConversationGroup } from "./groups/conversation"
 
@@ -42,7 +42,7 @@ const makeApiFromGroup = <
     .add(LocationGroup.middleware(locationMiddleware))
     .add(AgentGroup.middleware(locationMiddleware))
     .add(makeSessionGroup(sessionLocationMiddleware))
-    .add(WorkflowGroup)
+    .add(makeWorkflowGroup(locationMiddleware))
     .add(ResponsesGroup)
     .add(ConversationGroup)
     .add(MessageGroup.middleware(sessionLocationMiddleware))

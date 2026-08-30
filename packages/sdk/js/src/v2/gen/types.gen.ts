@@ -48,6 +48,36 @@ export type Event =
   | EventSessionNextRevertStaged
   | EventSessionNextRevertCleared
   | EventSessionNextRevertCommitted
+  | EventResponseCreated
+  | EventResponseInProgress
+  | EventResponseCompleted
+  | EventResponseIncomplete
+  | EventResponseFailed
+  | EventResponseCancelled
+  | EventResponseDeleted
+  | EventConversationCreated
+  | EventConversationItemAdded
+  | EventConversationDeleted
+  | EventWorkflowCreated
+  | EventWorkflowStarted
+  | EventWorkflowStageQueued
+  | EventWorkflowStageLeased
+  | EventWorkflowStageStarted
+  | EventWorkflowStageCheckpointed
+  | EventWorkflowArtifactCreated
+  | EventWorkflowStageRetryScheduled
+  | EventWorkflowStageSucceeded
+  | EventWorkflowStageSkipped
+  | EventWorkflowStageFailed
+  | EventWorkflowApprovalRequested
+  | EventWorkflowApprovalResolved
+  | EventWorkflowBudgetThresholdReached
+  | EventWorkflowBudgetUpdated
+  | EventWorkflowCancelRequested
+  | EventWorkflowStageCancelled
+  | EventWorkflowCancelled
+  | EventWorkflowSucceeded
+  | EventWorkflowFailed
   | EventMessagePartDelta
   | EventSessionDiff
   | EventSessionError
@@ -766,6 +796,12 @@ export type GlobalEvent = {
         properties: {
           sessionID: string
           info: Session
+          visibility?: "public" | "workflow"
+          project?: {
+            id: string
+            worktree: string
+            vcs?: ProjectVcs
+          }
         }
       }
     | {
@@ -781,7 +817,8 @@ export type GlobalEvent = {
         type: "session.deleted"
         properties: {
           sessionID: string
-          info: Session
+          visibility: "public" | "workflow"
+          timeDeleted: number
         }
       }
     | {
@@ -1188,6 +1225,344 @@ export type GlobalEvent = {
           timestamp: number
           sessionID: string
           messageID: string
+        }
+      }
+    | {
+        id: string
+        type: "response.created"
+        properties: {
+          responseID: string
+          timestamp: number
+          workflowID: string
+          model: string
+          background: boolean
+          store: boolean
+          previousResponseID?: string
+          conversationID?: string
+          requestHash: string
+          context: Array<{
+            [key: string]: unknown
+          }>
+          input: Array<{
+            [key: string]: unknown
+          }>
+        }
+      }
+    | {
+        id: string
+        type: "response.in_progress"
+        properties: {
+          responseID: string
+          timestamp: number
+        }
+      }
+    | {
+        id: string
+        type: "response.completed"
+        properties: {
+          responseID: string
+          timestamp: number
+          output?: Array<{
+            [key: string]: unknown
+          }>
+          usage?: ResponsesUsage
+        }
+      }
+    | {
+        id: string
+        type: "response.incomplete"
+        properties: {
+          responseID: string
+          timestamp: number
+          output?: Array<{
+            [key: string]: unknown
+          }>
+          error?: ResponsesError
+          usage?: ResponsesUsage
+        }
+      }
+    | {
+        id: string
+        type: "response.failed"
+        properties: {
+          responseID: string
+          timestamp: number
+          error?: ResponsesError
+          usage?: ResponsesUsage
+        }
+      }
+    | {
+        id: string
+        type: "response.cancelled"
+        properties: {
+          responseID: string
+          timestamp: number
+          error?: ResponsesError
+          usage?: ResponsesUsage
+        }
+      }
+    | {
+        id: string
+        type: "response.deleted"
+        properties: {
+          responseID: string
+          timestamp: number
+        }
+      }
+    | {
+        id: string
+        type: "conversation.created"
+        properties: {
+          conversationID: string
+          timestamp: number
+          metadata: {
+            [key: string]: unknown
+          }
+        }
+      }
+    | {
+        id: string
+        type: "conversation.item.added"
+        properties: {
+          conversationID: string
+          timestamp: number
+          responseID?: string
+          payload: {
+            [key: string]: unknown
+          }
+        }
+      }
+    | {
+        id: string
+        type: "conversation.deleted"
+        properties: {
+          conversationID: string
+          timestamp: number
+        }
+      }
+    | {
+        id: string
+        type: "workflow.created"
+        properties: {
+          workflowID: string
+          timestamp: number
+          type: string
+          input: {
+            [key: string]: unknown
+          }
+          budget: WorkflowBudget
+          stages: Array<WorkflowStageInput>
+          location?: LocationRef
+          sessionID?: string
+          agent?: string
+        }
+      }
+    | {
+        id: string
+        type: "workflow.started"
+        properties: {
+          workflowID: string
+          timestamp: number
+        }
+      }
+    | {
+        id: string
+        type: "workflow.stage.queued"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+        }
+      }
+    | {
+        id: string
+        type: "workflow.stage.leased"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          attempt: number
+          leaseOwner?: string
+          leaseExpiresAt: number
+        }
+      }
+    | {
+        id: string
+        type: "workflow.stage.started"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          attempt: number
+          leaseOwner?: string
+        }
+      }
+    | {
+        id: string
+        type: "workflow.stage.checkpointed"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          attempt: number
+          leaseOwner?: string
+          checkpoint: {
+            [key: string]: unknown
+          }
+        }
+      }
+    | {
+        id: string
+        type: "workflow.artifact.created"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          artifact: WorkflowArtifact
+        }
+      }
+    | {
+        id: string
+        type: "workflow.stage.retry_scheduled"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          attempt: number
+          leaseOwner?: string
+          failure: WorkflowFailure
+          usage: WorkflowUsage
+          notBefore: number
+        }
+      }
+    | {
+        id: string
+        type: "workflow.stage.succeeded"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          attempt: number
+          leaseOwner?: string
+          usage: WorkflowUsage
+          checkpoint?: {
+            [key: string]: unknown
+          }
+        }
+      }
+    | {
+        id: string
+        type: "workflow.stage.skipped"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          sourceStageID: string
+          outcomeSha256: string
+        }
+      }
+    | {
+        id: string
+        type: "workflow.stage.failed"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          attempt: number
+          leaseOwner?: string
+          failure: WorkflowFailure
+          usage: WorkflowUsage
+          source: "execution" | "recovery"
+        }
+      }
+    | {
+        id: string
+        type: "workflow.approval.requested"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID?: string
+          reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+          failure?: WorkflowFailure
+          usage?: WorkflowUsage
+        }
+      }
+    | {
+        id: string
+        type: "workflow.approval.resolved"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          action: "retry" | "fail"
+        }
+      }
+    | {
+        id: string
+        type: "workflow.budget.threshold_reached"
+        properties: {
+          workflowID: string
+          timestamp: number
+          percent: 50 | 80 | 100
+          dimension: string
+          usage: WorkflowUsage
+          budget: WorkflowBudget
+        }
+      }
+    | {
+        id: string
+        type: "workflow.budget.updated"
+        properties: {
+          workflowID: string
+          timestamp: number
+          budget: WorkflowBudget
+        }
+      }
+    | {
+        id: string
+        type: "workflow.cancel.requested"
+        properties: {
+          workflowID: string
+          timestamp: number
+        }
+      }
+    | {
+        id: string
+        type: "workflow.stage.cancelled"
+        properties: {
+          workflowID: string
+          timestamp: number
+          stageID: string
+          attempt: number
+          leaseOwner?: string
+          source: "execution" | "request"
+        }
+      }
+    | {
+        id: string
+        type: "workflow.cancelled"
+        properties: {
+          workflowID: string
+          timestamp: number
+        }
+      }
+    | {
+        id: string
+        type: "workflow.succeeded"
+        properties: {
+          workflowID: string
+          timestamp: number
+          usage: WorkflowUsage
+        }
+      }
+    | {
+        id: string
+        type: "workflow.failed"
+        properties: {
+          workflowID: string
+          timestamp: number
+          failure: WorkflowFailure
+          usage: WorkflowUsage
         }
       }
     | {
@@ -1636,6 +2011,36 @@ export type GlobalEvent = {
     | SyncEventSessionNextRevertStaged
     | SyncEventSessionNextRevertCleared
     | SyncEventSessionNextRevertCommitted
+    | SyncEventResponseCreated
+    | SyncEventResponseInProgress
+    | SyncEventResponseCompleted
+    | SyncEventResponseIncomplete
+    | SyncEventResponseFailed
+    | SyncEventResponseCancelled
+    | SyncEventResponseDeleted
+    | SyncEventConversationCreated
+    | SyncEventConversationItemAdded
+    | SyncEventConversationDeleted
+    | SyncEventWorkflowCreated
+    | SyncEventWorkflowStarted
+    | SyncEventWorkflowStageQueued
+    | SyncEventWorkflowStageLeased
+    | SyncEventWorkflowStageStarted
+    | SyncEventWorkflowStageCheckpointed
+    | SyncEventWorkflowArtifactCreated
+    | SyncEventWorkflowStageRetryScheduled
+    | SyncEventWorkflowStageSucceeded
+    | SyncEventWorkflowStageSkipped
+    | SyncEventWorkflowStageFailed
+    | SyncEventWorkflowApprovalRequested
+    | SyncEventWorkflowApprovalResolved
+    | SyncEventWorkflowBudgetThresholdReached
+    | SyncEventWorkflowBudgetUpdated
+    | SyncEventWorkflowCancelRequested
+    | SyncEventWorkflowStageCancelled
+    | SyncEventWorkflowCancelled
+    | SyncEventWorkflowSucceeded
+    | SyncEventWorkflowFailed
 }
 
 /**
@@ -2773,6 +3178,91 @@ export type SessionHistory = {
 
 export type SessionDurableEventStream = string
 
+export type WorkflowConflictError = {
+  _tag: "WorkflowConflictError"
+  workflowID: string
+  operation: string
+  message: string
+}
+
+export type WorkflowNotFoundError = {
+  _tag: "WorkflowNotFoundError"
+  workflowID: string
+  message: string
+}
+
+export type WorkflowDurableEvent =
+  | WorkflowCreated
+  | WorkflowStarted
+  | WorkflowStageQueued
+  | WorkflowStageLeased
+  | WorkflowStageStarted
+  | WorkflowStageCheckpointed
+  | WorkflowArtifactCreated
+  | WorkflowStageRetryScheduled
+  | WorkflowStageSucceeded
+  | WorkflowStageSkipped
+  | WorkflowStageFailed
+  | WorkflowApprovalRequested
+  | WorkflowApprovalResolved
+  | WorkflowBudgetThresholdReached
+  | WorkflowBudgetUpdated
+  | WorkflowCancelRequested
+  | WorkflowStageCancelled
+  | WorkflowCancelled
+  | WorkflowSucceeded
+  | WorkflowFailed
+
+export type WorkflowHistory = {
+  data: Array<WorkflowDurableEvent>
+  hasMore: boolean
+}
+
+export type WorkflowDurableEventStream = string
+
+export type WorkflowStageNotFoundError = {
+  _tag: "WorkflowStageNotFoundError"
+  workflowID: string
+  stageID: string
+  message: string
+}
+
+export type UnsupportedCapabilityError = {
+  _tag: "UnsupportedCapabilityError"
+  capability: string
+  message: string
+  supportedAlternatives: Array<string>
+}
+
+export type UnsupportedModelCapabilityError = {
+  _tag: "UnsupportedModelCapabilityError"
+  provider: string
+  model: string
+  required: string
+  supported: Array<string>
+  planned: boolean
+  message: string
+}
+
+export type ResponseConflictError = {
+  _tag: "ResponseConflictError"
+  resourceID: string
+  operation: string
+  message: string
+}
+
+export type ResponseNotFoundError = {
+  _tag: "ResponseNotFoundError"
+  responseID: string
+  message: string
+}
+
+export type ConversationNotFoundError = {
+  _tag: "ConversationNotFoundError"
+  conversationID: string
+  message: string
+}
+
 export type SessionMessagesResponse = {
   data: Array<SessionMessage>
   cursor: {
@@ -2807,6 +3297,16 @@ export type SessionStatus2 = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -2825,6 +3325,16 @@ export type QuestionReplied2 = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -2844,6 +3354,16 @@ export type QuestionRejected2 = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -2896,6 +3416,36 @@ export type V2Event =
   | SessionNextRevertStaged
   | SessionNextRevertCleared
   | SessionNextRevertCommitted
+  | ResponseCreated
+  | ResponseInProgress
+  | ResponseCompleted
+  | ResponseIncomplete
+  | ResponseFailed
+  | ResponseCancelled
+  | ResponseDeleted
+  | ConversationCreated
+  | ConversationItemAdded
+  | ConversationDeleted
+  | WorkflowCreated
+  | WorkflowStarted
+  | WorkflowStageQueued
+  | WorkflowStageLeased
+  | WorkflowStageStarted
+  | WorkflowStageCheckpointed
+  | WorkflowArtifactCreated
+  | WorkflowStageRetryScheduled
+  | WorkflowStageSucceeded
+  | WorkflowStageSkipped
+  | WorkflowStageFailed
+  | WorkflowApprovalRequested
+  | WorkflowApprovalResolved
+  | WorkflowBudgetThresholdReached
+  | WorkflowBudgetUpdated
+  | WorkflowCancelRequested
+  | WorkflowStageCancelled
+  | WorkflowCancelled
+  | WorkflowSucceeded
+  | WorkflowFailed
   | MessagePartDelta
   | SessionDiff
   | SessionError
@@ -3035,6 +3585,8 @@ export type MoveSessionDestination = {
   directory: string
 }
 
+export type ProjectVcs = "git"
+
 export type ModelRef = {
   id: string
   providerID: string
@@ -3119,6 +3671,85 @@ export type RevertState = {
   files?: Array<FileDiff>
 }
 
+export type ResponsesUsage = {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  inputTokensDetails?: {
+    cachedTokens: number
+  }
+  outputTokensDetails?: {
+    reasoningTokens: number
+  }
+}
+
+export type ResponsesError = {
+  code: string
+  message: string
+  type?: string
+  param?: string
+}
+
+export type WorkflowBudget = {
+  maxTokens?: number
+  maxTurns?: number
+  maxToolCalls?: number
+  maxAttempts?: number
+  maxDurationMs?: number
+}
+
+export type WorkflowStageInput = {
+  id?: string
+  type: string
+  ordinal: number
+  maxAttempts: number
+  recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+  idempotencyKey: string
+  input: {
+    [key: string]: unknown
+  }
+}
+
+export type WorkflowArtifact = {
+  id: string
+  workflowID: string
+  stageID: string
+  kind: string
+  uri: string
+  mime: string
+  sha256: string
+  size: number
+  metadata: {
+    [key: string]: unknown
+  }
+  timeCreated: number
+}
+
+export type WorkflowFailure = {
+  category:
+    | "transient"
+    | "authentication"
+    | "quota"
+    | "invalid_request"
+    | "schema"
+    | "build"
+    | "visual"
+    | "cancelled"
+    | "ambiguous"
+    | "unknown"
+  code: string
+  message: string
+  retryAfterMs?: number
+  ref?: string
+}
+
+export type WorkflowUsage = {
+  tokens: number
+  turns: number
+  toolCalls: number
+  attempts: number
+}
+
 export type PermissionV2Source = {
   type: "tool"
   messageID: string
@@ -3162,8 +3793,6 @@ export type QuestionV2Tool = {
 
 export type QuestionV2Answer = Array<string>
 
-export type ProjectVcs = "git"
-
 export type ProjectIcon = {
   url?: string
   override?: string
@@ -3202,6 +3831,12 @@ export type SyncEventSessionCreated = {
     data: {
       sessionID: string
       info: Session
+      visibility?: "public" | "workflow"
+      project?: {
+        id: string
+        worktree: string
+        vcs?: ProjectVcs
+      }
     }
   }
 }
@@ -3225,13 +3860,14 @@ export type SyncEventSessionDeleted = {
   type: "sync"
   id: string
   syncEvent: {
-    type: "session.deleted.1"
+    type: "session.deleted.3"
     id: string
     seq: number
     aggregateID: string
     data: {
       sessionID: string
-      info: Session
+      visibility: "public" | "workflow"
+      timeDeleted: number
     }
   }
 }
@@ -3823,6 +4459,554 @@ export type SyncEventSessionNextRevertCommitted = {
   }
 }
 
+export type SyncEventResponseCreated = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "response.created.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      responseID: string
+      timestamp: number
+      workflowID: string
+      model: string
+      background: boolean
+      store: boolean
+      previousResponseID?: string
+      conversationID?: string
+      requestHash: string
+      context: Array<{
+        [key: string]: unknown
+      }>
+      input: Array<{
+        [key: string]: unknown
+      }>
+    }
+  }
+}
+
+export type SyncEventResponseInProgress = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "response.in_progress.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      responseID: string
+      timestamp: number
+    }
+  }
+}
+
+export type SyncEventResponseCompleted = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "response.completed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      responseID: string
+      timestamp: number
+      output?: Array<{
+        [key: string]: unknown
+      }>
+      usage?: ResponsesUsage
+    }
+  }
+}
+
+export type SyncEventResponseIncomplete = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "response.incomplete.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      responseID: string
+      timestamp: number
+      output?: Array<{
+        [key: string]: unknown
+      }>
+      error?: ResponsesError
+      usage?: ResponsesUsage
+    }
+  }
+}
+
+export type SyncEventResponseFailed = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "response.failed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      responseID: string
+      timestamp: number
+      error?: ResponsesError
+      usage?: ResponsesUsage
+    }
+  }
+}
+
+export type SyncEventResponseCancelled = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "response.cancelled.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      responseID: string
+      timestamp: number
+      error?: ResponsesError
+      usage?: ResponsesUsage
+    }
+  }
+}
+
+export type SyncEventResponseDeleted = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "response.deleted.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      responseID: string
+      timestamp: number
+    }
+  }
+}
+
+export type SyncEventConversationCreated = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "conversation.created.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      conversationID: string
+      timestamp: number
+      metadata: {
+        [key: string]: unknown
+      }
+    }
+  }
+}
+
+export type SyncEventConversationItemAdded = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "conversation.item.added.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      conversationID: string
+      timestamp: number
+      responseID?: string
+      payload: {
+        [key: string]: unknown
+      }
+    }
+  }
+}
+
+export type SyncEventConversationDeleted = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "conversation.deleted.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      conversationID: string
+      timestamp: number
+    }
+  }
+}
+
+export type SyncEventWorkflowCreated = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.created.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      type: string
+      input: {
+        [key: string]: unknown
+      }
+      budget: WorkflowBudget
+      stages: Array<WorkflowStageInput>
+      location?: LocationRef
+      sessionID?: string
+      agent?: string
+    }
+  }
+}
+
+export type SyncEventWorkflowStarted = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.started.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+    }
+  }
+}
+
+export type SyncEventWorkflowStageQueued = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.stage.queued.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+    }
+  }
+}
+
+export type SyncEventWorkflowStageLeased = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.stage.leased.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      attempt: number
+      leaseOwner?: string
+      leaseExpiresAt: number
+    }
+  }
+}
+
+export type SyncEventWorkflowStageStarted = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.stage.started.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      attempt: number
+      leaseOwner?: string
+    }
+  }
+}
+
+export type SyncEventWorkflowStageCheckpointed = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.stage.checkpointed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      attempt: number
+      leaseOwner?: string
+      checkpoint: {
+        [key: string]: unknown
+      }
+    }
+  }
+}
+
+export type SyncEventWorkflowArtifactCreated = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.artifact.created.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      artifact: WorkflowArtifact
+    }
+  }
+}
+
+export type SyncEventWorkflowStageRetryScheduled = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.stage.retry_scheduled.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      attempt: number
+      leaseOwner?: string
+      failure: WorkflowFailure
+      usage: WorkflowUsage
+      notBefore: number
+    }
+  }
+}
+
+export type SyncEventWorkflowStageSucceeded = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.stage.succeeded.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      attempt: number
+      leaseOwner?: string
+      usage: WorkflowUsage
+      checkpoint?: {
+        [key: string]: unknown
+      }
+    }
+  }
+}
+
+export type SyncEventWorkflowStageSkipped = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.stage.skipped.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      sourceStageID: string
+      outcomeSha256: string
+    }
+  }
+}
+
+export type SyncEventWorkflowStageFailed = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.stage.failed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      attempt: number
+      leaseOwner?: string
+      failure: WorkflowFailure
+      usage: WorkflowUsage
+      source: "execution" | "recovery"
+    }
+  }
+}
+
+export type SyncEventWorkflowApprovalRequested = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.approval.requested.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID?: string
+      reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+      failure?: WorkflowFailure
+      usage?: WorkflowUsage
+    }
+  }
+}
+
+export type SyncEventWorkflowApprovalResolved = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.approval.resolved.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      action: "retry" | "fail"
+    }
+  }
+}
+
+export type SyncEventWorkflowBudgetThresholdReached = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.budget.threshold_reached.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      percent: 50 | 80 | 100
+      dimension: string
+      usage: WorkflowUsage
+      budget: WorkflowBudget
+    }
+  }
+}
+
+export type SyncEventWorkflowBudgetUpdated = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.budget.updated.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      budget: WorkflowBudget
+    }
+  }
+}
+
+export type SyncEventWorkflowCancelRequested = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.cancel.requested.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+    }
+  }
+}
+
+export type SyncEventWorkflowStageCancelled = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.stage.cancelled.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      stageID: string
+      attempt: number
+      leaseOwner?: string
+      source: "execution" | "request"
+    }
+  }
+}
+
+export type SyncEventWorkflowCancelled = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.cancelled.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+    }
+  }
+}
+
+export type SyncEventWorkflowSucceeded = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.succeeded.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      usage: WorkflowUsage
+    }
+  }
+}
+
+export type SyncEventWorkflowFailed = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "workflow.failed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      workflowID: string
+      timestamp: number
+      failure: WorkflowFailure
+      usage: WorkflowUsage
+    }
+  }
+}
+
 export type ConfigV2ReferenceGit = {
   repository: string
   branch?: string
@@ -3924,6 +5108,7 @@ export type SessionV2Info = {
     archived?: number
   }
   title: string
+  visibility: "public" | "workflow"
   location: LocationRef
   subpath?: string
   revert?: RevertState
@@ -4171,7 +5356,17 @@ export type SessionNextAgentSwitched = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4191,7 +5386,17 @@ export type SessionNextModelSwitched = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4211,7 +5416,17 @@ export type SessionNextMoved = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4231,7 +5446,17 @@ export type SessionNextPrompted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4252,7 +5477,17 @@ export type SessionNextPromptAdmitted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4273,7 +5508,17 @@ export type SessionNextContextUpdated = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4293,7 +5538,17 @@ export type SessionNextSynthetic = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4313,7 +5568,17 @@ export type SessionNextShellStarted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4334,7 +5599,17 @@ export type SessionNextShellEnded = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4354,7 +5629,17 @@ export type SessionNextStepStarted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4376,7 +5661,17 @@ export type SessionNextStepEnded = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 2
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4408,7 +5703,17 @@ export type SessionNextStepFailed = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 2
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4428,7 +5733,17 @@ export type SessionNextTextStarted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4448,7 +5763,17 @@ export type SessionNextTextEnded = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4469,7 +5794,17 @@ export type SessionNextToolInputStarted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4490,7 +5825,17 @@ export type SessionNextToolInputEnded = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4511,7 +5856,17 @@ export type SessionNextToolCalled = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4539,7 +5894,17 @@ export type SessionNextToolProgress = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4563,7 +5928,17 @@ export type SessionNextToolSuccess = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4593,7 +5968,17 @@ export type SessionNextToolFailed = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4619,7 +6004,17 @@ export type SessionNextReasoningStarted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4640,7 +6035,17 @@ export type SessionNextReasoningEnded = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4662,7 +6067,17 @@ export type SessionNextRetried = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4682,7 +6097,17 @@ export type SessionNextCompactionStarted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4702,7 +6127,17 @@ export type SessionNextCompactionEnded = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4724,7 +6159,17 @@ export type SessionNextRevertStaged = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4743,7 +6188,17 @@ export type SessionNextRevertCleared = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -4761,13 +6216,990 @@ export type SessionNextRevertCommitted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
     timestamp: number
     sessionID: string
     messageID: string
+  }
+}
+
+export type WorkflowCreateInput = {
+  id?: string
+  type: string
+  input: {
+    [key: string]: unknown
+  }
+  budget: WorkflowBudget
+  stages: Array<WorkflowStageInput>
+}
+
+export type WorkflowInfo = {
+  id: string
+  type: string
+  status: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"
+  currentStageID?: string
+  input: {
+    [key: string]: unknown
+  }
+  budget: WorkflowBudget
+  usage: WorkflowUsage
+  location?: LocationRef
+  sessionID?: string
+  agent?: string
+  cancelRequestedAt?: number
+  version: number
+  time: {
+    created: number
+    updated: number
+    completed?: number
+  }
+}
+
+export type WorkflowStage = {
+  id: string
+  workflowID: string
+  type: string
+  ordinal: number
+  status:
+    | "pending"
+    | "leased"
+    | "running"
+    | "retry_wait"
+    | "waiting_input"
+    | "waiting_approval"
+    | "succeeded"
+    | "failed"
+    | "cancelled"
+    | "skipped"
+  attempt: number
+  maxAttempts: number
+  notBefore?: number
+  leaseOwner?: string
+  leaseExpiresAt?: number
+  sessionID?: string
+  checkpoint?: {
+    [key: string]: unknown
+  }
+  recoveryPolicy: "restart_safe" | "reconcile_required" | "manual_required"
+  recoveryAction?: "retry" | "fail"
+  idempotencyKey: string
+  input: {
+    [key: string]: unknown
+  }
+  error?: WorkflowFailure
+  time: {
+    created: number
+    updated: number
+    started?: number
+    completed?: number
+  }
+}
+
+export type WorkflowDetail = {
+  run: WorkflowInfo
+  stages: Array<WorkflowStage>
+  artifacts: Array<WorkflowArtifact>
+}
+
+export type WorkflowCreated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.created"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    type: string
+    input: {
+      [key: string]: unknown
+    }
+    budget: WorkflowBudget
+    stages: Array<WorkflowStageInput>
+    location?: LocationRef
+    sessionID?: string
+    agent?: string
+  }
+}
+
+export type WorkflowStarted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.started"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+  }
+}
+
+export type WorkflowStageQueued = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.stage.queued"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+  }
+}
+
+export type WorkflowStageLeased = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.stage.leased"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    leaseExpiresAt: number
+  }
+}
+
+export type WorkflowStageStarted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.stage.started"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+  }
+}
+
+export type WorkflowStageCheckpointed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.stage.checkpointed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    checkpoint: {
+      [key: string]: unknown
+    }
+  }
+}
+
+export type WorkflowArtifactCreated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.artifact.created"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    artifact: WorkflowArtifact
+  }
+}
+
+export type WorkflowStageRetryScheduled = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.stage.retry_scheduled"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    failure: WorkflowFailure
+    usage: WorkflowUsage
+    notBefore: number
+  }
+}
+
+export type WorkflowStageSucceeded = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.stage.succeeded"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    usage: WorkflowUsage
+    checkpoint?: {
+      [key: string]: unknown
+    }
+  }
+}
+
+export type WorkflowStageSkipped = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.stage.skipped"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    sourceStageID: string
+    outcomeSha256: string
+  }
+}
+
+export type WorkflowStageFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.stage.failed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    failure: WorkflowFailure
+    usage: WorkflowUsage
+    source: "execution" | "recovery"
+  }
+}
+
+export type WorkflowApprovalRequested = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.approval.requested"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID?: string
+    reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+    failure?: WorkflowFailure
+    usage?: WorkflowUsage
+  }
+}
+
+export type WorkflowApprovalResolved = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.approval.resolved"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    action: "retry" | "fail"
+  }
+}
+
+export type WorkflowBudgetThresholdReached = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.budget.threshold_reached"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    percent: 50 | 80 | 100
+    dimension: string
+    usage: WorkflowUsage
+    budget: WorkflowBudget
+  }
+}
+
+export type WorkflowBudgetUpdated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.budget.updated"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    budget: WorkflowBudget
+  }
+}
+
+export type WorkflowCancelRequested = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.cancel.requested"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+  }
+}
+
+export type WorkflowStageCancelled = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.stage.cancelled"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    source: "execution" | "request"
+  }
+}
+
+export type WorkflowCancelled = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.cancelled"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+  }
+}
+
+export type WorkflowSucceeded = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.succeeded"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    usage: WorkflowUsage
+  }
+}
+
+export type WorkflowFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "workflow.failed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    workflowID: string
+    timestamp: number
+    failure: WorkflowFailure
+    usage: WorkflowUsage
+  }
+}
+
+export type WorkflowVisualBuildVisualLimits = {
+  maxRevisions: number
+  maxTokens: number
+  maxTurns: number
+  maxToolCalls: number
+}
+
+export type DesignArtifactSourcePath = string
+
+export type WorkflowVisualBuildProjectDirectory = "." | DesignArtifactSourcePath
+
+export type WorkflowVisualBuildStaticPreviewInput = {
+  kind: "static"
+  cwd?: WorkflowVisualBuildProjectDirectory
+  entrypoint: DesignArtifactSourcePath
+}
+
+export type WorkflowVisualBuildScriptPreviewInput = {
+  kind: "script"
+  cwd?: WorkflowVisualBuildProjectDirectory
+  argv: Array<string>
+  env?: {
+    [key: string]: unknown | unknown
+  }
+}
+
+export type WorkflowVisualBuildCreateInput = {
+  prompt: string
+  budget: WorkflowBudget
+  visual: WorkflowVisualBuildVisualLimits
+  preview?: WorkflowVisualBuildStaticPreviewInput | WorkflowVisualBuildScriptPreviewInput
+  delivery: "foreground" | "background"
+}
+
+export type ResponsesResource = {
+  id: string
+  workflowID: string
+  model: string
+  status: "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled"
+  background: boolean
+  store: boolean
+  previousResponseID?: string
+  conversationID?: string
+  requestHash: string
+  output: Array<{
+    [key: string]: unknown
+  }>
+  error?: ResponsesError
+  usage?: ResponsesUsage
+  createdAt: number
+  completedAt?: number
+  deletedAt?: number
+}
+
+export type WorkflowVisualBuildAdmission = {
+  workflow: WorkflowInfo
+  response: ResponsesResource
+}
+
+export type ResponsesCreatePayload = {
+  id?: string
+  workflowID: string
+  model: string
+  background: boolean
+  store: boolean
+  previousResponseID?: string
+  conversationID?: string
+  requestHash: string
+  input: Array<{
+    [key: string]: unknown
+  }>
+  tools?: Array<{
+    [key: string]: unknown
+  }>
+  include?: Array<string>
+  prompt?: {
+    [key: string]: unknown
+  }
+  truncation?: string
+  stream?: boolean
+  instructions?: string
+  temperature?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  topP?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  top_p?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  maxOutputTokens?: number
+  max_output_tokens?: number
+  topLogprobs?: number
+  top_logprobs?: number
+  toolChoice?:
+    | string
+    | {
+        [key: string]: unknown
+      }
+  tool_choice?:
+    | string
+    | {
+        [key: string]: unknown
+      }
+  reasoning?: {
+    [key: string]: unknown
+  }
+  text?: {
+    [key: string]: unknown
+  }
+  user?: string
+  parallelToolCalls?: boolean
+  parallel_tool_calls?: boolean
+  maxToolCalls?: number
+  max_tool_calls?: number
+  metadata?: {
+    [key: string]: unknown
+  }
+  moderation?: {
+    [key: string]: unknown
+  }
+  serviceTier?: string
+  service_tier?: string
+  safetyIdentifier?: string
+  safety_identifier?: string
+  promptCacheKey?: string
+  prompt_cache_key?: string
+  promptCacheRetention?: string
+  prompt_cache_retention?: string
+  promptCacheOptions?: {
+    [key: string]: unknown
+  }
+  prompt_cache_options?: {
+    [key: string]: unknown
+  }
+  contextManagement?: Array<{
+    [key: string]: unknown
+  }>
+  context_management?: Array<{
+    [key: string]: unknown
+  }>
+  streamOptions?: {
+    [key: string]: unknown
+  }
+  stream_options?: {
+    [key: string]: unknown
+  }
+  previous_response_id?: string
+  conversation?: string
+}
+
+export type ResponsesStreamEvent =
+  | {
+      type: "response.created"
+      sequence_number: number
+      data: {
+        responseID: string
+        timestamp: number
+        workflowID: string
+        model: string
+        background: boolean
+        store: boolean
+        previousResponseID?: string
+        conversationID?: string
+        requestHash: string
+        context: Array<{
+          [key: string]: unknown
+        }>
+        input: Array<{
+          [key: string]: unknown
+        }>
+      }
+    }
+  | {
+      type: "response.in_progress"
+      sequence_number: number
+      data: {
+        responseID: string
+        timestamp: number
+      }
+    }
+  | {
+      type: "response.completed"
+      sequence_number: number
+      data: {
+        responseID: string
+        timestamp: number
+        output?: Array<{
+          [key: string]: unknown
+        }>
+        usage?: ResponsesUsage
+      }
+    }
+  | {
+      type: "response.incomplete"
+      sequence_number: number
+      data: {
+        responseID: string
+        timestamp: number
+        output?: Array<{
+          [key: string]: unknown
+        }>
+        error?: ResponsesError
+        usage?: ResponsesUsage
+      }
+    }
+  | {
+      type: "response.failed"
+      sequence_number: number
+      data: {
+        responseID: string
+        timestamp: number
+        error?: ResponsesError
+        usage?: ResponsesUsage
+      }
+    }
+  | {
+      type: "response.cancelled"
+      sequence_number: number
+      data: {
+        responseID: string
+        timestamp: number
+        error?: ResponsesError
+        usage?: ResponsesUsage
+      }
+    }
+
+export type ResponsesStreamEventStream = string
+
+export type ResponsesResponseItem = {
+  responseID: string
+  ordinal: number
+  kind: "context" | "input" | "output"
+  payload: {
+    [key: string]: unknown
+  }
+}
+
+export type ResponsesConversationCreateInput = {
+  id?: string
+  metadata: {
+    [key: string]: unknown
+  }
+}
+
+export type ResponsesConversation = {
+  id: string
+  metadata: {
+    [key: string]: unknown
+  }
+  createdAt: number
+  deletedAt?: number
+}
+
+export type ResponsesConversationItemAppendPayload = {
+  responseID?: string
+  payload: {
+    [key: string]: unknown
+  }
+}
+
+export type ResponsesConversationItem = {
+  conversationID: string
+  ordinal: number
+  responseID?: string
+  payload: {
+    [key: string]: unknown
   }
 }
 
@@ -5031,6 +7463,16 @@ export type ModelsDevRefreshed = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5048,6 +7490,16 @@ export type IntegrationUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5065,6 +7517,16 @@ export type IntegrationConnectionUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5082,6 +7544,16 @@ export type CatalogUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5098,12 +7570,28 @@ export type SessionCreated = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
     sessionID: string
     info: Session
+    visibility?: "public" | "workflow"
+    project?: {
+      id: string
+      worktree: string
+      vcs?: ProjectVcs
+    }
   }
 }
 
@@ -5116,7 +7604,17 @@ export type SessionUpdated = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5134,12 +7632,23 @@ export type SessionDeleted = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 3
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
     sessionID: string
-    info: Session
+    visibility: "public" | "workflow"
+    timeDeleted: number
   }
 }
 
@@ -5152,7 +7661,17 @@ export type MessageUpdated = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5170,7 +7689,17 @@ export type MessageRemoved = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5188,7 +7717,17 @@ export type MessagePartUpdated = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5207,7 +7746,17 @@ export type MessagePartRemoved = {
   durable?: {
     aggregateID: string
     seq: number
-    version: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5227,6 +7776,16 @@ export type SessionNextTextDelta = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5248,6 +7807,16 @@ export type SessionNextReasoningDelta = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5269,6 +7838,16 @@ export type SessionNextToolInputDelta = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5290,6 +7869,16 @@ export type SessionNextCompactionDelta = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5297,6 +7886,319 @@ export type SessionNextCompactionDelta = {
     sessionID: string
     messageID: string
     text: string
+  }
+}
+
+export type ResponseCreated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "response.created"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    responseID: string
+    timestamp: number
+    workflowID: string
+    model: string
+    background: boolean
+    store: boolean
+    previousResponseID?: string
+    conversationID?: string
+    requestHash: string
+    context: Array<{
+      [key: string]: unknown
+    }>
+    input: Array<{
+      [key: string]: unknown
+    }>
+  }
+}
+
+export type ResponseInProgress = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "response.in_progress"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    responseID: string
+    timestamp: number
+  }
+}
+
+export type ResponseCompleted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "response.completed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    responseID: string
+    timestamp: number
+    output?: Array<{
+      [key: string]: unknown
+    }>
+    usage?: ResponsesUsage
+  }
+}
+
+export type ResponseIncomplete = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "response.incomplete"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    responseID: string
+    timestamp: number
+    output?: Array<{
+      [key: string]: unknown
+    }>
+    error?: ResponsesError
+    usage?: ResponsesUsage
+  }
+}
+
+export type ResponseFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "response.failed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    responseID: string
+    timestamp: number
+    error?: ResponsesError
+    usage?: ResponsesUsage
+  }
+}
+
+export type ResponseCancelled = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "response.cancelled"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    responseID: string
+    timestamp: number
+    error?: ResponsesError
+    usage?: ResponsesUsage
+  }
+}
+
+export type ResponseDeleted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "response.deleted"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    responseID: string
+    timestamp: number
+  }
+}
+
+export type ConversationCreated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "conversation.created"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    conversationID: string
+    timestamp: number
+    metadata: {
+      [key: string]: unknown
+    }
+  }
+}
+
+export type ConversationItemAdded = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "conversation.item.added"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    conversationID: string
+    timestamp: number
+    responseID?: string
+    payload: {
+      [key: string]: unknown
+    }
+  }
+}
+
+export type ConversationDeleted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "conversation.deleted"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: 1
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
+  }
+  location?: LocationRef
+  data: {
+    conversationID: string
+    timestamp: number
   }
 }
 
@@ -5310,6 +8212,16 @@ export type MessagePartDelta = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5331,6 +8243,16 @@ export type SessionDiff = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5349,6 +8271,16 @@ export type SessionError = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5375,6 +8307,16 @@ export type InstallationUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5392,6 +8334,16 @@ export type InstallationUpdateAvailable = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5409,6 +8361,16 @@ export type FileEdited = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5426,6 +8388,16 @@ export type ReferenceUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5443,6 +8415,16 @@ export type PermissionV2Asked = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5468,6 +8450,16 @@ export type PermissionV2Replied = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5487,6 +8479,16 @@ export type PluginAdded = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5504,6 +8506,16 @@ export type ProjectDirectoriesUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5521,6 +8533,16 @@ export type FileWatcherUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5539,6 +8561,16 @@ export type PtyCreated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5556,6 +8588,16 @@ export type PtyUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5573,6 +8615,16 @@ export type PtyExited = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5591,6 +8643,16 @@ export type PtyDeleted = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5608,6 +8670,16 @@ export type QuestionV2Asked = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5631,6 +8703,16 @@ export type QuestionV2Replied = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5650,6 +8732,16 @@ export type QuestionV2Rejected = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5668,6 +8760,16 @@ export type TodoUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5686,6 +8788,16 @@ export type LspUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5703,6 +8815,16 @@ export type PermissionAsked = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5731,6 +8853,16 @@ export type PermissionReplied = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5750,6 +8882,16 @@ export type TuiPromptAppend = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5767,6 +8909,16 @@ export type TuiCommandExecute = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5801,6 +8953,16 @@ export type TuiToastShow = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5821,6 +8983,16 @@ export type TuiSessionSelect = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5841,6 +9013,16 @@ export type McpToolsChanged = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5858,6 +9040,16 @@ export type McpBrowserOpenFailed = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5876,6 +9068,16 @@ export type CommandExecuted = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5896,6 +9098,16 @@ export type ProjectUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5920,6 +9132,16 @@ export type SessionIdle = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5937,6 +9159,16 @@ export type QuestionAsked = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5960,6 +9192,16 @@ export type SessionCompacted = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5977,6 +9219,16 @@ export type VcsBranchUpdated = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -5994,6 +9246,16 @@ export type WorkspaceReady = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -6011,6 +9273,16 @@ export type WorkspaceFailed = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -6028,6 +9300,16 @@ export type WorkspaceStatus = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -6046,6 +9328,16 @@ export type WorktreeReady = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -6064,6 +9356,16 @@ export type WorktreeFailed = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -6081,6 +9383,16 @@ export type ServerConnected = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -6098,6 +9410,16 @@ export type GlobalDisposed = {
     aggregateID: string
     seq: number
     version: number
+    replay?: boolean
+    batch?: {
+      id: string
+      index: number
+      size: number
+    }
+    related?: Array<{
+      type: string
+      data: unknown
+    }>
   }
   location?: LocationRef
   data: {
@@ -6189,6 +9511,12 @@ export type EventSessionCreated = {
   properties: {
     sessionID: string
     info: Session
+    visibility?: "public" | "workflow"
+    project?: {
+      id: string
+      worktree: string
+      vcs?: ProjectVcs
+    }
   }
 }
 
@@ -6206,7 +9534,8 @@ export type EventSessionDeleted = {
   type: "session.deleted"
   properties: {
     sessionID: string
-    info: Session
+    visibility: "public" | "workflow"
+    timeDeleted: number
   }
 }
 
@@ -6649,6 +9978,374 @@ export type EventSessionNextRevertCommitted = {
     timestamp: number
     sessionID: string
     messageID: string
+  }
+}
+
+export type EventResponseCreated = {
+  id: string
+  type: "response.created"
+  properties: {
+    responseID: string
+    timestamp: number
+    workflowID: string
+    model: string
+    background: boolean
+    store: boolean
+    previousResponseID?: string
+    conversationID?: string
+    requestHash: string
+    context: Array<{
+      [key: string]: unknown
+    }>
+    input: Array<{
+      [key: string]: unknown
+    }>
+  }
+}
+
+export type EventResponseInProgress = {
+  id: string
+  type: "response.in_progress"
+  properties: {
+    responseID: string
+    timestamp: number
+  }
+}
+
+export type EventResponseCompleted = {
+  id: string
+  type: "response.completed"
+  properties: {
+    responseID: string
+    timestamp: number
+    output?: Array<{
+      [key: string]: unknown
+    }>
+    usage?: ResponsesUsage
+  }
+}
+
+export type EventResponseIncomplete = {
+  id: string
+  type: "response.incomplete"
+  properties: {
+    responseID: string
+    timestamp: number
+    output?: Array<{
+      [key: string]: unknown
+    }>
+    error?: ResponsesError
+    usage?: ResponsesUsage
+  }
+}
+
+export type EventResponseFailed = {
+  id: string
+  type: "response.failed"
+  properties: {
+    responseID: string
+    timestamp: number
+    error?: ResponsesError
+    usage?: ResponsesUsage
+  }
+}
+
+export type EventResponseCancelled = {
+  id: string
+  type: "response.cancelled"
+  properties: {
+    responseID: string
+    timestamp: number
+    error?: ResponsesError
+    usage?: ResponsesUsage
+  }
+}
+
+export type EventResponseDeleted = {
+  id: string
+  type: "response.deleted"
+  properties: {
+    responseID: string
+    timestamp: number
+  }
+}
+
+export type EventConversationCreated = {
+  id: string
+  type: "conversation.created"
+  properties: {
+    conversationID: string
+    timestamp: number
+    metadata: {
+      [key: string]: unknown
+    }
+  }
+}
+
+export type EventConversationItemAdded = {
+  id: string
+  type: "conversation.item.added"
+  properties: {
+    conversationID: string
+    timestamp: number
+    responseID?: string
+    payload: {
+      [key: string]: unknown
+    }
+  }
+}
+
+export type EventConversationDeleted = {
+  id: string
+  type: "conversation.deleted"
+  properties: {
+    conversationID: string
+    timestamp: number
+  }
+}
+
+export type EventWorkflowCreated = {
+  id: string
+  type: "workflow.created"
+  properties: {
+    workflowID: string
+    timestamp: number
+    type: string
+    input: {
+      [key: string]: unknown
+    }
+    budget: WorkflowBudget
+    stages: Array<WorkflowStageInput>
+    location?: LocationRef
+    sessionID?: string
+    agent?: string
+  }
+}
+
+export type EventWorkflowStarted = {
+  id: string
+  type: "workflow.started"
+  properties: {
+    workflowID: string
+    timestamp: number
+  }
+}
+
+export type EventWorkflowStageQueued = {
+  id: string
+  type: "workflow.stage.queued"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+  }
+}
+
+export type EventWorkflowStageLeased = {
+  id: string
+  type: "workflow.stage.leased"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    leaseExpiresAt: number
+  }
+}
+
+export type EventWorkflowStageStarted = {
+  id: string
+  type: "workflow.stage.started"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+  }
+}
+
+export type EventWorkflowStageCheckpointed = {
+  id: string
+  type: "workflow.stage.checkpointed"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    checkpoint: {
+      [key: string]: unknown
+    }
+  }
+}
+
+export type EventWorkflowArtifactCreated = {
+  id: string
+  type: "workflow.artifact.created"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    artifact: WorkflowArtifact
+  }
+}
+
+export type EventWorkflowStageRetryScheduled = {
+  id: string
+  type: "workflow.stage.retry_scheduled"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    failure: WorkflowFailure
+    usage: WorkflowUsage
+    notBefore: number
+  }
+}
+
+export type EventWorkflowStageSucceeded = {
+  id: string
+  type: "workflow.stage.succeeded"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    usage: WorkflowUsage
+    checkpoint?: {
+      [key: string]: unknown
+    }
+  }
+}
+
+export type EventWorkflowStageSkipped = {
+  id: string
+  type: "workflow.stage.skipped"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    sourceStageID: string
+    outcomeSha256: string
+  }
+}
+
+export type EventWorkflowStageFailed = {
+  id: string
+  type: "workflow.stage.failed"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    failure: WorkflowFailure
+    usage: WorkflowUsage
+    source: "execution" | "recovery"
+  }
+}
+
+export type EventWorkflowApprovalRequested = {
+  id: string
+  type: "workflow.approval.requested"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID?: string
+    reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+    failure?: WorkflowFailure
+    usage?: WorkflowUsage
+  }
+}
+
+export type EventWorkflowApprovalResolved = {
+  id: string
+  type: "workflow.approval.resolved"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    action: "retry" | "fail"
+  }
+}
+
+export type EventWorkflowBudgetThresholdReached = {
+  id: string
+  type: "workflow.budget.threshold_reached"
+  properties: {
+    workflowID: string
+    timestamp: number
+    percent: 50 | 80 | 100
+    dimension: string
+    usage: WorkflowUsage
+    budget: WorkflowBudget
+  }
+}
+
+export type EventWorkflowBudgetUpdated = {
+  id: string
+  type: "workflow.budget.updated"
+  properties: {
+    workflowID: string
+    timestamp: number
+    budget: WorkflowBudget
+  }
+}
+
+export type EventWorkflowCancelRequested = {
+  id: string
+  type: "workflow.cancel.requested"
+  properties: {
+    workflowID: string
+    timestamp: number
+  }
+}
+
+export type EventWorkflowStageCancelled = {
+  id: string
+  type: "workflow.stage.cancelled"
+  properties: {
+    workflowID: string
+    timestamp: number
+    stageID: string
+    attempt: number
+    leaseOwner?: string
+    source: "execution" | "request"
+  }
+}
+
+export type EventWorkflowCancelled = {
+  id: string
+  type: "workflow.cancelled"
+  properties: {
+    workflowID: string
+    timestamp: number
+  }
+}
+
+export type EventWorkflowSucceeded = {
+  id: string
+  type: "workflow.succeeded"
+  properties: {
+    workflowID: string
+    timestamp: number
+    usage: WorkflowUsage
+  }
+}
+
+export type EventWorkflowFailed = {
+  id: string
+  type: "workflow.failed"
+  properties: {
+    workflowID: string
+    timestamp: number
+    failure: WorkflowFailure
+    usage: WorkflowUsage
   }
 }
 
@@ -11984,6 +15681,760 @@ export type V2SessionMessageResponses = {
 }
 
 export type V2SessionMessageResponse = V2SessionMessageResponses[keyof V2SessionMessageResponses]
+
+export type V2WorkflowListData = {
+  body?: never
+  path?: never
+  query?: {
+    status?: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"
+    limit?: string
+  }
+  url: "/api/workflow"
+}
+
+export type V2WorkflowListErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2WorkflowListError = V2WorkflowListErrors[keyof V2WorkflowListErrors]
+
+export type V2WorkflowListResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: Array<WorkflowInfo>
+  }
+}
+
+export type V2WorkflowListResponse = V2WorkflowListResponses[keyof V2WorkflowListResponses]
+
+export type V2WorkflowCreateData = {
+  body: WorkflowCreateInput
+  path?: never
+  query?: never
+  url: "/api/workflow"
+}
+
+export type V2WorkflowCreateErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowConflictError
+   */
+  409: WorkflowConflictError
+}
+
+export type V2WorkflowCreateError = V2WorkflowCreateErrors[keyof V2WorkflowCreateErrors]
+
+export type V2WorkflowCreateResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: WorkflowInfo
+  }
+}
+
+export type V2WorkflowCreateResponse = V2WorkflowCreateResponses[keyof V2WorkflowCreateResponses]
+
+export type V2WorkflowGetData = {
+  body?: never
+  path: {
+    workflowID: string
+  }
+  query?: never
+  url: "/api/workflow/{workflowID}"
+}
+
+export type V2WorkflowGetErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowNotFoundError
+   */
+  404: WorkflowNotFoundError
+}
+
+export type V2WorkflowGetError = V2WorkflowGetErrors[keyof V2WorkflowGetErrors]
+
+export type V2WorkflowGetResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: WorkflowDetail
+  }
+}
+
+export type V2WorkflowGetResponse = V2WorkflowGetResponses[keyof V2WorkflowGetResponses]
+
+export type V2WorkflowHistoryData = {
+  body?: never
+  path: {
+    workflowID: string
+  }
+  query?: {
+    limit?: string
+    after?: string
+  }
+  url: "/api/workflow/{workflowID}/history"
+}
+
+export type V2WorkflowHistoryErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowNotFoundError
+   */
+  404: WorkflowNotFoundError
+}
+
+export type V2WorkflowHistoryError = V2WorkflowHistoryErrors[keyof V2WorkflowHistoryErrors]
+
+export type V2WorkflowHistoryResponses = {
+  /**
+   * WorkflowHistory
+   */
+  200: WorkflowHistory
+}
+
+export type V2WorkflowHistoryResponse = V2WorkflowHistoryResponses[keyof V2WorkflowHistoryResponses]
+
+export type V2WorkflowEventsData = {
+  body?: never
+  path: {
+    workflowID: string
+  }
+  query?: {
+    after?: string
+  }
+  url: "/api/workflow/{workflowID}/event"
+}
+
+export type V2WorkflowEventsErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowNotFoundError
+   */
+  404: WorkflowNotFoundError
+}
+
+export type V2WorkflowEventsError = V2WorkflowEventsErrors[keyof V2WorkflowEventsErrors]
+
+export type V2WorkflowEventsResponses = {
+  /**
+   * Success
+   */
+  200: {
+    id: string
+    event: string
+    data: WorkflowDurableEventStream
+  }
+}
+
+export type V2WorkflowEventsResponse = V2WorkflowEventsResponses[keyof V2WorkflowEventsResponses]
+
+export type V2WorkflowArtifactsData = {
+  body?: never
+  path: {
+    workflowID: string
+  }
+  query?: never
+  url: "/api/workflow/{workflowID}/artifact"
+}
+
+export type V2WorkflowArtifactsErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowNotFoundError
+   */
+  404: WorkflowNotFoundError
+}
+
+export type V2WorkflowArtifactsError = V2WorkflowArtifactsErrors[keyof V2WorkflowArtifactsErrors]
+
+export type V2WorkflowArtifactsResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: Array<WorkflowArtifact>
+  }
+}
+
+export type V2WorkflowArtifactsResponse = V2WorkflowArtifactsResponses[keyof V2WorkflowArtifactsResponses]
+
+export type V2WorkflowCancelData = {
+  body?: never
+  path: {
+    workflowID: string
+  }
+  query?: never
+  url: "/api/workflow/{workflowID}/cancel"
+}
+
+export type V2WorkflowCancelErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowNotFoundError
+   */
+  404: WorkflowNotFoundError
+  /**
+   * WorkflowConflictError
+   */
+  409: WorkflowConflictError
+}
+
+export type V2WorkflowCancelError = V2WorkflowCancelErrors[keyof V2WorkflowCancelErrors]
+
+export type V2WorkflowCancelResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2WorkflowCancelResponse = V2WorkflowCancelResponses[keyof V2WorkflowCancelResponses]
+
+export type V2WorkflowUpdateBudgetData = {
+  body: {
+    budget: WorkflowBudget
+  }
+  path: {
+    workflowID: string
+  }
+  query?: never
+  url: "/api/workflow/{workflowID}/budget"
+}
+
+export type V2WorkflowUpdateBudgetErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowNotFoundError
+   */
+  404: WorkflowNotFoundError
+  /**
+   * WorkflowConflictError
+   */
+  409: WorkflowConflictError
+}
+
+export type V2WorkflowUpdateBudgetError = V2WorkflowUpdateBudgetErrors[keyof V2WorkflowUpdateBudgetErrors]
+
+export type V2WorkflowUpdateBudgetResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: WorkflowInfo
+  }
+}
+
+export type V2WorkflowUpdateBudgetResponse = V2WorkflowUpdateBudgetResponses[keyof V2WorkflowUpdateBudgetResponses]
+
+export type V2WorkflowResolveRecoveryData = {
+  body: {
+    action: "retry" | "fail"
+  }
+  path: {
+    workflowID: string
+    stageID: string
+  }
+  query?: never
+  url: "/api/workflow/{workflowID}/stage/{stageID}/recovery"
+}
+
+export type V2WorkflowResolveRecoveryErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowNotFoundError | WorkflowStageNotFoundError
+   */
+  404: WorkflowNotFoundError | WorkflowStageNotFoundError
+  /**
+   * WorkflowConflictError
+   */
+  409: WorkflowConflictError
+}
+
+export type V2WorkflowResolveRecoveryError = V2WorkflowResolveRecoveryErrors[keyof V2WorkflowResolveRecoveryErrors]
+
+export type V2WorkflowResolveRecoveryResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2WorkflowResolveRecoveryResponse =
+  V2WorkflowResolveRecoveryResponses[keyof V2WorkflowResolveRecoveryResponses]
+
+export type WorkflowVisualBuildCreateData = {
+  body: WorkflowVisualBuildCreateInput
+  headers?: {
+    "idempotency-key"?: string
+  }
+  path?: never
+  query?: never
+  url: "/api/workflow/visual-build"
+}
+
+export type WorkflowVisualBuildCreateErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * WorkflowConflictError
+   */
+  409: WorkflowConflictError
+}
+
+export type WorkflowVisualBuildCreateError = WorkflowVisualBuildCreateErrors[keyof WorkflowVisualBuildCreateErrors]
+
+export type WorkflowVisualBuildCreateResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: WorkflowVisualBuildAdmission
+  }
+}
+
+export type WorkflowVisualBuildCreateResponse =
+  WorkflowVisualBuildCreateResponses[keyof WorkflowVisualBuildCreateResponses]
+
+export type V1ResponsesCreateData = {
+  body?: ResponsesCreatePayload
+  path?: never
+  query?: never
+  url: "/v1/responses"
+}
+
+export type V1ResponsesCreateErrors = {
+  /**
+   * InvalidRequestError | UnsupportedCapabilityError | UnsupportedModelCapabilityError
+   */
+  400: InvalidRequestError | UnsupportedCapabilityError | UnsupportedModelCapabilityError
+  /**
+   * WorkflowNotFoundError
+   */
+  404: WorkflowNotFoundError
+  /**
+   * ResponseConflictError
+   */
+  409: ResponseConflictError
+}
+
+export type V1ResponsesCreateError = V1ResponsesCreateErrors[keyof V1ResponsesCreateErrors]
+
+export type V1ResponsesCreateResponses = {
+  /**
+   * Responses.Resource
+   */
+  200: ResponsesResource
+}
+
+export type V1ResponsesCreateResponse = V1ResponsesCreateResponses[keyof V1ResponsesCreateResponses]
+
+export type V1ResponsesDeleteData = {
+  body?: never
+  path: {
+    responseID: string
+  }
+  query?: never
+  url: "/v1/responses/{responseID}"
+}
+
+export type V1ResponsesDeleteErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ResponseNotFoundError
+   */
+  404: ResponseNotFoundError
+  /**
+   * ResponseConflictError
+   */
+  409: ResponseConflictError
+}
+
+export type V1ResponsesDeleteError = V1ResponsesDeleteErrors[keyof V1ResponsesDeleteErrors]
+
+export type V1ResponsesDeleteResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V1ResponsesDeleteResponse = V1ResponsesDeleteResponses[keyof V1ResponsesDeleteResponses]
+
+export type V1ResponsesGetData = {
+  body?: never
+  path: {
+    responseID: string
+  }
+  query?: never
+  url: "/v1/responses/{responseID}"
+}
+
+export type V1ResponsesGetErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ResponseNotFoundError
+   */
+  404: ResponseNotFoundError
+}
+
+export type V1ResponsesGetError = V1ResponsesGetErrors[keyof V1ResponsesGetErrors]
+
+export type V1ResponsesGetResponses = {
+  /**
+   * Responses.Resource
+   */
+  200: ResponsesResource
+}
+
+export type V1ResponsesGetResponse = V1ResponsesGetResponses[keyof V1ResponsesGetResponses]
+
+export type V1ResponsesCancelData = {
+  body?: never
+  path: {
+    responseID: string
+  }
+  query?: never
+  url: "/v1/responses/{responseID}/cancel"
+}
+
+export type V1ResponsesCancelErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ResponseNotFoundError
+   */
+  404: ResponseNotFoundError
+  /**
+   * ResponseConflictError
+   */
+  409: ResponseConflictError
+}
+
+export type V1ResponsesCancelError = V1ResponsesCancelErrors[keyof V1ResponsesCancelErrors]
+
+export type V1ResponsesCancelResponses = {
+  /**
+   * Responses.Resource
+   */
+  200: ResponsesResource
+}
+
+export type V1ResponsesCancelResponse = V1ResponsesCancelResponses[keyof V1ResponsesCancelResponses]
+
+export type V1ResponsesInputItemsData = {
+  body?: never
+  path: {
+    responseID: string
+  }
+  query?: never
+  url: "/v1/responses/{responseID}/input_items"
+}
+
+export type V1ResponsesInputItemsErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ResponseNotFoundError
+   */
+  404: ResponseNotFoundError
+}
+
+export type V1ResponsesInputItemsError = V1ResponsesInputItemsErrors[keyof V1ResponsesInputItemsErrors]
+
+export type V1ResponsesInputItemsResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: Array<ResponsesResponseItem>
+  }
+}
+
+export type V1ResponsesInputItemsResponse = V1ResponsesInputItemsResponses[keyof V1ResponsesInputItemsResponses]
+
+export type V1ResponsesEventsData = {
+  body?: never
+  path: {
+    responseID: string
+  }
+  query?: {
+    after?: string
+  }
+  url: "/v1/responses/{responseID}/event"
+}
+
+export type V1ResponsesEventsErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ResponseNotFoundError
+   */
+  404: ResponseNotFoundError
+}
+
+export type V1ResponsesEventsError = V1ResponsesEventsErrors[keyof V1ResponsesEventsErrors]
+
+export type V1ResponsesEventsResponses = {
+  /**
+   * Success
+   */
+  200: {
+    id: string
+    event: string
+    data: ResponsesStreamEventStream
+  }
+}
+
+export type V1ResponsesEventsResponse = V1ResponsesEventsResponses[keyof V1ResponsesEventsResponses]
+
+export type V1ConversationCreateData = {
+  body?: ResponsesConversationCreateInput
+  path?: never
+  query?: never
+  url: "/v1/conversations"
+}
+
+export type V1ConversationCreateErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * ResponseConflictError
+   */
+  409: ResponseConflictError
+}
+
+export type V1ConversationCreateError = V1ConversationCreateErrors[keyof V1ConversationCreateErrors]
+
+export type V1ConversationCreateResponses = {
+  /**
+   * Responses.Conversation
+   */
+  200: ResponsesConversation
+}
+
+export type V1ConversationCreateResponse = V1ConversationCreateResponses[keyof V1ConversationCreateResponses]
+
+export type V1ConversationDeleteData = {
+  body?: never
+  path: {
+    conversationID: string
+  }
+  query?: never
+  url: "/v1/conversations/{conversationID}"
+}
+
+export type V1ConversationDeleteErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ConversationNotFoundError
+   */
+  404: ConversationNotFoundError
+  /**
+   * ResponseConflictError
+   */
+  409: ResponseConflictError
+}
+
+export type V1ConversationDeleteError = V1ConversationDeleteErrors[keyof V1ConversationDeleteErrors]
+
+export type V1ConversationDeleteResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V1ConversationDeleteResponse = V1ConversationDeleteResponses[keyof V1ConversationDeleteResponses]
+
+export type V1ConversationGetData = {
+  body?: never
+  path: {
+    conversationID: string
+  }
+  query?: never
+  url: "/v1/conversations/{conversationID}"
+}
+
+export type V1ConversationGetErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ConversationNotFoundError
+   */
+  404: ConversationNotFoundError
+}
+
+export type V1ConversationGetError = V1ConversationGetErrors[keyof V1ConversationGetErrors]
+
+export type V1ConversationGetResponses = {
+  /**
+   * Responses.Conversation
+   */
+  200: ResponsesConversation
+}
+
+export type V1ConversationGetResponse = V1ConversationGetResponses[keyof V1ConversationGetResponses]
+
+export type V1ConversationItemsData = {
+  body?: never
+  path: {
+    conversationID: string
+  }
+  query?: never
+  url: "/v1/conversations/{conversationID}/items"
+}
+
+export type V1ConversationItemsErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * ConversationNotFoundError
+   */
+  404: ConversationNotFoundError
+}
+
+export type V1ConversationItemsError = V1ConversationItemsErrors[keyof V1ConversationItemsErrors]
+
+export type V1ConversationItemsResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: Array<ResponsesConversationItem>
+  }
+}
+
+export type V1ConversationItemsResponse = V1ConversationItemsResponses[keyof V1ConversationItemsResponses]
+
+export type V1ConversationAppendItemData = {
+  body?: ResponsesConversationItemAppendPayload
+  path: {
+    conversationID: string
+  }
+  query?: never
+  url: "/v1/conversations/{conversationID}/items"
+}
+
+export type V1ConversationAppendItemErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * ConversationNotFoundError
+   */
+  404: ConversationNotFoundError
+  /**
+   * ResponseConflictError
+   */
+  409: ResponseConflictError
+}
+
+export type V1ConversationAppendItemError = V1ConversationAppendItemErrors[keyof V1ConversationAppendItemErrors]
+
+export type V1ConversationAppendItemResponses = {
+  /**
+   * Responses.Conversation
+   */
+  200: ResponsesConversation
+}
+
+export type V1ConversationAppendItemResponse =
+  V1ConversationAppendItemResponses[keyof V1ConversationAppendItemResponses]
 
 export type V2SessionMessagesData = {
   body?: never

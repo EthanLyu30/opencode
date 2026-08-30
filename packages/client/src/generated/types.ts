@@ -319,6 +319,7 @@ export type SessionsListOutput = {
     }
     readonly time: { readonly created: number; readonly updated: number; readonly archived?: number }
     readonly title: string
+    readonly visibility: "public" | "workflow"
     readonly location: { readonly directory: string; readonly workspaceID?: string }
     readonly subpath?: string
     readonly revert?: {
@@ -381,6 +382,7 @@ export type SessionsCreateOutput = {
     }
     readonly time: { readonly created: number; readonly updated: number; readonly archived?: number }
     readonly title: string
+    readonly visibility: "public" | "workflow"
     readonly location: { readonly directory: string; readonly workspaceID?: string }
     readonly subpath?: string
     readonly revert?: {
@@ -419,6 +421,7 @@ export type SessionsGetOutput = {
     }
     readonly time: { readonly created: number; readonly updated: number; readonly archived?: number }
     readonly title: string
+    readonly visibility: "public" | "workflow"
     readonly location: { readonly directory: string; readonly workspaceID?: string }
     readonly subpath?: string
     readonly revert?: {
@@ -763,7 +766,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -783,7 +786,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -803,7 +806,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -823,7 +826,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -857,7 +860,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -891,7 +894,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -911,7 +914,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -931,7 +934,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -952,7 +955,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -972,7 +975,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -994,7 +997,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 2
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1023,7 +1026,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 2
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1043,7 +1046,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1063,7 +1066,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1084,7 +1087,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1105,7 +1108,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1126,7 +1129,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1152,7 +1155,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1177,7 +1180,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1208,7 +1211,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1234,7 +1237,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1255,7 +1258,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1277,7 +1280,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1304,7 +1307,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1324,7 +1327,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1346,7 +1349,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1377,7 +1380,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1392,7 +1395,7 @@ export type SessionsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -1417,7 +1420,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1437,7 +1440,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1457,7 +1460,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1477,7 +1480,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1511,7 +1514,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1545,7 +1548,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1565,7 +1568,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1585,7 +1588,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1606,7 +1609,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1626,7 +1629,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1648,7 +1651,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 2
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1677,7 +1680,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 2
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1697,7 +1700,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1717,7 +1720,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1738,7 +1741,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1759,7 +1762,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1780,7 +1783,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1806,7 +1809,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1831,7 +1834,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1862,7 +1865,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1888,7 +1891,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1909,7 +1912,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1931,7 +1934,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1958,7 +1961,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -1978,7 +1981,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -2000,7 +2003,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -2031,7 +2034,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -2046,7 +2049,7 @@ export type SessionsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -2400,6 +2403,9 @@ export type WorkflowsCreateOutput = {
       readonly toolCalls: number
       readonly attempts: number
     }
+    readonly location?: { readonly directory: string; readonly workspaceID?: string }
+    readonly sessionID?: string
+    readonly agent?: string
     readonly cancelRequestedAt?: number
     readonly version: number
     readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
@@ -2437,6 +2443,9 @@ export type WorkflowsListOutput = {
       readonly toolCalls: number
       readonly attempts: number
     }
+    readonly location?: { readonly directory: string; readonly workspaceID?: string }
+    readonly sessionID?: string
+    readonly agent?: string
     readonly cancelRequestedAt?: number
     readonly version: number
     readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
@@ -2466,6 +2475,9 @@ export type WorkflowsGetOutput = {
         readonly toolCalls: number
         readonly attempts: number
       }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly sessionID?: string
+      readonly agent?: string
       readonly cancelRequestedAt?: number
       readonly version: number
       readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
@@ -2551,7 +2563,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2589,6 +2601,9 @@ export type WorkflowsHistoryOutput = {
               readonly input: { readonly [x: string]: JsonValue }
             }>,
           ]
+          readonly location?: { readonly directory: string; readonly workspaceID?: string }
+          readonly sessionID?: string
+          readonly agent?: string
         }
       }
     | {
@@ -2598,7 +2613,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2613,7 +2628,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2628,7 +2643,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2650,7 +2665,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2671,7 +2686,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2693,7 +2708,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2724,7 +2739,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2769,7 +2784,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2793,11 +2808,32 @@ export type WorkflowsHistoryOutput = {
     | {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "workflow.stage.skipped"
+        readonly durable?: {
+          readonly aggregateID: string
+          readonly seq: number
+          readonly version: 1
+          readonly replay?: boolean
+          readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
+          readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
+        }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly workflowID: string
+          readonly timestamp: number
+          readonly stageID: string
+          readonly sourceStageID: string
+          readonly outcomeSha256: string
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "workflow.stage.failed"
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2842,7 +2878,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2852,7 +2888,7 @@ export type WorkflowsHistoryOutput = {
           readonly workflowID: string
           readonly timestamp: number
           readonly stageID?: string
-          readonly reason: "ambiguous_execution" | "budget_exhausted"
+          readonly reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
           readonly failure?: {
             readonly category:
               | "transient"
@@ -2885,7 +2921,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2905,7 +2941,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2938,7 +2974,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2963,7 +2999,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -2978,7 +3014,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -3000,7 +3036,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -3015,7 +3051,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -3039,7 +3075,7 @@ export type WorkflowsHistoryOutput = {
         readonly durable?: {
           readonly aggregateID: string
           readonly seq: number
-          readonly version: number
+          readonly version: 1
           readonly replay?: boolean
           readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
           readonly related?: ReadonlyArray<{ readonly type: string; readonly data: JsonValue }>
@@ -3090,7 +3126,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3128,6 +3164,9 @@ export type WorkflowsEventsOutput =
             readonly input: { readonly [x: string]: unknown }
           }>,
         ]
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly sessionID?: string
+        readonly agent?: string
       }
     }
   | {
@@ -3137,7 +3176,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3152,7 +3191,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3167,7 +3206,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3189,7 +3228,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3210,7 +3249,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3232,7 +3271,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3263,7 +3302,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3308,7 +3347,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3332,11 +3371,32 @@ export type WorkflowsEventsOutput =
   | {
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "workflow.stage.skipped"
+      readonly durable?: {
+        readonly aggregateID: string
+        readonly seq: number
+        readonly version: 1
+        readonly replay?: boolean
+        readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
+        readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+      }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly workflowID: string
+        readonly timestamp: number
+        readonly stageID: string
+        readonly sourceStageID: string
+        readonly outcomeSha256: string
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "workflow.stage.failed"
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3381,7 +3441,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3391,7 +3451,7 @@ export type WorkflowsEventsOutput =
         readonly workflowID: string
         readonly timestamp: number
         readonly stageID?: string
-        readonly reason: "ambiguous_execution" | "budget_exhausted"
+        readonly reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
         readonly failure?: {
           readonly category:
             | "transient"
@@ -3424,7 +3484,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3444,7 +3504,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3477,7 +3537,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3502,7 +3562,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3517,7 +3577,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3539,7 +3599,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3554,7 +3614,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3578,7 +3638,7 @@ export type WorkflowsEventsOutput =
       readonly durable?: {
         readonly aggregateID: string
         readonly seq: number
-        readonly version: number
+        readonly version: 1
         readonly replay?: boolean
         readonly batch?: { readonly id: string; readonly index: number; readonly size: number }
         readonly related?: ReadonlyArray<{ readonly type: string; readonly data: unknown }>
@@ -3667,6 +3727,9 @@ export type WorkflowsUpdateBudgetOutput = {
       readonly toolCalls: number
       readonly attempts: number
     }
+    readonly location?: { readonly directory: string; readonly workspaceID?: string }
+    readonly sessionID?: string
+    readonly agent?: string
     readonly cancelRequestedAt?: number
     readonly version: number
     readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
@@ -3680,6 +3743,194 @@ export type WorkflowsResolveRecoveryInput = {
 }
 
 export type WorkflowsResolveRecoveryOutput = void
+
+export type WorkflowsVisualBuildCreateInput = {
+  readonly "idempotency-key"?: { readonly "idempotency-key"?: string | undefined }["idempotency-key"]
+  readonly prompt: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly visual: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly preview?:
+      | { readonly kind: "static"; readonly cwd?: "." | string; readonly entrypoint: string }
+      | {
+          readonly kind: "script"
+          readonly cwd?: "." | string
+          readonly argv: readonly [string, ...Array<string>]
+          readonly env?: { readonly [x: string]: string }
+        }
+    readonly delivery: "foreground" | "background"
+  }["prompt"]
+  readonly budget: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly visual: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly preview?:
+      | { readonly kind: "static"; readonly cwd?: "." | string; readonly entrypoint: string }
+      | {
+          readonly kind: "script"
+          readonly cwd?: "." | string
+          readonly argv: readonly [string, ...Array<string>]
+          readonly env?: { readonly [x: string]: string }
+        }
+    readonly delivery: "foreground" | "background"
+  }["budget"]
+  readonly visual: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly visual: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly preview?:
+      | { readonly kind: "static"; readonly cwd?: "." | string; readonly entrypoint: string }
+      | {
+          readonly kind: "script"
+          readonly cwd?: "." | string
+          readonly argv: readonly [string, ...Array<string>]
+          readonly env?: { readonly [x: string]: string }
+        }
+    readonly delivery: "foreground" | "background"
+  }["visual"]
+  readonly preview?: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly visual: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly preview?:
+      | { readonly kind: "static"; readonly cwd?: "." | string; readonly entrypoint: string }
+      | {
+          readonly kind: "script"
+          readonly cwd?: "." | string
+          readonly argv: readonly [string, ...Array<string>]
+          readonly env?: { readonly [x: string]: string }
+        }
+    readonly delivery: "foreground" | "background"
+  }["preview"]
+  readonly delivery: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly visual: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly preview?:
+      | { readonly kind: "static"; readonly cwd?: "." | string; readonly entrypoint: string }
+      | {
+          readonly kind: "script"
+          readonly cwd?: "." | string
+          readonly argv: readonly [string, ...Array<string>]
+          readonly env?: { readonly [x: string]: string }
+        }
+    readonly delivery: "foreground" | "background"
+  }["delivery"]
+}
+
+export type WorkflowsVisualBuildCreateOutput = {
+  readonly data: {
+    readonly workflow: {
+      readonly id: string
+      readonly type: string
+      readonly status: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"
+      readonly currentStageID?: string
+      readonly input: { readonly [x: string]: JsonValue }
+      readonly budget: {
+        readonly maxTokens?: number
+        readonly maxTurns?: number
+        readonly maxToolCalls?: number
+        readonly maxAttempts?: number
+        readonly maxDurationMs?: number
+      }
+      readonly usage: {
+        readonly tokens: number
+        readonly turns: number
+        readonly toolCalls: number
+        readonly attempts: number
+      }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly sessionID?: string
+      readonly agent?: string
+      readonly cancelRequestedAt?: number
+      readonly version: number
+      readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+    }
+    readonly response: {
+      readonly id: string
+      readonly workflowID: string
+      readonly model: string
+      readonly status: "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled"
+      readonly background: boolean
+      readonly store: boolean
+      readonly previousResponseID?: string
+      readonly conversationID?: string
+      readonly requestHash: string
+      readonly output: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+      readonly error?: {
+        readonly code: string
+        readonly message: string
+        readonly type?: string
+        readonly param?: string
+      }
+      readonly usage?: {
+        readonly inputTokens: number
+        readonly outputTokens: number
+        readonly totalTokens: number
+        readonly inputTokensDetails?: { readonly cachedTokens: number }
+        readonly outputTokensDetails?: { readonly reasoningTokens: number }
+      }
+      readonly createdAt: number
+      readonly completedAt?: number
+      readonly deletedAt?: number
+    }
+  }
+}["data"]
 
 export type ResponsesCreateInput = {
   readonly id?: {

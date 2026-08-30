@@ -1,7 +1,7 @@
 import { afterEach, describe, expect } from "bun:test"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Deferred, Effect, Layer } from "effect"
+import { ConfigProvider, Deferred, Effect, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import { HttpServer } from "effect/unstable/http"
 import { ChildProcessSpawner } from "effect/unstable/process"
@@ -9,7 +9,6 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { Flag } from "@opencode-ai/core/flag/flag"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { validateSession } from "../../src/cli/tui/validate-session"
 import { InstanceBootstrap } from "../../src/project/bootstrap"
@@ -37,11 +36,14 @@ const appLayer = AppNodeBuilder.build(
   [[InstanceStore.bootstrapNode, noopBootstrapLayer]],
 )
 const it = testEffect(Layer.mergeAll(appLayer, httpApiLayer))
-
-const original = {
-  OPENCODE_SERVER_PASSWORD: Flag.OPENCODE_SERVER_PASSWORD,
-  OPENCODE_SERVER_USERNAME: Flag.OPENCODE_SERVER_USERNAME,
-}
+const authIt = testEffect(
+  Layer.mergeAll(
+    appLayer,
+    httpApiLayer.pipe(
+      Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ OPENCODE_SERVER_PASSWORD: "secret" }))),
+    ),
+  ),
+)
 
 type ServerPath = "default" | "raw"
 type Sdk = ReturnType<typeof createOpencodeClient>
@@ -61,8 +63,6 @@ function client(
   serverPath: ServerPath,
   directory?: string,
   input?: {
-    password?: string
-    username?: string
     headers?: Record<string, string>
     workspaceID?: string
     onRequest?: (request: Request) => void
@@ -81,15 +81,10 @@ function client(
   )
 }
 
-function serverFetch(
-  serverPath: ServerPath,
-  input?: { password?: string; username?: string; onRequest?: (request: Request) => void },
-) {
+function serverFetch(serverPath: ServerPath, input?: { onRequest?: (request: Request) => void }) {
   return HttpServer.HttpServer.use((server) =>
     Effect.sync(() => {
       void serverPath
-      Flag.OPENCODE_SERVER_PASSWORD = input?.password
-      Flag.OPENCODE_SERVER_USERNAME = input?.username
       const baseUrl = HttpServer.formatAddress(server.address)
       return Object.assign(
         async (request: RequestInfo | URL, init?: RequestInit) => {
@@ -252,7 +247,7 @@ function withFakeLlm<A, E>(serverPath: ServerPath, run: (input: LlmProjectFixtur
   return Effect.gen(function* () {
     const llm = yield* TestLLMServer
     return yield* withProject(serverPath, { config: testProviderConfig(llm.url) }, (input) => run({ ...input, llm }))
-  }).pipe(Effect.provide(TestLLMServer.layer))
+  }).pipe(Effect.provide(Layer.fresh(TestLLMServer.layer)))
 }
 
 function withFakeLlmProject<A, E>(
@@ -270,7 +265,7 @@ function withFakeLlmProject<A, E>(
       },
       (input) => run({ ...input, llm }),
     )
-  }).pipe(Effect.provide(TestLLMServer.layer))
+  }).pipe(Effect.provide(Layer.fresh(TestLLMServer.layer)))
 }
 
 function writeStandardFiles(dir: string) {
@@ -328,8 +323,6 @@ function seedMessage(directory: string, sessionID: string) {
 }
 
 afterEach(async () => {
-  Flag.OPENCODE_SERVER_PASSWORD = original.OPENCODE_SERVER_PASSWORD
-  Flag.OPENCODE_SERVER_USERNAME = original.OPENCODE_SERVER_USERNAME
   await disposeAllInstances()
   await resetDatabase()
 })
@@ -488,33 +481,27 @@ describe("HttpApi SDK", () => {
     ),
   )
 
-  httpapiInstance(
+  authIt.live(
     "uses generated SDK basic auth behavior",
-    { serverPath: "raw", setup: writeStandardFiles },
-    ({ directory }) =>
-      Effect.gen(function* () {
-        const missingSdk = yield* client("raw", directory, { password: "secret" })
-        const missing = yield* capture(() => missingSdk.file.read({ path: "hello.txt" }))
-        const badSdk = yield* client("raw", directory, {
-          password: "secret",
-          headers: { authorization: authorization("opencode", "wrong") },
-        })
-        const bad = yield* capture(() => badSdk.file.read({ path: "hello.txt" }))
-        const goodSdk = yield* client("raw", directory, {
-          password: "secret",
-          headers: { authorization: authorization("opencode", "secret") },
-        })
-        const good = yield* capture(() => goodSdk.file.read({ path: "hello.txt" }))
+    Effect.gen(function* () {
+      const missingSdk = yield* client("raw")
+      const missing = yield* capture(() => missingSdk.global.health())
+      const badSdk = yield* client("raw", undefined, {
+        headers: { authorization: authorization("opencode", "wrong") },
+      })
+      const bad = yield* capture(() => badSdk.global.health())
+      const goodSdk = yield* client("raw", undefined, {
+        headers: { authorization: authorization("opencode", "secret") },
+      })
+      const good = yield* capture(() => goodSdk.global.health())
 
-        return {
-          statuses: statuses({ missing, bad, good }),
-          content: record(good.data).content,
-        }
-      }),
+      expect(statuses({ missing, bad, good })).toEqual({ missing: 401, bad: 401, good: 200 })
+      expect(good.data).toMatchObject({ healthy: true })
+    }),
   )
 
   serverPathParity("matches generated SDK instance read routes", (serverPath) =>
-    withProject(serverPath, { git: true, setup: writeStandardFiles }, ({ sdk, directory }) =>
+    withProject(serverPath, { git: false, setup: writeStandardFiles }, ({ sdk, directory }) =>
       Effect.gen(function* () {
         const project = yield* capture(() => sdk.project.current())
         const projects = yield* capture(() => sdk.project.list())

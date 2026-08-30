@@ -175,6 +175,9 @@ import type {
   QuestionReplyErrors,
   QuestionReplyResponses,
   QuestionV2Reply,
+  ResponsesConversationCreateInput,
+  ResponsesConversationItemAppendPayload,
+  ResponsesCreatePayload,
   SessionAbortErrors,
   SessionAbortResponses,
   SessionChildrenErrors,
@@ -263,6 +266,28 @@ import type {
   TuiShowToastResponses,
   TuiSubmitPromptErrors,
   TuiSubmitPromptResponses,
+  V1ConversationAppendItemErrors,
+  V1ConversationAppendItemResponses,
+  V1ConversationCreateErrors,
+  V1ConversationCreateResponses,
+  V1ConversationDeleteErrors,
+  V1ConversationDeleteResponses,
+  V1ConversationGetErrors,
+  V1ConversationGetResponses,
+  V1ConversationItemsErrors,
+  V1ConversationItemsResponses,
+  V1ResponsesCancelErrors,
+  V1ResponsesCancelResponses,
+  V1ResponsesCreateErrors,
+  V1ResponsesCreateResponses,
+  V1ResponsesDeleteErrors,
+  V1ResponsesDeleteResponses,
+  V1ResponsesEventsErrors,
+  V1ResponsesEventsResponses,
+  V1ResponsesGetErrors,
+  V1ResponsesGetResponses,
+  V1ResponsesInputItemsErrors,
+  V1ResponsesInputItemsResponses,
   V2AgentListErrors,
   V2AgentListResponses,
   V2CommandListErrors,
@@ -385,6 +410,24 @@ import type {
   V2SessionWaitResponses,
   V2SkillListErrors,
   V2SkillListResponses,
+  V2WorkflowArtifactsErrors,
+  V2WorkflowArtifactsResponses,
+  V2WorkflowCancelErrors,
+  V2WorkflowCancelResponses,
+  V2WorkflowCreateErrors,
+  V2WorkflowCreateResponses,
+  V2WorkflowEventsErrors,
+  V2WorkflowEventsResponses,
+  V2WorkflowGetErrors,
+  V2WorkflowGetResponses,
+  V2WorkflowHistoryErrors,
+  V2WorkflowHistoryResponses,
+  V2WorkflowListErrors,
+  V2WorkflowListResponses,
+  V2WorkflowResolveRecoveryErrors,
+  V2WorkflowResolveRecoveryResponses,
+  V2WorkflowUpdateBudgetErrors,
+  V2WorkflowUpdateBudgetResponses,
   VcsApplyErrors,
   VcsApplyResponses,
   VcsDiffErrors,
@@ -395,6 +438,11 @@ import type {
   VcsGetResponses,
   VcsStatusErrors,
   VcsStatusResponses,
+  WorkflowBudget,
+  WorkflowCreateInput,
+  WorkflowVisualBuildCreateErrors,
+  WorkflowVisualBuildCreateInput,
+  WorkflowVisualBuildCreateResponses,
   WorktreeCreateErrors,
   WorktreeCreateInput,
   WorktreeCreateResponses,
@@ -5873,6 +5921,251 @@ export class Session3 extends HeyApiClient {
   }
 }
 
+export class Workflow extends HeyApiClient {
+  /**
+   * List workflows
+   *
+   * List durable workflows in descending creation order.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters?: {
+      status?: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"
+      limit?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "status" },
+            { in: "query", key: "limit" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<V2WorkflowListResponses, V2WorkflowListErrors, ThrowOnError>({
+      url: "/api/workflow",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Create workflow
+   *
+   * Durably create one workflow and its ordered stage definitions.
+   */
+  public create<ThrowOnError extends boolean = false>(
+    parameters: {
+      workflowCreateInput: WorkflowCreateInput
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ key: "workflowCreateInput", map: "body" }] }])
+    return (options?.client ?? this.client).post<V2WorkflowCreateResponses, V2WorkflowCreateErrors, ThrowOnError>({
+      url: "/api/workflow",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Get workflow
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      workflowID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "workflowID" }] }])
+    return (options?.client ?? this.client).get<V2WorkflowGetResponses, V2WorkflowGetErrors, ThrowOnError>({
+      url: "/api/workflow/{workflowID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get workflow history
+   *
+   * Read durable workflow events after an exclusive aggregate sequence.
+   */
+  public history<ThrowOnError extends boolean = false>(
+    parameters: {
+      workflowID: string
+      limit?: string
+      after?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "workflowID" },
+            { in: "query", key: "limit" },
+            { in: "query", key: "after" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<V2WorkflowHistoryResponses, V2WorkflowHistoryErrors, ThrowOnError>({
+      url: "/api/workflow/{workflowID}/history",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Subscribe to workflow events
+   *
+   * Replay durable workflow events after an aggregate sequence, then continue with new events.
+   */
+  public events<ThrowOnError extends boolean = false>(
+    parameters: {
+      workflowID: string
+      after?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "workflowID" },
+            { in: "query", key: "after" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).sse.get<V2WorkflowEventsResponses, V2WorkflowEventsErrors, ThrowOnError>({
+      url: "/api/workflow/{workflowID}/event",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List workflow artifacts
+   */
+  public artifacts<ThrowOnError extends boolean = false>(
+    parameters: {
+      workflowID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "workflowID" }] }])
+    return (options?.client ?? this.client).get<V2WorkflowArtifactsResponses, V2WorkflowArtifactsErrors, ThrowOnError>({
+      url: "/api/workflow/{workflowID}/artifact",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Cancel workflow
+   */
+  public cancel<ThrowOnError extends boolean = false>(
+    parameters: {
+      workflowID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "workflowID" }] }])
+    return (options?.client ?? this.client).post<V2WorkflowCancelResponses, V2WorkflowCancelErrors, ThrowOnError>({
+      url: "/api/workflow/{workflowID}/cancel",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Update workflow budget
+   */
+  public updateBudget<ThrowOnError extends boolean = false>(
+    parameters: {
+      workflowID: string
+      budget?: WorkflowBudget
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "workflowID" },
+            { in: "body", key: "budget" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      V2WorkflowUpdateBudgetResponses,
+      V2WorkflowUpdateBudgetErrors,
+      ThrowOnError
+    >({
+      url: "/api/workflow/{workflowID}/budget",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Resolve workflow recovery
+   */
+  public resolveRecovery<ThrowOnError extends boolean = false>(
+    parameters: {
+      workflowID: string
+      stageID: string
+      action?: "retry" | "fail"
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "workflowID" },
+            { in: "path", key: "stageID" },
+            { in: "body", key: "action" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      V2WorkflowResolveRecoveryResponses,
+      V2WorkflowResolveRecoveryErrors,
+      ThrowOnError
+    >({
+      url: "/api/workflow/{workflowID}/stage/{stageID}/recovery",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
 export class Model extends HeyApiClient {
   /**
    * List models
@@ -7008,6 +7301,11 @@ export class V2 extends HeyApiClient {
     return (this._session ??= new Session3({ client: this.client }))
   }
 
+  private _workflow?: Workflow
+  get workflow(): Workflow {
+    return (this._workflow ??= new Workflow({ client: this.client }))
+  }
+
   private _model?: Model
   get model(): Model {
     return (this._model ??= new Model({ client: this.client }))
@@ -7071,6 +7369,310 @@ export class V2 extends HeyApiClient {
   private _projectCopy?: ProjectCopy2
   get projectCopy(): ProjectCopy2 {
     return (this._projectCopy ??= new ProjectCopy2({ client: this.client }))
+  }
+}
+
+export class Workflow2 extends HeyApiClient {
+  /**
+   * Admit a visual build
+   *
+   * Durably admit one location-scoped visual-build Workflow and its Response.
+   */
+  public visualBuildCreate<ThrowOnError extends boolean = false>(
+    parameters: {
+      "idempotency-key"?: string
+      workflowVisualBuildCreateInput: WorkflowVisualBuildCreateInput
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "headers", key: "idempotency-key" },
+            { key: "workflowVisualBuildCreateInput", map: "body" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      WorkflowVisualBuildCreateResponses,
+      WorkflowVisualBuildCreateErrors,
+      ThrowOnError
+    >({
+      url: "/api/workflow/visual-build",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
+export class Responses extends HeyApiClient {
+  /**
+   * Create response
+   *
+   * Admit a durable local Responses resource linked to an existing workflow.
+   */
+  public create<ThrowOnError extends boolean = false>(
+    parameters?: {
+      responsesCreatePayload?: ResponsesCreatePayload
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ key: "responsesCreatePayload", map: "body" }] }])
+    return (options?.client ?? this.client).post<V1ResponsesCreateResponses, V1ResponsesCreateErrors, ThrowOnError>({
+      url: "/v1/responses",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Delete response
+   */
+  public delete<ThrowOnError extends boolean = false>(
+    parameters: {
+      responseID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "responseID" }] }])
+    return (options?.client ?? this.client).delete<V1ResponsesDeleteResponses, V1ResponsesDeleteErrors, ThrowOnError>({
+      url: "/v1/responses/{responseID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get response
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      responseID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "responseID" }] }])
+    return (options?.client ?? this.client).get<V1ResponsesGetResponses, V1ResponsesGetErrors, ThrowOnError>({
+      url: "/v1/responses/{responseID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Cancel response
+   */
+  public cancel<ThrowOnError extends boolean = false>(
+    parameters: {
+      responseID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "responseID" }] }])
+    return (options?.client ?? this.client).post<V1ResponsesCancelResponses, V1ResponsesCancelErrors, ThrowOnError>({
+      url: "/v1/responses/{responseID}/cancel",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List response input items
+   */
+  public inputItems<ThrowOnError extends boolean = false>(
+    parameters: {
+      responseID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "responseID" }] }])
+    return (options?.client ?? this.client).get<
+      V1ResponsesInputItemsResponses,
+      V1ResponsesInputItemsErrors,
+      ThrowOnError
+    >({
+      url: "/v1/responses/{responseID}/input_items",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Subscribe to response events
+   *
+   * Replay response lifecycle events after an exclusive durable sequence, then tail new events.
+   */
+  public events<ThrowOnError extends boolean = false>(
+    parameters: {
+      responseID: string
+      after?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "responseID" },
+            { in: "query", key: "after" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).sse.get<V1ResponsesEventsResponses, V1ResponsesEventsErrors, ThrowOnError>({
+      url: "/v1/responses/{responseID}/event",
+      ...options,
+      ...params,
+    })
+  }
+}
+
+export class Conversation extends HeyApiClient {
+  /**
+   * Create conversation
+   */
+  public create<ThrowOnError extends boolean = false>(
+    parameters?: {
+      responsesConversationCreateInput?: ResponsesConversationCreateInput
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [{ args: [{ key: "responsesConversationCreateInput", map: "body" }] }],
+    )
+    return (options?.client ?? this.client).post<
+      V1ConversationCreateResponses,
+      V1ConversationCreateErrors,
+      ThrowOnError
+    >({
+      url: "/v1/conversations",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Delete conversation
+   */
+  public delete<ThrowOnError extends boolean = false>(
+    parameters: {
+      conversationID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "conversationID" }] }])
+    return (options?.client ?? this.client).delete<
+      V1ConversationDeleteResponses,
+      V1ConversationDeleteErrors,
+      ThrowOnError
+    >({
+      url: "/v1/conversations/{conversationID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get conversation
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      conversationID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "conversationID" }] }])
+    return (options?.client ?? this.client).get<V1ConversationGetResponses, V1ConversationGetErrors, ThrowOnError>({
+      url: "/v1/conversations/{conversationID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List conversation items
+   */
+  public items<ThrowOnError extends boolean = false>(
+    parameters: {
+      conversationID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "conversationID" }] }])
+    return (options?.client ?? this.client).get<V1ConversationItemsResponses, V1ConversationItemsErrors, ThrowOnError>({
+      url: "/v1/conversations/{conversationID}/items",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Append conversation item
+   */
+  public appendItem<ThrowOnError extends boolean = false>(
+    parameters: {
+      conversationID: string
+      responsesConversationItemAppendPayload?: ResponsesConversationItemAppendPayload
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "conversationID" },
+            { key: "responsesConversationItemAppendPayload", map: "body" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      V1ConversationAppendItemResponses,
+      V1ConversationAppendItemErrors,
+      ThrowOnError
+    >({
+      url: "/v1/conversations/{conversationID}/items",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
+export class V1 extends HeyApiClient {
+  private _responses?: Responses
+  get responses(): Responses {
+    return (this._responses ??= new Responses({ client: this.client }))
+  }
+
+  private _conversation?: Conversation
+  get conversation(): Conversation {
+    return (this._conversation ??= new Conversation({ client: this.client }))
   }
 }
 
@@ -7215,5 +7817,15 @@ export class OpencodeClient extends HeyApiClient {
   private _v2?: V2
   get v2(): V2 {
     return (this._v2 ??= new V2({ client: this.client }))
+  }
+
+  private _workflow?: Workflow2
+  get workflow(): Workflow2 {
+    return (this._workflow ??= new Workflow2({ client: this.client }))
+  }
+
+  private _v1?: V1
+  get v1(): V1 {
+    return (this._v1 ??= new V1({ client: this.client }))
   }
 }

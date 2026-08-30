@@ -32,6 +32,9 @@ const ServerApi = HttpApi.make("test-server-authorization").add(
       HttpApiEndpoint.get("probe", "/api/probe", {
         success: Schema.String,
       }),
+      HttpApiEndpoint.post("visualBuild", "/api/workflow/visual-build", {
+        success: Schema.String,
+      }),
     )
     .middleware(ServerAuthorization),
 )
@@ -43,7 +46,9 @@ const handlers = HttpApiBuilder.group(Api, "test", (handlers) =>
 )
 
 const serverHandlers = HttpApiBuilder.group(ServerApi, "test.v2", (handlers) =>
-  handlers.handle("probe", () => Effect.succeed("ok")),
+  handlers
+    .handle("probe", () => Effect.succeed("ok"))
+    .handle("visualBuild", () => Effect.succeed("unreachable without authentication")),
 )
 
 const apiLayer = HttpRouter.serve(
@@ -169,6 +174,16 @@ describe("HttpApi authorization middleware", () => {
       expect(response.status).toBe(401)
       expect(response.headers["www-authenticate"] ?? "").toContain("Basic")
       expect(body).toEqual({ _tag: "UnauthorizedError", message: "Authentication required" })
+    }),
+  )
+
+  itV2Secret.live("applies the same bodyful v2 unauthorized error to visual-build admission", () =>
+    Effect.gen(function* () {
+      const response = yield* HttpClient.post("/api/workflow/visual-build")
+
+      expect(response.status).toBe(401)
+      expect(response.headers["www-authenticate"] ?? "").toContain("Basic")
+      expect(yield* response.json).toEqual({ _tag: "UnauthorizedError", message: "Authentication required" })
     }),
   )
 })
