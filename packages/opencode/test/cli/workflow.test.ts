@@ -28,7 +28,18 @@ describe("workflow observer", () => {
       workflowID: "wfl_fixture",
       timestamp: 7,
       stageID: "wfs_visual_1",
-      artifact: { metadata: { prompt: "must-not-be-used" } },
+      artifact: {
+        id: "wfa_fixture",
+        workflowID: "wfl_fixture",
+        stageID: "wfs_visual_1",
+        kind: "workflow.visual-review",
+        uri: "workflow://must-not-be-used",
+        mime: "application/json",
+        sha256: "a".repeat(64),
+        size: 1,
+        metadata: { prompt: "must-not-be-used" },
+        timeCreated: 7,
+      },
     })
     const terminal = workflowEvent(8, "workflow.succeeded", {
       workflowID: "wfl_fixture",
@@ -77,6 +88,104 @@ describe("workflow observer", () => {
     ])
   })
 
+  test("bounds empty and duplicate-only reconnects with the exact backoff schedule", async () => {
+    for (const scenario of ["empty", "duplicate"] as const) {
+      const eventCalls: Array<{ workflowID: string; after?: number }> = []
+      const delays: number[] = []
+      let failure: unknown
+      try {
+        await observeWorkflow({
+          workflowID: "wfl_fixture",
+          signal: new AbortController().signal,
+          client: {
+            events(input) {
+              eventCalls.push(input)
+              if (eventCalls.length > 6) throw new Error("observer exceeded its reconnect bound")
+              if (scenario === "duplicate") return stream([workflowCreated(1)])
+              return stream([])
+            },
+            async history() {
+              throw new Error("duplicate or empty reconnects must not request history")
+            },
+            async get() {
+              throw new Error("duplicate or empty reconnects must not fetch workflow state")
+            },
+          },
+          onProgress: () => undefined,
+          sleep: async (ms) => {
+            delays.push(ms)
+          },
+        })
+      } catch (error) {
+        failure = error
+      }
+
+      if (!(failure instanceof Error)) throw new Error(`${scenario}: observer did not reach its reconnect bound`)
+      expect(failure.name).toBe("WorkflowObservationError")
+      expect(failure.message).toBe("Workflow event stream reconnect limit reached")
+      expect(delays).toEqual([50, 100, 250, 500, 1_000])
+      expect(eventCalls).toEqual([
+        { workflowID: "wfl_fixture" },
+        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
+        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
+        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
+        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
+        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
+      ])
+    }
+  })
+
+  test("resets reconnect backoff only after a processed cursor advance", async () => {
+    const eventCalls: Array<{ workflowID: string; after?: number }> = []
+    const delays: number[] = []
+    const deliveries = [
+      [] as ReadonlyArray<unknown>,
+      [] as ReadonlyArray<unknown>,
+      [workflowCreated(1)],
+      [] as ReadonlyArray<unknown>,
+      [
+        workflowEvent(2, "workflow.succeeded", {
+          workflowID: "wfl_fixture",
+          timestamp: 2,
+          usage: usage(),
+        }),
+      ],
+    ]
+
+    const result = await observeWorkflow({
+      workflowID: "wfl_fixture",
+      signal: new AbortController().signal,
+      client: {
+        events(input) {
+          eventCalls.push(input)
+          const delivery = deliveries.shift()
+          if (!delivery) throw new Error("observer made an unexpected reconnect")
+          return stream(delivery)
+        },
+        async history() {
+          throw new Error("contiguous reconnects must not request history")
+        },
+        async get() {
+          throw new Error("terminal observation must not fetch workflow state")
+        },
+      },
+      onProgress: () => undefined,
+      sleep: async (ms) => {
+        delays.push(ms)
+      },
+    })
+
+    expect(result).toEqual({ type: "terminal", status: "succeeded", seq: 2 })
+    expect(delays).toEqual([50, 100, 50, 100])
+    expect(eventCalls).toEqual([
+      { workflowID: "wfl_fixture" },
+      { workflowID: "wfl_fixture", after: 0 },
+      { workflowID: "wfl_fixture", after: 0 },
+      { workflowID: "wfl_fixture", after: 1 },
+      { workflowID: "wfl_fixture", after: 1 },
+    ])
+  })
+
   test("confirms waiting approval from durable workflow state before returning", async () => {
     const gets: string[] = []
     const progress: string[] = []
@@ -91,7 +200,11 @@ describe("workflow observer", () => {
               workflowID: "wfl_fixture",
               timestamp: 2,
               reason: "budget_exhausted",
-              failure: { message: "raw-secret-must-not-render" },
+              failure: {
+                category: "unknown",
+                code: "approval_required",
+                message: "raw-secret-must-not-render",
+              },
             }),
           ]),
         async history() {
@@ -119,14 +232,7 @@ describe("workflow observer", () => {
         workflowID: "wfl_fixture",
         signal: new AbortController().signal,
         client: {
-          events: () =>
-            stream([
-              {
-                type: "workflow.created",
-                durable: { aggregateID: "wfl_other", seq: 1, version: 1 },
-                data: { workflowID: "wfl_fixture", stages: [] },
-              },
-            ]),
+          events: () => stream([{ ...workflowCreated(1), durable: { aggregateID: "wfl_other", seq: 1, version: 1 } }]),
           async history() {
             throw new Error("history must not run for a malformed contiguous event")
           },
@@ -145,6 +251,92 @@ describe("workflow observer", () => {
     expect(failure).toBeInstanceOf(Error)
     if (!(failure instanceof Error)) throw new Error("observer did not surface an Error")
     expect(failure.message).toContain("Workflow event authority is invalid")
+  })
+
+  test("rejects non-authoritative durable event schemas before advancing or reconnecting", async () => {
+    const malformed = [
+      {
+        label: "unknown event type",
+        event: workflowEvent(1, "workflow.raw-secret-sentinel", {
+          workflowID: "wfl_fixture",
+          timestamp: 1,
+        }),
+      },
+      {
+        label: "missing event-specific field",
+        event: workflowEvent(1, "workflow.succeeded", {
+          workflowID: "wfl_fixture",
+          timestamp: 1,
+        }),
+      },
+      {
+        label: "wrong durable version",
+        event: {
+          ...workflowEvent(1, "workflow.succeeded", {
+            workflowID: "wfl_fixture",
+            timestamp: 1,
+            usage: usage(),
+          }),
+          durable: { aggregateID: "wfl_fixture", seq: 1, version: 2 },
+        },
+      },
+      {
+        label: "wrong event-specific field type",
+        event: workflowEvent(1, "workflow.stage.started", {
+          workflowID: "wfl_fixture",
+          timestamp: 1,
+          stageID: "wfs_design",
+          attempt: "raw-secret-sentinel",
+        }),
+      },
+    ] as const
+
+    for (const item of malformed) {
+      let eventCalls = 0
+      let historyCalls = 0
+      let sleeps = 0
+      let failure: unknown
+      try {
+        await observeWorkflow({
+          workflowID: "wfl_fixture",
+          signal: new AbortController().signal,
+          client: {
+            events: () => {
+              eventCalls++
+              return stream([
+                item.event,
+                workflowEvent(2, "workflow.succeeded", {
+                  workflowID: "wfl_fixture",
+                  timestamp: 2,
+                  usage: usage(),
+                }),
+              ])
+            },
+            async history() {
+              historyCalls++
+              return { data: [], hasMore: false }
+            },
+            async get() {
+              throw new Error("schema failure must not fetch workflow state")
+            },
+          },
+          onProgress: () => undefined,
+          sleep: async () => {
+            sleeps++
+          },
+        })
+      } catch (error) {
+        failure = error
+      }
+
+      if (!(failure instanceof Error)) throw new Error(`${item.label}: malformed event was accepted`)
+      expect(failure.name).toBe("WorkflowObservationError")
+      expect(failure.message).toBe("Workflow event schema is invalid")
+      expect(failure.message).not.toContain("raw-secret-sentinel")
+      expect(eventCalls).toBe(1)
+      expect(historyCalls).toBe(0)
+      expect(sleeps).toBe(0)
+    }
   })
 
   test("renders every frozen route from durable stage definitions rather than prompt prose", async () => {
@@ -351,6 +543,55 @@ describe("workflow CLI process", () => {
         expect(result.stderr).toContain("Cancellation acknowledged")
         expect(result.stdout.trim().split("\n")).toHaveLength(1)
         expect(JSON.parse(result.stdout)).toMatchObject({ workflow: { status: "cancel_requested" } })
+      }),
+    60_000,
+  )
+
+  cliProcessIt.live(
+    "resolves a SIGINT race from one cancel conflict and one un-aborted terminal read",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        const child = yield* opencode.start(["workflow", "run", "Build the fixture", "--format", "json"], {
+          preload,
+          env: { OPENCODE_TEST_WORKFLOW_SCENARIO: "sigint-terminal-race" },
+          timeoutMs: 10_000,
+        })
+        yield* child.waitForStderr("Workflow admitted", 8_000)
+        const result = yield* child.result.pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () => Effect.die(new Error("workflow child did not resolve the SIGINT terminal race promptly")),
+          }),
+        )
+
+        expect(result.exitCode).toBe(130)
+        expect(result.durationMs).toBeLessThan(5_000)
+        expect(result.stdout.trim().split("\n")).toHaveLength(1)
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          workflow: { id: "wfl_fixture", status: "succeeded" },
+          response: { id: "resp_fixture", workflowID: "wfl_fixture", status: "queued" },
+          artifacts: [],
+        })
+        expect(result.stdout + result.stderr).not.toContain("raw-error-secret")
+      }),
+    60_000,
+  )
+
+  cliProcessIt.live(
+    "keeps non-terminal cancel conflicts and genuine cancel failures on redacted exit 1",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        for (const scenario of ["sigint-conflict-nonterminal", "sigint-cancel-failure"] as const) {
+          const result = yield* opencode.spawn(["workflow", "run", "Build the fixture", "--format", "json"], {
+            preload,
+            env: { OPENCODE_TEST_WORKFLOW_SCENARIO: scenario },
+            timeoutMs: 10_000,
+          })
+          expect(result.exitCode).toBe(1)
+          expect(result.stdout.trim().split("\n")).toHaveLength(1)
+          expect(JSON.parse(result.stdout)).toEqual({ workflow: null, response: null, artifacts: [] })
+          expect(result.stdout + result.stderr).not.toContain("raw-error-secret")
+        }
       }),
     60_000,
   )

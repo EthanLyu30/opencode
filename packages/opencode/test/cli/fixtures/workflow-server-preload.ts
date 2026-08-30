@@ -10,6 +10,8 @@ const state = {
   eventConnections: 0,
   terminalAvailable: false,
   terminalReads: [] as string[],
+  cancelCalls: 0,
+  workflowReads: 0,
 }
 
 const app = Server.Default().app
@@ -20,7 +22,7 @@ async function fixtureFetch(request: Request): Promise<Response> {
   if (request.method === "POST" && url.pathname === "/api/workflow/visual-build") return admission(request)
   if (request.method === "GET" && url.pathname === `/api/workflow/${workflowID}/event`) return events(request)
   if (request.method === "GET" && url.pathname === `/api/workflow/${workflowID}/history`) return history(url)
-  if (request.method === "GET" && url.pathname === `/api/workflow/${workflowID}`) return workflowGet()
+  if (request.method === "GET" && url.pathname === `/api/workflow/${workflowID}`) return workflowGet(request)
   if (request.method === "GET" && url.pathname === `/v1/responses/${responseID}`) return responseGet()
   if (request.method === "GET" && url.pathname === `/api/workflow/${workflowID}/artifact`) return artifactsGet()
   if (request.method === "POST" && url.pathname === `/api/workflow/${workflowID}/cancel`) return cancel(request)
@@ -72,8 +74,14 @@ function events(request: Request) {
   if (scenario === "schema") {
     return sse([{ type: "workflow.created", data: { workflowID, raw: "raw-error-secret" } }])
   }
-  if (scenario === "sigint") {
+  if (
+    scenario === "sigint" ||
+    scenario === "sigint-terminal-race" ||
+    scenario === "sigint-conflict-nonterminal" ||
+    scenario === "sigint-cancel-failure"
+  ) {
     if (url.searchParams.has("after")) return Response.json({ message: "unexpected reconnect" }, { status: 500 })
+    if (scenario === "sigint-terminal-race") state.terminalAvailable = true
     setTimeout(() => process.emit("SIGINT"), 20)
     return new Response(
       new ReadableStream<Uint8Array>({
@@ -128,8 +136,16 @@ function history(url: URL) {
   return Response.json({ message: "unexpected history cursor" }, { status: 500 })
 }
 
-function workflowGet() {
+function workflowGet(request: Request) {
   if (scenario === "approval") return Response.json({ data: detail("waiting_approval", 2) })
+  if (scenario === "sigint-terminal-race" || scenario === "sigint-conflict-nonterminal") {
+    state.workflowReads++
+    if (request.signal.aborted || state.cancelCalls !== 1 || state.workflowReads !== 1) {
+      return Response.json({ message: "terminal-race read count mismatch" }, { status: 500 })
+    }
+    const status = scenario === "sigint-terminal-race" ? "succeeded" : "running"
+    return Response.json({ data: detail(status, 3) })
+  }
   if (!state.terminalAvailable) return Response.json({ message: "workflow fetched before terminal" }, { status: 500 })
   state.terminalReads.push("workflow")
   const status = scenario === "failed" ? "failed" : scenario === "cancelled" ? "cancelled" : "succeeded"
@@ -186,7 +202,23 @@ function artifactsGet() {
 }
 
 async function cancel(request: Request) {
+  state.cancelCalls++
+  if (state.cancelCalls !== 1) return Response.json({ message: "duplicate cancel" }, { status: 500 })
   if (request.signal.aborted) return Response.json({ message: "cancel used aborted signal" }, { status: 499 })
+  if (scenario === "sigint-terminal-race" || scenario === "sigint-conflict-nonterminal") {
+    return Response.json(
+      {
+        _tag: "WorkflowConflictError",
+        workflowID,
+        operation: "cancel",
+        message: "raw-error-secret",
+      },
+      { status: 409 },
+    )
+  }
+  if (scenario === "sigint-cancel-failure") {
+    return Response.json({ message: "raw-error-secret" }, { status: 500 })
+  }
   await Bun.sleep(50)
   console.error("fixture cancellation acknowledged")
   return new Response(null, { status: 204 })
@@ -207,7 +239,7 @@ function workflow(status: string, updated: number) {
     time: {
       created: 1,
       updated,
-      ...(status === "queued" || status === "waiting_approval" ? {} : { completed: updated }),
+      ...(status === "succeeded" || status === "failed" || status === "cancelled" ? { completed: updated } : {}),
     },
   }
 }
@@ -284,8 +316,16 @@ function artifactCreated(seq: number) {
     timestamp: seq,
     stageID: "wfs_visual_1",
     artifact: {
+      id: "wfa_visual_fixture",
+      workflowID,
+      stageID: "wfs_visual_1",
+      kind: "workflow.visual-review",
       uri: "workflow://raw-output-secret",
+      mime: "application/json",
+      sha256: "a".repeat(64),
+      size: 1,
       metadata: { secret: "metadata-secret" },
+      timeCreated: seq,
     },
   })
 }
@@ -295,7 +335,7 @@ function approval(seq: number) {
     workflowID,
     timestamp: seq,
     reason: "budget_exhausted",
-    failure: { message: "raw-error-secret" },
+    failure: { category: "unknown", code: "approval_required", message: "raw-error-secret" },
   })
 }
 

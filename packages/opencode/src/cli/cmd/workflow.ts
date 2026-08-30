@@ -1,6 +1,7 @@
-import { ClientError, OpenCode } from "@opencode-ai/client"
+import { ClientError, isWorkflowConflictError, OpenCode } from "@opencode-ai/client"
+import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import type { Argv } from "yargs"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { writeSync } from "node:fs"
 import { EOL } from "os"
 import { effectCmd } from "../effect-cmd"
@@ -72,6 +73,8 @@ class ObservationError extends Error {
   override readonly name = "WorkflowObservationError"
 }
 
+const decodeWorkflowEvent = Schema.decodeUnknownSync(WorkflowEvent.Durable)
+
 export async function observeWorkflow(input: {
   readonly workflowID: string
   readonly client: WorkflowObserverClient
@@ -141,10 +144,9 @@ export async function observeWorkflow(input: {
       ? { workflowID: input.workflowID }
       : { workflowID: input.workflowID, after: lastSeq }
     firstConnection = false
-    let received = false
+    const beforeConnectionSeq = lastSeq
     try {
       for await (const raw of input.client.events(request, { signal: input.signal })) {
-        received = true
         const result = await accept(raw)
         if (result) return result
       }
@@ -156,7 +158,7 @@ export async function observeWorkflow(input: {
       }
     }
 
-    consecutiveDisconnects = received ? 1 : consecutiveDisconnects + 1
+    consecutiveDisconnects = lastSeq > beforeConnectionSeq ? 1 : consecutiveDisconnects + 1
     if (consecutiveDisconnects > RECONNECT_DELAYS.length) {
       throw new ObservationError("Workflow event stream reconnect limit reached")
     }
@@ -204,6 +206,7 @@ export const WorkflowRunCommand = effectCmd({
       let interrupted = false
       let signals = 0
       let cancelPromise: Promise<void> | undefined
+      let interruptionAttempted = false
       let finalWritten = false
       let admittedWorkflow: unknown
       let admittedResponse: unknown
@@ -223,6 +226,44 @@ export const WorkflowRunCommand = effectCmd({
         cancelPromise = client.workflows.cancel({ workflowID })
         cancelPromise.catch(() => undefined)
         return cancelPromise
+      }
+      const finishInterrupted = async () => {
+        if (interruptionAttempted) throw new ObservationError("Workflow interruption settlement already attempted")
+        interruptionAttempted = true
+        if (!client || !workflowID) throw new ObservationError("Workflow interruption authority is unavailable")
+
+        const currentClient = client
+        const currentWorkflowID = workflowID
+        let summaryWorkflow = admittedWorkflow
+        let statusOverride: string | undefined = "cancel_requested"
+        try {
+          await cancelOnce()
+          progress("Cancellation acknowledged")
+        } catch (error) {
+          if (
+            !isWorkflowConflictError(error) ||
+            error.workflowID !== currentWorkflowID ||
+            error.operation !== "cancel"
+          ) {
+            throw error
+          }
+          const detail = await currentClient.workflows.get({ workflowID: currentWorkflowID })
+          const status = workflowStatus(detail)
+          if (status !== "succeeded" && status !== "failed" && status !== "cancelled") {
+            throw new ObservationError("Workflow cancellation conflict is not terminal")
+          }
+          terminal = true
+          summaryWorkflow = readRecord(detail, "run")
+          statusOverride = undefined
+          progress(`Workflow already ${status}`)
+        }
+
+        await final({
+          workflow: workflowSummary(summaryWorkflow, statusOverride),
+          response: responseSummary(admittedResponse),
+          artifacts: [],
+        })
+        process.exitCode = 130
       }
       const sigint = () => {
         signals++
@@ -251,14 +292,7 @@ export const WorkflowRunCommand = effectCmd({
         progress("Workflow admitted")
 
         if (interrupted) {
-          await cancelOnce()
-          progress("Cancellation acknowledged")
-          await final({
-            workflow: workflowSummary(admittedWorkflow, "cancel_requested"),
-            response: responseSummary(admittedResponse),
-            artifacts: [],
-          })
-          process.exitCode = 130
+          await finishInterrupted()
           return
         }
 
@@ -277,14 +311,7 @@ export const WorkflowRunCommand = effectCmd({
         })
 
         if (observed.type === "interrupted" || interrupted) {
-          await cancelOnce()
-          progress("Cancellation acknowledged")
-          await final({
-            workflow: workflowSummary(admittedWorkflow, "cancel_requested"),
-            response: responseSummary(admittedResponse),
-            artifacts: [],
-          })
-          process.exitCode = 130
+          await finishInterrupted()
           return
         }
 
@@ -313,18 +340,13 @@ export const WorkflowRunCommand = effectCmd({
         await final(output)
         process.exitCode = observed.status === "succeeded" ? 0 : observed.status === "failed" ? 1 : 130
       } catch {
-        if (interrupted && workflowID) {
+        if (interrupted && workflowID && !interruptionAttempted) {
           try {
-            await cancelOnce()
-            progress("Cancellation acknowledged")
-            await final({
-              workflow: workflowSummary(admittedWorkflow, "cancel_requested"),
-              response: responseSummary(admittedResponse),
-              artifacts: [],
-            })
-            process.exitCode = 130
+            await finishInterrupted()
             return
-          } catch {}
+          } catch {
+            progress("Workflow cancellation failed")
+          }
         }
         progress("Workflow run failed")
         await final({ workflow: null, response: null, artifacts: [] })
@@ -379,17 +401,20 @@ async function admit(
 }
 
 function parseEvent(input: unknown, workflowID: string): ParsedEvent {
-  if (!isRecord(input) || typeof input.type !== "string" || !isRecord(input.data)) {
+  let event: WorkflowEvent.DurableEvent
+  try {
+    event = decodeWorkflowEvent(input)
+  } catch {
     throw new ObservationError("Workflow event schema is invalid")
   }
-  if (input.data.workflowID !== workflowID || !isRecord(input.durable) || input.durable.aggregateID !== workflowID) {
+  if (event.data.workflowID !== workflowID || !event.durable || event.durable.aggregateID !== workflowID) {
     throw new ObservationError("Workflow event authority is invalid")
   }
-  const seq = input.durable.seq
+  const seq = event.durable.seq
   if (!Number.isSafeInteger(seq) || typeof seq !== "number" || seq < 1) {
     throw new ObservationError("Workflow event sequence is invalid")
   }
-  return { type: input.type, seq, data: input.data }
+  return { type: event.type, seq, data: event.data as Record<string, unknown> }
 }
 
 function parseHistory(input: unknown, workflowID: string) {
