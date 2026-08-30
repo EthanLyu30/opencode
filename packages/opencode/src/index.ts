@@ -29,6 +29,7 @@ import { DbCommand } from "./cli/cmd/db"
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
+import { WorkflowCommand } from "./cli/cmd/workflow"
 
 const args = hideBin(process.argv)
 
@@ -83,6 +84,7 @@ const cli = yargs(args)
   .command(TuiThreadCommand)
   .command(AttachCommand)
   .command(RunCommand)
+  .command(WorkflowCommand)
   .command(GenerateCommand)
   .command(DebugCommand)
   .command(ConsoleCommand)

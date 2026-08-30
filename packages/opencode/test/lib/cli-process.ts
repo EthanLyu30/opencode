@@ -22,13 +22,13 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
-import { Deferred, Duration, Effect, Layer, Queue, Schedule, Scope, Stream } from "effect"
+import { Deferred, Duration, Effect, Fiber, Layer, Queue, Schedule, Scope, Stream } from "effect"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { ChildProcess } from "effect/unstable/process"
 import path from "node:path"
 import { TestLLMServer } from "./llm-server"
 import { testProviderConfig } from "./test-provider"
-import { it } from "./effect"
+import { it, pollWithTimeout } from "./effect"
 
 const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
@@ -86,10 +86,15 @@ export type RunResult = {
 
 export type RunHandle = {
   readonly interrupt: () => void
+  readonly waitForStderr: (text: string, timeoutMs?: number) => Effect.Effect<void, Error>
   readonly result: Effect.Effect<RunResult>
 }
 
-export type SpawnOpts = { readonly timeoutMs?: number; readonly env?: Record<string, string> }
+export type SpawnOpts = {
+  readonly timeoutMs?: number
+  readonly env?: Record<string, string>
+  readonly preload?: string
+}
 
 // Typed equivalent of constructing argv for `opencode run`. New flags should
 // land here so tests stay grep-able and refactor-safe.
@@ -156,6 +161,9 @@ export type OpencodeCli = {
   // High-level: run a single prompt against the test model. Short-lived.
   readonly run: (message: string, opts?: RunOpts) => Effect.Effect<RunResult>
   readonly startRun: (message: string, opts?: RunOpts) => Effect.Effect<RunHandle, never, Scope.Scope>
+  // Generic started-command helper. This is the one subprocess ownership
+  // path for short-lived commands that need live signalling/readiness.
+  readonly start: (args: string[], opts?: SpawnOpts) => Effect.Effect<RunHandle, never, Scope.Scope>
   // Spawn `opencode serve` and wait until it's listening. Long-lived: the
   // returned handle is killed when the caller's Scope closes. Fails if the
   // listening line doesn't appear within `readyTimeoutMs`.
@@ -182,15 +190,19 @@ export type CliFixture = {
   readonly opencode: OpencodeCli
 }
 
-// Provisions a TestLLMServer + tmpdir + spawn helper and invokes fn. Cleans
-// up the tmpdir on scope exit. TestLLMServer.layer is provided internally so
-// the caller doesn't need to wire it up — the fixture's lifetime is tied to
-// the surrounding Scope.
-export function withCliFixture<A, E>(
-  fn: (input: CliFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
-): Effect.Effect<A, E | unknown, Scope.Scope> {
+export type CliProcessFixture = {
+  readonly home: string
+  readonly opencode: OpencodeCli
+}
+
+// Common provider-free process environment. It owns one isolated tmpdir and
+// all subprocess lifecycle paths; higher-level fixtures add only the services
+// and config they actually need.
+function withCliProcessEnvironment<A, E>(
+  configJson: string,
+  fn: (input: CliProcessFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
+): Effect.Effect<A, unknown, Scope.Scope> {
   return Effect.gen(function* () {
-    const llm = yield* TestLLMServer
     const fs = yield* FSUtil.Service
     const appProc = yield* AppProcess.Service
 
@@ -201,8 +213,15 @@ export function withCliFixture<A, E>(
         .pipe(Effect.retry(Schedule.spaced("50 millis").pipe(Schedule.both(Schedule.recurs(20)))), Effect.ignore),
     )
 
-    const configJson = JSON.stringify(testProviderConfig(llm.url))
     const env = isolatedEnv(home, configJson)
+
+    const bunArgs = (args: string[], opts?: SpawnOpts) => [
+      "run",
+      ...(opts?.preload ? ["--preload", opts.preload] : []),
+      "--conditions=browser",
+      cliEntry,
+      ...args,
+    ]
 
     const spawn = Effect.fn("opencode.spawn")(function* (args: string[], opts?: SpawnOpts) {
       const start = Date.now()
@@ -211,7 +230,7 @@ export function withCliFixture<A, E>(
       // on `Bun.stdin.text()` (see src/cli/cmd/run.ts — non-TTY stdin is
       // consumed as the prompt). The old Process.run wrapper defaulted to
       // ignore; ChildProcess.make defaults to pipe, so we set it explicitly.
-      const command = ChildProcess.make("bun", ["run", "--conditions=browser", cliEntry, ...args], {
+      const command = ChildProcess.make(process.execPath, bunArgs(args, opts), {
         cwd: home,
         env: { ...env, ...opts?.env },
         extendEnv: true,
@@ -234,7 +253,7 @@ export function withCliFixture<A, E>(
             command: err.command,
             exitCode: err.exitCode ?? -1,
             stdout: Buffer.alloc(0),
-            stderr: Buffer.from((err.stderr ?? String(err.cause ?? err.message)) + "\n"),
+            stderr: Buffer.from((err.stderr ?? errorText(err.cause ?? err.message)) + "\n"),
             stdoutTruncated: false,
             stderrTruncated: false,
           } satisfies AppProcess.RunResult),
@@ -267,7 +286,7 @@ export function withCliFixture<A, E>(
         env: {
           ...opts.env,
           OPENCODE_CONFIG_CONTENT: JSON.stringify({
-            ...testProviderConfig(llm.url),
+            ...JSON.parse(configJson),
             permission: opts.permission,
           }),
         },
@@ -278,14 +297,13 @@ export function withCliFixture<A, E>(
       return spawn(runArgs(message, opts), runOpts(opts))
     }
 
-    const startRun = Effect.fn("opencode.startRun")(function* (message: string, opts?: RunOpts) {
+    const start = Effect.fn("opencode.start")(function* (args: string[], opts?: SpawnOpts) {
       const start = Date.now()
-      const options = runOpts(opts)
       const proc = yield* Effect.acquireRelease(
         Effect.sync(() =>
-          Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...runArgs(message, opts)], {
+          Bun.spawn([process.execPath, ...bunArgs(args, opts)], {
             cwd: home,
-            env: { ...process.env, ...env, ...options?.env },
+            env: { ...process.env, ...env, ...opts?.env },
             stdin: "ignore",
             stdout: "pipe",
             stderr: "pipe",
@@ -297,19 +315,32 @@ export function withCliFixture<A, E>(
             return child.exited
           }).pipe(Effect.ignore),
       )
+      const stderrChunks: string[] = []
+      const stderrFiber = yield* forkStderrDrain(proc.stderr, stderrChunks)
       const stdout = new Response(proc.stdout).text()
-      const stderr = new Response(proc.stderr).text()
 
       return {
         interrupt: () => proc.kill("SIGINT"),
-        result: Effect.promise(async () => ({
-          exitCode: await proc.exited,
-          stdout: normalizeLines(await stdout),
-          stderr: normalizeLines(await stderr),
-          durationMs: Date.now() - start,
-        })),
+        waitForStderr: (text, timeoutMs = 5_000) =>
+          pollWithTimeout(
+            Effect.sync(() => (stderrChunks.join("").includes(text) ? true : undefined)),
+            `opencode stderr did not contain ${JSON.stringify(text)}`,
+            Duration.millis(timeoutMs),
+          ).pipe(Effect.asVoid),
+        result: Effect.gen(function* () {
+          const exitCode = yield* Effect.promise(() => proc.exited)
+          yield* Fiber.join(stderrFiber)
+          return {
+            exitCode,
+            stdout: normalizeLines(yield* Effect.promise(() => stdout)),
+            stderr: normalizeLines(stderrChunks.join("")),
+            durationMs: Date.now() - start,
+          }
+        }),
       } satisfies RunHandle
     })
+
+    const startRun = (message: string, opts?: RunOpts) => start(runArgs(message, opts), runOpts(opts))
 
     const serve = Effect.fn("opencode.serve")(function* (opts?: ServeOpts) {
       const argv = ["serve"]
@@ -324,7 +355,7 @@ export function withCliFixture<A, E>(
       // as a finalizer error during test teardown.
       const proc = yield* Effect.acquireRelease(
         Effect.sync(() =>
-          Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...argv], {
+          Bun.spawn([process.execPath, ...bunArgs(argv, opts)], {
             cwd: home,
             env: { ...process.env, ...env, ...opts?.env },
             stdout: "pipe",
@@ -381,7 +412,7 @@ export function withCliFixture<A, E>(
         kill: () => {
           proc.kill()
         },
-        exited: proc.exited as Promise<number>,
+        exited: proc.exited,
       } satisfies ServeHandle
     })
 
@@ -395,7 +426,7 @@ export function withCliFixture<A, E>(
       // Either way we await proc.exited so the test scope doesn't leak.
       const proc = yield* Effect.acquireRelease(
         Effect.sync(() =>
-          Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...argv], {
+          Bun.spawn([process.execPath, ...bunArgs(argv, opts)], {
             cwd: opts?.cwd ?? home,
             env: { ...process.env, ...env, ...opts?.env },
             stdin: "pipe",
@@ -408,7 +439,9 @@ export function withCliFixture<A, E>(
           // window to exit, then SIGTERM. The Effect.timeoutOrElse expresses
           // exactly that race without raw setTimeout or Promise.race.
           Effect.gen(function* () {
-            yield* Effect.sync(() => p.stdin.end())
+            yield* Effect.sync(() => {
+              void p.stdin.end()
+            })
             yield* Effect.promise(() => p.exited).pipe(
               Effect.timeoutOrElse({
                 duration: Duration.seconds(2),
@@ -460,24 +493,37 @@ export function withCliFixture<A, E>(
         receive: Queue.take(responses),
         // proc.stdin.end() is idempotent in Bun; no try/catch needed.
         close: () => proc.stdin.end(),
-        exited: proc.exited as Promise<number>,
+        exited: proc.exited,
       } satisfies AcpHandle
     })
 
-    const opencode: OpencodeCli = { run, startRun, serve, acp, spawn, expectExit, parseJsonEvents }
+    const opencode: OpencodeCli = { run, startRun, start, serve, acp, spawn, expectExit, parseJsonEvents }
 
-    return yield* fn({ llm, home, opencode })
+    return yield* fn({ home, opencode })
     // FetchHttpClient is provided so test bodies can `yield* HttpClient.HttpClient`
     // and hit endpoints on `opencode.serve()` without rolling their own fetch.
   }).pipe(
     Effect.provide(
-      Layer.mergeAll(
-        TestLLMServer.layer,
-        FetchHttpClient.layer,
-        AppNodeBuilder.build(LayerNode.group([FSUtil.node, AppProcess.node])),
-      ),
+      Layer.mergeAll(FetchHttpClient.layer, AppNodeBuilder.build(LayerNode.group([FSUtil.node, AppProcess.node]))),
     ),
   )
+}
+
+export function withCliProcessFixture<A, E>(
+  fn: (input: CliProcessFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
+): Effect.Effect<A, unknown, Scope.Scope> {
+  return withCliProcessEnvironment("{}", fn)
+}
+
+export function withCliFixture<A, E>(
+  fn: (input: CliFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
+): Effect.Effect<A, unknown, Scope.Scope> {
+  return Effect.gen(function* () {
+    const llm = yield* TestLLMServer
+    return yield* withCliProcessEnvironment(JSON.stringify(testProviderConfig(llm.url)), (input) =>
+      fn({ ...input, llm }),
+    )
+  }).pipe(Effect.provide(TestLLMServer.layer))
 }
 
 function parseJsonEvents(stdout: string): Array<Record<string, unknown>> {
@@ -485,7 +531,24 @@ function parseJsonEvents(stdout: string): Array<Record<string, unknown>> {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .map(parseJsonRecord)
+}
+
+function parseJsonRecord(line: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(line)
+  if (!isRecord(value)) {
+    throw new Error("CLI JSON event must be an object")
+  }
+  return value
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function errorText(value: unknown) {
+  if (value instanceof Error) return value.message
+  return typeof value === "string" ? value : "subprocess failed"
 }
 
 function normalizeLines(value: string) {
@@ -532,4 +595,12 @@ export const cliIt = {
       () => Effect.runPromise(Effect.scoped(withCliFixture(body))),
       opts,
     ),
+}
+
+export const cliProcessIt = {
+  live: <A, E>(
+    name: string,
+    body: (input: CliProcessFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
+    opts?: number | TestOptions,
+  ) => it.live(name, () => withCliProcessFixture(body), opts),
 }

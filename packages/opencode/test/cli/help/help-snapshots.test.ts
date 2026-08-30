@@ -47,6 +47,7 @@ const TOP_LEVEL = [
   "mcp",
   "attach",
   "run",
+  "workflow",
   "debug",
   "providers", // aliased to `auth`
   "agent",
@@ -80,6 +81,7 @@ const SUBCOMMANDS = [
   ["agent", "list"],
   ["session", "list"],
   ["session", "delete"],
+  ["workflow", "run"],
   ["github", "install"],
   ["github", "run"],
   ["db", "path"],

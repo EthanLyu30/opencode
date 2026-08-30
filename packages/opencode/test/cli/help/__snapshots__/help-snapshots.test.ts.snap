@@ -107,6 +107,22 @@ Options:
                                                                           [boolean] [default: false]"
 `;
 
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode workflow --help 1`] = `
+"opencode workflow
+
+run production workflows
+
+Commands:
+  opencode workflow run <prompt>  run a production visual workflow
+
+Options:
+  -h, --help        show help                                                              [boolean]
+  -v, --version     show version number                                                    [boolean]
+      --print-logs  print logs to stderr                                                   [boolean]
+      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure        run without external plugins                                           [boolean]"
+`;
+
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode debug --help 1`] = `
 "opencode debug
 
@@ -579,6 +595,23 @@ Options:
       --print-logs  print logs to stderr                                                   [boolean]
       --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
       --pure        run without external plugins                                           [boolean]"
+`;
+
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode workflow run --help 1`] = `
+"opencode workflow run <prompt>
+
+run a production visual workflow
+
+Positionals:
+  prompt  workflow prompt                                                        [string] [required]
+
+Options:
+  -h, --help        show help                                                              [boolean]
+  -v, --version     show version number                                                    [boolean]
+      --print-logs  print logs to stderr                                                   [boolean]
+      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure        run without external plugins                                           [boolean]
+      --format      output format         [string] [choices: "default", "json"] [default: "default"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode github install --help 1`] = `
