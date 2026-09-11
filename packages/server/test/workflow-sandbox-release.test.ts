@@ -79,6 +79,8 @@ describe("reviewed workflow sandbox release", () => {
 
     expect(script).toContain("registry@sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278")
     expect(script).toContain("127.0.0.1:5000/opencode/workflow-sandbox@sha256:")
+    expect(script).toContain('@("network", "create", "--driver", "bridge", $registryNetwork)')
+    expect(script).not.toContain('@("network", "create", "--driver", "bridge", "--internal", $registryNetwork)')
     expect(script).toContain("--pull=never")
     expect(script).toContain('"--read-only"')
     expect(script).toContain('"--cap-drop", "ALL"')

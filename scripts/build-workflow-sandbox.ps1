@@ -144,7 +144,10 @@ try {
   Assert-ImageDigest -Engine $engine -Reference $bunBase
   Assert-ImageDigest -Engine $engine -Reference $registryImage
 
-  Invoke-Docker -Engine $engine -Arguments @("network", "create", "--driver", "bridge", "--internal", $registryNetwork) | Out-Null
+  # Docker Engine 29 omits published host ports for containers attached only to an
+  # internal bridge. The registry remains loopback-only through the explicit
+  # 127.0.0.1 publish binding; runtime preview containers are still network-none.
+  Invoke-Docker -Engine $engine -Arguments @("network", "create", "--driver", "bridge", $registryNetwork) | Out-Null
   Invoke-Docker -Engine $engine -Arguments @(
     "container", "run", "--detach", "--rm",
     "--name", $registryContainer,
