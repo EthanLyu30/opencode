@@ -817,22 +817,47 @@ export const layerWith = (options?: LayerOptions) =>
       function publish<D extends Definition>(definition: D, data: Data<D>, options?: PublishOptions) {
         return Effect.gen(function* () {
           const canonical = canonicalData(definition, data)
-          const related = options?.related?.map((item) => ({
-            ...item,
-            data: canonicalData(item.definition, item.data),
-          }))
-          const canonicalOptions = related ? { ...options, related } : options
+          const optionID = options?.id
+          const optionMetadata = options?.metadata
+          const optionLocation = options?.location
+          const optionCommit = options?.commit
+          const optionTerminal = options?.terminal
+          const relatedInput = options?.related
+          if (relatedInput !== undefined && !Array.isArray(relatedInput)) {
+            throw new TypeError("Related events must be an array")
+          }
+          const related =
+            relatedInput === undefined
+              ? undefined
+              : Array.from(relatedInput, (item) => {
+                  const itemDefinition = item.definition
+                  const itemData = item.data
+                  const itemID = item.id
+                  return {
+                    definition: itemDefinition,
+                    data: canonicalData(itemDefinition, itemData),
+                    ...(itemID === undefined ? {} : { id: itemID }),
+                  }
+                })
+          const canonicalOptions: PublishOptions = {
+            id: optionID,
+            metadata: optionMetadata,
+            location: optionLocation,
+            commit: optionCommit,
+            related,
+            terminal: optionTerminal,
+          }
           const serviceLocation = Option.getOrUndefined(yield* Effect.serviceOption(Location.Service))
           const location =
-            canonicalOptions?.location ??
+            optionLocation ??
             (serviceLocation
               ? { directory: serviceLocation.directory, workspaceID: serviceLocation.workspaceID }
               : undefined)
           return yield* publishEvent(
             definition,
             {
-              id: canonicalOptions?.id ?? ID.create(),
-              ...(canonicalOptions?.metadata ? { metadata: canonicalOptions.metadata } : {}),
+              id: optionID ?? ID.create(),
+              ...(optionMetadata ? { metadata: optionMetadata } : {}),
               type: definition.type,
               ...(location ? { location } : {}),
               data: canonical,

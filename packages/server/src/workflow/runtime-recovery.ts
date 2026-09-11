@@ -11,7 +11,10 @@ import { Context, DateTime, Effect, Layer } from "effect"
 import { createHash } from "node:crypto"
 import { Docker } from "./docker"
 import { DockerConfig } from "./docker-config"
+import { ProductionHostRuntime } from "./production-host-runtime"
 import { WorkflowCommandSandboxServer } from "./command-sandbox"
+
+const EXPIRED_RUNTIME_BATCH_SIZE = 100
 
 function isExecutableRole(value: string): value is WorkflowCommandSandbox.Request["role"] {
   return value === "implement" || value === "repair" || value === "test" || value === "deliver"
@@ -110,13 +113,21 @@ export function makeLayer(input: {
 
 export const layer = makeLayer({
   engine: Docker.production,
-  config: DockerConfig.fromEnvironment(process.env),
+  config: productionDockerConfig(process.env),
 })
 
 export const node = makeGlobalNode({ service: Service, layer, deps: [WorkflowStore.node] })
 
+function productionDockerConfig(environment: Readonly<Record<string, string | undefined>>) {
+  try {
+    return ProductionHostRuntime.load(environment).dockerConfig
+  } catch {
+    return ProductionHostRuntime.unavailableDockerConfig()
+  }
+}
+
 async function loadExpired(store: WorkflowStore.Interface, now: number) {
-  return Effect.runPromise(store.expired(now))
+  return Effect.runPromise(store.expired({ now, limit: EXPIRED_RUNTIME_BATCH_SIZE }))
 }
 
 async function currentAuthority(

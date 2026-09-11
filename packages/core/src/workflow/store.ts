@@ -38,7 +38,7 @@ export interface Interface {
     readonly now: number
     readonly expiresAt: number
   }) => Effect.Effect<boolean>
-  readonly expired: (now: number) => Effect.Effect<Workflow.Stage[]>
+  readonly expired: (input: { readonly now: number; readonly limit: number }) => Effect.Effect<Workflow.Stage[]>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/WorkflowStore") {}
@@ -458,19 +458,30 @@ const layer = Layer.effect(
         return rows.length === 1
       }),
 
-      expired: Effect.fn("WorkflowStore.expired")(function* (now) {
+      expired: Effect.fn("WorkflowStore.expired")(function* (input) {
+        if (!Number.isSafeInteger(input.limit) || input.limit <= 0) return []
         const rows = yield* db
-          .select()
+          .select({ stage: WorkflowStageTable })
           .from(WorkflowStageTable)
+          .innerJoin(WorkflowRunTable, eq(WorkflowStageTable.workflow_id, WorkflowRunTable.id))
           .where(
             and(
               inArray(WorkflowStageTable.status, ["leased", "running"]),
-              lt(WorkflowStageTable.lease_expires_at, now),
+              lt(WorkflowStageTable.lease_expires_at, input.now),
+              eq(WorkflowRunTable.status, "running"),
+              isNull(WorkflowRunTable.cancel_requested_at),
             ),
           )
+          .orderBy(
+            asc(WorkflowStageTable.lease_expires_at),
+            asc(WorkflowStageTable.workflow_id),
+            asc(WorkflowStageTable.ordinal),
+            asc(WorkflowStageTable.id),
+          )
+          .limit(input.limit)
           .all()
           .pipe(Effect.orDie)
-        return rows.map(stageRow)
+        return rows.map((row) => stageRow(row.stage))
       }),
     })
     return service

@@ -11,6 +11,9 @@ import { WorkflowSecretGuard } from "./secret-guard"
 const MAX_CONFIGURATION_FILE_BYTES = 16 * 1024 * 1024
 const MAX_CONFIGURATION_BYTES = 64 * 1024 * 1024
 
+/** Host-owned container application port; never the dynamically published host port. */
+export const SCRIPT_PREVIEW_TARGET_PORT = 18_081
+
 const relevantConfigurationNames = Object.freeze([
   "package.json",
   "bun.lock",
@@ -56,17 +59,24 @@ const unsafeEnvironmentName = /(?:^|_)(?:AUTH|COOKIE|CREDENTIAL|KEY|PASSWORD|SEC
 const hostAuthorityEnvironmentNames = new Set([
   "ALL_PROXY",
   "BUN_OPTIONS",
+  "CI",
   "COMSPEC",
   "DYLD_INSERT_LIBRARIES",
+  "HOME",
   "HTTP_PROXY",
   "HTTPS_PROXY",
+  "LANG",
   "LD_PRELOAD",
   "NODE_OPTIONS",
+  "NO_COLOR",
   "NO_PROXY",
+  "OPENCODE_PREVIEW_PORT",
   "PATH",
   "PATHEXT",
   "PORT",
   "SHELL",
+  "TEMP",
+  "TMP",
 ])
 const allowedExecutables = new Set(["bun", "bun.exe", "node", "node.exe"])
 const bunExecutables = new Set(["bun", "bun.exe"])
@@ -233,10 +243,20 @@ export function verifyConfiguration(plan: PreviewPlan): void {
     const identity = verifyDirectoryIdentity(plan)
     if (plan.kind === "script") {
       if (plan.argv === undefined) changed()
-      const configDirectory = scriptConfigurationDirectory(plan.argv, identity.locationRoot, identity.cwd)
+      const configDirectory = scriptConfigurationDirectory(
+        plan.argv,
+        identity.locationRoot,
+        identity.cwd,
+        plan.runtimeEnvPolicy?.kind === "framework" ? plan.runtimeEnvPolicy.framework : undefined,
+      )
       const current = configurationFiles(identity.locationRoot, configDirectory)
       if (!sameConfiguration(current, plan.configFiles)) changed()
-      validateScriptInvocation(plan.argv, identity.locationRoot, current)
+      validateScriptInvocation(
+        plan.argv,
+        identity.locationRoot,
+        current,
+        plan.runtimeEnvPolicy?.kind === "framework" ? plan.runtimeEnvPolicy.framework : undefined,
+      )
       verifyRuntimeEnvPolicy(plan, identity, current)
     } else {
       verifyStaticIdentity(plan, identity.cwd)
@@ -347,7 +367,10 @@ export function isFrozen(value: unknown): value is PreviewPlan {
           Array.isArray(plan.argv) &&
           isExactFrozenArray(plan.argv) &&
           plan.argv.length > 0 &&
-          freezeArgv(plan.argv).every((argument, index) => argument === plan.argv?.[index]) &&
+          freezeArgv(
+            plan.argv,
+            plan.runtimeEnvPolicy?.kind === "framework" ? plan.runtimeEnvPolicy.framework : undefined,
+          ).every((argument, index) => argument === plan.argv?.[index]) &&
           isRuntimeEnvPolicy(plan.runtimeEnvPolicy, plan.locationRoot, plan.cwd)
     if (!validShape) return false
     return (
@@ -491,7 +514,18 @@ function recognizeProject(
         "vite",
         "production",
         root,
-        freezeArray(["bun", "run", "--no-env-file", "preview"]),
+        freezeArray([
+          "bun",
+          "run",
+          "--no-env-file",
+          "preview",
+          "--",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          String(SCRIPT_PREVIEW_TARGET_PORT),
+          "--strictPort",
+        ]),
         files,
       )
     }
@@ -501,7 +535,18 @@ function recognizeProject(
         "vite",
         "development",
         root,
-        freezeArray(["bun", "run", "--no-env-file", "dev"]),
+        freezeArray([
+          "bun",
+          "run",
+          "--no-env-file",
+          "dev",
+          "--",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          String(SCRIPT_PREVIEW_TARGET_PORT),
+          "--strictPort",
+        ]),
         files,
       )
     }
@@ -513,7 +558,17 @@ function recognizeProject(
         "next",
         "development",
         root,
-        freezeArray(["bun", "run", "--no-env-file", "dev"]),
+        freezeArray([
+          "bun",
+          "run",
+          "--no-env-file",
+          "dev",
+          "--",
+          "--hostname",
+          "0.0.0.0",
+          "--port",
+          String(SCRIPT_PREVIEW_TARGET_PORT),
+        ]),
         files,
       )
     }
@@ -523,7 +578,17 @@ function recognizeProject(
         "next",
         "production",
         root,
-        freezeArray(["bun", "run", "--no-env-file", "start"]),
+        freezeArray([
+          "bun",
+          "run",
+          "--no-env-file",
+          "start",
+          "--",
+          "--hostname",
+          "0.0.0.0",
+          "--port",
+          String(SCRIPT_PREVIEW_TARGET_PORT),
+        ]),
         files,
       )
     }
@@ -683,7 +748,7 @@ function tryResolveStatic(root: string): string | undefined {
   }
 }
 
-function freezeArgv(argv: readonly string[]): readonly string[] {
+function freezeArgv(argv: readonly string[], framework?: FrameworkRuntimeEnvPolicy["framework"]): readonly string[] {
   if (
     !Array.isArray(argv) ||
     argv.length === 0 ||
@@ -701,7 +766,7 @@ function freezeArgv(argv: readonly string[]): readonly string[] {
   ) {
     throw invalid("invalid_preview_configuration", "Preview argv must use an approved direct runtime, never a shell")
   }
-  if (directNodeEntrypoint(argv) === undefined) packageRunScript(argv)
+  if (directNodeEntrypoint(argv) === undefined) packageRunScript(argv, framework)
   if (
     argv.some((argument) => /^--?(?:api[-_]?key|authorization|credential|password|secret|token)(?:=|$)/i.test(argument))
   ) {
@@ -728,17 +793,28 @@ function directNodeEntrypoint(argv: readonly string[]): string | undefined {
   return argv[1]
 }
 
-function scriptConfigurationDirectory(argv: readonly string[], locationRoot: string, cwd: string): string {
+function scriptConfigurationDirectory(
+  argv: readonly string[],
+  locationRoot: string,
+  cwd: string,
+  framework?: FrameworkRuntimeEnvPolicy["framework"],
+): string {
   const relativeEntrypoint = directNodeEntrypoint(argv)
-  if (relativeEntrypoint === undefined) return cwd
+  if (relativeEntrypoint === undefined) {
+    packageRunScript(argv, framework)
+    return cwd
+  }
   return path.dirname(resolveFile(locationRoot, cwd, relativeEntrypoint))
 }
 
-function packageRunScript(argv: readonly string[]): string | undefined {
+function packageRunScript(
+  argv: readonly string[],
+  framework?: FrameworkRuntimeEnvPolicy["framework"],
+): string | undefined {
   const executable = (argv[0] ?? "").toLowerCase()
   if (!bunExecutables.has(executable)) return undefined
   if (
-    argv.length !== 4 ||
+    (argv.length !== 4 && (!framework || !trustedFrameworkBinding(argv, framework))) ||
     argv[1] !== "run" ||
     argv[2] !== "--no-env-file" ||
     typeof argv[3] !== "string" ||
@@ -752,12 +828,23 @@ function packageRunScript(argv: readonly string[]): string | undefined {
   return argv[3]
 }
 
+function trustedFrameworkBinding(argv: readonly string[], framework: FrameworkRuntimeEnvPolicy["framework"]): boolean {
+  const suffix = argv.slice(4)
+  const port = String(SCRIPT_PREVIEW_TARGET_PORT)
+  const expected =
+    framework === "vite"
+      ? ["--", "--host", "0.0.0.0", "--port", port, "--strictPort"]
+      : ["--", "--hostname", "0.0.0.0", "--port", port]
+  return JSON.stringify(suffix) === JSON.stringify(expected)
+}
+
 function validateScriptInvocation(
   argv: readonly string[],
   locationRoot: string,
   configFiles: readonly FrozenConfigurationFile[],
+  framework?: FrameworkRuntimeEnvPolicy["framework"],
 ): void {
-  const script = packageRunScript(argv)
+  const script = packageRunScript(argv, framework)
   if (script === undefined) return
   const packageFile = [...configFiles].reverse().find((file) => configurationName(file.path) === "package.json")
   if (packageFile === undefined) {

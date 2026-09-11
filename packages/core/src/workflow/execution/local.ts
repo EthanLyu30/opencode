@@ -60,6 +60,33 @@ export const defaults: Options = {
 }
 
 const MAX_CHECKPOINT_BYTES = 256 * 1024
+const EXPIRED_LEASE_BATCH_SIZE = 100
+
+export const handleLiveLifecycleConflict = Effect.fnUntraced(function* (input: {
+  readonly cause: Cause.Cause<unknown>
+  readonly store: WorkflowStore.Interface
+  readonly stage: Workflow.Stage
+  readonly ownerID: string
+  readonly now: number
+}) {
+  if (!(Cause.squash(input.cause) instanceof WorkflowProjector.LifecycleConflict)) {
+    return yield* Effect.failCause(input.cause)
+  }
+  const detail = yield* input.store.get(input.stage.workflowID)
+  const current = detail?.stages.find((item) => item.id === input.stage.id)
+  const generationLost =
+    !detail ||
+    detail.run.status !== "running" ||
+    detail.run.cancelRequestedAt !== undefined ||
+    !current ||
+    current.attempt !== input.stage.attempt ||
+    current.leaseOwner !== input.ownerID ||
+    current.leaseExpiresAt === undefined ||
+    DateTime.toEpochMillis(current.leaseExpiresAt) < input.now ||
+    (current.status !== "leased" && current.status !== "running")
+  if (generationLost) return
+  return yield* Effect.failCause(input.cause)
+})
 
 export const layerWith = (options: Options) =>
   Layer.effect(
@@ -73,8 +100,12 @@ export const layerWith = (options: Options) =>
       const db = (yield* Database.Service).db
       const wake = yield* Effect.acquireRelease(PubSub.sliding<void>(1), PubSub.shutdown)
       const fibers = new Map<Workflow.ID, Set<Fiber.Fiber<void>>>()
+      const staleGenerations = new Set<string>()
       const slots = yield* Semaphore.make(options.concurrency)
       const reconciliation = makeReconciliationState()
+
+      const generationKey = (stage: Workflow.Stage) =>
+        `${stage.workflowID}:${stage.id}:${stage.attempt}:${stage.leaseOwner ?? ""}`
 
       const hasCapacity = () => {
         let active = 0
@@ -85,7 +116,10 @@ export const layerWith = (options: Options) =>
       const currentLease = Effect.fnUntraced(function* (stage: Workflow.Stage, now: number) {
         const detail = yield* store.get(stage.workflowID)
         const current = detail?.stages.find((item) => item.id === stage.id)
-        if (!detail || !current || detail.run.cancelRequestedAt !== undefined) return undefined
+        if (!detail || !current || detail.run.cancelRequestedAt !== undefined) {
+          staleGenerations.add(generationKey(stage))
+          return undefined
+        }
         if (
           current.attempt !== stage.attempt ||
           current.leaseOwner !== options.ownerID ||
@@ -93,6 +127,7 @@ export const layerWith = (options: Options) =>
           DateTime.toEpochMillis(current.leaseExpiresAt) < now ||
           (current.status !== "leased" && current.status !== "running")
         ) {
+          staleGenerations.add(generationKey(stage))
           return undefined
         }
         return detail
@@ -248,7 +283,8 @@ export const layerWith = (options: Options) =>
 
       const settleExpiredLeases = Effect.gen(function* () {
         const now = yield* DateTime.now
-        const expired = yield* store.expired(DateTime.toEpochMillis(now))
+        const nowMillis = DateTime.toEpochMillis(now)
+        const expired = yield* store.expired({ now: nowMillis, limit: EXPIRED_LEASE_BATCH_SIZE })
         yield* Effect.forEach(
           expired,
           (stage) =>
@@ -263,11 +299,14 @@ export const layerWith = (options: Options) =>
                 current.attempt !== stage.attempt ||
                 current.leaseOwner !== stage.leaseOwner ||
                 current.status !== stage.status ||
+                (current.status !== "leased" && current.status !== "running") ||
                 current.leaseExpiresAt === undefined ||
-                DateTime.toEpochMillis(current.leaseExpiresAt) >= DateTime.toEpochMillis(now)
+                DateTime.toEpochMillis(current.leaseExpiresAt) !== DateTime.toEpochMillis(stage.leaseExpiresAt!) ||
+                DateTime.toEpochMillis(current.leaseExpiresAt) >= nowMillis
               ) {
                 return
               }
+              const observedLeaseExpiresAt = stage.leaseExpiresAt!
 
               if (current.recoveryPolicy === "restart_safe" && current.attempt < current.maxAttempts) {
                 yield* events.publish(WorkflowEvent.Stage.RetryScheduled, {
@@ -283,6 +322,11 @@ export const layerWith = (options: Options) =>
                   },
                   usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
                   notBefore: now,
+                  leaseFence: {
+                    variant: "expired_recovery",
+                    expectedStatus: current.status,
+                    observedLeaseExpiresAt,
+                  },
                 })
                 return
               }
@@ -291,6 +335,13 @@ export const layerWith = (options: Options) =>
                 workflowID: current.workflowID,
                 stageID: current.id,
                 timestamp: now,
+                attempt: current.attempt,
+                leaseOwner: current.leaseOwner,
+                leaseFence: {
+                  variant: "expired_recovery",
+                  expectedStatus: current.status,
+                  observedLeaseExpiresAt,
+                },
                 reason: "ambiguous_execution",
                 failure: {
                   category: "ambiguous",
@@ -303,11 +354,28 @@ export const layerWith = (options: Options) =>
                 usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
               })
             }).pipe(
-              Effect.catchCause((cause) =>
-                Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict
-                  ? Effect.void
-                  : Effect.failCause(cause),
-              ),
+              Effect.catchCause((cause) => {
+                if (!(Cause.squash(cause) instanceof WorkflowProjector.LifecycleConflict)) {
+                  return Effect.failCause(cause)
+                }
+                return Effect.gen(function* () {
+                  const detail = yield* store.get(stage.workflowID)
+                  const current = detail?.stages.find((item) => item.id === stage.id)
+                  const tupleChanged =
+                    !current ||
+                    current.status !== stage.status ||
+                    current.attempt !== stage.attempt ||
+                    current.leaseOwner !== stage.leaseOwner ||
+                    current.leaseExpiresAt === undefined ||
+                    DateTime.toEpochMillis(current.leaseExpiresAt) !== DateTime.toEpochMillis(stage.leaseExpiresAt!)
+                  const renewed =
+                    current?.leaseExpiresAt !== undefined && DateTime.toEpochMillis(current.leaseExpiresAt) >= nowMillis
+                  const lifecycleChanged =
+                    detail?.run.cancelRequestedAt !== undefined || detail?.run.status !== "running"
+                  if (tupleChanged || renewed || lifecycleChanged) return
+                  return yield* Effect.failCause(cause)
+                })
+              }),
             ),
           { concurrency: 1, discard: true },
         )
@@ -440,7 +508,10 @@ export const layerWith = (options: Options) =>
           ),
           heartbeat(stage).pipe(Effect.as({ type: "lease_lost" as const })),
         )
-        if (outcome.type === "lease_lost") return
+        if (outcome.type === "lease_lost") {
+          staleGenerations.add(generationKey(stage))
+          return
+        }
         if (Exit.isFailure(outcome.exit)) {
           const error = Option.getOrUndefined(Cause.findErrorOption(outcome.exit.cause))
           if (!error) {
@@ -470,6 +541,7 @@ export const layerWith = (options: Options) =>
               failure,
               usage: error.usage,
               notBefore: DateTime.makeUnsafe(decision.notBefore),
+              leaseFence: { variant: "live_execution", expectedStatus: "running" },
             })
             if (
               !(yield* store.gateBudget({
@@ -487,6 +559,9 @@ export const layerWith = (options: Options) =>
               workflowID: stage.workflowID,
               stageID: stage.id,
               timestamp: completedAt,
+              attempt: stage.attempt,
+              leaseOwner: options.ownerID,
+              leaseFence: { variant: "live_execution", expectedStatus: "running" },
               reason: "ambiguous_execution",
               failure,
               usage: error.usage,
@@ -727,7 +802,15 @@ export const layerWith = (options: Options) =>
             return
           }
         }
-        const branchValidation = !roleStage
+        // A lone `deliver` stage is also the Responses transport endpoint and
+        // does not claim the visual role graph. Once any non-deliver role is
+        // present, however, the complete role history and branch semantics are
+        // enforced independently of the workflow's descriptive type string.
+        const roleGraphWorkflow = initial.stages.some(
+          (item) => item.type !== "deliver" && Schema.is(WorkflowRole.Role)(item.type),
+        )
+        const roleStateMachine = roleStage && roleGraphWorkflow
+        const branchValidation = !roleStateMachine
           ? ({ type: "none" } as const)
           : outcomeArtifacts.length !== 1
             ? ({
@@ -775,6 +858,7 @@ export const layerWith = (options: Options) =>
         const branch = branchValidation.type === "branch" ? branchValidation : undefined
         const branchStageIDs = new Set(branch?.stageIDs ?? [])
         if (
+          roleStateMachine &&
           completionCandidate &&
           completionCandidate.stages.every(
             (item) => item.id === stage.id || item.status === "succeeded" || item.status === "skipped",
@@ -941,18 +1025,31 @@ export const layerWith = (options: Options) =>
         const ready = yield* Deferred.make<void>()
         const entry: { fiber?: Fiber.Fiber<void> } = {}
         const cleanup = Effect.sync(() => {
+          const suppressWake = staleGenerations.delete(generationKey(stage))
           const fiber = entry.fiber
-          if (!fiber) return
-          const set = fibers.get(stage.workflowID)
-          set?.delete(fiber)
-          if (set?.size === 0) fibers.delete(stage.workflowID)
-        }).pipe(Effect.andThen(PubSub.publish(wake, undefined)), Effect.asVoid)
+          if (fiber) {
+            const set = fibers.get(stage.workflowID)
+            set?.delete(fiber)
+            if (set?.size === 0) fibers.delete(stage.workflowID)
+          }
+          return suppressWake
+        }).pipe(
+          Effect.flatMap((suppressWake) => (suppressWake ? Effect.void : PubSub.publish(wake, undefined))),
+          Effect.asVoid,
+        )
         const task = Deferred.await(ready).pipe(
           Effect.andThen(
             slots.withPermit(
               runStage(stage).pipe(
                 Effect.catchTag("CancelRequested", () => settleStageCancellation(stage, "execution")),
                 Effect.onInterrupt(() => settleStageCancellation(stage, "execution")),
+                Effect.catchCause((cause) =>
+                  Effect.gen(function* () {
+                    const now = DateTime.toEpochMillis(yield* DateTime.now)
+                    yield* handleLiveLifecycleConflict({ cause, store, stage, ownerID: options.ownerID, now })
+                    staleGenerations.add(generationKey(stage))
+                  }),
+                ),
               ),
             ),
           ),
@@ -999,6 +1096,7 @@ export const layerWith = (options: Options) =>
       yield* Stream.merge(Stream.fromPubSub(wake), Stream.tick(options.pollIntervalMs)).pipe(
         Stream.runForEach(() =>
           settlePersistedCancellations.pipe(
+            Effect.andThen(settleExpiredLeases),
             Effect.andThen(reconcileEvidenceIteration({ workflows: store, visualHost, state: reconciliation })),
             Effect.andThen(fill),
             Effect.catchCause((cause) => Effect.logError("Workflow scheduler iteration failed", cause)),

@@ -19,9 +19,21 @@ import { ResponsesProjector } from "@opencode-ai/core/responses/projector"
 import { ResponsesStore } from "@opencode-ai/core/responses/store"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Location } from "@opencode-ai/schema/location"
+import { AbsolutePath } from "@opencode-ai/schema/schema"
+import { Session } from "@opencode-ai/schema/session"
 import { tmpdir } from "./fixture/tmpdir"
 
 const workerPath = fileURLToPath(new URL("./workflow-crash-worker.ts", import.meta.url))
+
+const admit = (workflow: WorkflowV2.Interface, input: Workflow.CreateInput) =>
+  workflow.admit({
+    ...input,
+    location: Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit") }),
+    sessionID: Session.ID.make("ses_workflow_crash"),
+    agent: Agent.ID.make("build"),
+  })
 
 const createInput = (policy: Workflow.RecoveryPolicy, suffix: string, maxAttempts = 3): Workflow.CreateInput => ({
   id: Workflow.ID.make(`wfl_crash_${suffix}`),
@@ -70,7 +82,7 @@ async function runCrash(policy: "restart_safe" | "manual_required", maxAttempts 
   await Effect.runPromise(
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
     }).pipe(Effect.provide(seedLayer), Effect.scoped),
   )
 
@@ -216,7 +228,7 @@ test("a cancellation requested after a worker crash survives restart and fences 
   await Effect.runPromise(
     Effect.gen(function* () {
       const workflow = yield* WorkflowV2.Service
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
     }).pipe(Effect.provide(seedLayer), Effect.scoped),
   )
 

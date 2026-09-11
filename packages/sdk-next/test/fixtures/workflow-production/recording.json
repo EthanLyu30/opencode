@@ -1,0 +1,333 @@
+{
+  "version": 1,
+  "stages": [
+    {
+      "role": "design",
+      "revision": 0,
+      "provider": "kimi",
+      "model": "kimi-k3",
+      "protocol": "openai-chat",
+      "effort": "max",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "design", "verdict": "ready", "revision": 0 },
+        "payload": {
+          "spec": {
+            "schemaVersion": 1,
+            "goals": ["Render the approved offline reference"],
+            "routes": [{ "path": "/", "goal": "Show the approved experience" }],
+            "layoutConstraints": ["Keep the primary content visible"],
+            "componentTree": [{ "id": "root", "component": "main", "children": [] }],
+            "states": [{ "name": "ready", "description": "The experience is ready" }],
+            "typography": [{ "token": "body", "family": "sans-serif", "weight": 400, "sizePx": 16, "lineHeight": 1.5 }],
+            "colors": [{ "token": "background", "value": "#ffffff" }],
+            "responsiveRules": [
+              { "viewport": "desktop", "width": 1280, "height": 720, "rules": ["Keep main visible"] }
+            ],
+            "accessibilityRules": ["Use a semantic main landmark"],
+            "acceptanceCriteria": ["The final implementation matches the approved reference"],
+            "projectStack": ["HTML"],
+            "referenceApp": {
+              "entrypoint": "index.html",
+              "readySelector": "main",
+              "files": [
+                {
+                  "path": "index.html",
+                  "sha256": "8b7b843950d61b38b8c4f0ff28b55733917b0bbb3734fbb0d51739e538d789a5",
+                  "size": 55
+                }
+              ],
+              "viewports": [{ "name": "desktop", "width": 1280, "height": 720 }]
+            }
+          },
+          "sources": [{ "path": "index.html", "content": "<!doctype html><main id=\"app\">implementation-r2</main>\n" }]
+        }
+      },
+      "toolScript": [],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop" }
+    },
+    {
+      "role": "decompose",
+      "revision": 0,
+      "provider": "kimi",
+      "model": "kimi-k3",
+      "protocol": "openai-chat",
+      "effort": "high",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "decompose", "verdict": "ready", "revision": 0 },
+        "payload": {
+          "acceptanceCriteria": ["The final implementation matches the approved reference"],
+          "tasks": [
+            {
+              "id": "page",
+              "title": "Implement the page",
+              "description": "Apply the approved visual implementation",
+              "acceptanceCriteria": ["The page renders through the frozen preview"],
+              "dependsOn": [],
+              "files": ["index.html"]
+            }
+          ]
+        }
+      },
+      "toolScript": [],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop" }
+    },
+    {
+      "role": "implement",
+      "revision": 0,
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "protocol": "openai-responses",
+      "effort": "max",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "implement", "verdict": "ready", "revision": 0 },
+        "payload": { "summary": "Implemented revision zero through the admitted patch tool." }
+      },
+      "toolScript": [
+        {
+          "name": "apply_patch",
+          "callID": "call-implement-r0",
+          "input": {
+            "patchText": "*** Begin Patch\n*** Update File: index.html\n@@\n-<!doctype html><main id=\"app\">initial</main>\n+<!doctype html><main id=\"app\">implementation-r0</main>\n*** End Patch"
+          }
+        }
+      ],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop" }
+    },
+    {
+      "role": "test",
+      "revision": 0,
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "protocol": "openai-responses",
+      "effort": "high",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "test", "verdict": "revise", "revision": 0 },
+        "payload": { "summary": "The admission-frozen functional test requires repair." }
+      },
+      "toolScript": [],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop", "hostTestExit": 1 }
+    },
+    {
+      "role": "repair",
+      "revision": 1,
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "protocol": "openai-responses",
+      "effort": "max",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "repair", "verdict": "ready", "revision": 1 },
+        "payload": { "summary": "Repaired the functional issue in revision one." }
+      },
+      "toolScript": [
+        {
+          "name": "apply_patch",
+          "callID": "call-repair-r1",
+          "input": {
+            "patchText": "*** Begin Patch\n*** Update File: index.html\n@@\n-<!doctype html><main id=\"app\">implementation-r0</main>\n+<!doctype html><main id=\"app\">implementation-r1</main>\n*** End Patch"
+          }
+        }
+      ],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop" }
+    },
+    {
+      "role": "test",
+      "revision": 1,
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "protocol": "openai-responses",
+      "effort": "high",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "test", "verdict": "pass", "revision": 1 },
+        "payload": { "summary": "The admission-frozen functional test passes revision one." }
+      },
+      "toolScript": [],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop", "hostTestExit": 0 }
+    },
+    {
+      "role": "visual_review",
+      "revision": 1,
+      "provider": "kimi",
+      "model": "kimi-k3",
+      "protocol": "openai-chat",
+      "effort": "max",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "visual_review", "verdict": "revise", "revision": 1 },
+        "payload": {
+          "verdict": "fail",
+          "score": 60,
+          "findings": [
+            {
+              "id": "visual-gap",
+              "severity": "major",
+              "viewport": "desktop",
+              "region": "main",
+              "category": "content",
+              "expected": "Revision two content",
+              "actual": "Revision one content",
+              "repair": "Apply the approved revision two content",
+              "requiresRecapture": true
+            }
+          ]
+        }
+      },
+      "toolScript": [],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop" }
+    },
+    {
+      "role": "repair",
+      "revision": 2,
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "protocol": "openai-responses",
+      "effort": "max",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "repair", "verdict": "ready", "revision": 2 },
+        "payload": { "summary": "Repaired the visual issue in revision two." }
+      },
+      "toolScript": [
+        {
+          "name": "apply_patch",
+          "callID": "call-repair-r2",
+          "input": {
+            "patchText": "*** Begin Patch\n*** Update File: index.html\n@@\n-<!doctype html><main id=\"app\">implementation-r1</main>\n+<!doctype html><main id=\"app\">implementation-r2</main>\n*** End Patch"
+          }
+        }
+      ],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop" }
+    },
+    {
+      "role": "test",
+      "revision": 2,
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "protocol": "openai-responses",
+      "effort": "high",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "test", "verdict": "pass", "revision": 2 },
+        "payload": { "summary": "The admission-frozen functional test passes revision two." }
+      },
+      "toolScript": [],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop", "hostTestExit": 0 }
+    },
+    {
+      "role": "visual_review",
+      "revision": 2,
+      "provider": "kimi",
+      "model": "kimi-k3",
+      "protocol": "openai-chat",
+      "effort": "max",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "visual_review", "verdict": "pass", "revision": 2 },
+        "payload": { "verdict": "pass", "score": 100, "findings": [] }
+      },
+      "toolScript": [],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop" }
+    },
+    {
+      "role": "deliver",
+      "revision": 2,
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "protocol": "openai-responses",
+      "effort": "high",
+      "semantic": {
+        "contractVersion": 1,
+        "outcome": { "schemaVersion": 1, "role": "deliver", "verdict": "complete", "revision": 2 },
+        "payload": { "summary": "Delivered the verified offline production workflow." }
+      },
+      "toolScript": [],
+      "usage": { "inputTokens": 3, "outputTokens": 2, "totalTokens": 5 },
+      "terminal": { "finishReason": "stop" }
+    }
+  ],
+  "expectedArtifacts": [
+    { "role": "design", "revision": 0, "kind": "workflow.design.spec", "count": 1 },
+    { "role": "design", "revision": 0, "kind": "workflow.design.reference-app", "count": 1 },
+    { "role": "design", "revision": 0, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "decompose", "revision": 0, "kind": "workflow.decomposition.plan", "count": 1 },
+    { "role": "decompose", "revision": 0, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "implement", "revision": 0, "kind": "tool-continuation", "count": 1 },
+    { "role": "implement", "revision": 0, "kind": "workflow.implementation-manifest", "count": 1 },
+    { "role": "implement", "revision": 0, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "test", "revision": 0, "kind": "workflow.test.result", "count": 1 },
+    { "role": "test", "revision": 0, "kind": "workflow.test.log", "count": 1 },
+    { "role": "test", "revision": 0, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "repair", "revision": 1, "kind": "tool-continuation", "count": 1 },
+    { "role": "repair", "revision": 1, "kind": "workflow.implementation-manifest", "count": 1 },
+    { "role": "repair", "revision": 1, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "test", "revision": 1, "kind": "workflow.test.result", "count": 1 },
+    { "role": "test", "revision": 1, "kind": "workflow.test.log", "count": 1 },
+    { "role": "test", "revision": 1, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "visual_review", "revision": 1, "kind": "workflow.visual.reference-screenshot", "count": 1 },
+    { "role": "visual_review", "revision": 1, "kind": "workflow.visual.implementation-screenshot", "count": 1 },
+    { "role": "visual_review", "revision": 1, "kind": "workflow.visual-review", "count": 1 },
+    { "role": "visual_review", "revision": 1, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "repair", "revision": 2, "kind": "tool-continuation", "count": 1 },
+    { "role": "repair", "revision": 2, "kind": "workflow.implementation-manifest", "count": 1 },
+    { "role": "repair", "revision": 2, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "test", "revision": 2, "kind": "workflow.test.result", "count": 1 },
+    { "role": "test", "revision": 2, "kind": "workflow.test.log", "count": 1 },
+    { "role": "test", "revision": 2, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "visual_review", "revision": 2, "kind": "workflow.visual.implementation-screenshot", "count": 1 },
+    { "role": "visual_review", "revision": 2, "kind": "workflow.visual-review", "count": 1 },
+    { "role": "visual_review", "revision": 2, "kind": "workflow.role.outcome", "count": 1 },
+    { "role": "deliver", "revision": 2, "kind": "workflow.delivery", "count": 1 },
+    { "role": "deliver", "revision": 2, "kind": "workflow.role.outcome", "count": 1 }
+  ],
+  "expectedPreviews": [
+    {
+      "kind": "reference",
+      "revision": 0,
+      "sha256": "8b7b843950d61b38b8c4f0ff28b55733917b0bbb3734fbb0d51739e538d789a5",
+      "size": 55
+    },
+    {
+      "kind": "implementation",
+      "revision": 1,
+      "sha256": "2d1bf2b76681437c844ae823a6a0430498e89a69fbb28d17d030417936cff9da",
+      "size": 55
+    },
+    {
+      "kind": "implementation",
+      "revision": 2,
+      "sha256": "8b7b843950d61b38b8c4f0ff28b55733917b0bbb3734fbb0d51739e538d789a5",
+      "size": 55
+    }
+  ],
+  "terminal": {
+    "workflowStatus": "succeeded",
+    "responseStatus": "completed",
+    "responseStore": true,
+    "source": {
+      "role": "deliver",
+      "revision": 2,
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "protocol": "openai-responses"
+    },
+    "providerStages": 11,
+    "preallocatedStages": 12,
+    "skippedStages": 1,
+    "skippedStage": { "role": "visual_review", "revision": 0, "ordinal": 4 }
+  }
+}

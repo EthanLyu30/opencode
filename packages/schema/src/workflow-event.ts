@@ -19,6 +19,18 @@ const stageBase = {
   leaseOwner: Schema.String.pipe(optional),
 }
 
+const leaseFence = Schema.Union([
+  Schema.Struct({
+    variant: Schema.Literal("live_execution"),
+    expectedStatus: Schema.Literals(["leased", "running"]),
+  }),
+  Schema.Struct({
+    variant: Schema.Literal("expired_recovery"),
+    expectedStatus: Schema.Literals(["leased", "running"]),
+    observedLeaseExpiresAt: DateTimeUtcFromMillis,
+  }),
+])
+
 // ── Run lifecycle ────────────────────────────────────────────────────────────
 
 export const Created = Event.define({
@@ -113,6 +125,7 @@ export namespace Stage {
       failure: Workflow.Failure,
       usage: Workflow.Usage,
       notBefore: DateTimeUtcFromMillis,
+      leaseFence: leaseFence.pipe(optional),
     },
   })
   export type RetryScheduled = typeof RetryScheduled.Type
@@ -187,6 +200,9 @@ export namespace Approval {
     schema: {
       ...base,
       stageID: Workflow.StageID.pipe(optional),
+      attempt: NonNegativeInt.pipe(optional),
+      leaseOwner: Schema.String.pipe(optional),
+      leaseFence: leaseFence.pipe(optional),
       reason: Schema.Literals(["ambiguous_execution", "budget_exhausted", "workflow_location_required"]),
       failure: Workflow.Failure.pipe(optional),
       usage: Workflow.Usage.pipe(optional),

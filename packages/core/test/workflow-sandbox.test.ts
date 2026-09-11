@@ -213,7 +213,7 @@ describe("Workflow command sandbox", () => {
     ),
   )
 
-  it.live("executes arbitrary contained build, test, and finalization commands with declared writes", () =>
+  it.live("executes arbitrary contained implementation and repair commands with declared writes", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (workspace) =>
@@ -225,7 +225,7 @@ describe("Workflow command sandbox", () => {
           yield* Effect.gen(function* () {
             const registry = yield* ToolRegistry.Service
             let call = 0
-            const execute = (role: "implement" | "repair" | "test" | "deliver", command: string) =>
+            const execute = (role: "implement" | "repair", command: string) =>
               Effect.gen(function* () {
                 const materialized = yield* registry.materialize(WorkflowPermissions.forRole(role))
                 const issued = yield* admit(role, location, sessionID)
@@ -263,14 +263,6 @@ describe("Workflow command sandbox", () => {
             expect((yield* execute("repair", "printf repaired > repaired.txt")).output?.structured).toMatchObject({
               exit: 0,
             })
-            expect((yield* execute("test", "printf passed > test-output/result.txt")).output?.structured).toMatchObject(
-              {
-                exit: 0,
-              },
-            )
-            expect(
-              (yield* execute("deliver", "printf delivered > release/finalized.txt")).output?.structured,
-            ).toMatchObject({ exit: 0 })
           }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
 
           expect(yield* Effect.promise(() => fs.readFile(path.join(workspace.path, "dist", "build.txt"), "utf8"))).toBe(
@@ -282,18 +274,12 @@ describe("Workflow command sandbox", () => {
           expect(yield* Effect.promise(() => fs.readFile(path.join(workspace.path, "repaired.txt"), "utf8"))).toBe(
             "repaired",
           )
-          expect(
-            yield* Effect.promise(() => fs.readFile(path.join(workspace.path, "test-output", "result.txt"), "utf8")),
-          ).toBe("passed")
-          expect(
-            yield* Effect.promise(() => fs.readFile(path.join(workspace.path, "release", "finalized.txt"), "utf8")),
-          ).toBe("delivered")
         }),
       (workspace) => Effect.promise(() => workspace[Symbol.asyncDispose]()),
     ),
   )
 
-  it.live("rejects traversal, absolute, subprocess, network, host-shell, and test output escapes", () =>
+  it.live("rejects implementation traversal, absolute, subprocess, network, and host-shell escapes", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([workspace, outside]) =>
@@ -311,7 +297,7 @@ describe("Workflow command sandbox", () => {
           yield* Effect.gen(function* () {
             const registry = yield* ToolRegistry.Service
             let call = 0
-            const execute = (role: "implement" | "test" | "deliver", command: string) =>
+            const execute = (role: "implement", command: string) =>
               Effect.gen(function* () {
                 const materialized = yield* registry.materialize(WorkflowPermissions.forRole(role))
                 const issued = yield* admit(role, location, sessionID)
@@ -332,7 +318,7 @@ describe("Workflow command sandbox", () => {
                   issued,
                 )
               })
-            const reject = (role: "implement" | "test" | "deliver", command: string) =>
+            const reject = (role: "implement", command: string) =>
               execute(role, command).pipe(
                 Effect.map((settled) => expect(settled.output?.structured).not.toMatchObject({ exit: 0 })),
               )
@@ -342,9 +328,6 @@ describe("Workflow command sandbox", () => {
             yield* reject("implement", "sh -c 'printf escaped > ../outside.txt'")
             yield* reject("implement", "python3 -c 'import socket; socket.create_connection((\"1.1.1.1\", 53), 1)'")
             yield* reject("implement", "/init /c 'echo escaped'")
-            yield* reject("test", "printf mutated > source.txt")
-            yield* reject("test", "printf escaped > ../outside.txt")
-            yield* reject("deliver", "printf forbidden > not-finalization.txt")
           }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
 
           expect(yield* Effect.promise(() => fs.readFile(source, "utf8"))).toBe("source")
@@ -418,9 +401,9 @@ const expectedCatalog = {
   decompose: ["glob", "grep", "read"],
   implement: ["apply_patch", "bash", "edit", "glob", "grep", "read", "write"],
   repair: ["apply_patch", "bash", "edit", "glob", "grep", "read", "write"],
-  test: ["bash", "glob", "grep", "read"],
+  test: ["glob", "grep", "read"],
   visual_review: ["glob", "grep", "read"],
-  deliver: ["bash", "glob", "grep", "read"],
+  deliver: ["glob", "grep", "read"],
 } satisfies Record<WorkflowRole.Role, readonly string[]>
 
 function toWsl(value: string) {

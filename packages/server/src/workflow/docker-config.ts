@@ -2,8 +2,9 @@ export * as DockerConfig from "./docker-config"
 
 import fs from "node:fs/promises"
 import path from "node:path"
+import type { ProductionHostRoots } from "./production-host-roots"
 
-const pinnedImagePattern = /^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$/
+const pinnedImagePattern = /^(?:[a-z0-9][a-z0-9._/-]*|127\.0\.0\.1:5000\/[a-z0-9][a-z0-9._/-]*)@sha256:[a-f0-9]{64}$/
 const executablePattern = /^[A-Za-z]:\\(?:[^<>:"/\\|?*\u0000-\u001f]+\\)*docker\.exe$/i
 
 export interface Config {
@@ -13,8 +14,16 @@ export interface Config {
   readonly temp: string
   /** Host-owned roots which may never overlap an admitted workflow Location. */
   readonly protectedRoots?: readonly string[]
+  /** Exact workflow-owned leaves which must not overlap Docker engine/config/temp. */
+  readonly isolationRoots?: readonly string[]
+  /** Umbrella roots excluded only from workflow Location admission. */
+  readonly locationExcludedRoots?: readonly string[]
+  /** Revalidates ACL and filesystem identity at each Docker operation boundary. */
+  readonly verifyHostRoots?: () => void
   /** Minted only by validate(); callers must pass the validated record to Docker execution helpers. */
   readonly engineIdentity?: EngineIdentity
+  /** Minted only by validate(); binds every configured directory to its original filesystem identity. */
+  readonly directoryIdentities?: readonly DirectoryIdentity[]
   readonly limits: {
     readonly timeoutMs: number
     readonly engineTimeoutMs: number
@@ -33,9 +42,19 @@ export interface EngineIdentity {
   readonly birthtimeMs: string
 }
 
+export interface DirectoryIdentity {
+  readonly canonical: string
+  readonly device: string
+  readonly inode: string
+  readonly birthtimeMs: string
+}
+
 export type ValidatedConfig = Config & {
   readonly protectedRoots: readonly string[]
+  readonly isolationRoots: readonly string[]
+  readonly locationExcludedRoots: readonly string[]
   readonly engineIdentity: EngineIdentity
+  readonly directoryIdentities: readonly DirectoryIdentity[]
 }
 
 export const defaults: Config["limits"] = Object.freeze({
@@ -55,17 +74,39 @@ export function fromEnvironment(environment: Readonly<Record<string, string | un
     image: environment.OPENCODE_WORKFLOW_SANDBOX_IMAGE ?? "",
     dockerConfig: environment.OPENCODE_WORKFLOW_SANDBOX_CONFIG ?? "",
     temp: environment.OPENCODE_WORKFLOW_SANDBOX_TEMP ?? "",
-    protectedRoots: [
-      environment.OPENCODE_WORKFLOW_HOST_ROOT ?? "",
+    isolationRoots: [
+      environment.OPENCODE_WORKFLOW_HOST_DATA ?? "",
       environment.OPENCODE_WORKFLOW_EVIDENCE_ROOT ?? "",
+      environment.OPENCODE_WORKFLOW_HOST_RUNTIME ?? "",
       environment.PLAYWRIGHT_BROWSERS_PATH ?? "",
+      environment.OPENCODE_WORKFLOW_HOST_CACHE ?? "",
       environment.OPENCODE_WORKFLOW_HOST_TEMP ?? "",
     ],
+    locationExcludedRoots: [environment.OPENCODE_WORKFLOW_HOST_ROOT ?? ""],
+    limits: defaults,
+  }
+}
+
+export function fromProductionHostRoots(contract: ProductionHostRoots.Contract): Config {
+  return {
+    enginePath: contract.sandbox.enginePath,
+    image: contract.sandbox.image,
+    dockerConfig: contract.roots.dockerConfigRoot,
+    temp: contract.roots.dockerTempRoot,
+    isolationRoots: [
+      contract.roots.dataRoot,
+      contract.roots.browserRuntimeRoot,
+      contract.roots.browserCacheRoot,
+      contract.roots.previewCapabilityRoot,
+    ],
+    locationExcludedRoots: [contract.roots.deploymentRoot],
+    verifyHostRoots: contract.policy.verifyAll,
     limits: defaults,
   }
 }
 
 export async function validate(config: Config): Promise<ValidatedConfig> {
+  config.verifyHostRoots?.()
   if (
     !pinnedImagePattern.test(config.image) ||
     !path.win32.isAbsolute(config.enginePath) ||
@@ -90,13 +131,21 @@ export async function validate(config: Config): Promise<ValidatedConfig> {
   if (config.engineIdentity !== undefined && !sameEngineIdentity(config.engineIdentity, engineIdentity)) {
     throw new TypeError("Docker engine file identity changed")
   }
-  const dockerConfig = await canonicalDDirectory(config.dockerConfig)
-  const temp = await canonicalDDirectory(config.temp)
+  const dockerConfigIdentity = await directoryIdentity(config.dockerConfig)
+  const tempIdentity = await directoryIdentity(config.temp)
+  const dockerConfig = dockerConfigIdentity.canonical
+  const temp = tempIdentity.canonical
   if (overlap(dockerConfig, temp)) throw new TypeError("Docker config and temp roots must be separate")
-  const protectedRoots = Object.freeze(
-    await Promise.all((config.protectedRoots ?? []).map((root) => canonicalDDirectory(root))),
-  )
-  for (const protectedRoot of protectedRoots) {
+  if (overlap(engineIdentity.canonical, dockerConfig) || overlap(engineIdentity.canonical, temp)) {
+    throw new TypeError("Docker engine, config, and temp must be isolated")
+  }
+  const protectedRoots = await canonicalDirectoryList(config.protectedRoots ?? [])
+  const isolationRoots = await canonicalDirectoryList([...(config.isolationRoots ?? []), ...protectedRoots])
+  const locationExcludedRoots = await canonicalDirectoryList([
+    ...(config.locationExcludedRoots ?? []),
+    ...protectedRoots,
+  ])
+  for (const protectedRoot of isolationRoots) {
     if (
       overlap(dockerConfig, protectedRoot) ||
       overlap(temp, protectedRoot) ||
@@ -105,37 +154,51 @@ export async function validate(config: Config): Promise<ValidatedConfig> {
       throw new TypeError("Docker and workflow protected roots must be isolated")
     }
   }
+  const directoryIdentities = Object.freeze(
+    await identitiesFor([dockerConfig, temp, ...isolationRoots, ...locationExcludedRoots]),
+  )
+  if (
+    config.directoryIdentities !== undefined &&
+    !sameDirectoryIdentities(config.directoryIdentities, directoryIdentities)
+  ) {
+    throw new TypeError("Docker host directory identity changed")
+  }
   return Object.freeze({
     ...config,
     enginePath: engineIdentity.canonical,
     dockerConfig,
     temp,
-    protectedRoots,
+    protectedRoots: Object.freeze(protectedRoots),
+    isolationRoots: Object.freeze(isolationRoots),
+    locationExcludedRoots: Object.freeze(locationExcludedRoots),
     engineIdentity,
+    directoryIdentities,
   })
 }
 
 export async function revalidate(config: Config): Promise<ValidatedConfig> {
-  if (config.engineIdentity === undefined || config.protectedRoots === undefined) {
+  if (
+    config.engineIdentity === undefined ||
+    config.protectedRoots === undefined ||
+    config.isolationRoots === undefined ||
+    config.locationExcludedRoots === undefined ||
+    config.directoryIdentities === undefined
+  ) {
     throw new TypeError("Docker configuration was not host-validated")
   }
-  const stat = await fs.lstat(config.enginePath, { bigint: true })
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n) {
-    throw new TypeError("Docker engine file identity changed")
-  }
-  const current: EngineIdentity = Object.freeze({
-    canonical: config.enginePath,
-    device: stat.dev.toString(),
-    inode: stat.ino.toString(),
-    birthtimeMs: stat.birthtimeMs.toString(),
-  })
-  if (!sameEngineIdentity(config.engineIdentity, current)) throw new TypeError("Docker engine file identity changed")
-  return Object.freeze({ ...config, protectedRoots: config.protectedRoots, engineIdentity: config.engineIdentity })
+  return validate(config)
 }
 
 export async function admitWorkspace(config: ValidatedConfig, workspace: string): Promise<string> {
   const canonical = await canonicalDDirectory(workspace)
-  const protectedPaths = [config.dockerConfig, config.temp, config.enginePath, ...config.protectedRoots]
+  const protectedPaths = [
+    config.dockerConfig,
+    config.temp,
+    config.enginePath,
+    ...config.isolationRoots,
+    ...config.locationExcludedRoots,
+    ...config.protectedRoots,
+  ]
   if (protectedPaths.some((protectedPath) => overlap(protectedPath, canonical))) {
     throw new TypeError("Workflow Location overlaps a protected host/runtime path")
   }
@@ -143,7 +206,18 @@ export async function admitWorkspace(config: ValidatedConfig, workspace: string)
 }
 
 export function invocationEnvironment(config: Config): Readonly<Record<string, string>> {
-  return { DOCKER_CONFIG: config.dockerConfig, TEMP: config.temp, TMP: config.temp }
+  return {
+    DOCKER_CONFIG: config.dockerConfig,
+    DOCKER_CONTEXT: "default",
+    DOCKER_HOST: "",
+    DOCKER_TLS_VERIFY: "",
+    DOCKER_CERT_PATH: "",
+    BUILDX_BUILDER: "",
+    BUILDKIT_HOST: "",
+    PATH: path.win32.dirname(config.enginePath),
+    TEMP: config.temp,
+    TMP: config.temp,
+  }
 }
 
 async function canonicalDDirectory(value: string): Promise<string> {
@@ -157,6 +231,57 @@ async function canonicalDDirectory(value: string): Promise<string> {
   const stat = await fs.lstat(canonical)
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new TypeError("Docker host root must be a real directory")
   return canonical
+}
+
+async function directoryIdentity(value: string): Promise<DirectoryIdentity> {
+  const canonical = await canonicalDDirectory(value)
+  const stat = await fs.lstat(canonical, { bigint: true })
+  return Object.freeze({
+    canonical,
+    device: stat.dev.toString(),
+    inode: stat.ino.toString(),
+    birthtimeMs: stat.birthtimeMs.toString(),
+  })
+}
+
+async function canonicalDirectoryList(values: readonly string[]): Promise<string[]> {
+  const result: string[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const canonical = await canonicalDDirectory(value)
+    const key = canonical.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(canonical)
+  }
+  return result
+}
+
+async function identitiesFor(values: readonly string[]): Promise<DirectoryIdentity[]> {
+  const result: DirectoryIdentity[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const identity = await directoryIdentity(value)
+    const key = identity.canonical.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(identity)
+  }
+  return result
+}
+
+function sameDirectoryIdentities(left: readonly DirectoryIdentity[], right: readonly DirectoryIdentity[]): boolean {
+  if (left.length !== right.length) return false
+  return left.every((identity, index) => {
+    const current = right[index]
+    return (
+      current !== undefined &&
+      sameWindowsPath(identity.canonical, current.canonical) &&
+      identity.device === current.device &&
+      identity.inode === current.inode &&
+      identity.birthtimeMs === current.birthtimeMs
+    )
+  })
 }
 
 async function engineFileIdentity(value: string): Promise<EngineIdentity> {

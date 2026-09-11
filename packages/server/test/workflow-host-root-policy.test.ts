@@ -268,14 +268,26 @@ describe("HostRootPolicy", () => {
     expect(probe(fixture.roots.evidenceRoot)).toEqual(fixture.snapshot)
     expect(invocation?.executable).toBe("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
     expect(invocation?.argv.slice(0, 4)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
-    expect(invocation?.argv.at(-1)).toBe(fixture.roots.evidenceRoot)
+    expect(invocation?.argv).toHaveLength(5)
     expect(invocation?.argv[4]).not.toContain(fixture.roots.evidenceRoot)
     expect(invocation?.env).toEqual({
       SystemRoot: "C:\\Windows",
       WINDIR: "C:\\Windows",
       TEMP: fixture.roots.tempRoot,
       TMP: fixture.roots.tempRoot,
+      OPENCODE_ACL_PROBE_TARGET: fixture.roots.evidenceRoot,
     })
+  })
+
+  test("production probe reads a real canonical D-drive directory", async () => {
+    await using fixture = await setup()
+
+    const snapshot = HostRootPolicy.productionProbe({ tempRoot: fixture.roots.tempRoot })(fixture.roots.evidenceRoot)
+
+    expect(snapshot.currentUserSid).toMatch(/^S-1-/)
+    expect(snapshot.ownerSid).toMatch(/^S-1-/)
+    expect(snapshot.reparsePoint).toBe(false)
+    expect(snapshot.descriptorSddl.length).toBeGreaterThan(0)
   })
 })
 

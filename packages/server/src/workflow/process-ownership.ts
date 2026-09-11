@@ -4,15 +4,22 @@ import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 
-export interface Identity {
+export interface Identity extends WorkflowVisualHost.PreviewLeaseAuthority {
   readonly hostID: WorkflowVisualHost.HostID
   readonly nonce: string
 }
 
 export interface OwnedProcess {
+  readonly origin: string
   readonly exited: Promise<number>
   readonly stdout: ReadableStream<Uint8Array>
   readonly stderr: ReadableStream<Uint8Array>
+}
+
+export interface RecoveryInput {
+  readonly identity: Identity
+  /** Re-read durable lease authority immediately before each destructive operation. */
+  readonly finalGate: () => Promise<boolean>
 }
 
 export interface Service {
@@ -32,8 +39,13 @@ export interface Service {
     readonly signal: AbortSignal
     readonly deadline: number
   }) => Promise<OwnedProcess>
-  readonly stop: (input: { readonly identity: Identity; readonly process: OwnedProcess }) => Promise<void>
-  readonly recover: (identity: Identity) => Promise<void>
+  readonly stop: (input: {
+    readonly identity: Identity
+    readonly process: OwnedProcess
+    /** Replacement recovery re-reads durable authority before each destructive operation. */
+    readonly finalGate?: () => Promise<boolean>
+  }) => Promise<void>
+  readonly recover: (input: RecoveryInput) => Promise<void>
 }
 
 export const unavailable: Service = Object.freeze({

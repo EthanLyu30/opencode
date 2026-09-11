@@ -15,6 +15,7 @@ import { Hash } from "../util/hash"
 import { Wildcard } from "../util/wildcard"
 import { ApplicationTools } from "./application-tools"
 import { definition, permission, settle, validateName, type AnyTool, type RegistrationError } from "./tool"
+import { ToolCatalogVersion } from "./catalog-version"
 import { Tools } from "./tools"
 import { makeLocationNode } from "../effect/app-node"
 import { WorkflowToolLineage } from "../workflow/tool-lineage"
@@ -105,7 +106,7 @@ const registryLayer = Layer.effect(
     const applications = yield* ApplicationTools.Service
     const resources = yield* ToolOutputStore.Service
     const owner = {}
-    type Registration = { readonly identity: object; readonly tool: AnyTool }
+    type Registration = { readonly identity: object; readonly tool: AnyTool; readonly recoveryVersion?: string }
     const local = new Map<string, Array<{ readonly token: object; readonly registration: Registration }>>()
     const identities = new WeakMap<object, string>()
     const fingerprintFor = (identity: object) => {
@@ -163,8 +164,20 @@ const registryLayer = Layer.effect(
         yield* Effect.uninterruptible(
           Effect.gen(function* () {
             const token = {}
-            for (const [name, tool] of entries)
-              local.set(name, [...(local.get(name) ?? []), { token, registration: { identity: {}, tool } }])
+            for (const [name, tool] of entries) {
+              const recoveryVersion = ToolCatalogVersion.get(tool)
+              local.set(name, [
+                ...(local.get(name) ?? []),
+                {
+                  token,
+                  registration: {
+                    identity: {},
+                    tool,
+                    ...(recoveryVersion === undefined ? {} : { recoveryVersion }),
+                  },
+                },
+              ])
+            }
             yield* Effect.addFinalizer(() =>
               Effect.sync(() => {
                 for (const [name] of entries) {
@@ -178,22 +191,37 @@ const registryLayer = Layer.effect(
         )
       }),
       materialize: Effect.fn("ToolRegistry.materialize")(function* (permissions = []) {
-        const registrations = new Map(applications.entries())
+        const registrations = new Map<string, Registration>(applications.entries())
         for (const [name, entries] of local) {
           const registration = entries.at(-1)?.registration
           if (registration) registrations.set(name, registration)
         }
         for (const [name, registration] of registrations)
           if (whollyDisabled(permission(registration.tool, name), permissions)) registrations.delete(name)
+        const executable = Array.from(registrations, ([name, registration]) => ({
+          name,
+          registration,
+          definition: definition(name, registration.tool),
+          permission: permission(registration.tool, name),
+          recoveryVersion: registration.recoveryVersion,
+        }))
         const materialization: Materialization = {
           fingerprint: Hash.sha256(
-            JSON.stringify(
-              Array.from(registrations, ([name, registration]) => [name, fingerprintFor(registration.identity)]).sort(
-                ([left], [right]) => left.localeCompare(right),
-              ),
+            canonicalCatalog(
+              executable
+                .map(({ name, registration, definition, permission, recoveryVersion }) => ({
+                  name,
+                  authority:
+                    recoveryVersion === undefined
+                      ? { kind: "process-registration", identity: fingerprintFor(registration.identity) }
+                      : { kind: "trusted-built-in", version: recoveryVersion },
+                  definition,
+                  permission,
+                }))
+                .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0)),
             ),
           ),
-          definitions: Array.from(registrations, ([name, registration]) => definition(name, registration.tool)),
+          definitions: executable.map((item) => item.definition),
           settle: (input) => {
             if (WorkflowRoleAgentProfiles.isRoleAgent(input.agent))
               return Effect.succeed({
@@ -293,6 +321,24 @@ const workflowAuthorityLayer = Layer.effect(
 function whollyDisabled(action: string, rules: PermissionV2.Ruleset) {
   const rule = rules.findLast((rule) => Wildcard.match(action, rule.action))
   return rule?.resource === "*" && rule.effect === "deny"
+}
+
+function canonicalCatalog(value: unknown, active = new Set<object>()): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value)
+  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value)
+  if (typeof value !== "object") throw new TypeError("Tool catalog contains a non-canonical value")
+  if (active.has(value)) throw new TypeError("Tool catalog contains a cyclic value")
+  active.add(value)
+  try {
+    if (Array.isArray(value)) return `[${value.map((item) => canonicalCatalog(item, active)).join(",")}]`
+    return `{${Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalCatalog(item, active)}`)
+      .join(",")}}`
+  } finally {
+    active.delete(value)
+  }
 }
 
 export const node = makeLocationNode({

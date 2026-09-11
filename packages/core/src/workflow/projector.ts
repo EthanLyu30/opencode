@@ -1,6 +1,6 @@
 export * as WorkflowProjector from "./projector"
 
-import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm"
+import { and, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-orm"
 import { DateTime, Effect, Layer } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
@@ -166,12 +166,45 @@ function requireLiveLease(
     readonly leaseOwner?: string
     readonly timestamp: DateTime.Utc
   },
+  historicalReplay = false,
 ) {
   const leaseOwner = requireFencing(row, input)
-  if (row.lease_expires_at === null || DateTime.toEpochMillis(input.timestamp) > row.lease_expires_at) {
+  if (
+    row.lease_expires_at === null ||
+    (!historicalReplay && DateTime.toEpochMillis(input.timestamp) > row.lease_expires_at)
+  ) {
     throw new LifecycleConflict(input.workflowID, input.stageID)
   }
   return leaseOwner
+}
+
+function liveLeaseExpiryCondition(timestamp: DateTime.Utc, historicalReplay: boolean) {
+  return historicalReplay ? [] : [gte(WorkflowStageTable.lease_expires_at, DateTime.toEpochMillis(timestamp))]
+}
+
+function historicalRecoveryMismatch(
+  row: typeof WorkflowStageTable.$inferSelect,
+  observedLeaseExpiresAt: number,
+  historicalReplay: boolean,
+) {
+  return (
+    historicalReplay &&
+    (row.lease_expires_at === null ||
+      row.lease_expires_at > observedLeaseExpiresAt ||
+      row.time_updated > observedLeaseExpiresAt)
+  )
+}
+
+function recoveryExpiryConditions(observedLeaseExpiresAt: number, timestamp: DateTime.Utc, historicalReplay: boolean) {
+  return historicalReplay
+    ? [
+        lte(WorkflowStageTable.lease_expires_at, observedLeaseExpiresAt),
+        lte(WorkflowStageTable.time_updated, observedLeaseExpiresAt),
+      ]
+    : [
+        eq(WorkflowStageTable.lease_expires_at, observedLeaseExpiresAt),
+        lt(WorkflowStageTable.lease_expires_at, DateTime.toEpochMillis(timestamp)),
+      ]
 }
 
 function applyUsage(db: DB, workflowID: Workflow.ID, usage: Workflow.Usage, timestamp: DateTime.Utc) {
@@ -326,13 +359,14 @@ const layer = Layer.effectDiscard(
         const data = event.data
         yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "running")
-        const leaseOwner = requireLiveLease(row, data)
+        const historicalReplay = event.durable?.replay === true
+        const leaseOwner = requireLiveLease(row, data, historicalReplay)
         const updated = yield* db
           .update(WorkflowStageTable)
           .set({
             status: "running",
             time_started: DateTime.toEpochMillis(data.timestamp),
-            time_updated: DateTime.toEpochMillis(data.timestamp),
+            time_updated: sql`max(${WorkflowStageTable.time_updated}, ${DateTime.toEpochMillis(data.timestamp)})`,
           })
           .where(
             and(
@@ -341,7 +375,7 @@ const layer = Layer.effectDiscard(
               eq(WorkflowStageTable.status, row.status),
               eq(WorkflowStageTable.attempt, data.attempt),
               eq(WorkflowStageTable.lease_owner, leaseOwner),
-              gte(WorkflowStageTable.lease_expires_at, DateTime.toEpochMillis(data.timestamp)),
+              ...liveLeaseExpiryCondition(data.timestamp, historicalReplay),
             ),
           )
           .returning({ id: WorkflowStageTable.id })
@@ -372,13 +406,14 @@ const layer = Layer.effectDiscard(
         yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* requireStage(db, data.workflowID, data.stageID)
         if (row.status !== "running") throw new LifecycleConflict(data.workflowID, data.stageID)
-        const leaseOwner = requireLiveLease(row, data)
+        const historicalReplay = event.durable?.replay === true
+        const leaseOwner = requireLiveLease(row, data, historicalReplay)
         const updated = yield* db
           .update(WorkflowStageTable)
           .set({
             checkpoint: data.checkpoint,
             recovery_action: row.recovery_action === "retry" ? null : row.recovery_action,
-            time_updated: DateTime.toEpochMillis(data.timestamp),
+            time_updated: sql`max(${WorkflowStageTable.time_updated}, ${DateTime.toEpochMillis(data.timestamp)})`,
           })
           .where(
             and(
@@ -387,7 +422,7 @@ const layer = Layer.effectDiscard(
               eq(WorkflowStageTable.status, "running"),
               eq(WorkflowStageTable.attempt, data.attempt),
               eq(WorkflowStageTable.lease_owner, leaseOwner),
-              gte(WorkflowStageTable.lease_expires_at, DateTime.toEpochMillis(data.timestamp)),
+              ...liveLeaseExpiryCondition(data.timestamp, historicalReplay),
             ),
           )
           .returning({ id: WorkflowStageTable.id })
@@ -401,7 +436,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Stage.RetryScheduled, (event) =>
       Effect.gen(function* () {
         const data = event.data
-        yield* requireNotCancelled(db, data.workflowID, data.stageID)
+        const run = yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "retry_wait")
         const recoveryResolution = row.recovery_action === "retry"
         if (
@@ -411,6 +446,35 @@ const layer = Layer.effectDiscard(
           throw new LifecycleConflict(data.workflowID, data.stageID)
         }
         const leaseOwner = recoveryResolution ? undefined : requireFencing(row, data)
+        const historicalReplay = event.durable?.replay === true
+        const fence = data.leaseFence
+        const expiryConditions = []
+        if (!recoveryResolution) {
+          if (fence === undefined) {
+            if (!historicalReplay) throw new LifecycleConflict(data.workflowID, data.stageID)
+          } else if (fence.variant === "live_execution") {
+            if (fence.expectedStatus !== "running" || row.status !== fence.expectedStatus) {
+              throw new LifecycleConflict(data.workflowID, data.stageID)
+            }
+            requireLiveLease(row, data, historicalReplay)
+            expiryConditions.push(...liveLeaseExpiryCondition(data.timestamp, historicalReplay))
+          } else {
+            const observedLeaseExpiresAt = DateTime.toEpochMillis(fence.observedLeaseExpiresAt)
+            if (
+              run.status !== "running" ||
+              row.status !== fence.expectedStatus ||
+              (historicalReplay
+                ? historicalRecoveryMismatch(row, observedLeaseExpiresAt, historicalReplay)
+                : row.lease_expires_at !== observedLeaseExpiresAt) ||
+              observedLeaseExpiresAt >= DateTime.toEpochMillis(data.timestamp)
+            ) {
+              throw new LifecycleConflict(data.workflowID, data.stageID)
+            }
+            expiryConditions.push(...recoveryExpiryConditions(observedLeaseExpiresAt, data.timestamp, historicalReplay))
+          }
+        } else if (fence !== undefined) {
+          throw new LifecycleConflict(data.workflowID, data.stageID)
+        }
         const updated = yield* db
           .update(WorkflowStageTable)
           .set({
@@ -430,6 +494,7 @@ const layer = Layer.effectDiscard(
               ...(leaseOwner === undefined
                 ? [isNull(WorkflowStageTable.lease_owner)]
                 : [eq(WorkflowStageTable.lease_owner, leaseOwner)]),
+              ...expiryConditions,
             ),
           )
           .returning({ id: WorkflowStageTable.id })
@@ -446,7 +511,8 @@ const layer = Layer.effectDiscard(
         const data = event.data
         yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "succeeded")
-        const leaseOwner = requireLiveLease(row, data)
+        const historicalReplay = event.durable?.replay === true
+        const leaseOwner = requireLiveLease(row, data, historicalReplay)
         const updated = yield* db
           .update(WorkflowStageTable)
           .set({
@@ -464,7 +530,7 @@ const layer = Layer.effectDiscard(
               eq(WorkflowStageTable.status, row.status),
               eq(WorkflowStageTable.attempt, data.attempt),
               eq(WorkflowStageTable.lease_owner, leaseOwner),
-              gte(WorkflowStageTable.lease_expires_at, DateTime.toEpochMillis(data.timestamp)),
+              ...liveLeaseExpiryCondition(data.timestamp, historicalReplay),
             ),
           )
           .returning({ id: WorkflowStageTable.id })
@@ -613,7 +679,8 @@ const layer = Layer.effectDiscard(
         const data = event.data
         yield* requireNotCancelled(db, data.workflowID, data.stageID)
         const row = yield* guardTransition(db, data.workflowID, data.stageID, "failed")
-        const leaseOwner = data.source === "execution" ? requireLiveLease(row, data) : undefined
+        const historicalReplay = event.durable?.replay === true
+        const leaseOwner = data.source === "execution" ? requireLiveLease(row, data, historicalReplay) : undefined
         if (data.source === "execution") {
           if (!leaseOwner) throw new LifecycleConflict(data.workflowID, data.stageID)
         } else if (row.recovery_action !== "fail") {
@@ -639,7 +706,7 @@ const layer = Layer.effectDiscard(
                 : [
                     eq(WorkflowStageTable.attempt, data.attempt),
                     eq(WorkflowStageTable.lease_owner, leaseOwner),
-                    gte(WorkflowStageTable.lease_expires_at, DateTime.toEpochMillis(data.timestamp)),
+                    ...liveLeaseExpiryCondition(data.timestamp, historicalReplay),
                   ]),
             ),
           )
@@ -698,10 +765,62 @@ const layer = Layer.effectDiscard(
     yield* events.project(WorkflowEvent.Approval.Requested, (event) =>
       Effect.gen(function* () {
         const data = event.data
-        yield* requireNotCancelled(db, data.workflowID, data.stageID)
+        const runRow = yield* requireNotCancelled(db, data.workflowID, data.stageID)
         if (data.reason === "ambiguous_execution") {
           if (data.stageID === undefined || data.failure === undefined) throw new LifecycleConflict(data.workflowID)
           const row = yield* guardTransition(db, data.workflowID, data.stageID, "waiting_approval")
+          const historicalReplay = event.durable?.replay === true
+          const fence = data.leaseFence
+          const authorityConditions = []
+          if (fence === undefined) {
+            if (!historicalReplay) throw new LifecycleConflict(data.workflowID, data.stageID)
+          } else {
+            if (data.attempt === undefined || data.leaseOwner === undefined) {
+              throw new LifecycleConflict(data.workflowID, data.stageID)
+            }
+            const leaseOwner = requireFencing(row, {
+              workflowID: data.workflowID,
+              stageID: data.stageID,
+              attempt: data.attempt,
+              leaseOwner: data.leaseOwner,
+            })
+            authorityConditions.push(
+              eq(WorkflowStageTable.attempt, data.attempt),
+              eq(WorkflowStageTable.lease_owner, leaseOwner),
+            )
+            if (fence.variant === "live_execution") {
+              if (fence.expectedStatus !== "running" || row.status !== fence.expectedStatus) {
+                throw new LifecycleConflict(data.workflowID, data.stageID)
+              }
+              requireLiveLease(
+                row,
+                {
+                  workflowID: data.workflowID,
+                  stageID: data.stageID,
+                  attempt: data.attempt,
+                  leaseOwner: data.leaseOwner,
+                  timestamp: data.timestamp,
+                },
+                historicalReplay,
+              )
+              authorityConditions.push(...liveLeaseExpiryCondition(data.timestamp, historicalReplay))
+            } else {
+              const observedLeaseExpiresAt = DateTime.toEpochMillis(fence.observedLeaseExpiresAt)
+              if (
+                runRow.status !== "running" ||
+                row.status !== fence.expectedStatus ||
+                (historicalReplay
+                  ? historicalRecoveryMismatch(row, observedLeaseExpiresAt, historicalReplay)
+                  : row.lease_expires_at !== observedLeaseExpiresAt) ||
+                observedLeaseExpiresAt >= DateTime.toEpochMillis(data.timestamp)
+              ) {
+                throw new LifecycleConflict(data.workflowID, data.stageID)
+              }
+              authorityConditions.push(
+                ...recoveryExpiryConditions(observedLeaseExpiresAt, data.timestamp, historicalReplay),
+              )
+            }
+          }
           const stage = yield* db
             .update(WorkflowStageTable)
             .set({
@@ -716,6 +835,7 @@ const layer = Layer.effectDiscard(
                 eq(WorkflowStageTable.id, data.stageID),
                 eq(WorkflowStageTable.workflow_id, data.workflowID),
                 eq(WorkflowStageTable.status, row.status),
+                ...authorityConditions,
               ),
             )
             .returning({ id: WorkflowStageTable.id })

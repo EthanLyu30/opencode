@@ -8,6 +8,7 @@ export interface LaunchOptions {
   readonly headless: true
   readonly downloadsPath: string
   readonly args: string[]
+  readonly executablePath?: string
 }
 
 export interface ContextOptions {
@@ -100,6 +101,8 @@ export function makeRuntime(input: {
   readonly browserType: BrowserType
   readonly tempRoot: string
   readonly timeoutMs?: number
+  readonly verifyBoundary?: () => void
+  readonly executablePath?: string
 }): Runtime {
   const tempRoot = requireDirectory(input.tempRoot)
   const timeoutMs = input.timeoutMs ?? 15_000
@@ -110,15 +113,18 @@ export function makeRuntime(input: {
   return {
     capture: async (capture) => {
       if (closed) throw new Error("Playwright runtime is closed")
+      input.verifyBoundary?.()
       const current = await runAbortable(
         (browser ??= input.browserType.launch({
           headless: true,
           downloadsPath: tempRoot,
           args: [...CHROMIUM_NETWORK_SUPPRESSION_ARGS],
+          ...(input.executablePath === undefined ? {} : { executablePath: input.executablePath }),
         })),
         capture.signal,
         timeoutMs,
       )
+      input.verifyBoundary?.()
       const contextPromise = current.newContext({
         viewport: { width: capture.viewport.width, height: capture.viewport.height },
         colorScheme: "light",
@@ -128,94 +134,107 @@ export function makeRuntime(input: {
         permissions: [],
       })
       const context = await runAbortable(contextPromise, capture.signal, timeoutMs).catch((cause) => {
-        void contextPromise.then(
-          (value) => settleWithin(value.close(), timeoutMs),
-          () => undefined,
-        )
+        void contextPromise
+          .then(
+            (value) => closeAtBoundary(() => value.close(), input.verifyBoundary, timeoutMs),
+            () => undefined,
+          )
+          .catch(() => undefined)
         throw cause
       })
-      try {
-        await runAbortable(
-          context.route("**/*", async (route) => {
-            const requestURL = route.request().url()
-            if (!isAdmittedRequest(requestURL, capture.url, capture.allowedOrigins)) {
-              await route.abort()
-              return
-            }
-            const response = await route.fetch({ maxRedirects: 0, timeout: timeoutMs })
-            try {
-              const location = responseHeader(response.headers(), "location")
-              if (
-                REDIRECT_STATUSES.has(response.status()) &&
-                location !== undefined &&
-                !isAdmittedRequest(new URL(location, requestURL).href, capture.url, capture.allowedOrigins)
-              ) {
+      return withBoundaryCleanup(
+        async () => {
+          input.verifyBoundary?.()
+          await runAbortable(
+            context.route("**/*", async (route) => {
+              const requestURL = route.request().url()
+              if (!isAdmittedRequest(requestURL, capture.url, capture.allowedOrigins)) {
                 await route.abort()
                 return
               }
-              await response.fulfill()
-            } finally {
-              await response.dispose()
-            }
-          }),
-          capture.signal,
-          timeoutMs,
-        )
-        await runAbortable(
-          context.routeWebSocket("**/*", async (route) => {
-            if (isAdmittedWebSocket(route.url(), capture.url, capture.allowedOrigins)) {
-              route.connectToServer()
-              return
-            }
-            await route.close({ code: 1008, reason: "WebSocket origin is not admitted" })
-          }),
-          capture.signal,
-          timeoutMs,
-        )
-        const page = await runAbortable(context.newPage(), capture.signal, timeoutMs)
-        await runAbortable(
-          page.goto(capture.url, { waitUntil: "domcontentloaded", timeout: timeoutMs }),
-          capture.signal,
-          timeoutMs,
-        )
-        await runAbortable(
-          page.waitForSelector(capture.readySelector, { state: "visible", timeout: timeoutMs }),
-          capture.signal,
-          timeoutMs,
-        )
-        await runAbortable(
-          page.evaluate(() => document.fonts.ready),
-          capture.signal,
-          timeoutMs,
-        )
-        await runAbortable(
-          page.evaluate(
-            () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
-          ),
-          capture.signal,
-          timeoutMs,
-        )
-        return await runAbortable(
-          page.screenshot({
-            type: "png",
-            fullPage: false,
-            animations: "disabled",
-            caret: "hide",
-            scale: "css",
-          }),
-          capture.signal,
-          timeoutMs,
-        )
-      } finally {
-        await settleWithin(context.close(), timeoutMs)
-      }
+              const response = await route.fetch({ maxRedirects: 0, timeout: timeoutMs })
+              try {
+                const location = responseHeader(response.headers(), "location")
+                if (
+                  REDIRECT_STATUSES.has(response.status()) &&
+                  location !== undefined &&
+                  !isAdmittedRequest(new URL(location, requestURL).href, capture.url, capture.allowedOrigins)
+                ) {
+                  await route.abort()
+                  return
+                }
+                await response.fulfill()
+              } finally {
+                await response.dispose()
+              }
+            }),
+            capture.signal,
+            timeoutMs,
+          )
+          await runAbortable(
+            context.routeWebSocket("**/*", async (route) => {
+              if (isAdmittedWebSocket(route.url(), capture.url, capture.allowedOrigins)) {
+                route.connectToServer()
+                return
+              }
+              await route.close({ code: 1008, reason: "WebSocket origin is not admitted" })
+            }),
+            capture.signal,
+            timeoutMs,
+          )
+          const page = await runAbortable(context.newPage(), capture.signal, timeoutMs)
+          await runAbortable(
+            page.goto(capture.url, { waitUntil: "domcontentloaded", timeout: timeoutMs }),
+            capture.signal,
+            timeoutMs,
+          )
+          await runAbortable(
+            page.waitForSelector(capture.readySelector, { state: "visible", timeout: timeoutMs }),
+            capture.signal,
+            timeoutMs,
+          )
+          await runAbortable(
+            page.evaluate(() => document.fonts.ready),
+            capture.signal,
+            timeoutMs,
+          )
+          await runAbortable(
+            page.evaluate(
+              () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+            ),
+            capture.signal,
+            timeoutMs,
+          )
+          const screenshot = await runAbortable(
+            page.screenshot({
+              type: "png",
+              fullPage: false,
+              animations: "disabled",
+              caret: "hide",
+              scale: "css",
+            }),
+            capture.signal,
+            timeoutMs,
+          )
+          input.verifyBoundary?.()
+          return screenshot
+        },
+        () => context.close(),
+        input.verifyBoundary,
+        timeoutMs,
+      )
     },
     close: async () => {
       if (closed) return
       closed = true
-      await browser?.then(
-        (value) => value.close(),
-        () => undefined,
+      await closeAtBoundary(
+        () =>
+          browser?.then(
+            (value) => value.close(),
+            () => undefined,
+          ) ?? Promise.resolve(),
+        input.verifyBoundary,
+        timeoutMs,
       )
     },
   }
@@ -239,85 +258,171 @@ function runAbortable<A>(work: PromiseLike<A>, signal: AbortSignal, timeoutMs: n
   })
 }
 
-function settleWithin(work: PromiseLike<unknown>, timeoutMs: number): Promise<void> {
+async function closeAtBoundary(close: () => PromiseLike<unknown>, verify: (() => void) | undefined, timeoutMs: number) {
+  const failures: unknown[] = []
+  try {
+    verify?.()
+  } catch (cause) {
+    failures.push(cause)
+  }
+  const cleanupFailure = await settleCleanup(close, timeoutMs)
+  if (cleanupFailure !== undefined) failures.push(cleanupFailure)
+  try {
+    verify?.()
+  } catch (cause) {
+    failures.push(cause)
+  }
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1) {
+    throw new AggregateError(failures, `Playwright cleanup boundary failed: ${failures.map(failureMessage).join("; ")}`)
+  }
+}
+
+async function withBoundaryCleanup<A>(
+  work: () => Promise<A>,
+  close: () => PromiseLike<unknown>,
+  verify: (() => void) | undefined,
+  timeoutMs: number,
+): Promise<A> {
+  let outcome: { readonly success: true; readonly value: A } | { readonly success: false; readonly cause: unknown }
+  try {
+    outcome = { success: true, value: await work() }
+  } catch (cause) {
+    outcome = { success: false, cause }
+  }
+  let cleanupFailure: unknown
+  try {
+    await closeAtBoundary(close, verify, timeoutMs)
+  } catch (cause) {
+    cleanupFailure = cause
+  }
+  if (!outcome.success && cleanupFailure !== undefined) {
+    throw new AggregateError(
+      [outcome.cause, cleanupFailure],
+      `Playwright capture and cleanup failed: ${failureMessage(outcome.cause)}; ${failureMessage(cleanupFailure)}`,
+    )
+  }
+  if (!outcome.success) throw outcome.cause
+  if (cleanupFailure !== undefined) throw cleanupFailure
+  return outcome.value
+}
+
+function settleCleanup(close: () => PromiseLike<unknown>, timeoutMs: number): Promise<unknown> {
+  let work: PromiseLike<unknown>
+  try {
+    work = close()
+  } catch (cause) {
+    return Promise.resolve(cause)
+  }
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, timeoutMs)
+    const timer = setTimeout(() => resolve(new Error("Playwright cleanup timed out")), timeoutMs)
     void Promise.resolve(work).then(
       () => {
         clearTimeout(timer)
-        resolve()
+        resolve(undefined)
       },
-      () => {
+      (cause) => {
         clearTimeout(timer)
-        resolve()
+        resolve(cause)
       },
     )
   })
 }
 
-export function productionRuntime(input: {
+function failureMessage(cause: unknown) {
+  return cause instanceof Error ? cause.message : String(cause)
+}
+
+export interface ProductionRuntimeOptions {
   readonly tempRoot: string
   readonly browserRoot?: string
   readonly timeoutMs?: number
-}): Runtime {
-  requireDirectory(input.browserRoot ?? requireBrowserRoot())
+  readonly browserExecutablePath?: string
+  readonly browserRuntimePolicy: (canonicalBrowserRoot: string) => void
+  readonly browserCachePolicy: (canonicalBrowserCache: string) => void
+  /** Trusted test seam; production uses Playwright's Chromium binding. */
+  readonly browserType?: BrowserType
+}
+
+export function productionRuntime(input: ProductionRuntimeOptions): Runtime {
+  const configuredBrowserRoot = input.browserRoot ?? requireBrowserRoot()
+  input.browserRuntimePolicy(configuredBrowserRoot)
+  input.browserCachePolicy(input.tempRoot)
+  const browserRoot = requireProductionDirectory(configuredBrowserRoot)
+  const tempRoot = requireProductionDirectory(input.tempRoot)
+  const executablePath = input.browserExecutablePath ?? chromium.executablePath()
+  const executableIdentity = requireProductionExecutable(browserRoot, executablePath)
+  const verifyBoundary = () => {
+    input.browserRuntimePolicy(browserRoot)
+    input.browserCachePolicy(tempRoot)
+    requireProductionDirectory(browserRoot)
+    requireProductionDirectory(tempRoot)
+    if (requireProductionExecutable(browserRoot, executablePath) !== executableIdentity) {
+      throw new TypeError("Playwright production executable identity changed")
+    }
+  }
+  verifyBoundary()
   return makeRuntime({
-    tempRoot: input.tempRoot,
+    tempRoot,
     timeoutMs: input.timeoutMs,
-    browserType: {
-      launch: async (options) => {
-        const browser = await chromium.launch(options)
-        return {
-          newContext: async (contextOptions) => {
-            const context = await browser.newContext({
-              ...contextOptions,
-              permissions: [...contextOptions.permissions],
-            })
-            return {
-              route: async (pattern, handler) => {
-                await context.route(pattern, (route) =>
-                  handler({
-                    request: () => ({ url: () => route.request().url() }),
-                    fetch: async (fetchOptions) => {
-                      const response = await route.fetch(fetchOptions)
-                      return {
-                        status: () => response.status(),
-                        headers: () => response.headers(),
-                        fulfill: () => route.fulfill({ response }),
-                        dispose: () => response.dispose(),
-                      }
-                    },
-                    abort: () => route.abort(),
-                  }),
-                )
-              },
-              routeWebSocket: async (pattern, handler) => {
-                await context.routeWebSocket(pattern, (route) =>
-                  handler({
-                    url: () => route.url(),
-                    connectToServer: () => {
-                      route.connectToServer()
-                    },
-                    close: (closeOptions) => route.close(closeOptions),
-                  }),
-                )
-              },
-              newPage: async () => {
-                const page = await context.newPage()
-                return {
-                  goto: (url, gotoOptions) => page.goto(url, gotoOptions),
-                  waitForSelector: (selector, selectorOptions) => page.waitForSelector(selector, selectorOptions),
-                  evaluate: (callback) => page.evaluate(callback),
-                  screenshot: async (screenshotOptions) => Uint8Array.from(await page.screenshot(screenshotOptions)),
-                }
-              },
-              close: () => context.close(),
-            }
-          },
-          close: () => browser.close(),
-        }
-      },
-    },
+    verifyBoundary,
+    executablePath,
+    browserType:
+      input.browserType ??
+      ({
+        launch: async (options) => {
+          const browser = await chromium.launch(options)
+          return {
+            newContext: async (contextOptions) => {
+              const context = await browser.newContext({
+                ...contextOptions,
+                permissions: [...contextOptions.permissions],
+              })
+              return {
+                route: async (pattern, handler) => {
+                  await context.route(pattern, (route) =>
+                    handler({
+                      request: () => ({ url: () => route.request().url() }),
+                      fetch: async (fetchOptions) => {
+                        const response = await route.fetch(fetchOptions)
+                        return {
+                          status: () => response.status(),
+                          headers: () => response.headers(),
+                          fulfill: () => route.fulfill({ response }),
+                          dispose: () => response.dispose(),
+                        }
+                      },
+                      abort: () => route.abort(),
+                    }),
+                  )
+                },
+                routeWebSocket: async (pattern, handler) => {
+                  await context.routeWebSocket(pattern, (route) =>
+                    handler({
+                      url: () => route.url(),
+                      connectToServer: () => {
+                        route.connectToServer()
+                      },
+                      close: (closeOptions) => route.close(closeOptions),
+                    }),
+                  )
+                },
+                newPage: async () => {
+                  const page = await context.newPage()
+                  return {
+                    goto: (url, gotoOptions) => page.goto(url, gotoOptions),
+                    waitForSelector: (selector, selectorOptions) => page.waitForSelector(selector, selectorOptions),
+                    evaluate: (callback) => page.evaluate(callback),
+                    screenshot: async (screenshotOptions) => Uint8Array.from(await page.screenshot(screenshotOptions)),
+                  }
+                },
+                close: () => context.close(),
+              }
+            },
+            close: () => browser.close(),
+          }
+        },
+      } satisfies BrowserType),
   })
 }
 
@@ -384,4 +489,37 @@ function requireDirectory(value: string): string {
   const canonical = fs.realpathSync.native(value)
   if (!fs.statSync(canonical).isDirectory()) throw new TypeError("Playwright runtime path is not a directory")
   return canonical
+}
+
+function requireProductionDirectory(value: string): string {
+  if (!path.isAbsolute(value)) throw new TypeError("Playwright production roots must be absolute")
+  const lexical = path.resolve(value)
+  const canonical = fs.realpathSync.native(lexical)
+  const stat = fs.lstatSync(lexical)
+  if (lexical !== value || canonical !== lexical || !stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new TypeError("Playwright production roots must be canonical directories without aliases")
+  }
+  return canonical
+}
+
+function requireProductionExecutable(browserRoot: string, value: string): string {
+  if (!path.isAbsolute(value)) throw new TypeError("Playwright production executable must be absolute")
+  const lexical = path.resolve(value)
+  const canonical = fs.realpathSync.native(lexical)
+  const stat = fs.lstatSync(lexical, { bigint: true })
+  const relative = path.relative(browserRoot, canonical)
+  if (
+    lexical !== value ||
+    canonical !== lexical ||
+    relative === "" ||
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.nlink !== 1n
+  ) {
+    throw new TypeError("Playwright production executable must be an exact file inside the browser runtime root")
+  }
+  return `${canonical}:${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.size}`
 }

@@ -12,6 +12,7 @@ import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/productio
 import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { DateTime, Effect } from "effect"
 import fs from "node:fs/promises"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import { WorkflowProductionEvidenceServer } from "../src/workflow/production-evidence"
 
@@ -21,8 +22,43 @@ describe("Workflow production evidence Server composition", () => {
     expect(WorkflowProductionEvidenceServer.compositionNodes).toBeFunction()
   })
 
+  test("treats a preview lease as live only while its Workflow is running and has no cancellation request", async () => {
+    const workflowID = WorkflowSchema.ID.make("wfl_server_preview_lease_probe")
+    const review = {
+      ...stage(workflowID, "visual_review", 0, 0, "running"),
+      leaseOwner: "preview-owner",
+      leaseExpiresAt: DateTime.makeUnsafe(2_000),
+    }
+    const makeRun = (status: "running" | "failed", cancelRequestedAt?: number) =>
+      WorkflowSchema.Info.make({
+        id: workflowID,
+        type: "visual-build",
+        status,
+        currentStageID: review.id,
+        input: {},
+        budget: {},
+        usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
+        version: 1,
+        time: { created: DateTime.makeUnsafe(1), updated: DateTime.makeUnsafe(2) },
+        ...(cancelRequestedAt === undefined ? {} : { cancelRequestedAt: DateTime.makeUnsafe(cancelRequestedAt) }),
+      })
+    let detail = { run: makeRun("running"), stages: [review], artifacts: [] }
+    const dependencies = { getWorkflow: () => Effect.succeed(detail) }
+    const resolver = WorkflowProductionEvidenceServer.makePreviewLeaseResolver(dependencies, () => 1_000)
+    const probe = WorkflowProductionEvidenceServer.makePreviewLeaseLiveProbe(dependencies, () => 1_000)
+    const lease = await resolver(workflowID)
+
+    expect(await probe(lease)).toBe(true)
+    detail = { ...detail, run: makeRun("failed") }
+    await expect(resolver(workflowID)).rejects.toThrow("Stage lease")
+    expect(await probe(lease)).toBe(false)
+    detail = { ...detail, run: makeRun("running", 900) }
+    await expect(resolver(workflowID)).rejects.toThrow("Stage lease")
+    expect(await probe(lease)).toBe(false)
+  })
+
   test("reloads exact owner, revision, baseline, design, plan, and current workspace authority", async () => {
-    const directory = await fs.mkdtemp("D:\\OpenCode-Task23.7b\\resolver-")
+    const directory = await fs.mkdtemp(path.join(tmpdir(), "workflow-production-resolver-"))
     try {
       const source = "<!doctype html><main>ready</main>"
       await fs.writeFile(path.join(directory, "index.html"), source)
@@ -31,7 +67,11 @@ describe("Workflow production evidence Server composition", () => {
       const designStage = stage(workflowID, "design", 0, 0)
       const decomposeStage = stage(workflowID, "decompose", 1, 0)
       const implementStage = stage(workflowID, "implement", 2, 0)
-      const reviewStage = stage(workflowID, "visual_review", 3, 0, "running")
+      const reviewStage = {
+        ...stage(workflowID, "visual_review", 3, 0, "running"),
+        leaseOwner: "production-resolver-owner",
+        leaseExpiresAt: DateTime.makeUnsafe(4_000),
+      }
       const sourceSha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex")
       const spec = {
         schemaVersion: 1 as const,

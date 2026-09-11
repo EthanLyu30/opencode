@@ -11,6 +11,7 @@ import { Credential } from "../../credential"
 import { makeGlobalNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
 import { ResponsesV2 } from "../../responses"
+import { ResponsesAdmission } from "../../responses/admission"
 import { SessionMessage } from "../../session/message"
 import { SessionStore } from "../../session/store"
 import { ToolRegistry } from "../../tool/registry"
@@ -95,6 +96,7 @@ type ProviderResult = typeof ProviderResult.Type
 const ProviderTurn = Schema.Struct({
   sequence: Schema.Number,
   requestFingerprint: Schema.String,
+  preTurnUsage: Workflow.Usage.pipe(Schema.optional),
   result: Schema.optional(ProviderResult),
 })
 
@@ -319,24 +321,34 @@ const productionLayer = Layer.effect(
               priorArtifacts: input.artifacts,
               ...(trustedMessages === undefined ? {} : { messages: trustedMessages }),
             })
-            const continuation = yield* continuationFromStage(input, responseID, responses, route, contract)
+            let continuation = yield* continuationFromStage(input, responseID, responses, route, contract)
+            const recoveryRetry = input.stage.recoveryAction === "retry"
             if (continuation?.activeTurn?.pendingCallID !== undefined) {
-              return yield* Effect.fail({
-                failure: {
-                  category: "ambiguous",
-                  code: "tool_execution_ambiguous",
-                  message: "A local tool may have produced side effects before its result was durably checkpointed.",
+              if (!recoveryRetry)
+                return yield* Effect.fail({
+                  failure: {
+                    category: "ambiguous",
+                    code: "tool_execution_ambiguous",
+                    message: "A local tool may have produced side effects before its result was durably checkpointed.",
+                  },
+                  usage: zeroUsage,
+                } satisfies ExecutionFailure)
+              continuation = {
+                ...continuation,
+                activeTurn: {
+                  calls: continuation.activeTurn.calls,
+                  results: continuation.activeTurn.results,
                 },
-                usage: zeroUsage,
-              } satisfies ExecutionFailure)
+              }
             }
+            const recoveredContinuation = continuation
             const recoveryMaterialization =
-              continuation?.catalogFingerprint === undefined
+              recoveredContinuation?.catalogFingerprint === undefined
                 ? undefined
                 : yield* Effect.gen(function* () {
                     yield* WorkflowRoleAgents.reassert(route.role)
                     const materialization = yield* registry.materialize(contract.permissions)
-                    if (materialization.fingerprint !== continuation.catalogFingerprint) {
+                    if (materialization.fingerprint !== recoveredContinuation.catalogFingerprint && !recoveryRetry) {
                       return yield* Effect.fail(
                         executionFailure(
                           "ambiguous",
@@ -346,23 +358,30 @@ const productionLayer = Layer.effect(
                         ),
                       )
                     }
-                    if (continuation.providerTurn !== undefined) {
+                    if (recoveredContinuation.providerTurn !== undefined) {
                       const recoveredMessages = [
                         ...contract.messages,
-                        ...continuation.turns.flatMap(continuationMessages),
+                        ...recoveredContinuation.turns.flatMap(continuationMessages),
                       ]
-                      const remainingTokens = remainingTokenBudget(input, route, continuation.usage)
+                      const remainingTokens = remainingTokenBudget(
+                        input,
+                        route,
+                        recoveredContinuation.providerTurn.preTurnUsage ?? recoveredContinuation.usage,
+                      )
                       const requestFingerprint = WorkflowProviderRequest.build({
                         model: route.model,
                         route,
                         contract,
-                        sequence: continuation.providerTurn.sequence,
+                        sequence: recoveredContinuation.providerTurn.sequence,
                         catalogFingerprint: materialization.fingerprint,
                         messages: recoveredMessages,
                         tools: materialization.definitions,
                         remainingTokens,
                       }).fingerprint
-                      if (requestFingerprint !== continuation.providerTurn.requestFingerprint)
+                      if (
+                        requestFingerprint !== recoveredContinuation.providerTurn.requestFingerprint &&
+                        !recoveryRetry
+                      )
                         return yield* Effect.fail(
                           executionFailure(
                             "invalid_request",
@@ -374,14 +393,16 @@ const productionLayer = Layer.effect(
                     return materialization
                   })
             if (continuation?.providerTurn !== undefined && continuation.providerTurn.result === undefined) {
-              return yield* Effect.fail({
-                failure: {
-                  category: "ambiguous",
-                  code: "provider_execution_ambiguous",
-                  message: "A provider request may have completed before its result was durably checkpointed.",
-                },
-                usage: zeroUsage,
-              } satisfies ExecutionFailure)
+              if (!recoveryRetry)
+                return yield* Effect.fail({
+                  failure: {
+                    category: "ambiguous",
+                    code: "provider_execution_ambiguous",
+                    message: "A provider request may have completed before its result was durably checkpointed.",
+                  },
+                  usage: zeroUsage,
+                } satisfies ExecutionFailure)
+              continuation = { ...continuation, providerTurn: undefined }
             }
             const model = yield* credentialedModel(credentials, route).pipe(
               Effect.mapError((error) => settleExecutionFailure(response, error)),
@@ -399,7 +420,9 @@ const productionLayer = Layer.effect(
             const responseOutput: Responses.ItemPayload[] = [...(continuation?.responseOutput ?? [])]
             let activeTurn = continuation?.activeTurn
             let providerTurn = continuation?.providerTurn
-            let catalogFingerprint = continuation?.catalogFingerprint
+            let catalogFingerprint = recoveryRetry
+              ? (recoveryMaterialization?.fingerprint ?? continuation?.catalogFingerprint)
+              : continuation?.catalogFingerprint
             let recoverySnapshot = recoveryMaterialization
             let generated: ProviderResult | undefined
             while (true) {
@@ -436,7 +459,7 @@ const productionLayer = Layer.effect(
                     remainingTokens,
                   })
                   const requestFingerprint = requestSnapshot.fingerprint
-                  providerTurn = { sequence, requestFingerprint }
+                  providerTurn = { sequence, requestFingerprint, preTurnUsage: usage }
                   yield* saveContinuation(input, responses, response, {
                     kind: "workflow.model.continuation",
                     version: 2,
@@ -458,13 +481,41 @@ const productionLayer = Layer.effect(
                     artifacts: toolArtifacts,
                     ...(input.preparation?.authority === undefined ? {} : { preparation: input.preparation.authority }),
                   } satisfies ModelContinuation)
-                  const raw = yield* modelClient
-                    .generate(requestSnapshot.request)
-                    .pipe(
-                      Effect.mapError((error) =>
-                        providerFailure(input, response, error, usage, checkpointedUsage, providerUsage),
+                  const raw = yield* modelClient.generate(requestSnapshot.request).pipe(
+                    Effect.catch((error) =>
+                      // A typed provider failure proves that this request did
+                      // not produce model output. Roll the durable intent back
+                      // to the exact pre-dispatch continuation before the
+                      // executor schedules a retry. Defects, interruption, and
+                      // process loss do not enter this branch, so their
+                      // unresolved provider intent remains fail-closed.
+                      saveContinuation(input, responses, response, {
+                        kind: "workflow.model.continuation",
+                        version: 2,
+                        providerID: route.providerID,
+                        modelID: route.modelID,
+                        protocol: route.protocol,
+                        reasoningEffort: route.reasoningEffort,
+                        contractFingerprint: contract.contractFingerprint,
+                        contextDigest: contract.contextDigest,
+                        routeFingerprint: contract.routeFingerprint,
+                        ...(responseID === undefined ? {} : { responseID }),
+                        completedTurns: usage.turns,
+                        turns: continuationTurns,
+                        usage,
+                        providerUsage,
+                        responseOutput,
+                        artifacts: toolArtifacts,
+                        ...(input.preparation?.authority === undefined
+                          ? {}
+                          : { preparation: input.preparation.authority }),
+                      } satisfies ModelContinuation).pipe(
+                        Effect.andThen(
+                          Effect.fail(providerFailure(input, response, error, usage, checkpointedUsage, providerUsage)),
+                        ),
                       ),
-                    )
+                    ),
+                  )
                   usage = addWorkflowUsage(usage, raw.usage)
                   providerUsage = addResponseUsage(providerUsage, raw.usage)
                   generated = yield* Effect.try({
@@ -478,7 +529,7 @@ const productionLayer = Layer.effect(
                       usage,
                     }),
                   })
-                  providerTurn = { sequence, requestFingerprint, result: generated }
+                  providerTurn = { ...providerTurn, result: generated }
                   yield* saveContinuation(input, responses, response, {
                     kind: "workflow.model.continuation",
                     version: 2,
@@ -747,6 +798,7 @@ const productionLayer = Layer.effect(
               usage,
               providerUsage,
               artifacts: toolArtifacts,
+              ...(trustedMessages === undefined ? {} : { trustedMessages }),
               responseSettlement:
                 responseID === undefined || response === undefined
                   ? undefined
@@ -912,6 +964,17 @@ function decodeAndValidateContinuation(
           : continuation.providerTurn.result === undefined
             ? continuation.usage.turns + 1
             : continuation.usage.turns
+      const preTurnUsageInvalid =
+        continuation.providerTurn !== undefined &&
+        continuation.providerTurn.preTurnUsage !== undefined &&
+        (continuation.providerTurn.sequence !== continuation.providerTurn.preTurnUsage.turns + 1 ||
+          continuation.providerTurn.preTurnUsage.tokens > continuation.usage.tokens ||
+          continuation.providerTurn.preTurnUsage.toolCalls !== continuation.usage.toolCalls ||
+          continuation.providerTurn.preTurnUsage.attempts !== continuation.usage.attempts ||
+          (continuation.providerTurn.result === undefined
+            ? continuation.providerTurn.preTurnUsage.tokens !== continuation.usage.tokens ||
+              continuation.providerTurn.preTurnUsage.turns !== continuation.usage.turns
+            : continuation.providerTurn.preTurnUsage.turns + 1 !== continuation.usage.turns))
       if (
         continuation.providerID !== route.providerID ||
         continuation.modelID !== route.modelID ||
@@ -929,6 +992,7 @@ function decodeAndValidateContinuation(
         continuation.providerTurn?.sequence !== expectedProviderSequence ||
         (continuation.providerTurn !== undefined && continuation.catalogFingerprint === undefined) ||
         (continuation.providerTurn !== undefined && continuation.activeTurn !== undefined) ||
+        preTurnUsageInvalid ||
         activeTurnInvalid ||
         invalidTurns
       ) {
@@ -1105,8 +1169,21 @@ function responseContext(responses: ResponsesV2.Interface, responseID: Responses
       )
     const transient = response.store ? undefined : yield* responses.transientInput(responseID)
     const items = transient ?? (yield* responses.contextItems(responseID).pipe(Effect.mapError(responseFailure)))
-    return yield* responseItemsToMessages(items)
+    return yield* responseItemsToMessages(items.filter((item) => !ownedVisualBuildReceipt(item, response)))
   })
+}
+
+function ownedVisualBuildReceipt(item: Responses.ItemPayload, response: Responses.Resource): boolean {
+  const receipt = ResponsesAdmission.tryDecodeVisualBuildReceipt(item)
+  return (
+    receipt !== undefined &&
+    receipt.ids.responseID === response.id &&
+    receipt.ids.workflowID === response.workflowID &&
+    receipt.requestHash === response.requestHash &&
+    receipt.response.model === response.model &&
+    receipt.response.store === response.store &&
+    receipt.response.background === response.background
+  )
 }
 
 function responseItemsToMessages(items: ReadonlyArray<Responses.ItemPayload>) {

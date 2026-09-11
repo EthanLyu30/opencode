@@ -15,15 +15,33 @@ import path from "node:path"
 import { PlaywrightCapture } from "../src/workflow/playwright"
 import { ProcessOwnership } from "../src/workflow/process-ownership"
 import { EvidenceLedger } from "../src/workflow/evidence-ledger"
-import { WorkflowVisualHostServer } from "../src/workflow/visual-host"
+import { WorkflowVisualHostServer as WorkflowVisualHostServerModule } from "../src/workflow/visual-host"
+import { VisualHostClaim } from "../src/workflow/visual-host-claim"
 
 const workflowID = WorkflowSchema.ID.make("wfl_server_visual_host")
 const captureStageID = WorkflowSchema.StageID.make("wfs_server_visual_capture")
 const implementationSha256 = "c".repeat(64)
-const resolveImplementationContract: WorkflowVisualHost.ResolveImplementationContract = async () => ({
+const testPreviewLease = (id: WorkflowSchema.ID = workflowID): WorkflowVisualHost.PreviewLeaseAuthority => ({
+  workflowID: id,
+  stageID: captureStageID,
+  attempt: 1,
+  leaseOwner: "workflow-visual-host-test-owner",
+  leaseExpiresAt: 2_000_000_000_000,
+})
+const resolveImplementationContract: WorkflowVisualHost.ResolveImplementationContract = async (input) => ({
   implementationSha256,
   readySelector: "#ready",
+  previewLease: testPreviewLease(input.workflowID),
 })
+const WorkflowVisualHostServer = {
+  ...WorkflowVisualHostServerModule,
+  makeLayer: (options: WorkflowVisualHostServerModule.Options) =>
+    WorkflowVisualHostServerModule.makeLayer({
+      resolvePreviewLease: async (id) => testPreviewLease(id),
+      isPreviewLeaseLive: async () => true,
+      ...options,
+    }),
+}
 const fixtureRoot = path.join(import.meta.dir, "fixtures", "workflow-visual")
 const testRoot = "D:\\OpenCode-Local\\tmp\\workflow-host-tests"
 
@@ -32,6 +50,324 @@ afterAll(async () => {
 })
 
 describe("WorkflowVisualHostServer", () => {
+  test("checks a production host-root policy before creating a missing preview root", async () => {
+    await using temp = await taskTemp()
+    const hostRoot = path.join(temp.path, "missing-preview-root")
+    const policyInputs: string[] = []
+
+    const failure = await Effect.runPromise(
+      Effect.scoped(WorkflowVisualHost.Service).pipe(
+        Effect.provide(
+          WorkflowVisualHostServerModule.makeLayer({
+            hostRoot,
+            evidenceRoot: path.join(temp.path, "evidence"),
+            browser: browserRuntime().runtime,
+            hostRootPolicy: (candidate) => {
+              policyInputs.push(candidate)
+              throw new TypeError("preview root is not deployment-owned")
+            },
+            resolvePreviewLease: async (id) => testPreviewLease(id),
+            isPreviewLeaseLive: async () => true,
+          }),
+        ),
+        Effect.flip,
+      ),
+    )
+
+    expect(failure).toMatchObject({ code: "visual_host_unavailable" })
+    expect(policyInputs).toEqual([hostRoot])
+    expect(await fs.exists(hostRoot)).toBe(false)
+  })
+
+  test("revalidates a replaced preview root before writing a capability", async () => {
+    await using temp = await taskTemp()
+    const hostRoot = path.join(temp.path, "preview")
+    const evidenceRoot = path.join(temp.path, "evidence")
+    await fs.mkdir(hostRoot)
+    const expected = rootIdentity(hostRoot)
+    const parked = `${hostRoot}-parked`
+    let result: { readonly _tag: "Success" | "Failure" } | undefined
+
+    try {
+      result = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            yield* Effect.promise(async () => {
+              await fs.rename(hostRoot, parked)
+              await fs.mkdir(hostRoot)
+            })
+            return yield* host
+              .materializeReference({
+                workflowID,
+                referenceApp: {
+                  entrypoint: "index.html",
+                  readySelector: "#ready",
+                  projectStack: ["HTML"],
+                  files: [{ path: "index.html", content: '<!doctype html><div id="ready"></div>' }],
+                },
+              })
+              .pipe(Effect.exit)
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHostServerModule.makeLayer({
+              hostRoot,
+              evidenceRoot,
+              browser: browserRuntime().runtime,
+              hostRootPolicy: (candidate) => {
+                if (candidate !== hostRoot || rootIdentity(candidate) !== expected) {
+                  throw new TypeError("preview root identity changed")
+                }
+              },
+              resolvePreviewLease: async (id) => testPreviewLease(id),
+              isPreviewLeaseLive: async () => true,
+            }),
+          ),
+        ),
+      )
+
+      expect(result._tag).toBe("Failure")
+      expect(await fs.readdir(hostRoot)).toEqual([])
+    } finally {
+      if (await fs.exists(hostRoot)) await fs.rmdir(hostRoot)
+      if (await fs.exists(parked)) await fs.rename(parked, hostRoot)
+    }
+  })
+
+  test("revalidates an ancestor junction before writing a capability", async () => {
+    await using temp = await taskTemp()
+    const deployment = path.join(temp.path, "deployment")
+    const hostRoot = path.join(deployment, "temp", "preview")
+    const evidenceRoot = path.join(temp.path, "evidence")
+    await fs.mkdir(hostRoot, { recursive: true })
+    const parked = `${deployment}-parked`
+    let beforeEntries: string[] = []
+
+    try {
+      const result = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            yield* Effect.promise(async () => {
+              beforeEntries = await fs.readdir(hostRoot)
+              await fs.rename(deployment, parked)
+              await fs.symlink(parked, deployment, process.platform === "win32" ? "junction" : "dir")
+            })
+            return yield* host
+              .materializeReference({
+                workflowID,
+                referenceApp: {
+                  entrypoint: "index.html",
+                  readySelector: "#ready",
+                  projectStack: ["HTML"],
+                  files: [{ path: "index.html", content: '<!doctype html><div id="ready"></div>' }],
+                },
+              })
+              .pipe(Effect.exit)
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHostServerModule.makeLayer({
+              hostRoot,
+              evidenceRoot,
+              browser: browserRuntime().runtime,
+              hostRootPolicy: () => undefined,
+              resolvePreviewLease: async (id) => testPreviewLease(id),
+              isPreviewLeaseLive: async () => true,
+            }),
+          ),
+        ),
+      )
+
+      expect(result._tag).toBe("Failure")
+      expect(await fs.readdir(path.join(parked, "temp", "preview"))).toEqual(beforeEntries)
+    } finally {
+      if (await fs.lstat(deployment).catch(() => undefined)) await fs.unlink(deployment)
+      if (await fs.exists(parked)) await fs.rename(parked, deployment)
+    }
+  })
+
+  test("validates paired lease options before opening the evidence ledger", async () => {
+    await using temp = await taskTemp()
+    const evidenceRoot = path.join(temp.path, "incomplete-lease-evidence")
+
+    const failure = await Effect.runPromise(
+      Effect.scoped(WorkflowVisualHost.Service).pipe(
+        Effect.provide(
+          WorkflowVisualHostServerModule.makeLayer({
+            hostRoot: temp.path,
+            evidenceRoot,
+            browser: browserRuntime().runtime,
+            resolvePreviewLease: async (id) => testPreviewLease(id),
+          }),
+        ),
+        Effect.flip,
+      ),
+    )
+
+    expect(failure).toMatchObject({ code: "visual_host_unavailable" })
+    expect(await fs.exists(evidenceRoot)).toBe(false)
+  })
+
+  test("authorizes and re-verifies the exact preview descendant before recursive cleanup", async () => {
+    await using temp = await taskTemp()
+    const events: Array<{ readonly operation: "authorize" | "verify"; readonly target: string }> = []
+    const authorities = new WeakSet<object>()
+    const cleanupPolicy = {
+      authorizeCleanupTarget: (input: { readonly target: string; readonly workspace?: string }) => {
+        const authority = Object.freeze({
+          target: input.target,
+          previewCapabilityRoot: temp.path,
+          identity: "test-cleanup-authority",
+        })
+        authorities.add(authority)
+        events.push({ operation: "authorize", target: input.target })
+        return authority
+      },
+      verifyCleanupTarget: (authority: { readonly target: string }) => {
+        if (!authorities.has(authority)) throw new TypeError("cleanup authority was not minted")
+        events.push({ operation: "verify", target: authority.target })
+        return authority.target
+      },
+    }
+    let hostID: WorkflowVisualHost.HostID | undefined
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          hostID = (yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: '<!doctype html><div id="ready"></div>' }],
+            },
+          })).hostID
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            cleanupPolicy,
+          }),
+        ),
+      ),
+    )
+
+    if (hostID === undefined) throw new TypeError("preview host was not materialized")
+    const target = path.join(temp.path, hostID)
+    expect(events).toEqual([
+      { operation: "authorize", target },
+      { operation: "verify", target },
+    ])
+    expect(await fs.exists(target)).toBe(false)
+  })
+
+  test("derives production visual hosting, browser storage, Docker, and cleanup from one root contract", async () => {
+    await using fixture = await productionHostFixture()
+    const browserInputs: PlaywrightCapture.ProductionRuntimeOptions[] = []
+    const browser = browserRuntime().runtime
+    const browserRuntimeFactory = (input: PlaywrightCapture.ProductionRuntimeOptions) => {
+      browserInputs.push(input)
+      return browser
+    }
+    let previewDirectory: string | undefined
+    let deploymentLocationResult: { readonly _tag: "Left" | "Right"; readonly value: unknown } | undefined
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: '<!doctype html><div id="ready"></div>' }],
+            },
+          })
+          previewDirectory = path.join(fixture.directories.preview, preview.hostID)
+          expect(yield* Effect.promise(() => fs.exists(previewDirectory!))).toBe(true)
+          expect(yield* Effect.promise(() => fs.exists(path.join(fixture.directories.data, "evidence.sqlite")))).toBe(
+            true,
+          )
+          const forbiddenPlan = PreviewPlan.freeze({
+            authority: "admission",
+            location: Location.Ref.make({ directory: AbsolutePath.make(fixture.directories.deployment) }),
+            preview: { kind: "static", entrypoint: "index.html" },
+            allowedOrigins: [],
+          })
+          deploymentLocationResult = yield* host
+            .prepareImplementation({ workflowID, revision: 1, plan: forbiddenPlan })
+            .pipe(
+              Effect.match({
+                onFailure: (value) => ({ _tag: "Left" as const, value }),
+                onSuccess: (value) => ({ _tag: "Right" as const, value }),
+              }),
+            )
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServerModule.productionLayer({
+            environment: fixture.environment,
+            aclProbe: fixture.probe,
+            resolvePreviewLease: async (id) => testPreviewLease(id),
+            isPreviewLeaseLive: async () => true,
+            browserRuntimeFactory,
+          }),
+        ),
+      ),
+    )
+
+    expect(browserInputs).toEqual([
+      {
+        browserRoot: fixture.directories.browserRuntime,
+        tempRoot: fixture.directories.browserCache,
+        browserRuntimePolicy: expect.any(Function),
+        browserCachePolicy: expect.any(Function),
+      },
+    ])
+    expect(deploymentLocationResult).toMatchObject({
+      _tag: "Left",
+      value: { code: "invalid_preview_plan" },
+    })
+    if (previewDirectory === undefined) throw new TypeError("production preview directory was not observed")
+    expect(await fs.exists(previewDirectory)).toBe(false)
+  })
+
+  test("passes the production contract browser-runtime and cache verifiers into Playwright", async () => {
+    await using fixture = await productionHostFixture()
+    let browserInput: PlaywrightCapture.ProductionRuntimeOptions | undefined
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* WorkflowVisualHost.Service
+          if (browserInput === undefined) throw new TypeError("browser runtime factory was not called")
+          fixture.invalidateAcl()
+          expect(() => browserInput!.browserRuntimePolicy(fixture.directories.browserRuntime)).toThrow(/ACL descriptor/)
+          expect(() => browserInput!.browserCachePolicy(fixture.directories.browserCache)).toThrow(/ACL descriptor/)
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServerModule.productionLayer({
+            environment: fixture.environment,
+            aclProbe: fixture.probe,
+            browserRuntimeFactory: (input) => {
+              browserInput = input
+              return browserRuntime().runtime
+            },
+          }),
+        ),
+      ),
+    )
+  })
+
   test("materializes strict reference files behind a fresh loopback capability and removes them with the scope", async () => {
     await using temp = await taskTemp()
     const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
@@ -559,6 +895,390 @@ describe("WorkflowVisualHostServer", () => {
     expect(runtime.contextsClosed).toBe(2)
   })
 
+  test("clears its exact intent and stages no PNG when the live lease is lost after browser production", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const produced = browserRuntime()
+    const ledger = EvidenceLedger.open(path.join(temp.path, ".evidence"))
+    let live = true
+    const runtime: PlaywrightCapture.Runtime = {
+      capture: async (input) => {
+        const bytes = await produced.runtime.capture(input)
+        live = false
+        return bytes
+      },
+      close: () => produced.runtime.close(),
+    }
+    const lease = testPreviewLease(workflowID)
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          const input = {
+            preview,
+            stageID: WorkflowSchema.StageID.make("wfs_server_visual_late_lease"),
+            viewport: { name: "desktop", width: 1440, height: 900 } as const,
+          }
+          const coordinates = WorkflowVisualHost.evidenceCoordinates(input)
+          const outcome = yield* host.capture(input).pipe(
+            Effect.match({
+              onFailure: (left) => ({ _tag: "Left" as const, left }),
+              onSuccess: (right) => ({ _tag: "Right" as const, right }),
+            }),
+          )
+          return {
+            outcome,
+            item: yield* Effect.promise(() => ledger.get(coordinates)),
+            used: yield* Effect.promise(() => ledger.used(String(workflowID))),
+          }
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: runtime,
+            evidenceLedger: ledger,
+            resolvePreviewLease: async () => lease,
+            isPreviewLeaseLive: async (candidate) => live && candidate.leaseOwner === lease.leaseOwner,
+          }),
+        ),
+      ),
+    )
+
+    expect(result.outcome).toMatchObject({ _tag: "Left", left: { code: "capture_failed" } })
+    expect(result.item).toBeUndefined()
+    expect(result.used).toBe(0)
+    expect(produced.contextOptions).toHaveLength(1)
+    expect(await VisualHostClaim.list(temp.path)).toEqual([])
+  })
+
+  test("creates no intent and calls no browser when capture enters after lease loss", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const base = EvidenceLedger.open(path.join(temp.path, ".evidence"))
+    let beginCalls = 0
+    let browserCalls = 0
+    let live = true
+    const ledger: EvidenceLedger.Service = {
+      ...base,
+      beginCapture: async (input) => {
+        beginCalls++
+        return base.beginCapture(input)
+      },
+    }
+    const runtime: PlaywrightCapture.Runtime = {
+      capture: async () => {
+        browserCalls++
+        return WorkflowVisualHost.deterministicPng({ name: "entry-lost", width: 390, height: 844 })
+      },
+      close: async () => undefined,
+    }
+    const lease = testPreviewLease(workflowID)
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          live = false
+          const outcome = yield* host
+            .capture({
+              preview,
+              stageID: WorkflowSchema.StageID.make("wfs_server_visual_entry_lost"),
+              viewport: { name: "mobile", width: 390, height: 844 },
+            })
+            .pipe(
+              Effect.match({
+                onFailure: (left) => ({ _tag: "Left" as const, left }),
+                onSuccess: (right) => ({ _tag: "Right" as const, right }),
+              }),
+            )
+          return { outcome, used: yield* Effect.promise(() => base.used(String(workflowID))) }
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: runtime,
+            evidenceLedger: ledger,
+            resolvePreviewLease: async () => lease,
+            isPreviewLeaseLive: async () => live,
+          }),
+        ),
+      ),
+    )
+
+    expect(result.outcome).toMatchObject({ _tag: "Left", left: { code: "capture_failed" } })
+    expect({ beginCalls, browserCalls, used: result.used }).toEqual({ beginCalls: 0, browserCalls: 0, used: 0 })
+  })
+
+  test("clears the exact intent before browser entry when lease loss follows intent creation", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const base = EvidenceLedger.open(path.join(temp.path, ".evidence"))
+    let live = true
+    let beginCalls = 0
+    let usedCalls = 0
+    let completeCalls = 0
+    let clearCalls = 0
+    let browserCalls = 0
+    const ledger: EvidenceLedger.Service = {
+      ...base,
+      beginCapture: async (input) => {
+        beginCalls++
+        const result = await base.beginCapture(input)
+        live = false
+        return result
+      },
+      used: async (id) => {
+        usedCalls++
+        return base.used(id)
+      },
+      completeCapture: async (input) => {
+        completeCalls++
+        return base.completeCapture(input)
+      },
+      clearCapture: async (input) => {
+        clearCalls++
+        return base.clearCapture(input)
+      },
+    }
+    const runtime: PlaywrightCapture.Runtime = {
+      capture: async () => {
+        browserCalls++
+        return WorkflowVisualHost.deterministicPng({ name: "intent-lost", width: 390, height: 844 })
+      },
+      close: async () => undefined,
+    }
+    const lease = testPreviewLease(workflowID)
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          const input = {
+            preview,
+            stageID: WorkflowSchema.StageID.make("wfs_server_visual_intent_lost"),
+            viewport: { name: "mobile", width: 390, height: 844 } as const,
+          }
+          const coordinates = WorkflowVisualHost.evidenceCoordinates(input)
+          const outcome = yield* host.capture(input).pipe(
+            Effect.match({
+              onFailure: (left) => ({ _tag: "Left" as const, left }),
+              onSuccess: (right) => ({ _tag: "Right" as const, right }),
+            }),
+          )
+          return {
+            outcome,
+            item: yield* Effect.promise(() => base.get(coordinates)),
+            charged: yield* Effect.promise(() => base.used(String(workflowID))),
+          }
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: runtime,
+            evidenceLedger: ledger,
+            resolvePreviewLease: async () => lease,
+            isPreviewLeaseLive: async () => live,
+          }),
+        ),
+      ),
+    )
+
+    expect(result.outcome).toMatchObject({ _tag: "Left", left: { code: "capture_failed" } })
+    expect(result.item).toBeUndefined()
+    expect(result.charged).toBe(0)
+    expect({ beginCalls, usedCalls, browserCalls, completeCalls, clearCalls }).toEqual({
+      beginCalls: 1,
+      usedCalls: 0,
+      browserCalls: 0,
+      completeCalls: 0,
+      clearCalls: 1,
+    })
+  })
+
+  test("runs the final live gate after PNG validation and before durable completion", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const base = EvidenceLedger.open(path.join(temp.path, ".evidence"))
+    let browserReturned = false
+    let postBrowserProbes = 0
+    let completeCalls = 0
+    let clearCalls = 0
+    const ledger: EvidenceLedger.Service = {
+      ...base,
+      completeCapture: async (input) => {
+        completeCalls++
+        return base.completeCapture(input)
+      },
+      clearCapture: async (input) => {
+        clearCalls++
+        return base.clearCapture(input)
+      },
+    }
+    const runtime: PlaywrightCapture.Runtime = {
+      capture: async () => {
+        const bytes = WorkflowVisualHost.deterministicPng({ name: "final-gate", width: 390, height: 844 })
+        browserReturned = true
+        return bytes
+      },
+      close: async () => undefined,
+    }
+    const lease = testPreviewLease(workflowID)
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          const input = {
+            preview,
+            stageID: WorkflowSchema.StageID.make("wfs_server_visual_final_gate"),
+            viewport: { name: "mobile", width: 390, height: 844 } as const,
+          }
+          const coordinates = WorkflowVisualHost.evidenceCoordinates(input)
+          const outcome = yield* host.capture(input).pipe(
+            Effect.match({
+              onFailure: (left) => ({ _tag: "Left" as const, left }),
+              onSuccess: (right) => ({ _tag: "Right" as const, right }),
+            }),
+          )
+          return {
+            outcome,
+            item: yield* Effect.promise(() => base.get(coordinates)),
+            charged: yield* Effect.promise(() => base.used(String(workflowID))),
+          }
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: runtime,
+            evidenceLedger: ledger,
+            resolvePreviewLease: async () => lease,
+            isPreviewLeaseLive: async () => {
+              if (!browserReturned) return true
+              postBrowserProbes++
+              return postBrowserProbes === 1
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result.outcome).toMatchObject({ _tag: "Left", left: { code: "capture_failed" } })
+    expect(result.item).toBeUndefined()
+    expect(result.charged).toBe(0)
+    expect({ postBrowserProbes, completeCalls, clearCalls }).toEqual({
+      postBrowserProbes: 2,
+      completeCalls: 0,
+      clearCalls: 1,
+    })
+  })
+
+  test("rolls back the exact staged capture when the lease is lost after durable completion", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const base = EvidenceLedger.open(path.join(temp.path, ".evidence"))
+    let live = true
+    let completeCalls = 0
+    const ledger: EvidenceLedger.Service = {
+      ...base,
+      completeCapture: async (input) => {
+        completeCalls++
+        const item = await base.completeCapture(input)
+        live = false
+        return item
+      },
+    }
+    const runtime: PlaywrightCapture.Runtime = {
+      capture: async () => WorkflowVisualHost.deterministicPng({ name: "post-complete-loss", width: 390, height: 844 }),
+      close: async () => undefined,
+    }
+    const lease = testPreviewLease(workflowID)
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          const input = {
+            preview,
+            stageID: WorkflowSchema.StageID.make("wfs_server_visual_post_complete_loss"),
+            viewport: { name: "mobile", width: 390, height: 844 } as const,
+          }
+          const coordinates = WorkflowVisualHost.evidenceCoordinates(input)
+          const outcome = yield* host.capture(input).pipe(
+            Effect.match({
+              onFailure: (left) => ({ _tag: "Left" as const, left }),
+              onSuccess: (right) => ({ _tag: "Right" as const, right }),
+            }),
+          )
+          return {
+            outcome,
+            item: yield* Effect.promise(() => base.get(coordinates)),
+            charged: yield* Effect.promise(() => base.used(String(workflowID))),
+          }
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: runtime,
+            evidenceLedger: ledger,
+            resolvePreviewLease: async () => lease,
+            isPreviewLeaseLive: async () => live,
+          }),
+        ),
+      ),
+    )
+
+    expect(result.outcome).toMatchObject({ _tag: "Left", left: { code: "capture_failed" } })
+    expect(result.item).toBeUndefined()
+    expect(result.charged).toBe(0)
+    expect(completeCalls).toBe(1)
+  })
+
   test("fails closed before capability creation without trusted implementation contract authority", async () => {
     await using temp = await taskTemp()
     await using workspaceTemp = await taskTemp()
@@ -670,6 +1390,251 @@ describe("WorkflowVisualHostServer", () => {
     expect(contractValid).toBe(true)
     expect(abortObserved).toBe(true)
     expect((await fs.readdir(temp.path)).filter((name) => /^[a-f0-9]{64}$/.test(name))).toEqual([])
+  })
+
+  test("stops an owned process and publishes no preview when its lease is lost after readiness", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    await fs.writeFile(path.join(workspaceTemp.path, "server.mjs"), "setInterval(() => undefined, 60_000)\n")
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "script", argv: ["node", "server.mjs"] },
+      allowedOrigins: [],
+    })
+    const lease = testPreviewLease(workflowID)
+    let live = true
+    let starts = 0
+    let stops = 0
+    let readiness = 0
+    const process: ProcessOwnership.OwnedProcess = {
+      origin: "http://127.0.0.1:43119",
+      exited: new Promise(() => undefined),
+      stdout: new ReadableStream({ start: (controller) => controller.close() }),
+      stderr: new ReadableStream({ start: (controller) => controller.close() }),
+    }
+    const ownership: ProcessOwnership.Service = {
+      available: true,
+      start: async () => {
+        starts++
+        return process
+      },
+      stop: async (input) => {
+        if (input.process !== process) throw new Error("foreign process")
+        stops++
+      },
+      recover: async () => {
+        throw new Error("unused")
+      },
+    }
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            processOwnership: ownership,
+            probeOwnedOrigin: async (origin) => {
+              if (origin !== process.origin) throw new Error("foreign readiness origin")
+              readiness++
+              live = false
+              return true
+            },
+            resolveImplementationContract: async () => ({
+              implementationSha256,
+              readySelector: "#ready",
+              previewLease: lease,
+            }),
+            resolvePreviewLease: async () => lease,
+            isPreviewLeaseLive: async (candidate) => live && candidate.leaseOwner === lease.leaseOwner,
+          }),
+        ),
+        Effect.match({
+          onFailure: (left) => ({ _tag: "Left" as const, left }),
+          onSuccess: (right) => ({ _tag: "Right" as const, right }),
+        }),
+      ),
+    )
+
+    expect(outcome).toMatchObject({ _tag: "Left", left: { code: "visual_host_unavailable" } })
+    expect({ starts, readiness, stops }).toEqual({ starts: 1, readiness: 1, stops: 1 })
+    expect((await fs.readdir(temp.path)).filter((name) => /^[a-f0-9]{64}$/.test(name))).toEqual([])
+    expect(await VisualHostClaim.list(temp.path)).toEqual([])
+  })
+
+  test("publishes no reference handle when its lease is lost at the final publication seam", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const lease = testPreviewLease(workflowID)
+    let live = true
+    let publicationSeams = 0
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolvePreviewLease: async () => lease,
+            isPreviewLeaseLive: async () => live,
+            onBeforePreviewPublish: async () => {
+              publicationSeams++
+              live = false
+            },
+          }),
+        ),
+        Effect.match({
+          onFailure: (left) => ({ _tag: "Left" as const, left }),
+          onSuccess: (right) => ({ _tag: "Right" as const, right }),
+        }),
+      ),
+    )
+
+    expect(outcome).toMatchObject({ _tag: "Left", left: { code: "visual_host_unavailable" } })
+    expect(publicationSeams).toBe(1)
+    expect(await VisualHostClaim.list(temp.path)).toEqual([])
+  })
+
+  test("publishes no static implementation handle when its lease is lost at the final publication seam", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    await fs.writeFile(path.join(workspaceTemp.path, "index.html"), "<!doctype html><main id=ready></main>")
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "static", entrypoint: "index.html" },
+    })
+    const lease = testPreviewLease(workflowID)
+    let live = true
+    let publicationSeams = 0
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolveImplementationContract: async () => ({
+              implementationSha256,
+              readySelector: "#ready",
+              previewLease: lease,
+            }),
+            resolvePreviewLease: async () => lease,
+            isPreviewLeaseLive: async () => live,
+            onBeforePreviewPublish: async () => {
+              publicationSeams++
+              live = false
+            },
+          }),
+        ),
+        Effect.match({
+          onFailure: (left) => ({ _tag: "Left" as const, left }),
+          onSuccess: (right) => ({ _tag: "Right" as const, right }),
+        }),
+      ),
+    )
+
+    expect(outcome).toMatchObject({ _tag: "Left", left: { code: "visual_host_unavailable" } })
+    expect(publicationSeams).toBe(1)
+    expect(await VisualHostClaim.list(temp.path)).toEqual([])
+  })
+
+  test("stops an owned process without probing readiness when its lease is lost during start", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    await fs.writeFile(path.join(workspaceTemp.path, "server.mjs"), "setInterval(() => undefined, 60_000)\n")
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "script", argv: ["node", "server.mjs"] },
+      allowedOrigins: [],
+    })
+    const lease = testPreviewLease(workflowID)
+    let live = true
+    let starts = 0
+    let stops = 0
+    let readiness = 0
+    const process: ProcessOwnership.OwnedProcess = {
+      origin: "http://127.0.0.1:43120",
+      exited: new Promise(() => undefined),
+      stdout: new ReadableStream({ start: (controller) => controller.close() }),
+      stderr: new ReadableStream({ start: (controller) => controller.close() }),
+    }
+    const ownership: ProcessOwnership.Service = {
+      available: true,
+      start: async () => {
+        starts++
+        live = false
+        return process
+      },
+      stop: async (input) => {
+        if (input.process !== process) throw new Error("foreign process")
+        stops++
+      },
+      recover: async () => {
+        throw new Error("unused")
+      },
+    }
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            processOwnership: ownership,
+            probeOwnedOrigin: async () => {
+              readiness++
+              return true
+            },
+            resolveImplementationContract: async () => ({
+              implementationSha256,
+              readySelector: "#ready",
+              previewLease: lease,
+            }),
+            resolvePreviewLease: async () => lease,
+            isPreviewLeaseLive: async () => live,
+          }),
+        ),
+        Effect.match({
+          onFailure: (left) => ({ _tag: "Left" as const, left }),
+          onSuccess: (right) => ({ _tag: "Right" as const, right }),
+        }),
+      ),
+    )
+
+    expect(outcome).toMatchObject({ _tag: "Left", left: { code: "visual_host_unavailable" } })
+    expect({ starts, readiness, stops }).toEqual({ starts: 1, readiness: 0, stops: 1 })
+    expect(await VisualHostClaim.list(temp.path)).toEqual([])
   })
 
   test("spawns only the frozen argv for a script preview and tears down its process tree on scope close", async () => {
@@ -789,7 +1754,15 @@ describe("WorkflowVisualHostServer", () => {
             const manifest = JSON.parse(
               yield* Effect.promise(() => fs.readFile(path.join(directory, ".host.json"), "utf8")),
             )
-            identity = { hostID: preview.hostID, nonce: manifest.processNonce }
+            identity = {
+              workflowID: manifest.workflowID,
+              stageID: manifest.stageID,
+              attempt: manifest.attempt,
+              leaseOwner: manifest.leaseOwner,
+              leaseExpiresAt: manifest.leaseExpiresAt,
+              hostID: preview.hostID,
+              nonce: manifest.nonce,
+            }
           }),
         ).pipe(
           Effect.provide(
@@ -807,7 +1780,9 @@ describe("WorkflowVisualHostServer", () => {
       expect(await fs.exists(directory)).toBe(true)
       expect(await fetch(`http://127.0.0.1:${port}`).then((response) => response.text())).toBe("still-owned")
     } finally {
-      if (identity !== undefined) await ownership.service.recover(identity).catch(() => undefined)
+      if (identity !== undefined) {
+        await ownership.service.recover({ identity, finalGate: async () => true }).catch(() => undefined)
+      }
       if (directory !== "") await fs.rm(directory, { recursive: true, force: true })
     }
   }, 10_000)
@@ -1063,7 +2038,12 @@ describe("WorkflowVisualHostServer", () => {
             browser: browserRuntime().runtime,
             resolveImplementationContract: async () => {
               await fs.writeFile(path.join(app, "index.html"), changed)
-              return { implementationSha256, readySelector: "#ready", sealedSnapshot }
+              return {
+                implementationSha256,
+                readySelector: "#ready",
+                sealedSnapshot,
+                previewLease: testPreviewLease(workflowID),
+              }
             },
           }),
         ),
@@ -1598,6 +2578,8 @@ describe("WorkflowVisualHostServer", () => {
   test("recovers only expired host-owned capabilities that are not fenced by an active lease", async () => {
     await using temp = await taskTemp()
     const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const expiredWorkflowID = WorkflowSchema.ID.make("wfl_server_visual_expired")
+    let expiredLeaseLive = true
     const result = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -1612,7 +2594,7 @@ describe("WorkflowVisualHostServer", () => {
             },
           })
           const expired = yield* host.materializeReference({
-            workflowID: WorkflowSchema.ID.make("wfl_server_visual_expired"),
+            workflowID: expiredWorkflowID,
             referenceApp: {
               entrypoint: "index.html",
               readySelector: "#ready",
@@ -1620,6 +2602,7 @@ describe("WorkflowVisualHostServer", () => {
               files: [{ path: "index.html", content: reference }],
             },
           })
+          expiredLeaseLive = false
           yield* host.recoverExpired({ activeHostIDs: new Set([leased.hostID]), expiredBefore: 11 })
           expect(leased.hostID).not.toBe(expired.hostID)
           expect(yield* Effect.promise(() => fs.exists(path.join(temp.path, leased.hostID)))).toBe(true)
@@ -1632,6 +2615,8 @@ describe("WorkflowVisualHostServer", () => {
             hostRoot: temp.path,
             browser: browserRuntime().runtime,
             now: () => 10,
+            isPreviewLeaseLive: async (lease) => lease.workflowID === workflowID || expiredLeaseLive,
+            resolvePreviewLease: async (id) => testPreviewLease(id),
           }),
         ),
       ),
@@ -1640,6 +2625,981 @@ describe("WorkflowVisualHostServer", () => {
     expect(await fs.exists(path.join(temp.path, result.leased.hostID))).toBe(false)
     expect(await fs.exists(path.join(temp.path, result.expired.hostID))).toBe(false)
     expect(await fs.exists(temp.path)).toBe(true)
+  })
+
+  test("recovers an authenticated orphan once at fresh runtime startup without sweeping a new active preview", async () => {
+    await using temp = await taskTemp()
+    const identity: ProcessOwnership.Identity = {
+      ...testPreviewLease(workflowID),
+      attempt: 1,
+      leaseOwner: "expired-preview-owner",
+      hostID: WorkflowVisualHost.HostID.make("8".repeat(64)),
+      nonce: "9".repeat(64),
+    }
+    const orphan = (await claimedOrphan(temp.path, identity)).directory
+    const recovered: ProcessOwnership.Identity[] = []
+    const ownership: ProcessOwnership.Service = {
+      available: true,
+      start: async () => {
+        throw new Error("unused")
+      },
+      stop: async () => {
+        throw new Error("unused")
+      },
+      recover: async (candidate) => {
+        if (candidate.identity.hostID !== identity.hostID || candidate.identity.nonce !== identity.nonce) {
+          throw new Error("unauthenticated recovery")
+        }
+        if (!(await candidate.finalGate())) throw new Error("live recovery")
+        recovered.push(candidate.identity)
+      },
+    }
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    let activeDirectory = ""
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const active = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          activeDirectory = path.join(temp.path, active.hostID)
+          expect(yield* Effect.promise(() => fs.exists(orphan))).toBe(false)
+          expect(yield* Effect.promise(() => fs.exists(activeDirectory))).toBe(true)
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            processOwnership: ownership,
+            resolvePreviewLease: async (id) => testPreviewLease(id),
+            isPreviewLeaseLive: async (lease) => lease.leaseOwner !== identity.leaseOwner,
+            now: () => 11,
+          }),
+        ),
+      ),
+    )
+
+    expect(recovered).toEqual([identity])
+    expect(await fs.exists(activeDirectory)).toBe(false)
+    await Effect.runPromise(
+      Effect.scoped(WorkflowVisualHost.Service).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            processOwnership: ownership,
+            resolvePreviewLease: async (id) => testPreviewLease(id),
+            isPreviewLeaseLive: async (lease) => lease.leaseOwner !== identity.leaseOwner,
+            now: () => 12,
+          }),
+        ),
+      ),
+    )
+    expect(recovered).toEqual([identity])
+  })
+
+  test("publishes a capability directory only after its exact claim-bound manifest is durable", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    let created = false
+    let staged = false
+    let published = false
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolvePreviewLease: async (id) => testPreviewLease(id),
+            isPreviewLeaseLive: async () => true,
+            onRecordStagingCreated: async () => {
+              created = true
+            },
+            onRecordStaged: async (stagingDirectory, finalDirectory) => {
+              staged = true
+              expect(await fs.exists(finalDirectory)).toBe(false)
+              const manifest = path.join(stagingDirectory, ".host.json")
+              expect((await fs.stat(manifest)).size).toBeGreaterThan(0)
+              expect((await fs.lstat(manifest)).nlink).toBe(1)
+            },
+            onRecordCreated: async (directory) => {
+              published = true
+              expect(await fs.exists(path.join(directory, ".host.json"))).toBe(true)
+              expect((await fs.readdir(temp.path)).some((entry) => entry.endsWith(".pending"))).toBe(false)
+            },
+          }),
+        ),
+        Effect.match({ onFailure: (error) => ({ error }), onSuccess: () => ({ success: true as const }) }),
+      ),
+    )
+
+    expect({ created, staged, published, outcome }).toEqual({
+      created: true,
+      staged: true,
+      published: true,
+      outcome: { success: true },
+    })
+  })
+
+  test("preserves a foreign final capability directory when atomic record publication collides", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    let sentinel = ""
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          return yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolvePreviewLease: async (id) => testPreviewLease(id),
+            isPreviewLeaseLive: async () => true,
+            onRecordStaged: async (_stagingDirectory, finalDirectory) => {
+              await fs.mkdir(finalDirectory)
+              sentinel = path.join(finalDirectory, "foreign.txt")
+              await fs.writeFile(sentinel, "preserve")
+            },
+          }),
+        ),
+        Effect.match({ onFailure: (error) => ({ error }), onSuccess: () => ({ success: true as const }) }),
+      ),
+    )
+
+    expect(outcome).toMatchObject({ error: { code: "visual_host_unavailable" } })
+    expect(await fs.readFile(sentinel, "utf8")).toBe("preserve")
+    expect(await VisualHostClaim.list(temp.path)).toEqual([])
+  })
+
+  test.each(["empty", "partial-manifest"] as const)(
+    "recovers an exact generation-and-nonce-bound %s record staging directory",
+    async (variant) => {
+      await using temp = await taskTemp()
+      const identity: ProcessOwnership.Identity = {
+        ...testPreviewLease(workflowID),
+        hostID: WorkflowVisualHost.HostID.make("a".repeat(64)),
+        nonce: "b".repeat(64),
+      }
+      const body = VisualHostClaim.make({
+        purpose: "reference",
+        kind: "static",
+        ...identity,
+        createdAt: 10,
+        revision: 0,
+        configurationSha256: "c".repeat(64),
+        sourceSha256: "d".repeat(64),
+      })
+      const acquired = await VisualHostClaim.acquire(temp.path, body)
+      if (acquired.status !== "acquired") throw new TypeError("staging claim did not acquire")
+      const staging = path.join(temp.path, `.host.${identity.hostID}.${body.generation}.${identity.nonce}.pending`)
+      await fs.mkdir(staging)
+      if (variant === "partial-manifest") await fs.writeFile(path.join(staging, ".host.json"), "{")
+
+      await Effect.runPromise(
+        Effect.scoped(WorkflowVisualHost.Service).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              resolvePreviewLease: async (id) => testPreviewLease(id),
+              isPreviewLeaseLive: async () => false,
+            }),
+          ),
+        ),
+      )
+
+      expect(await fs.exists(staging)).toBe(false)
+      expect(await VisualHostClaim.list(temp.path)).toEqual([])
+    },
+  )
+
+  test("preserves and rejects a foreign record staging directory not bound to the claim nonce", async () => {
+    await using temp = await taskTemp()
+    const identity: ProcessOwnership.Identity = {
+      ...testPreviewLease(workflowID),
+      hostID: WorkflowVisualHost.HostID.make("c".repeat(64)),
+      nonce: "d".repeat(64),
+    }
+    const body = VisualHostClaim.make({
+      purpose: "reference",
+      kind: "static",
+      ...identity,
+      createdAt: 10,
+      revision: 0,
+      configurationSha256: "e".repeat(64),
+      sourceSha256: "f".repeat(64),
+    })
+    const acquired = await VisualHostClaim.acquire(temp.path, body)
+    if (acquired.status !== "acquired") throw new TypeError("staging claim did not acquire")
+    const foreign = path.join(temp.path, `.host.${identity.hostID}.${body.generation}.${"0".repeat(64)}.pending`)
+    await fs.mkdir(foreign)
+    const sentinel = path.join(foreign, "foreign.txt")
+    await fs.writeFile(sentinel, "preserve")
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(WorkflowVisualHost.Service).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolvePreviewLease: async (id) => testPreviewLease(id),
+            isPreviewLeaseLive: async () => false,
+          }),
+        ),
+        Effect.match({ onFailure: (error) => ({ error }), onSuccess: () => ({ success: true as const }) }),
+      ),
+    )
+
+    expect(outcome).toMatchObject({ error: { code: "visual_host_unavailable" } })
+    expect(await fs.readFile(sentinel, "utf8")).toBe("preserve")
+    expect(await VisualHostClaim.list(temp.path)).toMatchObject([
+      { state: "active", body: { generation: body.generation, nonce: identity.nonce } },
+    ])
+  })
+
+  test("preserves an active final capability directory whose complete exact manifest is missing", async () => {
+    await using temp = await taskTemp()
+    const identity: ProcessOwnership.Identity = {
+      ...testPreviewLease(workflowID),
+      hostID: WorkflowVisualHost.HostID.make("5".repeat(64)),
+      nonce: "6".repeat(64),
+    }
+    const claimed = await claimedOrphan(temp.path, identity, { writeManifest: false })
+    const sentinel = path.join(claimed.directory, "foreign.txt")
+    await fs.writeFile(sentinel, "preserve")
+    const recovered: ProcessOwnership.Identity[] = []
+    const ownership: ProcessOwnership.Service = {
+      available: true,
+      start: async () => {
+        throw new Error("unused")
+      },
+      stop: async () => {
+        throw new Error("unused")
+      },
+      recover: async ({ identity: candidate }) => {
+        recovered.push(candidate)
+      },
+    }
+
+    for (let restart = 0; restart < 2; restart++) {
+      const outcome = await Effect.runPromise(
+        Effect.scoped(WorkflowVisualHost.Service).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              processOwnership: ownership,
+              resolvePreviewLease: async (id) => testPreviewLease(id),
+              isPreviewLeaseLive: async () => false,
+            }),
+          ),
+          Effect.match({ onFailure: (error) => ({ error }), onSuccess: () => ({ success: true as const }) }),
+        ),
+      )
+      expect(outcome).toMatchObject({ error: { code: "visual_host_unavailable" } })
+      expect(await fs.readFile(sentinel, "utf8")).toBe("preserve")
+      expect(recovered).toEqual([])
+    }
+  })
+
+  test("never launders a pending claim with an unknown capability directory into recoverable releasing state", async () => {
+    await using temp = await taskTemp()
+    const identity: ProcessOwnership.Identity = {
+      ...testPreviewLease(workflowID),
+      hostID: WorkflowVisualHost.HostID.make("3".repeat(64)),
+      nonce: "4".repeat(64),
+    }
+    const body = VisualHostClaim.make({
+      purpose: "implementation",
+      kind: "script",
+      ...identity,
+      createdAt: 10,
+      revision: 1,
+      configurationSha256: "c".repeat(64),
+      sourceSha256: "d".repeat(64),
+    })
+    await expect(
+      VisualHostClaim.acquire(temp.path, body, {
+        afterMirrorLinked: async () => {
+          throw new Error("simulated owner crash before active promotion")
+        },
+      }),
+    ).rejects.toThrow("simulated owner crash")
+    const directory = path.join(temp.path, identity.hostID)
+    const sentinel = path.join(directory, "foreign.txt")
+    await fs.mkdir(directory)
+    await fs.writeFile(sentinel, "preserve")
+    const recovered: ProcessOwnership.Identity[] = []
+    const ownership: ProcessOwnership.Service = {
+      available: true,
+      start: async () => {
+        throw new Error("unused")
+      },
+      stop: async () => {
+        throw new Error("unused")
+      },
+      recover: async ({ identity: candidate }) => {
+        recovered.push(candidate)
+      },
+    }
+    const restart = () =>
+      Effect.runPromise(
+        Effect.scoped(WorkflowVisualHost.Service).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              processOwnership: ownership,
+              resolvePreviewLease: async (id) => testPreviewLease(id),
+              isPreviewLeaseLive: async () => false,
+            }),
+          ),
+          Effect.match({
+            onFailure: (error) => ({ error }),
+            onSuccess: () => ({ success: true as const }),
+          }),
+        ),
+      )
+
+    for (let restartCount = 0; restartCount < 2; restartCount++) {
+      expect(await restart()).toMatchObject({ error: { code: "visual_host_unavailable" } })
+      expect(await VisualHostClaim.list(temp.path)).toMatchObject([
+        { state: "pending", body: { generation: body.generation, hostID: identity.hostID } },
+      ])
+      expect(await fs.readFile(sentinel, "utf8")).toBe("preserve")
+      expect(recovered).toEqual([])
+    }
+  })
+
+  test.each(["symlink", "hardlink", "oversize", "extra-key"] as const)(
+    "preserves an orphan and starts no recovery for a %s ownership manifest",
+    async (variant) => {
+      await using temp = await taskTemp()
+      await using outside = await taskTemp()
+      const identity: ProcessOwnership.Identity = {
+        ...testPreviewLease(workflowID),
+        hostID: WorkflowVisualHost.HostID.make("7".repeat(64)),
+        nonce: "6".repeat(64),
+      }
+      const claimed = await claimedOrphan(temp.path, identity, { writeManifest: false })
+      const { directory } = claimed
+      const manifest = path.join(directory, ".host.json")
+      const sentinel = path.join(directory, "preserve.txt")
+      const body = claimed.manifest
+      await fs.writeFile(sentinel, "preserve")
+      if (variant === "symlink") {
+        const target = path.join(outside.path, "manifest.json")
+        await fs.writeFile(target, JSON.stringify(body))
+        await fs.symlink(target, manifest, "file")
+      } else if (variant === "hardlink") {
+        await fs.writeFile(manifest, JSON.stringify(body))
+        await fs.link(manifest, path.join(outside.path, "manifest-owner.json"))
+      } else if (variant === "oversize") {
+        await fs.writeFile(manifest, "x".repeat(16 * 1024 + 1))
+      } else {
+        await fs.writeFile(manifest, JSON.stringify({ ...body, extra: true }))
+      }
+      const recovered: ProcessOwnership.Identity[] = []
+      const ownership: ProcessOwnership.Service = {
+        available: true,
+        start: async () => {
+          throw new Error("unused")
+        },
+        stop: async () => {
+          throw new Error("unused")
+        },
+        recover: async ({ identity: candidate }) => {
+          recovered.push(candidate)
+        },
+      }
+
+      const outcome = await Effect.runPromise(
+        Effect.scoped(WorkflowVisualHost.Service).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              processOwnership: ownership,
+              isPreviewLeaseLive: async () => false,
+              resolvePreviewLease: async (id) => testPreviewLease(id),
+            }),
+          ),
+          Effect.match({
+            onFailure: (error) => ({ error }),
+            onSuccess: () => ({ success: true as const }),
+          }),
+        ),
+      )
+
+      expect(outcome).toMatchObject({ error: { operation: "recover_expired", code: "visual_host_unavailable" } })
+      expect(recovered).toEqual([])
+      expect(await fs.readFile(sentinel, "utf8")).toBe("preserve")
+      expect(await fs.exists(directory)).toBe(true)
+      expect(await VisualHostClaim.list(temp.path)).toMatchObject([
+        {
+          state: "active",
+          body: { generation: claimed.claim.body.generation, hostID: identity.hostID },
+        },
+      ])
+    },
+  )
+
+  test("admits only one filesystem owner across concurrent host layers for the same Stage purpose", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    let markFirstCreated!: () => void
+    const firstCreated = new Promise<void>((resolve) => {
+      markFirstCreated = resolve
+    })
+    let releaseFirst!: () => void
+    const holdFirst = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const materialize = (evidenceRoot: string, onRecordCreated?: () => Promise<void>) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.flatMap(WorkflowVisualHost.Service, (host) =>
+            host
+              .materializeReference({
+                workflowID,
+                referenceApp: {
+                  entrypoint: "index.html",
+                  readySelector: "#ready",
+                  projectStack: ["HTML"],
+                  files: [{ path: "index.html", content: reference }],
+                },
+              })
+              .pipe(
+                Effect.match({
+                  onFailure: (left) => ({ _tag: "Left" as const, left }),
+                  onSuccess: (right) => ({ _tag: "Right" as const, right }),
+                }),
+              ),
+          ),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              evidenceRoot,
+              browser: browserRuntime().runtime,
+              onRecordCreated,
+            }),
+          ),
+        ),
+      )
+
+    const first = materialize(path.join(temp.path, "evidence-a"), async () => {
+      markFirstCreated()
+      await holdFirst
+    })
+    await firstCreated
+    let second: Awaited<ReturnType<typeof materialize>>
+    try {
+      second = await materialize(path.join(temp.path, "evidence-b"))
+    } finally {
+      releaseFirst()
+    }
+    const admitted = await first
+
+    expect(admitted._tag).toBe("Right")
+    expect(second).toMatchObject({ _tag: "Left", left: { code: "visual_host_unavailable" } })
+  })
+
+  test("fences a stale layer finisher after another layer replaces the exact released generation", async () => {
+    await using temp = await taskTemp()
+    const oldIdentity: ProcessOwnership.Identity = {
+      ...testPreviewLease(workflowID),
+      leaseOwner: "workflow-visual-host-old-layer-owner",
+      hostID: WorkflowVisualHost.HostID.make("1".repeat(64)),
+      nonce: "2".repeat(64),
+    }
+    const orphan = await claimedOrphan(temp.path, oldIdentity, {
+      kind: "static",
+      purpose: "reference",
+      revision: 0,
+    })
+    const currentLease: WorkflowVisualHost.PreviewLeaseAuthority = {
+      ...testPreviewLease(workflowID),
+      attempt: 2,
+      leaseOwner: "workflow-visual-host-new-layer-owner",
+      leaseExpiresAt: 2_000_000_000_100,
+    }
+    const isLive = async (lease: WorkflowVisualHost.PreviewLeaseAuthority) =>
+      lease.workflowID === currentLease.workflowID &&
+      lease.stageID === currentLease.stageID &&
+      lease.attempt === currentLease.attempt &&
+      lease.leaseOwner === currentLease.leaseOwner
+    let markOldReleasing!: () => void
+    const oldReleasing = new Promise<void>((resolve) => {
+      markOldReleasing = resolve
+    })
+    let continueOldFinisher!: () => void
+    const holdOldFinisher = new Promise<void>((resolve) => {
+      continueOldFinisher = resolve
+    })
+    const staleLayer = Effect.runPromise(
+      Effect.scoped(WorkflowVisualHost.Service).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolvePreviewLease: async () => currentLease,
+            isPreviewLeaseLive: isLive,
+            onClaimReleasing: async (claim) => {
+              if (claim.body.generation !== orphan.claim.body.generation) {
+                throw new Error("unexpected releasing generation")
+              }
+              markOldReleasing()
+              await holdOldFinisher
+            },
+          }),
+        ),
+        Effect.match({
+          onFailure: (error) => ({ error }),
+          onSuccess: () => ({ success: true as const }),
+        }),
+      ),
+    )
+    await oldReleasing
+
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    let markReplacement!: (directory: string) => void
+    const replacementReady = new Promise<string>((resolve) => {
+      markReplacement = resolve
+    })
+    let releaseReplacement!: () => void
+    const holdReplacement = new Promise<void>((resolve) => {
+      releaseReplacement = resolve
+    })
+    const replacementLayer = Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const preview = yield* host.materializeReference({
+            workflowID,
+            referenceApp: {
+              entrypoint: "index.html",
+              readySelector: "#ready",
+              projectStack: ["HTML"],
+              files: [{ path: "index.html", content: reference }],
+            },
+          })
+          markReplacement(path.join(temp.path, preview.hostID))
+          yield* Effect.promise(() => holdReplacement)
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolvePreviewLease: async () => currentLease,
+            isPreviewLeaseLive: isLive,
+          }),
+        ),
+      ),
+    )
+    const replacementDirectory = await replacementReady
+    expect(await fs.exists(orphan.directory)).toBe(false)
+    expect(await fs.exists(replacementDirectory)).toBe(true)
+
+    continueOldFinisher()
+    expect(await staleLayer).toMatchObject({ error: { code: "visual_host_unavailable" } })
+    expect(await fs.exists(replacementDirectory)).toBe(true)
+    expect(await VisualHostClaim.list(temp.path)).toMatchObject([
+      {
+        state: "active",
+        body: {
+          purpose: "reference",
+          attempt: 2,
+          leaseOwner: currentLease.leaseOwner,
+        },
+      },
+    ])
+
+    releaseReplacement()
+    await replacementLayer
+    expect(await VisualHostClaim.list(temp.path)).toEqual([])
+  })
+
+  test("keeps an active claim active when the stale lease becomes live at the release transition gate", async () => {
+    await using temp = await taskTemp()
+    const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const firstLease = testPreviewLease(workflowID)
+    const secondLease: WorkflowVisualHost.PreviewLeaseAuthority = {
+      ...firstLease,
+      attempt: 2,
+      leaseOwner: "workflow-visual-host-transition-gate-owner",
+      leaseExpiresAt: firstLease.leaseExpiresAt + 100,
+    }
+    let current = firstLease
+    let racing = false
+    let staleChecks = 0
+    const same = (
+      lease: WorkflowVisualHost.PreviewLeaseAuthority,
+      expected: WorkflowVisualHost.PreviewLeaseAuthority,
+    ) =>
+      lease.workflowID === expected.workflowID &&
+      lease.stageID === expected.stageID &&
+      lease.attempt === expected.attempt &&
+      lease.leaseOwner === expected.leaseOwner
+    const isLive = async (lease: WorkflowVisualHost.PreviewLeaseAuthority) => {
+      if (racing && same(lease, firstLease)) {
+        staleChecks++
+        return staleChecks >= 3
+      }
+      return same(lease, current)
+    }
+    const referenceInput = {
+      workflowID,
+      referenceApp: {
+        entrypoint: "index.html",
+        readySelector: "#ready",
+        projectStack: ["HTML"],
+        files: [{ path: "index.html", content: reference }],
+      },
+    }
+
+    const observed = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          const first = yield* host.materializeReference(referenceInput)
+          current = secondLease
+          racing = true
+          const second = yield* host.materializeReference(referenceInput).pipe(
+            Effect.match({
+              onFailure: (left) => ({ _tag: "Left" as const, left }),
+              onSuccess: (right) => ({ _tag: "Right" as const, right }),
+            }),
+          )
+          const [claim] = yield* Effect.promise(() => VisualHostClaim.list(temp.path))
+          return {
+            claimState: claim?.state,
+            oldReachable: yield* Effect.promise(() => fetch(first.url).then((response) => response.ok)),
+            second,
+            staleChecks,
+          }
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            resolvePreviewLease: async () => current,
+            isPreviewLeaseLive: isLive,
+          }),
+        ),
+      ),
+    )
+
+    expect(observed.second).toMatchObject({ _tag: "Left", left: { code: "visual_host_unavailable" } })
+    expect(observed).toMatchObject({ claimState: "active", oldReachable: true, staleChecks: 3 })
+    expect(await VisualHostClaim.list(temp.path)).toEqual([])
+  })
+
+  test.each(["afterBeginRelease", "beforeServerStop"] as const)(
+    "does not stop a stale active server when its exact lease becomes live at %s",
+    async (seam) => {
+      await using temp = await taskTemp()
+      const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+      const firstLease = testPreviewLease(workflowID)
+      const secondLease: WorkflowVisualHost.PreviewLeaseAuthority = {
+        ...firstLease,
+        attempt: 2,
+        leaseOwner: "workflow-visual-host-release-race-owner",
+        leaseExpiresAt: firstLease.leaseExpiresAt + 100,
+      }
+      let current = firstLease
+      let releaseSeams = 0
+      const isLive = async (lease: WorkflowVisualHost.PreviewLeaseAuthority) =>
+        lease.workflowID === current.workflowID &&
+        lease.stageID === current.stageID &&
+        lease.attempt === current.attempt &&
+        lease.leaseOwner === current.leaseOwner
+      const referenceInput = {
+        workflowID,
+        referenceApp: {
+          entrypoint: "index.html",
+          readySelector: "#ready",
+          projectStack: ["HTML"],
+          files: [{ path: "index.html", content: reference }],
+        },
+      }
+
+      const raced = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            const first = yield* host.materializeReference(referenceInput)
+            current = secondLease
+            const second = yield* host.materializeReference(referenceInput).pipe(
+              Effect.match({
+                onFailure: (left) => ({ _tag: "Left" as const, left }),
+                onSuccess: (right) => ({ _tag: "Right" as const, right }),
+              }),
+            )
+            const oldReachable = yield* Effect.promise(() =>
+              fetch(first.url).then(
+                (response) => response.ok,
+                () => false,
+              ),
+            )
+            return { firstURL: first.url, oldReachable, second }
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              resolvePreviewLease: async () => current,
+              isPreviewLeaseLive: isLive,
+              ...(seam === "afterBeginRelease"
+                ? {
+                    onAfterBeginRelease: async () => {
+                      releaseSeams++
+                      current = firstLease
+                    },
+                  }
+                : {
+                    onBeforeServerStop: async () => {
+                      if (current === firstLease) return
+                      releaseSeams++
+                      current = firstLease
+                    },
+                  }),
+            }),
+          ),
+        ),
+      )
+
+      expect(raced.second).toMatchObject({ _tag: "Left", left: { code: "visual_host_unavailable" } })
+      expect({ releaseSeams, oldReachable: raced.oldReachable }).toEqual({ releaseSeams: 1, oldReachable: true })
+      expect(await VisualHostClaim.list(temp.path)).toEqual([])
+      await expect(fetch(raced.firstURL)).rejects.toThrow()
+    },
+  )
+
+  test.each(["beforeCapabilityRemove", "beforeClaimDelete"] as const)(
+    "fences stale release at %s and preserves the remaining exact authority until retry",
+    async (seam) => {
+      await using temp = await taskTemp()
+      const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+      const firstLease = testPreviewLease(workflowID)
+      const secondLease: WorkflowVisualHost.PreviewLeaseAuthority = {
+        ...firstLease,
+        attempt: 2,
+        leaseOwner: "workflow-visual-host-late-release-owner",
+        leaseExpiresAt: firstLease.leaseExpiresAt + 100,
+      }
+      let current = firstLease
+      let seams = 0
+      const isLive = async (lease: WorkflowVisualHost.PreviewLeaseAuthority) =>
+        lease.workflowID === current.workflowID &&
+        lease.stageID === current.stageID &&
+        lease.attempt === current.attempt &&
+        lease.leaseOwner === current.leaseOwner
+      const referenceInput = {
+        workflowID,
+        referenceApp: {
+          entrypoint: "index.html",
+          readySelector: "#ready",
+          projectStack: ["HTML"],
+          files: [{ path: "index.html", content: reference }],
+        },
+      }
+      const closeGate = async () => {
+        if (current === firstLease) return
+        seams++
+        current = firstLease
+      }
+
+      const observed = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            const first = yield* host.materializeReference(referenceInput)
+            current = secondLease
+            const second = yield* host.materializeReference(referenceInput).pipe(
+              Effect.match({
+                onFailure: (left) => ({ _tag: "Left" as const, left }),
+                onSuccess: (right) => ({ _tag: "Right" as const, right }),
+              }),
+            )
+            return {
+              second,
+              directoryExists: yield* Effect.promise(() => fs.exists(path.join(temp.path, first.hostID))),
+              claims: yield* Effect.promise(() => VisualHostClaim.list(temp.path)),
+              oldReachable: yield* Effect.promise(() =>
+                fetch(first.url).then(
+                  (response) => response.ok,
+                  () => false,
+                ),
+              ),
+            }
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: browserRuntime().runtime,
+              resolvePreviewLease: async () => current,
+              isPreviewLeaseLive: isLive,
+              ...(seam === "beforeCapabilityRemove"
+                ? { onBeforeCapabilityRemove: closeGate }
+                : { onBeforeClaimDelete: closeGate }),
+            }),
+          ),
+        ),
+      )
+
+      expect(observed.second).toMatchObject({ _tag: "Left", left: { code: "visual_host_unavailable" } })
+      expect({ seams, oldReachable: observed.oldReachable }).toEqual({ seams: 1, oldReachable: false })
+      expect(observed.directoryExists).toBe(seam === "beforeCapabilityRemove")
+      expect(observed.claims).toMatchObject([{ state: "releasing" }])
+      expect(await VisualHostClaim.list(temp.path)).toEqual([])
+    },
+  )
+
+  test("stops a same-layer stale active owner before starting its replacement attempt", async () => {
+    await using temp = await taskTemp()
+    await using workspaceTemp = await taskTemp()
+    await fs.writeFile(path.join(workspaceTemp.path, "server.mjs"), "setInterval(() => undefined, 60_000)\n")
+    const plan = PreviewPlan.freeze({
+      authority: "admission",
+      location: Location.Ref.make({ directory: AbsolutePath.make(workspaceTemp.path) }),
+      preview: { kind: "script", argv: ["node", "server.mjs"] },
+      allowedOrigins: [],
+    })
+    let current = { ...testPreviewLease(workflowID), leaseExpiresAt: 2_000_000_000_100 }
+    const events: Array<{
+      readonly operation: "start" | "stop"
+      readonly attempt: number
+      readonly owner: string
+      readonly gated?: boolean
+    }> = []
+    const servers = new Map<
+      ProcessOwnership.OwnedProcess,
+      { readonly server: ReturnType<typeof Bun.serve>; readonly resolveExit: (exit: number) => void }
+    >()
+    const ownership: ProcessOwnership.Service = {
+      available: true,
+      start: async ({ identity }) => {
+        const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ready") })
+        let resolveExit!: (exit: number) => void
+        const exited = new Promise<number>((resolve) => {
+          resolveExit = resolve
+        })
+        const owned: ProcessOwnership.OwnedProcess = {
+          origin: `http://127.0.0.1:${server.port}`,
+          exited,
+          stdout: new ReadableStream({ start: (controller) => controller.close() }),
+          stderr: new ReadableStream({ start: (controller) => controller.close() }),
+        }
+        servers.set(owned, { server, resolveExit })
+        events.push({ operation: "start", attempt: identity.attempt, owner: identity.leaseOwner })
+        return owned
+      },
+      stop: async ({ identity, process, finalGate }) => {
+        const gated = finalGate === undefined ? undefined : await finalGate()
+        if (gated === false) throw new Error("lease became live")
+        const server = servers.get(process)
+        if (server === undefined) throw new Error("unknown process")
+        server.server.stop(true)
+        server.resolveExit(0)
+        servers.delete(process)
+        events.push({ operation: "stop", attempt: identity.attempt, owner: identity.leaseOwner, gated })
+      },
+      recover: async () => {
+        throw new Error("active replacement must use the authenticated active handle")
+      },
+    }
+    const contract: WorkflowVisualHost.ResolveImplementationContract = async () => ({
+      implementationSha256,
+      readySelector: "#ready",
+      previewLease: current,
+    })
+    const isLive = async (lease: WorkflowVisualHost.PreviewLeaseAuthority) =>
+      lease.workflowID === current.workflowID &&
+      lease.stageID === current.stageID &&
+      lease.attempt === current.attempt &&
+      lease.leaseOwner === current.leaseOwner &&
+      current.leaseExpiresAt >= Date.now()
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const host = yield* WorkflowVisualHost.Service
+          yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+          current = {
+            ...current,
+            attempt: 2,
+            leaseOwner: "workflow-visual-host-replacement-owner",
+            leaseExpiresAt: 2_000_000_000_200,
+          }
+          yield* host.prepareImplementation({ workflowID, revision: 1, plan })
+          expect(events).toEqual([
+            { operation: "start", attempt: 1, owner: "workflow-visual-host-test-owner" },
+            { operation: "stop", attempt: 1, owner: "workflow-visual-host-test-owner", gated: true },
+            { operation: "start", attempt: 2, owner: "workflow-visual-host-replacement-owner" },
+          ])
+          expect(servers.size).toBe(1)
+        }),
+      ).pipe(
+        Effect.provide(
+          WorkflowVisualHostServer.makeLayer({
+            hostRoot: temp.path,
+            browser: browserRuntime().runtime,
+            processOwnership: ownership,
+            resolveImplementationContract: contract,
+            resolvePreviewLease: async () => current,
+            isPreviewLeaseLive: isLive,
+          }),
+        ),
+      ),
+    )
+
+    expect(events.at(-1)).toEqual({
+      operation: "stop",
+      attempt: 2,
+      owner: "workflow-visual-host-replacement-owner",
+      gated: undefined,
+    })
+    expect(servers.size).toBe(0)
   })
 
   test("recovers an orphan process only through its persisted authenticated ownership identity", async () => {
@@ -1657,16 +3617,11 @@ describe("WorkflowVisualHostServer", () => {
       allowedOrigins: [`http://127.0.0.1:${port}`],
     })
     const identity: ProcessOwnership.Identity = {
+      ...testPreviewLease(workflowID),
       hostID: WorkflowVisualHost.HostID.make("a".repeat(64)),
       nonce: "b".repeat(64),
     }
-    const directory = path.join(temp.path, identity.hostID)
-    const runtimeTemp = path.join(directory, ".tmp")
-    await fs.mkdir(runtimeTemp, { recursive: true })
-    await fs.writeFile(
-      path.join(directory, ".host.json"),
-      JSON.stringify({ hostID: identity.hostID, createdAt: 10, processNonce: identity.nonce }),
-    )
+    const { directory, runtimeTemp } = await claimedOrphan(temp.path, identity)
     const ownership = processOwnership()
     await ownership.service.start({
       identity,
@@ -1693,6 +3648,8 @@ describe("WorkflowVisualHostServer", () => {
               hostRoot: temp.path,
               browser: browserRuntime().runtime,
               processOwnership: ownership.service,
+              isPreviewLeaseLive: async () => false,
+              resolvePreviewLease: async (id) => testPreviewLease(id),
             }),
           ),
           Effect.scoped,
@@ -1703,7 +3660,7 @@ describe("WorkflowVisualHostServer", () => {
       expect(await fs.exists(directory)).toBe(false)
       await expect(fetch(`http://127.0.0.1:${port}`)).rejects.toThrow()
     } finally {
-      await ownership.service.recover(identity).catch(() => undefined)
+      await ownership.service.recover({ identity, finalGate: async () => true }).catch(() => undefined)
     }
   })
 
@@ -1722,16 +3679,13 @@ describe("WorkflowVisualHostServer", () => {
       allowedOrigins: [`http://127.0.0.1:${port}`],
     })
     const identity: ProcessOwnership.Identity = {
+      ...testPreviewLease(workflowID),
       hostID: WorkflowVisualHost.HostID.make("c".repeat(64)),
       nonce: "d".repeat(64),
     }
-    const directory = path.join(temp.path, identity.hostID)
-    const runtimeTemp = path.join(directory, ".tmp")
-    await fs.mkdir(runtimeTemp, { recursive: true })
-    await fs.writeFile(
-      path.join(directory, ".host.json"),
-      JSON.stringify({ hostID: identity.hostID, createdAt: 10, processNonce: "e".repeat(64) }),
-    )
+    const { directory, runtimeTemp } = await claimedOrphan(temp.path, identity, {
+      manifestNonce: "e".repeat(64),
+    })
     const ownership = processOwnership()
     await ownership.service.start({
       identity,
@@ -1758,6 +3712,8 @@ describe("WorkflowVisualHostServer", () => {
               hostRoot: temp.path,
               browser: browserRuntime().runtime,
               processOwnership: ownership.service,
+              isPreviewLeaseLive: async () => false,
+              resolvePreviewLease: async (id) => testPreviewLease(id),
             }),
           ),
           Effect.scoped,
@@ -1768,12 +3724,12 @@ describe("WorkflowVisualHostServer", () => {
         ),
       )
 
-      expect(outcome).toMatchObject({ error: { operation: "recover_expired", code: "cleanup_target_rejected" } })
+      expect(outcome).toMatchObject({ error: { operation: "recover_expired", code: "visual_host_unavailable" } })
       expect(ownership.recovered).toEqual([])
       expect(await fs.exists(directory)).toBe(true)
       expect(await fetch(`http://127.0.0.1:${port}`).then((response) => response.text())).toBe("owned-ready")
     } finally {
-      await ownership.service.recover(identity).catch(() => undefined)
+      await ownership.service.recover({ identity, finalGate: async () => true }).catch(() => undefined)
       await fs.rm(directory, { recursive: true, force: true })
     }
   })
@@ -1917,6 +3873,64 @@ function browserRuntime(captureBytes?: () => Uint8Array) {
   })
 }
 
+async function claimedOrphan(
+  root: string,
+  identity: ProcessOwnership.Identity,
+  options: {
+    readonly kind?: "static" | "script"
+    readonly purpose?: VisualHostClaim.Purpose
+    readonly revision?: number
+    readonly writeManifest?: boolean
+    readonly manifestNonce?: string
+  } = {},
+) {
+  const kind = options.kind ?? "script"
+  const purpose = options.purpose ?? "implementation"
+  const revision = options.revision ?? 1
+  const body = VisualHostClaim.make({
+    purpose,
+    kind,
+    workflowID: identity.workflowID,
+    stageID: identity.stageID,
+    attempt: identity.attempt,
+    leaseOwner: identity.leaseOwner,
+    leaseExpiresAt: identity.leaseExpiresAt,
+    hostID: identity.hostID,
+    nonce: identity.nonce,
+    createdAt: 10,
+    revision,
+    configurationSha256: "c".repeat(64),
+    sourceSha256: "d".repeat(64),
+  })
+  const acquired = await VisualHostClaim.acquire(root, body)
+  if (acquired.status !== "acquired") throw new TypeError("orphan claim did not acquire")
+  const directory = path.join(root, identity.hostID)
+  const runtimeTemp = path.join(directory, ".tmp")
+  await fs.mkdir(runtimeTemp, { recursive: true })
+  const manifest = {
+    hostID: identity.hostID,
+    createdAt: 10,
+    kind,
+    purpose,
+    revision,
+    configurationSha256: body.configurationSha256,
+    sourceSha256: body.sourceSha256,
+    claimKey: acquired.claim.key,
+    claimGeneration: body.generation,
+    claimSha256: acquired.claim.sha256,
+    workflowID: identity.workflowID,
+    stageID: identity.stageID,
+    attempt: identity.attempt,
+    leaseOwner: identity.leaseOwner,
+    leaseExpiresAt: identity.leaseExpiresAt,
+    nonce: options.manifestNonce ?? identity.nonce,
+  }
+  if (options.writeManifest !== false) {
+    await fs.writeFile(path.join(directory, ".host.json"), JSON.stringify(manifest))
+  }
+  return { claim: acquired.claim, directory, runtimeTemp, manifest }
+}
+
 async function taskTemp() {
   await fs.mkdir(testRoot, { recursive: true })
   const directory = await fs.realpath(await fs.mkdtemp(path.join(testRoot, "case-")))
@@ -1924,6 +3938,67 @@ async function taskTemp() {
     path: directory,
     async [Symbol.asyncDispose]() {
       await fs.rm(directory, { recursive: true, force: true })
+    },
+  }
+}
+
+function rootIdentity(root: string) {
+  const stat = fsSync.lstatSync(root, { bigint: true })
+  return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`
+}
+
+async function productionHostFixture() {
+  const temp = await taskTemp()
+  const deployment = path.join(temp.path, "deployment")
+  const directories = {
+    deployment,
+    data: path.join(deployment, "data"),
+    browserRuntime: path.join(deployment, "runtime", "playwright"),
+    browserCache: path.join(deployment, "cache", "browser"),
+    preview: path.join(deployment, "temp", "preview"),
+    dockerConfig: path.join(deployment, "sandbox", "config"),
+    dockerTemp: path.join(deployment, "sandbox", "temp"),
+  }
+  await Promise.all(Object.values(directories).map((directory) => fs.mkdir(directory, { recursive: true })))
+  await fs.writeFile(path.join(deployment, "index.html"), '<!doctype html><div id="ready"></div>')
+  const engine = path.join(temp.path, "docker.exe")
+  await fs.writeFile(engine, "test docker engine")
+  const environment = {
+    OPENCODE_WORKFLOW_HOST_ROOT: deployment,
+    OPENCODE_WORKFLOW_HOST_DATA: directories.data,
+    OPENCODE_WORKFLOW_HOST_RUNTIME: directories.browserRuntime,
+    OPENCODE_WORKFLOW_HOST_CACHE: directories.browserCache,
+    OPENCODE_WORKFLOW_HOST_TEMP: directories.preview,
+    OPENCODE_WORKFLOW_EVIDENCE_ROOT: directories.data,
+    PLAYWRIGHT_BROWSERS_PATH: directories.browserRuntime,
+    OPENCODE_WORKFLOW_SANDBOX_ENGINE: engine,
+    OPENCODE_WORKFLOW_SANDBOX_IMAGE: `opencode/workflow-sandbox@sha256:${"a".repeat(64)}`,
+    OPENCODE_WORKFLOW_SANDBOX_CONFIG: directories.dockerConfig,
+    OPENCODE_WORKFLOW_SANDBOX_TEMP: directories.dockerTemp,
+  } as const
+  const sid = "S-1-5-21-1000-1000-1000-1001"
+  const snapshot = {
+    currentUserSid: sid,
+    currentIdentitySids: [sid],
+    ownerSid: sid,
+    protected: true,
+    reparsePoint: false,
+    descriptorSddl: `O:${sid}G:${sid}D:P(A;;FA;;;${sid})(A;;FA;;;S-1-5-18)(A;;FA;;;S-1-5-32-544)`,
+    aces: [
+      { sid, allow: true, inherited: false, mask: 0x001f01ff },
+      { sid: "S-1-5-18", allow: true, inherited: false, mask: 0x001f01ff },
+      { sid: "S-1-5-32-544", allow: true, inherited: false, mask: 0x001f01ff },
+    ],
+  }
+  return {
+    directories,
+    environment,
+    probe: () => structuredClone(snapshot),
+    invalidateAcl: () => {
+      snapshot.descriptorSddl = `${snapshot.descriptorSddl}-changed`
+    },
+    async [Symbol.asyncDispose]() {
+      await temp[Symbol.asyncDispose]()
     },
   }
 }
@@ -1966,7 +4041,12 @@ function processOwnership() {
       })
       processes.set(key(input.identity), { identity: input.identity, subprocess })
       state.started.push({ argv: [...input.plan.argv!], hostID: input.identity.hostID })
-      return { exited: subprocess.exited, stdout: subprocess.stdout, stderr: subprocess.stderr }
+      return {
+        origin: input.plan.allowedOrigins[0] ?? "http://127.0.0.1:4317",
+        exited: subprocess.exited,
+        stdout: subprocess.stdout,
+        stderr: subprocess.stderr,
+      }
     },
     async stop(input) {
       const owned = processes.get(key(input.identity))
@@ -1975,7 +4055,9 @@ function processOwnership() {
       processes.delete(key(input.identity))
       state.stopped.push(input.identity)
     },
-    async recover(identity) {
+    async recover(input) {
+      if (!(await input.finalGate())) throw new Error("live process")
+      const identity = input.identity
       const owned = processes.get(key(identity))
       if (owned === undefined || owned.identity.nonce !== identity.nonce) throw new Error("unowned process")
       await stopTestProcess(owned.subprocess)

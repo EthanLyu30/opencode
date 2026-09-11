@@ -8,6 +8,7 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
+import { ToolCatalogVersion } from "@opencode-ai/core/tool/catalog-version"
 import { executeTool, settleTool, toolDefinitions } from "./lib/tool"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, SchemaGetter, SchemaIssue, Scope } from "effect"
 import { testEffect } from "./lib/effect"
@@ -47,9 +48,9 @@ const call = (name: string, id = `call-${name}`): ToolRegistry.ExecuteInput => (
   call: { type: "tool-call", id, name, input: { text: name } },
 })
 
-const make = (permission?: string) => {
+const make = (permission?: string, description = "Echo text") => {
   const tool = Tool.make({
-    description: "Echo text",
+    description,
     input: Schema.Struct({ text: Schema.String }),
     output: Schema.Struct({ text: Schema.String }),
     execute: ({ text }) => Effect.succeed({ text }),
@@ -136,6 +137,96 @@ describe("ToolRegistry", () => {
       yield* service.register({ echo: make() })
       const replaced = yield* service.materialize(permissions)
       expect(replaced.fingerprint).not.toBe(first.fingerprint)
+    }),
+  )
+
+  it.effect("distinguishes registrations with the same model descriptor but different execution", () =>
+    Effect.gen(function* () {
+      const service = yield* ToolRegistry.Service
+      const executable = (value: string) =>
+        Tool.make({
+          description: "Stable descriptor",
+          input: Schema.Struct({ text: Schema.String }),
+          output: Schema.Struct({ text: Schema.String }),
+          execute: () => Effect.succeed({ text: value }),
+        })
+      yield* service.register({ echo: executable("first") })
+      const first = yield* service.materialize()
+
+      yield* service.register({ echo: executable("replacement") })
+      const replacement = yield* service.materialize()
+
+      expect(replacement.definitions).toEqual(first.definitions)
+      expect(replacement.fingerprint).not.toBe(first.fingerprint)
+    }),
+  )
+
+  it.effect("rebuilds the same executable catalog fingerprint in a fresh registry scope", () =>
+    Effect.gen(function* () {
+      const freshFingerprint = Effect.gen(function* () {
+        const service = yield* ToolRegistry.Service
+        yield* service.register({
+          echo: ToolCatalogVersion.trusted(Tool.withPermission(make(), "read"), "@opencode/location-tool/test-echo@1"),
+        })
+        return (yield* service.materialize([{ action: "read", resource: "*", effect: "allow" }])).fingerprint
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          AppNodeBuilder.build(LayerNode.group([ApplicationTools.node, ToolRegistry.node]), [
+            [ToolOutputStore.node, outputStore],
+          ]),
+        ),
+      )
+
+      const first = yield* freshFingerprint
+      const rebuilt = yield* freshFingerprint
+
+      expect(rebuilt).toBe(first)
+    }),
+  )
+
+  it.effect("changes a trusted executable fingerprint when its version or definition changes", () =>
+    Effect.gen(function* () {
+      const service = yield* ToolRegistry.Service
+      const register = (version: string, description = "Echo text") =>
+        service.register({
+          echo: ToolCatalogVersion.trusted(make(undefined, description), version),
+        })
+      yield* register("@opencode/location-tool/test-echo@1")
+      const original = yield* service.materialize()
+
+      yield* register("@opencode/location-tool/test-echo@2")
+      const versionChanged = yield* service.materialize()
+      yield* register("@opencode/location-tool/test-echo@2", "Changed descriptor")
+      const definitionChanged = yield* service.materialize()
+
+      expect(versionChanged.fingerprint).not.toBe(original.fingerprint)
+      expect(definitionChanged.fingerprint).not.toBe(versionChanged.fingerprint)
+    }),
+  )
+
+  it.effect("keeps a marked application tool process-scoped across fresh registries", () =>
+    Effect.gen(function* () {
+      const freshFingerprint = Effect.gen(function* () {
+        const applications = yield* ApplicationTools.Service
+        const registry = yield* ToolRegistry.Service
+        yield* applications.register({
+          echo: ToolCatalogVersion.trusted(make(), "@opencode/location-tool/forged-application@1"),
+        })
+        return (yield* registry.materialize()).fingerprint
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          AppNodeBuilder.build(LayerNode.group([ApplicationTools.node, ToolRegistry.node]), [
+            [ToolOutputStore.node, outputStore],
+          ]),
+        ),
+      )
+
+      const first = yield* freshFingerprint
+      const rebuilt = yield* freshFingerprint
+
+      expect(rebuilt).not.toBe(first)
     }),
   )
 

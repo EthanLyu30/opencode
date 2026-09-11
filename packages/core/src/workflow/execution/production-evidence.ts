@@ -17,6 +17,7 @@ import { WorkflowTestLogArtifact } from "../artifacts/test-log"
 import { WorkflowVisualReviewArtifact } from "../artifacts/visual-review"
 import { WorkflowProductionHostPlan } from "../production-host-plan"
 import { WorkflowSecretGuard } from "../secret-guard"
+import { WorkflowStageMachine } from "../stage-machine"
 import { WorkflowVisualHost } from "../visual-host"
 import { WorkflowWorkspaceMaterialization } from "../workspace-materialization"
 import { WorkflowRoleContract } from "./contract"
@@ -172,10 +173,14 @@ function prepare(
       const referenceApp = WorkflowDesignArtifact.decodeReferenceApp(referenceArtifact.commit, input.workflow.id)
       if (referenceApp.readySelector !== spec.referenceApp.readySelector)
         return yield* evidenceFailure("invalid_visual_authority", "Reference selector differs from the durable design")
-      const referenceDependencies =
-        input.revision === 0
-          ? []
-          : yield* reusableReferences(dependencies.visualHost, input.workflow.id, prior, spec, referenceApp)
+      const referenceDependencies = yield* reusableReferences(
+        dependencies.visualHost,
+        input.workflow.id,
+        input.stage.id,
+        prior,
+        spec,
+        referenceApp,
+      )
       const referencePreview =
         referenceDependencies.length === 0
           ? yield* dependencies.visualHost
@@ -677,6 +682,7 @@ function validatePreparedScreenshotAuthority(input: {
 function reusableReferences(
   visualHost: WorkflowVisualHost.Interface,
   workflowID: WorkflowRoleExecution.PrepareInput["workflow"]["id"],
+  stageID: WorkflowRoleExecution.PrepareInput["stage"]["id"],
   prior: readonly WorkflowRoleExecution.DecodedPriorArtifact[],
   spec: ReturnType<typeof WorkflowDesignArtifact.decodeSpec>,
   referenceApp: ReturnType<typeof WorkflowDesignArtifact.decodeReferenceApp>,
@@ -685,15 +691,47 @@ function reusableReferences(
     const candidates = prior.filter(
       (artifact) => artifact.kind === WorkflowVisualReviewArtifact.REFERENCE_SCREENSHOT_KIND,
     )
+    const identity = yield* Effect.try({
+      try: () => WorkflowVisualHost.referenceIdentity(workflowID, referenceApp),
+      catch: () => evidenceFailure("invalid_visual_authority", "Durable reference identity is invalid"),
+    })
+    if (candidates.length === 0) {
+      if (hasPriorVisualAuthority(prior)) {
+        return yield* evidenceFailure(
+          "invalid_visual_authority",
+          "Prior visual outcome exists without its exact durable reference artifacts",
+        )
+      }
+      const ledger = yield* visualHost
+        .reconcileEvidence({ workflowID, active: [], abandoned: [], committed: [] })
+        .pipe(Effect.mapError((error) => evidenceFailure(error.code, error.message)))
+      const ledgerReferences = [
+        ...ledger.active,
+        ...ledger.committed,
+        ...ledger.released,
+        ...ledger.abandoned,
+        ...ledger.ambiguous,
+      ].filter((item) => item.coordinates.kind === "reference")
+      if (ledgerReferences.length === 0) return Object.freeze([])
+      if (isExactCurrentStagedReferenceSet(ledgerReferences, stageID, spec, identity)) {
+        // A process may die after the PNG is staged but before EventV2 publishes
+        // its artifact. Re-entering capture with the same logical coordinates
+        // restores those bytes without another browser call or quota charge.
+        return Object.freeze([])
+      }
+      const unsettled = ledgerReferences.some(
+        (item) => item.state === "capturing" || item.state === "staged" || item.artifact === undefined,
+      )
+      return yield* evidenceFailure(
+        unsettled ? "reference_evidence_ambiguous" : "invalid_visual_authority",
+        "Reference ledger history exists without one exact durable artifact per viewport",
+      )
+    }
     if (candidates.length !== spec.referenceApp.viewports.length)
       return yield* evidenceFailure(
         "invalid_visual_authority",
         "Later visual revisions require one exact durable reference per viewport",
       )
-    const identity = yield* Effect.try({
-      try: () => WorkflowVisualHost.referenceIdentity(workflowID, referenceApp),
-      catch: () => evidenceFailure("invalid_visual_authority", "Durable reference identity is invalid"),
-    })
     const ordered = yield* Effect.try({
       try: () =>
         spec.referenceApp.viewports.map((viewport) => {
@@ -757,6 +795,50 @@ function reusableReferences(
         : Effect.fail(evidenceFailure("invalid_visual_authority", "Reference dependency validation failed")),
     ),
   )
+}
+
+function hasPriorVisualAuthority(prior: readonly WorkflowRoleExecution.DecodedPriorArtifact[]): boolean {
+  return prior.some((artifact) => {
+    if (
+      artifact.kind === WorkflowVisualReviewArtifact.REVIEW_KIND ||
+      artifact.kind === WorkflowVisualReviewArtifact.IMPLEMENTATION_SCREENSHOT_KIND
+    ) {
+      return true
+    }
+    if (artifact.kind !== WorkflowStageMachine.OUTCOME_ARTIFACT_KIND) return false
+    if (artifact.value === null || typeof artifact.value !== "object") return false
+    const outcome = Reflect.get(artifact.value, "outcome")
+    return outcome !== null && typeof outcome === "object" && Reflect.get(outcome, "role") === "visual_review"
+  })
+}
+
+function isExactCurrentStagedReferenceSet(
+  items: readonly WorkflowVisualHost.EvidenceSummary[],
+  stageID: WorkflowRoleExecution.PrepareInput["stage"]["id"],
+  spec: ReturnType<typeof WorkflowDesignArtifact.decodeSpec>,
+  identity: WorkflowVisualHost.PreviewIdentity,
+): boolean {
+  if (items.length !== spec.referenceApp.viewports.length) return false
+  return spec.referenceApp.viewports.every((viewport) => {
+    const matches = items.filter((item) => {
+      const coordinates = item.coordinates
+      return (
+        item.state === "staged" &&
+        item.receipt !== undefined &&
+        item.artifact === undefined &&
+        coordinates.stageID === stageID &&
+        coordinates.kind === "reference" &&
+        coordinates.revision === 0 &&
+        coordinates.viewport.name === viewport.name &&
+        coordinates.viewport.width === viewport.width &&
+        coordinates.viewport.height === viewport.height &&
+        coordinates.configSha256 === identity.configSha256 &&
+        coordinates.sourceSha256 === identity.sourceSha256 &&
+        coordinates.readySelectorSha256 === identity.readySelectorSha256
+      )
+    })
+    return matches.length === 1
+  })
 }
 
 function decodePrior(

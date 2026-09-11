@@ -101,6 +101,7 @@ const eventCount = (type: string) =>
 describe("SessionV2.prompt", () => {
   it.effect("exposes the execution registry", () =>
     Effect.gen(function* () {
+      yield* setup
       activeSessions.add(sessionID)
       expect(Array.from(yield* (yield* SessionV2.Service).active)).toEqual([sessionID])
     }).pipe(Effect.ensuring(Effect.sync(() => activeSessions.clear()))),
@@ -130,13 +131,14 @@ describe("SessionV2.prompt", () => {
     }),
   )
 
-  it.effect("delegates interruption without requiring a recorded Session", () =>
+  it.effect("rejects interruption for an unrecorded public Session", () =>
     Effect.gen(function* () {
       const session = yield* SessionV2.Service
       interruptCalls.length = 0
+      const missing = SessionV2.ID.make("ses_missing")
 
-      yield* session.interrupt(SessionV2.ID.make("ses_missing"))
-      expect(interruptCalls).toEqual([SessionV2.ID.make("ses_missing")])
+      expect((yield* session.interrupt(missing).pipe(Effect.flip))._tag).toBe("Session.NotFoundError")
+      expect(interruptCalls).toEqual([])
     }),
   )
 

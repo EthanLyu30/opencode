@@ -9,11 +9,23 @@ import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Location } from "@opencode-ai/schema/location"
+import { AbsolutePath } from "@opencode-ai/schema/schema"
+import { Session } from "@opencode-ai/schema/session"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([EventV2.node, WorkflowV2.node, WorkflowStore.node, WorkflowExecutor.node])),
 )
+
+const admit = (workflow: WorkflowV2.Interface, input: Workflow.CreateInput) =>
+  workflow.admit({
+    ...input,
+    location: Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit") }),
+    sessionID: Session.ID.make("ses_workflow_budget"),
+    agent: Agent.ID.make("build"),
+  })
 
 describe("WorkflowBudget", () => {
   test("reports every newly crossed threshold once", () => {
@@ -95,7 +107,7 @@ describe("WorkflowBudget", () => {
       const workflowID = Workflow.ID.make("wfl_budget_gate")
       const firstID = Workflow.StageID.make("wfs_budget_gate_first")
       const secondID = Workflow.StageID.make("wfs_budget_gate_second")
-      yield* workflow.create({
+      yield* admit(workflow, {
         id: workflowID,
         type: "development",
         input: {},
@@ -177,7 +189,7 @@ describe("WorkflowBudget", () => {
       const events = yield* EventV2.Service
       const workflowID = Workflow.ID.make("wfl_budget_update_validation")
       const stageID = Workflow.StageID.make("wfs_budget_update_validation")
-      yield* workflow.create({
+      yield* admit(workflow, {
         id: workflowID,
         type: "development",
         input: {},

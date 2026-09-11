@@ -149,6 +149,47 @@ describe("WorkflowStore", () => {
     }),
   )
 
+  it.effect("returns a bounded deterministic batch of expired leases", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const store = yield* WorkflowStore.Service
+      yield* events.publish(WorkflowEvent.Created, createData1)
+      yield* events.publish(WorkflowEvent.Created, createData2)
+      yield* events.publish(WorkflowEvent.Stage.Leased, {
+        workflowID: workflowID1,
+        stageID: designStageID,
+        timestamp: DateTime.makeUnsafe(2_500),
+        attempt: 1,
+        leaseOwner: "worker-expired-later",
+        leaseExpiresAt: DateTime.makeUnsafe(4_000),
+      })
+      yield* events.publish(WorkflowEvent.Stage.Leased, {
+        workflowID: workflowID2,
+        stageID: reviewStageID,
+        timestamp: DateTime.makeUnsafe(2_500),
+        attempt: 1,
+        leaseOwner: "worker-expired-first",
+        leaseExpiresAt: DateTime.makeUnsafe(3_000),
+      })
+
+      expect(yield* store.expired({ now: 5_000, limit: 2 })).toEqual([])
+      yield* events.publish(WorkflowEvent.Started, {
+        workflowID: workflowID1,
+        timestamp: DateTime.makeUnsafe(2_600),
+      })
+      yield* events.publish(WorkflowEvent.Started, {
+        workflowID: workflowID2,
+        timestamp: DateTime.makeUnsafe(2_600),
+      })
+      expect((yield* store.expired({ now: 5_000, limit: 1 })).map((stage) => stage.id)).toEqual([reviewStageID])
+      expect((yield* store.expired({ now: 5_000, limit: 2 })).map((stage) => stage.id)).toEqual([
+        reviewStageID,
+        designStageID,
+      ])
+      expect(yield* store.expired({ now: 5_000, limit: 0 })).toEqual([])
+    }),
+  )
+
   it.effect("returns immutable artifacts in creation order", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service

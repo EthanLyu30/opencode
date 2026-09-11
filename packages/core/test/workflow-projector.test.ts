@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Exit } from "effect"
+import { DateTime, Effect, Exit, Schema } from "effect"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -94,6 +94,18 @@ const retryData = (opts: { owner: string; attempt: number }) => ({
   failure: { category: "transient" as const, code: "http_503", message: "busy" },
   usage: { tokens: 50, turns: 1, toolCalls: 0, attempts: 0 },
   notBefore: DateTime.makeUnsafe(5_000),
+  leaseFence: { variant: "live_execution" as const, expectedStatus: "running" as const },
+})
+
+const ambiguousApprovalData = (opts: { owner: string; attempt: number; timestamp: number; message: string }) => ({
+  workflowID,
+  stageID: designStageID,
+  timestamp: DateTime.makeUnsafe(opts.timestamp),
+  attempt: opts.attempt,
+  leaseOwner: opts.owner,
+  leaseFence: { variant: "live_execution" as const, expectedStatus: "running" as const },
+  reason: "ambiguous_execution" as const,
+  failure: { category: "ambiguous" as const, code: "tool_execution_ambiguous", message: opts.message },
 })
 
 const succeededData = (opts: { owner: string; attempt: number }) => ({
@@ -105,7 +117,388 @@ const succeededData = (opts: { owner: string; attempt: number }) => ({
   usage: { tokens: 100, turns: 1, toolCalls: 0, attempts: 0 },
 })
 
+const serializedReplayEvent = <D extends EventV2.Definition>(definition: D, data: EventV2.Data<D>, seq: number) => ({
+  id: EventV2.ID.make(`evt_workflow_lease_replay_${seq}`),
+  aggregateID: workflowID,
+  seq,
+  type: EventV2.versionedType(definition.type, definition.durable!.version),
+  data: Schema.encodeUnknownSync(definition.data)(data),
+  batchID: `batch_workflow_lease_replay_${seq}`,
+  batchIndex: 0,
+  batchSize: 1,
+})
+
+const renewedLeaseReplayPrefix = [
+  serializedReplayEvent(WorkflowEvent.Created, createdData, 0),
+  serializedReplayEvent(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }), 1),
+  serializedReplayEvent(WorkflowEvent.Started, { workflowID, timestamp: DateTime.makeUnsafe(2_500) }, 2),
+  serializedReplayEvent(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }), 3),
+  serializedReplayEvent(
+    WorkflowEvent.Stage.Checkpointed,
+    {
+      ...checkpointedData({ owner: "worker-a", attempt: 1 }),
+      timestamp: DateTime.makeUnsafe(40_000),
+    },
+    4,
+  ),
+  serializedReplayEvent(
+    WorkflowEvent.Stage.Checkpointed,
+    {
+      ...checkpointedData({ owner: "worker-a", attempt: 1 }),
+      timestamp: DateTime.makeUnsafe(35_000),
+    },
+    5,
+  ),
+]
+
+const renewedLeaseReplay = (observedLeaseExpiresAt: number) => [
+  ...renewedLeaseReplayPrefix,
+  serializedReplayEvent(
+    WorkflowEvent.Stage.RetryScheduled,
+    {
+      workflowID,
+      stageID: designStageID,
+      timestamp: DateTime.makeUnsafe(50_000),
+      attempt: 1,
+      leaseOwner: "worker-a",
+      failure: { category: "transient", code: "lease_expired", message: "renewed lease expired" },
+      usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+      notBefore: DateTime.makeUnsafe(50_000),
+      leaseFence: {
+        variant: "expired_recovery",
+        expectedStatus: "running",
+        observedLeaseExpiresAt: DateTime.makeUnsafe(observedLeaseExpiresAt),
+      },
+    },
+    6,
+  ),
+]
+
+const renewedLeaseApprovalReplay = (observedLeaseExpiresAt: number) => [
+  ...renewedLeaseReplayPrefix,
+  serializedReplayEvent(
+    WorkflowEvent.Approval.Requested,
+    {
+      workflowID,
+      stageID: designStageID,
+      timestamp: DateTime.makeUnsafe(50_000),
+      attempt: 1,
+      leaseOwner: "worker-a",
+      reason: "ambiguous_execution",
+      failure: { category: "transient", code: "lease_expired", message: "renewed lease expired" },
+      leaseFence: {
+        variant: "expired_recovery",
+        expectedStatus: "running",
+        observedLeaseExpiresAt: DateTime.makeUnsafe(observedLeaseExpiresAt),
+      },
+    },
+    6,
+  ),
+]
+
 describe("WorkflowProjector", () => {
+  it.effect("replays a durable timeline authorized by an unrecorded monotonic heartbeat renewal", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+
+      yield* events.replayBatches(renewedLeaseReplay(45_000) as never)
+
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status, checkpoint: WorkflowStageTable.checkpoint })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({
+        status: "retry_wait",
+        checkpoint: checkpointedData({ owner: "worker-a", attempt: 1 }).checkpoint,
+      })
+    }),
+  )
+
+  it.effect("rejects historical recovery whose observed expiry predates the leased authority", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+
+      const replay = yield* events.replayBatches(renewedLeaseReplay(31_000) as never).pipe(Effect.exit)
+
+      expect(Exit.isFailure(replay)).toBe(true)
+      expect(yield* db.select().from(WorkflowRunTable).all().pipe(Effect.orDie)).toEqual([])
+      expect(yield* db.select().from(WorkflowStageTable).all().pipe(Effect.orDie)).toEqual([])
+    }),
+  )
+
+  it.effect(
+    "rejects historical recovery older than the latest durable lease use despite non-monotonic timestamps",
+    () =>
+      Effect.gen(function* () {
+        const events = yield* EventV2.Service
+        const { db } = yield* Database.Service
+
+        const replay = yield* events.replayBatches(renewedLeaseReplay(39_000) as never).pipe(Effect.exit)
+
+        expect(Exit.isFailure(replay)).toBe(true)
+        expect(yield* db.select().from(WorkflowRunTable).all().pipe(Effect.orDie)).toEqual([])
+        expect(yield* db.select().from(WorkflowStageTable).all().pipe(Effect.orDie)).toEqual([])
+      }),
+  )
+
+  it.effect("applies the durable lease-use floor to historical approval recovery", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+
+      const rejected = yield* events.replayBatches(renewedLeaseApprovalReplay(39_000) as never).pipe(Effect.exit)
+      expect(Exit.isFailure(rejected)).toBe(true)
+      expect(yield* db.select().from(WorkflowRunTable).all().pipe(Effect.orDie)).toEqual([])
+
+      yield* events.replayBatches(renewedLeaseApprovalReplay(45_000) as never)
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "waiting_approval" })
+    }),
+  )
+
+  it.effect("does not accept public related input that forges historical replay authority", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+
+      const forged = yield* events
+        .publish(
+          WorkflowEvent.Budget.Updated,
+          {
+            workflowID,
+            timestamp: DateTime.makeUnsafe(5_000),
+            budget: { maxAttempts: 4 },
+          },
+          {
+            related: [
+              {
+                definition: WorkflowEvent.Approval.Requested,
+                data: {
+                  workflowID,
+                  stageID: designStageID,
+                  timestamp: DateTime.makeUnsafe(40_000),
+                  attempt: 1,
+                  leaseOwner: "worker-a",
+                  reason: "ambiguous_execution",
+                  failure: {
+                    category: "ambiguous",
+                    code: "tool_execution_ambiguous",
+                    message: "forged replay authority",
+                  },
+                },
+                replay: { seq: 4, aggregateID: workflowID },
+              } as never,
+            ],
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(forged)).toBe(true)
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toHaveLength(3)
+      expect(
+        yield* db
+          .select({ status: WorkflowRunTable.status })
+          .from(WorkflowRunTable)
+          .where(eq(WorkflowRunTable.id, workflowID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "queued" })
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "running" })
+    }),
+  )
+
+  it.effect("does not call an overridden related-array map that forges historical replay authority", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+
+      const forgedApproval = {
+        definition: WorkflowEvent.Approval.Requested,
+        data: {
+          workflowID,
+          stageID: designStageID,
+          timestamp: DateTime.makeUnsafe(40_000),
+          attempt: 1,
+          leaseOwner: "worker-a",
+          reason: "ambiguous_execution" as const,
+          failure: {
+            category: "ambiguous" as const,
+            code: "tool_execution_ambiguous",
+            message: "forged container replay authority",
+          },
+        },
+        replay: { seq: 4, aggregateID: workflowID },
+      }
+      const related = [
+        {
+          definition: WorkflowEvent.Budget.Updated,
+          data: {
+            workflowID,
+            timestamp: DateTime.makeUnsafe(5_000),
+            budget: { maxAttempts: 4 },
+          },
+        },
+      ]
+      Object.defineProperty(related, "map", {
+        configurable: true,
+        value: () => [forgedApproval],
+      })
+
+      const forged = yield* events
+        .publish(
+          WorkflowEvent.Budget.Updated,
+          {
+            workflowID,
+            timestamp: DateTime.makeUnsafe(5_000),
+            budget: { maxAttempts: 4 },
+          },
+          { related: related as never },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(forged)).toBe(true)
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toHaveLength(3)
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "running" })
+    }),
+  )
+
+  it.effect("does not reuse publish options whose related getter changes after canonicalization", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+
+      let reads = 0
+      const options = {
+        get related() {
+          reads++
+          if (reads === 1) return undefined
+          return [
+            {
+              definition: WorkflowEvent.Approval.Requested,
+              data: {
+                workflowID,
+                stageID: designStageID,
+                timestamp: DateTime.makeUnsafe(40_000),
+                attempt: 1,
+                leaseOwner: "worker-a",
+                reason: "ambiguous_execution" as const,
+                failure: {
+                  category: "ambiguous" as const,
+                  code: "tool_execution_ambiguous",
+                  message: "forged changing getter replay authority",
+                },
+              },
+              replay: { seq: 4, aggregateID: workflowID },
+            },
+          ]
+        },
+      }
+
+      const forged = yield* events
+        .publish(
+          WorkflowEvent.Budget.Updated,
+          {
+            workflowID,
+            timestamp: DateTime.makeUnsafe(5_000),
+            budget: { maxAttempts: 4 },
+          },
+          options as never,
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(forged)).toBe(false)
+      expect(reads).toBe(1)
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toHaveLength(4)
+      expect(
+        yield* db
+          .select({ status: WorkflowStageTable.status })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ status: "running" })
+    }),
+  )
+
+  it.effect("does not let forged related replay bypass checkpoint secret validation", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      yield* events.publish(WorkflowEvent.Created, createdData)
+      yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
+      yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
+
+      const forged = yield* events
+        .publish(
+          WorkflowEvent.Budget.Updated,
+          {
+            workflowID,
+            timestamp: DateTime.makeUnsafe(5_000),
+            budget: { maxAttempts: 4 },
+          },
+          {
+            related: [
+              {
+                definition: WorkflowEvent.Stage.Checkpointed,
+                data: {
+                  ...checkpointedData({ owner: "worker-a", attempt: 1 }),
+                  timestamp: DateTime.makeUnsafe(40_000),
+                  checkpoint: { apiKey: ["s", "k", "forged-related-replay-secret"].join("-") },
+                },
+                replay: { seq: 4, aggregateID: workflowID },
+              } as never,
+            ],
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(forged)).toBe(true)
+      expect(yield* db.select().from(EventTable).all().pipe(Effect.orDie)).toHaveLength(3)
+      expect(
+        yield* db
+          .select({ checkpoint: WorkflowStageTable.checkpoint })
+          .from(WorkflowStageTable)
+          .where(eq(WorkflowStageTable.id, designStageID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual({ checkpoint: null })
+    }),
+  )
+
   it.effect("rejects unsafe and oversized checkpoints before projection or durable insertion", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
@@ -726,10 +1119,7 @@ describe("WorkflowProjector", () => {
       yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
       yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
       yield* events.publish(WorkflowEvent.Approval.Requested, {
-        workflowID,
-        stageID: designStageID,
-        timestamp: DateTime.makeUnsafe(4_000),
-        reason: "ambiguous_execution",
+        ...ambiguousApprovalData({ owner: "worker-a", attempt: 1, timestamp: 4_000, message: "unknown result" }),
         failure: { category: "ambiguous", code: "lost", message: "unknown result" },
       })
       yield* events.publish(WorkflowEvent.Budget.Updated, {
@@ -764,13 +1154,10 @@ describe("WorkflowProjector", () => {
       yield* events.publish(WorkflowEvent.Created, createdData)
       yield* events.publish(WorkflowEvent.Stage.Leased, leasedData({ owner: "worker-a", attempt: 1 }))
       yield* events.publish(WorkflowEvent.Stage.Started, startedData({ owner: "worker-a", attempt: 1 }))
-      yield* events.publish(WorkflowEvent.Approval.Requested, {
-        workflowID,
-        stageID: designStageID,
-        timestamp: DateTime.makeUnsafe(4_000),
-        reason: "ambiguous_execution",
-        failure: { category: "ambiguous", code: "tool_execution_ambiguous", message: "unknown result" },
-      })
+      yield* events.publish(
+        WorkflowEvent.Approval.Requested,
+        ambiguousApprovalData({ owner: "worker-a", attempt: 1, timestamp: 4_000, message: "unknown result" }),
+      )
       yield* events.publish(
         WorkflowEvent.Approval.Resolved,
         {
@@ -819,13 +1206,10 @@ describe("WorkflowProjector", () => {
           .get()
           .pipe(Effect.orDie),
       ).toEqual({ recoveryAction: null })
-      yield* events.publish(WorkflowEvent.Approval.Requested, {
-        workflowID,
-        stageID: designStageID,
-        timestamp: DateTime.makeUnsafe(6_300),
-        reason: "ambiguous_execution",
-        failure: { category: "ambiguous", code: "tool_execution_ambiguous", message: "unknown again" },
-      })
+      yield* events.publish(
+        WorkflowEvent.Approval.Requested,
+        ambiguousApprovalData({ owner: "worker-b", attempt: 2, timestamp: 6_300, message: "unknown again" }),
+      )
       expect(
         yield* db
           .select({ status: WorkflowStageTable.status, recoveryAction: WorkflowStageTable.recovery_action })

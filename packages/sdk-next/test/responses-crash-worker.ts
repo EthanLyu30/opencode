@@ -5,9 +5,18 @@ import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { Responses, Workflow } from "../src"
 import { createdOnlyBody, runtimeLayer, seedPair } from "./lib/native-responses-runtime"
 
-const [databasePath, rawWorkflowID, rawResponseID, markerPath, attemptPath, envPath] = process.argv.slice(2)
-if (!databasePath || !rawWorkflowID || !rawResponseID || !markerPath || !attemptPath || !envPath) {
-  throw new Error("Expected database, workflow, response, marker, attempt, and env paths")
+const [databasePath, workspaceDirectory, rawWorkflowID, rawResponseID, markerPath, attemptPath, envPath] =
+  process.argv.slice(2)
+if (
+  !databasePath ||
+  !workspaceDirectory ||
+  !rawWorkflowID ||
+  !rawResponseID ||
+  !markerPath ||
+  !attemptPath ||
+  !envPath
+) {
+  throw new Error("Expected database, workspace, workflow, response, marker, attempt, and env paths")
 }
 
 const credentialNames = Object.keys(process.env).filter((name) => /(KEY|TOKEN|SECRET|AUTH)/i.test(name))
@@ -17,7 +26,7 @@ if (credentialNames.length > 0) throw new Error(`Credential variables reached ch
 const workflowID = Workflow.ID.make(rawWorkflowID)
 const responseID = Responses.ID.make(rawResponseID)
 const body = createdOnlyBody()
-await seedPair(databasePath, workflowID, responseID, true)
+await seedPair(databasePath, workspaceDirectory, workflowID, responseID, true)
 
 await Effect.runPromise(
   Effect.scoped(

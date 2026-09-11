@@ -10,6 +10,7 @@ const administratorsSid = "S-1-5-32-544"
 const fixedPowerShell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
 const genericAll = 0x10000000
 const genericWrite = 0x40000000
+const fullControl = 0x001f01ff
 const concreteWriteMask =
   0x00000002 | // FILE_WRITE_DATA / FILE_ADD_FILE
   0x00000004 | // FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
@@ -32,6 +33,8 @@ export interface AclSnapshot {
   readonly currentIdentitySids: readonly string[]
   readonly ownerSid: string
   readonly protected: boolean
+  /** Present and false for production probes; legacy callers may omit it. */
+  readonly reparsePoint?: boolean
   readonly descriptorSddl: string
   readonly aces: readonly Ace[]
 }
@@ -50,6 +53,37 @@ export interface Policy {
   readonly verifyHostRoot: (canonicalHostRoot: string) => void
   readonly verifyEvidenceRoot: (canonicalEvidenceRoot: string) => void
   readonly verifyTempRoot: (canonicalTempRoot: string) => void
+}
+
+/** Seven independently protected directories which form the production host topology. */
+export interface ProductionRoots {
+  readonly deploymentRoot: string
+  readonly dataRoot: string
+  readonly browserRuntimeRoot: string
+  readonly browserCacheRoot: string
+  readonly previewCapabilityRoot: string
+  readonly dockerConfigRoot: string
+  readonly dockerTempRoot: string
+}
+
+export interface ProductionPolicy {
+  readonly roots: ProductionRoots
+  readonly verifyDeploymentRoot: (canonicalRoot: string) => void
+  readonly verifyDataRoot: (canonicalRoot: string) => void
+  readonly verifyBrowserRuntimeRoot: (canonicalRoot: string) => void
+  readonly verifyBrowserCacheRoot: (canonicalRoot: string) => void
+  readonly verifyPreviewCapabilityRoot: (canonicalRoot: string) => void
+  readonly verifyDockerConfigRoot: (canonicalRoot: string) => void
+  readonly verifyDockerTempRoot: (canonicalRoot: string) => void
+  readonly verifyAll: () => void
+  readonly authorizeCleanupTarget: (input: { readonly target: string; readonly workspace?: string }) => CleanupAuthority
+  readonly verifyCleanupTarget: (authority: CleanupAuthority) => string
+}
+
+export interface CleanupAuthority {
+  readonly target: string
+  readonly previewCapabilityRoot: string
+  readonly identity: string
 }
 
 export interface ProbeInvocation {
@@ -101,6 +135,90 @@ export function make(input: Roots & { readonly workspaceRoots?: readonly string[
   })
 }
 
+export function makeProduction(
+  input: ProductionRoots & { readonly workspaceRoots?: readonly string[]; readonly probe: Probe },
+): ProductionPolicy {
+  const roots = canonicalProductionRoots(input)
+  const workspaces = (input.workspaceRoots ?? []).map(canonicalRoot)
+  if (workspaces.some((workspace) => overlap(workspace, roots.deploymentRoot))) {
+    throw new TypeError("Workflow Location overlaps the production deployment tree")
+  }
+
+  const fingerprints = new Map<keyof ProductionRoots, string>()
+  const identities = new Map<keyof ProductionRoots, string>()
+  for (const [name, root] of productionRootEntries(roots)) {
+    const snapshot = input.probe(root)
+    verifyProductionAcl(root, snapshot)
+    fingerprints.set(name, fingerprint(snapshot))
+    identities.set(name, rootIdentity(root))
+  }
+
+  const verifyOne = (name: keyof ProductionRoots, actual: string) => {
+    const expected = roots[name]
+    if (actual !== expected) throw new TypeError(`Workflow ${name} policy target changed`)
+    if (requireCanonical(expected) !== expected || rootIdentity(expected) !== identities.get(name)) {
+      throw new TypeError(`Workflow ${name} identity changed`)
+    }
+    const snapshot = input.probe(expected)
+    verifyProductionAcl(expected, snapshot)
+    if (fingerprint(snapshot) !== fingerprints.get(name)) {
+      throw new TypeError(`Workflow ${name} ACL descriptor changed`)
+    }
+  }
+  const verifyAll = () => {
+    for (const [name, root] of productionRootEntries(roots)) verifyOne(name, root)
+  }
+  const cleanupAuthorities = new WeakSet<object>()
+  const authorizeCleanupTarget = (candidate: { readonly target: string; readonly workspace?: string }) => {
+    verifyOne("previewCapabilityRoot", roots.previewCapabilityRoot)
+    const target = canonicalRoot(candidate.target)
+    if (!strictlyContains(roots.previewCapabilityRoot, target)) {
+      throw new TypeError("Workflow cleanup target is outside preview capability temp")
+    }
+    if (candidate.workspace !== undefined) {
+      const workspace = canonicalRoot(candidate.workspace)
+      if (overlap(workspace, target)) throw new TypeError("Workflow cleanup target overlaps its Location")
+    }
+    const authority: CleanupAuthority = Object.freeze({
+      target,
+      previewCapabilityRoot: roots.previewCapabilityRoot,
+      identity: rootIdentity(target),
+    })
+    cleanupAuthorities.add(authority)
+    verifyOne("previewCapabilityRoot", roots.previewCapabilityRoot)
+    return authority
+  }
+  const verifyCleanupTarget = (authority: CleanupAuthority) => {
+    if (authority === null || typeof authority !== "object" || !cleanupAuthorities.has(authority)) {
+      throw new TypeError("Workflow cleanup authority was not minted by this host policy")
+    }
+    verifyOne("previewCapabilityRoot", roots.previewCapabilityRoot)
+    if (
+      authority.previewCapabilityRoot !== roots.previewCapabilityRoot ||
+      requireCanonical(authority.target) !== authority.target ||
+      !strictlyContains(roots.previewCapabilityRoot, authority.target) ||
+      rootIdentity(authority.target) !== authority.identity
+    ) {
+      throw new TypeError("Workflow cleanup target identity changed")
+    }
+    return authority.target
+  }
+
+  return Object.freeze({
+    roots: Object.freeze({ ...roots }),
+    verifyDeploymentRoot: (root: string) => verifyOne("deploymentRoot", root),
+    verifyDataRoot: (root: string) => verifyOne("dataRoot", root),
+    verifyBrowserRuntimeRoot: (root: string) => verifyOne("browserRuntimeRoot", root),
+    verifyBrowserCacheRoot: (root: string) => verifyOne("browserCacheRoot", root),
+    verifyPreviewCapabilityRoot: (root: string) => verifyOne("previewCapabilityRoot", root),
+    verifyDockerConfigRoot: (root: string) => verifyOne("dockerConfigRoot", root),
+    verifyDockerTempRoot: (root: string) => verifyOne("dockerTempRoot", root),
+    verifyAll,
+    authorizeCleanupTarget,
+    verifyCleanupTarget,
+  })
+}
+
 export function productionProbe(input: {
   readonly tempRoot: string
   readonly run?: (invocation: ProbeInvocation) => ProbeResult
@@ -123,8 +241,14 @@ export function productionProbe(input: {
     const target = requireCanonical(canonicalRoot)
     const result = run({
       executable: fixedPowerShell,
-      argv: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", aclScript, target],
-      env: { SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows", TEMP: tempRoot, TMP: tempRoot },
+      argv: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", aclScript],
+      env: {
+        SystemRoot: "C:\\Windows",
+        WINDIR: "C:\\Windows",
+        TEMP: tempRoot,
+        TMP: tempRoot,
+        OPENCODE_ACL_PROBE_TARGET: target,
+      },
     })
     if (result.exit !== 0 || result.stderr.trim() !== "") throw new TypeError("Workflow ACL probe failed closed")
     let parsed: unknown
@@ -155,6 +279,49 @@ function canonicalRoots(input: Roots): Roots {
     throw new TypeError("Workflow host subroots must be isolated descendants")
   }
   return roots
+}
+
+function canonicalProductionRoots(input: ProductionRoots): ProductionRoots {
+  const roots: ProductionRoots = {
+    deploymentRoot: canonicalRoot(input.deploymentRoot),
+    dataRoot: canonicalRoot(input.dataRoot),
+    browserRuntimeRoot: canonicalRoot(input.browserRuntimeRoot),
+    browserCacheRoot: canonicalRoot(input.browserCacheRoot),
+    previewCapabilityRoot: canonicalRoot(input.previewCapabilityRoot),
+    dockerConfigRoot: canonicalRoot(input.dockerConfigRoot),
+    dockerTempRoot: canonicalRoot(input.dockerTempRoot),
+  }
+  const leaves = [
+    roots.dataRoot,
+    roots.browserRuntimeRoot,
+    roots.browserCacheRoot,
+    roots.previewCapabilityRoot,
+    roots.dockerConfigRoot,
+    roots.dockerTempRoot,
+  ]
+  if (!leaves.every((leaf) => strictlyContains(roots.deploymentRoot, leaf))) {
+    throw new TypeError("Workflow production leaves must be strict deployment descendants")
+  }
+  for (let left = 0; left < leaves.length; left++) {
+    for (let right = left + 1; right < leaves.length; right++) {
+      if (overlap(leaves[left], leaves[right])) {
+        throw new TypeError("Workflow production leaves must be pairwise isolated")
+      }
+    }
+  }
+  return roots
+}
+
+function productionRootEntries(roots: ProductionRoots): ReadonlyArray<readonly [keyof ProductionRoots, string]> {
+  return [
+    ["deploymentRoot", roots.deploymentRoot],
+    ["dataRoot", roots.dataRoot],
+    ["browserRuntimeRoot", roots.browserRuntimeRoot],
+    ["browserCacheRoot", roots.browserCacheRoot],
+    ["previewCapabilityRoot", roots.previewCapabilityRoot],
+    ["dockerConfigRoot", roots.dockerConfigRoot],
+    ["dockerTempRoot", roots.dockerTempRoot],
+  ]
 }
 
 function canonicalRoot(value: string) {
@@ -220,12 +387,35 @@ function verifyAcl(root: string, snapshot: AclSnapshot) {
   }
 }
 
+function verifyProductionAcl(root: string, snapshot: AclSnapshot) {
+  verifyAcl(root, snapshot)
+  if (snapshot.reparsePoint !== false) {
+    throw new TypeError(`Workflow production root is an unproven reparse point: ${root}`)
+  }
+  for (const sid of [snapshot.currentUserSid, systemSid, administratorsSid]) {
+    const identities =
+      sid === snapshot.currentUserSid ? new Set(snapshot.currentIdentitySids) : new Set([sid, "S-1-1-0", "S-1-5-11"])
+    let allowed = 0
+    let denied = 0
+    for (const ace of snapshot.aces) {
+      if (ace.inherited || !identities.has(ace.sid)) continue
+      const access = fullControlAccess(ace.mask)
+      if (ace.allow) allowed = (allowed | access) >>> 0
+      else denied = (denied | access) >>> 0
+    }
+    if ((((allowed & ~denied) >>> 0) & fullControl) !== fullControl) {
+      throw new TypeError(`Workflow production root lacks effective full control for trusted host authority: ${root}`)
+    }
+  }
+}
+
 function decodeSnapshot(value: unknown): AclSnapshot {
   if (value === null || typeof value !== "object") throw new TypeError("Workflow ACL snapshot is not an object")
   const currentUserSid = Reflect.get(value, "currentUserSid")
   const currentIdentitySids = Reflect.get(value, "currentIdentitySids")
   const ownerSid = Reflect.get(value, "ownerSid")
   const protectedAcl = Reflect.get(value, "protected")
+  const reparsePoint = Reflect.get(value, "reparsePoint")
   const descriptorSddl = Reflect.get(value, "descriptorSddl")
   const rawAces = Reflect.get(value, "aces")
   if (
@@ -233,6 +423,7 @@ function decodeSnapshot(value: unknown): AclSnapshot {
     !Array.isArray(currentIdentitySids) ||
     typeof ownerSid !== "string" ||
     typeof protectedAcl !== "boolean" ||
+    (reparsePoint !== undefined && typeof reparsePoint !== "boolean") ||
     typeof descriptorSddl !== "string" ||
     !Array.isArray(rawAces)
   ) {
@@ -255,6 +446,7 @@ function decodeSnapshot(value: unknown): AclSnapshot {
     currentIdentitySids: currentIdentitySids.map(String),
     ownerSid,
     protected: protectedAcl,
+    ...(reparsePoint === undefined ? {} : { reparsePoint }),
     descriptorSddl,
     aces,
   }
@@ -272,6 +464,11 @@ function dangerousAccess(value: number): number {
   return write >>> 0
 }
 
+function fullControlAccess(value: number): number {
+  const mask = value >>> 0
+  return (mask & genericAll) !== 0 ? fullControl : mask & fullControl
+}
+
 function fingerprint(snapshot: AclSnapshot): string {
   return createHash("sha256")
     .update(
@@ -280,6 +477,7 @@ function fingerprint(snapshot: AclSnapshot): string {
         currentIdentitySids: [...snapshot.currentIdentitySids].toSorted(),
         ownerSid: snapshot.ownerSid,
         protected: snapshot.protected,
+        reparsePoint: snapshot.reparsePoint,
         descriptorSddl: snapshot.descriptorSddl,
         aces: snapshot.aces.map((ace) => ({ ...ace, mask: ace.mask >>> 0 })),
       }),
@@ -319,8 +517,10 @@ function overlap(left: string, right: string) {
 }
 
 const aclScript = String.raw`$ErrorActionPreference = 'Stop'
-$target = $args[0]
+$target = $env:OPENCODE_ACL_PROBE_TARGET
+if ([string]::IsNullOrWhiteSpace($target)) { throw 'ACL probe target is missing' }
 $acl = Get-Acl -LiteralPath $target
+$attributes = (Get-Item -Force -LiteralPath $target).Attributes
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $current = $identity.User.Value
 $currentSids = @($current, 'S-1-1-0') + @($identity.Groups | ForEach-Object { $_.Value }) | Select-Object -Unique
@@ -340,6 +540,7 @@ $aces = @($acl.Access | ForEach-Object {
   currentIdentitySids = @($currentSids)
   ownerSid = $owner
   protected = $acl.AreAccessRulesProtected
+  reparsePoint = (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
   descriptorSddl = $descriptor
   aces = $aces
 } | ConvertTo-Json -Depth 5 -Compress`

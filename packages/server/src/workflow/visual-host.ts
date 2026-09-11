@@ -18,6 +18,8 @@ import { DockerProcessOwnership } from "./docker-process-ownership"
 import { HostRootPolicy } from "./host-root-policy"
 import { PlaywrightCapture } from "./playwright"
 import { ProcessOwnership } from "./process-ownership"
+import { ProductionHostRuntime } from "./production-host-runtime"
+import { VisualHostClaim } from "./visual-host-claim"
 
 const MAX_PROCESS_LOG_BYTES = 1024 * 1024
 const MAX_STATIC_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -25,6 +27,7 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 15_000
 const DEFAULT_POLL_INTERVAL_MS = 50
 const DEFAULT_FINALIZER_TIMEOUT_MS = 5_000
 const manifestName = ".host.json"
+const MAX_AUTHORITY_FILE_BYTES = 16 * 1024
 
 interface HostRecord {
   readonly hostID: WorkflowVisualHost.HostID
@@ -32,6 +35,10 @@ interface HostRecord {
   readonly directory: string
   readonly workspace?: string
   readonly createdAt: number
+  readonly kind: "static" | "script"
+  readonly lease: WorkflowVisualHost.PreviewLeaseAuthority
+  claim: VisualHostClaim.Owned
+  readonly identity: ProcessOwnership.Identity
   readySelector?: string
   allowedOrigins: readonly string[]
   captureURL?: string
@@ -41,6 +48,7 @@ interface HostRecord {
   preview?: WorkflowVisualHost.PreparedPreview
   server?: ReturnType<typeof Bun.serve>
   released: boolean
+  releaseTask?: Promise<boolean>
 }
 
 export interface Options {
@@ -50,17 +58,43 @@ export interface Options {
   readonly evidenceLedger?: EvidenceLedger.Service
   readonly evidenceRootPolicy?: EvidenceLedger.OpenOptions["rootPolicy"]
   readonly hostRootPolicy?: (canonicalHostRoot: string) => void
+  readonly cleanupPolicy?: Pick<HostRootPolicy.ProductionPolicy, "authorizeCleanupTarget" | "verifyCleanupTarget">
   readonly workspacePolicy?: (canonicalWorkspace: string) => Promise<void>
   readonly processOwnership?: ProcessOwnership.Service
+  /** Trusted adapter seam for an already-authenticated owned loopback origin. */
+  readonly probeOwnedOrigin?: (origin: string, signal: AbortSignal) => Promise<boolean>
+  /** Trusted durable Stage resolver used by reference and implementation capabilities. */
+  readonly resolvePreviewLease?: (
+    workflowID: WorkflowVisualHost.PreviewLeaseAuthority["workflowID"],
+  ) => Promise<WorkflowVisualHost.PreviewLeaseAuthority>
+  /** Fresh WorkflowStore read; true only for the same live workflow/stage/attempt/owner tuple. */
+  readonly isPreviewLeaseLive?: (lease: WorkflowVisualHost.PreviewLeaseAuthority) => Promise<boolean>
   readonly now?: () => number
   readonly startupTimeoutMs?: number
   readonly pollIntervalMs?: number
   readonly finalizerTimeoutMs?: number
   readonly maxProcessLogBytes?: number
   readonly onSpawnArgv?: (argv: readonly string[]) => void
+  /** Trusted test seam after process ownership returns an authenticated live process. */
+  readonly onProcessStarted?: (claim: VisualHostClaim.Owned) => Promise<void>
+  /** Trusted test seam after the generation/nonce-bound private staging directory is created. */
+  readonly onRecordStagingCreated?: (stagingDirectory: string) => Promise<void>
+  /** Trusted test seam after the exact manifest is flushed in a private sibling staging directory. */
+  readonly onRecordStaged?: (stagingDirectory: string, finalDirectory: string) => Promise<void>
+  /** Trusted test seam after the manifest-bearing staging directory is atomically published. */
+  readonly onRecordPublished?: (finalDirectory: string) => Promise<void>
   readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
   readonly onStaticFileOpened?: (file: string) => Promise<void>
   readonly onStaticFileRead?: (file: string) => Promise<void>
+  /** Trusted test seam immediately before the final live publication gate. */
+  readonly onBeforePreviewPublish?: (claim: VisualHostClaim.Owned) => Promise<void>
+  /** Trusted test seams around stale-owner destructive release boundaries. */
+  readonly onAfterBeginRelease?: (claim: VisualHostClaim.Owned) => Promise<void>
+  readonly onBeforeServerStop?: (claim: VisualHostClaim.Owned) => Promise<void>
+  readonly onBeforeCapabilityRemove?: (claim: VisualHostClaim.Owned) => Promise<void>
+  readonly onBeforeClaimDelete?: (claim: VisualHostClaim.Owned) => Promise<void>
+  /** Trusted test seam after an orphan claim has durably entered releasing. */
+  readonly onClaimReleasing?: (claim: VisualHostClaim.Owned) => Promise<void>
   /**
    * Trusted host seam. Task23.7 supplies a resolver backed by exact durable
    * design + implementation/snapshot authority; absence fails closed.
@@ -79,7 +113,9 @@ export function makeLayer(options: Options): Layer.Layer<WorkflowVisualHost.Serv
       })
       yield* Effect.addFinalizer(() =>
         Effect.promise(async () => {
-          await Promise.all([...state.active.values()].map((record) => release(state, record)))
+          await Promise.all(
+            [...state.active.values()].map((record) => settleWithin(release(state, record), state.finalizerTimeoutMs)),
+          )
           await settleWithin(state.browser.close(), state.finalizerTimeoutMs)
           await settleWithin(state.evidence.close(), state.finalizerTimeoutMs)
         }).pipe(Effect.ignore),
@@ -104,49 +140,48 @@ export interface ProductionLayerOptions {
   readonly engine?: Docker.Engine
   readonly aclProbe?: HostRootPolicy.Probe
   readonly browser?: PlaywrightCapture.Runtime
+  /** Trusted construction seam; production defaults to PlaywrightCapture.productionRuntime. */
+  readonly browserRuntimeFactory?: typeof PlaywrightCapture.productionRuntime
   readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
+  readonly resolvePreviewLease?: Options["resolvePreviewLease"]
+  readonly isPreviewLeaseLive?: Options["isPreviewLeaseLive"]
 }
 
 export function productionLayer(input: ProductionLayerOptions) {
   try {
-    const configuredRoot = requiredEnvironment(input.environment, "OPENCODE_WORKFLOW_HOST_ROOT")
-    const hostRoot = requiredEnvironment(input.environment, "OPENCODE_WORKFLOW_HOST_TEMP")
-    const evidenceRoot = requiredEnvironment(input.environment, "OPENCODE_WORKFLOW_EVIDENCE_ROOT")
-    const browserRoot = requiredEnvironment(input.environment, "PLAYWRIGHT_BROWSERS_PATH")
-    const probe =
-      input.aclProbe ??
-      HostRootPolicy.productionProbe({
-        tempRoot: hostRoot,
-      })
-    const policy = HostRootPolicy.make({
-      hostRoot: configuredRoot,
-      evidenceRoot,
-      browserRoot,
-      tempRoot: hostRoot,
-      probe,
-    })
-    const config = DockerConfig.fromEnvironment(input.environment)
+    const runtime = ProductionHostRuntime.load(input.environment, { probe: input.aclProbe })
+    const contract = runtime.contract
+    const browserRuntimeFactory = input.browserRuntimeFactory ?? PlaywrightCapture.productionRuntime
     const configured = makeLayer({
-      hostRoot: policy.roots.tempRoot,
-      evidenceRoot: policy.roots.evidenceRoot,
+      hostRoot: contract.roots.previewCapabilityRoot,
+      evidenceRoot: contract.roots.dataRoot,
       browser:
         input.browser ??
-        PlaywrightCapture.productionRuntime({
-          browserRoot: policy.roots.browserRoot,
-          tempRoot: path.join(policy.roots.browserRoot, "runtime-temp"),
+        browserRuntimeFactory({
+          browserRoot: contract.roots.browserRuntimeRoot,
+          tempRoot: contract.roots.browserCacheRoot,
+          browserRuntimePolicy: contract.policy.verifyBrowserRuntimeRoot,
+          browserCachePolicy: contract.policy.verifyBrowserCacheRoot,
         }),
-      evidenceRootPolicy: policy.verifyEvidenceRoot,
-      hostRootPolicy: policy.verifyTempRoot,
+      evidenceRootPolicy: contract.policy.verifyDataRoot,
+      hostRootPolicy: contract.policy.verifyPreviewCapabilityRoot,
+      cleanupPolicy: contract.policy,
       workspacePolicy: async (workspace) => {
-        const validated = await DockerConfig.validate(config)
+        contract.policy.verifyDeploymentRoot(contract.roots.deploymentRoot)
+        if (pathsOverlap(workspace, contract.roots.deploymentRoot)) {
+          throw new TypeError("Workflow Location overlaps the production deployment tree")
+        }
+        const validated = await DockerConfig.validate(runtime.dockerConfig)
         await DockerConfig.admitWorkspace(validated, workspace)
       },
       processOwnership: DockerProcessOwnership.make({
         engine: input.engine ?? Docker.production,
-        config,
-        hostRoot: policy.roots.tempRoot,
+        config: runtime.dockerConfig,
+        hostRoot: contract.roots.previewCapabilityRoot,
       }),
       resolveImplementationContract: input.resolveImplementationContract,
+      resolvePreviewLease: input.resolvePreviewLease,
+      isPreviewLeaseLive: input.isPreviewLeaseLive,
       requireImplementationSealedSnapshot: true,
     })
     return configured.pipe(Layer.catch(() => WorkflowVisualHost.unavailableLayer))
@@ -162,9 +197,13 @@ export const node = makeGlobalNode({ service: WorkflowVisualHost.Service, layer,
 interface State {
   readonly root: string
   readonly hostRootPolicy?: (canonicalHostRoot: string) => void
+  readonly cleanupPolicy?: Options["cleanupPolicy"]
   readonly workspacePolicy?: (canonicalWorkspace: string) => Promise<void>
   readonly browser: PlaywrightCapture.Runtime
   readonly processOwnership: ProcessOwnership.Service
+  readonly probeOwnedOrigin: NonNullable<Options["probeOwnedOrigin"]>
+  readonly resolvePreviewLease?: Options["resolvePreviewLease"]
+  readonly isPreviewLeaseLive?: Options["isPreviewLeaseLive"]
   readonly active: Map<WorkflowVisualHost.HostID, HostRecord>
   readonly evidence: EvidenceLedger.Service
   readonly captureTails: Map<string, Promise<void>>
@@ -174,18 +213,36 @@ interface State {
   readonly finalizerTimeoutMs: number
   readonly maxProcessLogBytes: number
   readonly onSpawnArgv?: (argv: readonly string[]) => void
+  readonly onProcessStarted?: Options["onProcessStarted"]
+  readonly onRecordStagingCreated?: Options["onRecordStagingCreated"]
+  readonly onRecordStaged?: Options["onRecordStaged"]
+  readonly onRecordPublished?: Options["onRecordPublished"]
   readonly onRecordCreated?: (directory: string, signal: AbortSignal) => Promise<void>
   readonly onStaticFileOpened?: (file: string) => Promise<void>
   readonly onStaticFileRead?: (file: string) => Promise<void>
+  readonly onBeforePreviewPublish?: Options["onBeforePreviewPublish"]
+  readonly onAfterBeginRelease?: Options["onAfterBeginRelease"]
+  readonly onBeforeServerStop?: Options["onBeforeServerStop"]
+  readonly onBeforeCapabilityRemove?: Options["onBeforeCapabilityRemove"]
+  readonly onBeforeClaimDelete?: Options["onBeforeClaimDelete"]
+  readonly onClaimReleasing?: Options["onClaimReleasing"]
   readonly resolveImplementationContract?: WorkflowVisualHost.ResolveImplementationContract
   readonly requireImplementationSealedSnapshot: boolean
 }
 
 async function makeState(options: Options): Promise<State> {
+  if ((options.resolvePreviewLease === undefined) !== (options.isPreviewLeaseLive === undefined)) {
+    throw new TypeError("Workflow preview lease authority is incomplete")
+  }
   if (!path.isAbsolute(options.hostRoot)) throw new TypeError("Workflow host root must be absolute")
-  await fs.mkdir(options.hostRoot, { recursive: true })
+  if (options.hostRootPolicy === undefined) await fs.mkdir(options.hostRoot, { recursive: true })
+  else options.hostRootPolicy(options.hostRoot)
+  const lexicalRoot = path.resolve(options.hostRoot)
   const root = await fs.realpath(options.hostRoot)
-  if (!(await fs.stat(root)).isDirectory()) throw new TypeError("Workflow host root must be a directory")
+  const rootStat = await fs.lstat(options.hostRoot)
+  if (root !== lexicalRoot || !rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new TypeError("Workflow host root must be a canonical directory")
+  }
   options.hostRootPolicy?.(root)
   const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
@@ -203,12 +260,16 @@ async function makeState(options: Options): Promise<State> {
   ) {
     throw new TypeError("Workflow host bounds must be positive safe integers")
   }
-  return {
+  const state: State = {
     root,
     hostRootPolicy: options.hostRootPolicy,
+    cleanupPolicy: options.cleanupPolicy,
     workspacePolicy: options.workspacePolicy,
     browser: options.browser,
     processOwnership: options.processOwnership ?? ProcessOwnership.unavailable,
+    probeOwnedOrigin: options.probeOwnedOrigin ?? probeOwnedOrigin,
+    resolvePreviewLease: options.resolvePreviewLease,
+    isPreviewLeaseLive: options.isPreviewLeaseLive,
     active: new Map(),
     evidence:
       options.evidenceLedger ??
@@ -222,12 +283,31 @@ async function makeState(options: Options): Promise<State> {
     finalizerTimeoutMs,
     maxProcessLogBytes,
     onSpawnArgv: options.onSpawnArgv,
+    onProcessStarted: options.onProcessStarted,
+    onRecordStagingCreated: options.onRecordStagingCreated,
+    onRecordStaged: options.onRecordStaged,
+    onRecordPublished: options.onRecordPublished,
     onRecordCreated: options.onRecordCreated,
     onStaticFileOpened: options.onStaticFileOpened,
     onStaticFileRead: options.onStaticFileRead,
+    onBeforePreviewPublish: options.onBeforePreviewPublish,
+    onAfterBeginRelease: options.onAfterBeginRelease,
+    onBeforeServerStop: options.onBeforeServerStop,
+    onBeforeCapabilityRemove: options.onBeforeCapabilityRemove,
+    onBeforeClaimDelete: options.onBeforeClaimDelete,
+    onClaimReleasing: options.onClaimReleasing,
     resolveImplementationContract: options.resolveImplementationContract,
     requireImplementationSealedSnapshot: options.requireImplementationSealedSnapshot === true,
   }
+  if (state.isPreviewLeaseLive !== undefined) {
+    try {
+      await recoverLeaseCapabilities(state)
+    } catch (cause) {
+      await settleWithin(state.evidence.close(), state.finalizerTimeoutMs)
+      throw cause
+    }
+  }
+  return state
 }
 
 function materializeReference(
@@ -241,8 +321,22 @@ function materializeReference(
         try: () => validateReference(input.referenceApp),
         catch: () => failure("materialize_reference", "invalid_reference_app", "Reference application is invalid"),
       })
+      const lease = yield* Effect.tryPromise({
+        try: () => resolvePreviewLease(state, input.workflowID),
+        catch: () =>
+          failure("materialize_reference", "visual_host_unavailable", "Reference lease authority is unavailable"),
+      })
       const record = yield* Effect.tryPromise({
-        try: () => createRecord(state, String(input.workflowID)),
+        try: () =>
+          createRecord(state, {
+            workflowID: String(input.workflowID),
+            kind: "static",
+            lease,
+            purpose: "reference",
+            revision: 0,
+            configurationSha256: reference.configSha256,
+            sourceSha256: reference.configSha256,
+          }),
         catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
       })
       state.active.set(record.hostID, record)
@@ -258,9 +352,14 @@ function materializeReference(
       }
       yield* Effect.tryPromise({
         try: async () => {
-          for (const file of reference.files) await writeReferenceFile(state, record, file)
+          await assertRecordLeaseLive(state, record)
+          for (const file of reference.files) {
+            await assertRecordLeaseLive(state, record)
+            await writeReferenceFile(state, record, file)
+            await assertRecordLeaseLive(state, record)
+          }
           await guardHostRoot(state, record.directory)
-          await writeManifest(state, record)
+          await assertRecordLeaseLive(state, record)
           startStaticServer(
             record,
             record.directory,
@@ -269,23 +368,27 @@ function materializeReference(
             state.onStaticFileOpened,
             state.onStaticFileRead,
           )
+          await assertRecordLeaseLive(state, record)
           await guardHostRoot(state, record.directory)
+          await assertRecordLeaseLive(state, record)
         },
         catch: () => failure("materialize_reference", "visual_host_unavailable", "Reference host could not start"),
       })
-      record.preview = WorkflowVisualHost.preparedPreview({
-        hostID: record.hostID,
-        url: capabilityURL(record),
-        workflowID: input.workflowID,
-        kind: "reference",
-        revision: 0,
-        configSha256: reference.configSha256,
-        sourceSha256: reference.configSha256,
-        readySelectorSha256: createHash("sha256").update(reference.readySelector).digest("hex"),
-        scope,
+      return yield* Effect.tryPromise({
+        try: () =>
+          publishPreview(state, record, {
+            workflowID: input.workflowID,
+            kind: "reference",
+            revision: 0,
+            configSha256: reference.configSha256,
+            sourceSha256: reference.configSha256,
+            readySelectorSha256: createHash("sha256").update(reference.readySelector).digest("hex"),
+            readySelector: reference.readySelector,
+            scope,
+          }),
+        catch: () =>
+          failure("materialize_reference", "visual_host_unavailable", "Reference lease changed before publication"),
       })
-      record.readySelector = reference.readySelector
-      return record.preview
     }),
   )
 }
@@ -352,6 +455,32 @@ function prepareImplementation(
                 "Implementation capture authority rejected the durable contract",
               ),
       })
+      const observedLease = yield* Effect.try({
+        try: () => {
+          const authority = WorkflowVisualHost.validatePreviewLeaseAuthority(contract.previewLease)
+          if (authority.workflowID !== input.workflowID) throw new TypeError("preview lease workflow mismatch")
+          return authority
+        },
+        catch: () =>
+          failure(
+            "prepare_implementation",
+            "invalid_preview_plan",
+            "Implementation capture authority has no exact live Stage lease",
+          ),
+      })
+      const lease = yield* Effect.tryPromise({
+        try: async () => {
+          const current = await resolvePreviewLease(state, input.workflowID)
+          if (!sameLeaseTuple(current, observedLease)) throw new TypeError("preview lease tuple changed")
+          return current
+        },
+        catch: () =>
+          failure(
+            "prepare_implementation",
+            "invalid_preview_plan",
+            "Implementation capture authority Stage lease is not live",
+          ),
+      })
       const sealedSnapshot = contract.sealedSnapshot
       if (state.requireImplementationSealedSnapshot && sealedSnapshot === undefined)
         return yield* failure(
@@ -382,20 +511,27 @@ function prepareImplementation(
       const workspaceRoot = input.plan.locationRoot
       const record = yield* Effect.tryPromise({
         try: () =>
-          createRecord(state, String(input.workflowID), sealedSnapshot === undefined ? workspaceRoot : undefined),
+          createRecord(state, {
+            workflowID: String(input.workflowID),
+            kind: input.plan.kind,
+            lease,
+            purpose: "implementation",
+            revision: input.revision,
+            configurationSha256: input.plan.configSha256,
+            sourceSha256: contract.implementationSha256,
+            workspace: sealedSnapshot === undefined ? workspaceRoot : undefined,
+          }),
         catch: () =>
           failure("prepare_implementation", "visual_host_unavailable", "Implementation host could not start"),
       })
       state.active.set(record.hostID, record)
       yield* Effect.addFinalizer(() => Effect.promise(() => release(state, record)).pipe(Effect.ignore))
-      if (input.plan.kind === "script") {
-        record.processIdentity = { hostID: record.hostID, nonce: randomBytes(32).toString("hex") }
-      }
       yield* Effect.tryPromise({
         try: async () => {
+          await assertRecordLeaseLive(state, record)
           await guardHostRoot(state, record.directory)
-          await writeManifest(state, record)
           await fs.mkdir(path.join(record.directory, ".tmp"))
+          await assertRecordLeaseLive(state, record)
           await guardHostRoot(state, record.directory)
         },
         catch: () =>
@@ -404,8 +540,9 @@ function prepareImplementation(
       if (input.plan.kind === "static") {
         record.allowedOrigins = input.plan.allowedOrigins
         const frozenEntrypoint = input.plan.entrypoint ?? ""
-        yield* Effect.try({
-          try: () =>
+        yield* Effect.tryPromise({
+          try: async () => {
+            await assertRecordLeaseLive(state, record)
             startStaticServer(
               record,
               path.dirname(frozenEntrypoint),
@@ -414,19 +551,29 @@ function prepareImplementation(
               state.onStaticFileOpened,
               state.onStaticFileRead,
               sealedSnapshot?.archive,
-            ),
+            )
+            await assertRecordLeaseLive(state, record)
+          },
           catch: () =>
             failure("prepare_implementation", "visual_host_unavailable", "Static implementation host could not start"),
         })
       } else {
-        const targetOrigin = yield* Effect.try({
-          try: () => requireScriptOrigin(input.plan.allowedOrigins),
+        record.allowedOrigins = input.plan.allowedOrigins
+        yield* Effect.tryPromise({
+          try: () => recoverLeaseCapabilities(state, lease, record.hostID),
           catch: () =>
             failure(
               "prepare_implementation",
-              "invalid_preview_plan",
-              "Script preview requires one admission-frozen loopback origin",
+              "visual_host_unavailable",
+              "Prior preview owner recovery was unavailable",
             ),
+        })
+        yield* Effect.tryPromise({
+          try: async () => {
+            await assertRecordLeaseLive(state, record)
+          },
+          catch: () =>
+            failure("prepare_implementation", "visual_host_unavailable", "Preview lease changed before process start"),
         })
         yield* restore(
           Effect.tryPromise({
@@ -444,6 +591,20 @@ function prepareImplementation(
               failure("prepare_implementation", "visual_host_unavailable", "Preview process could not start"),
           }),
         )
+        yield* Effect.tryPromise({
+          try: () => assertRecordLeaseLive(state, record),
+          catch: () =>
+            failure("prepare_implementation", "visual_host_unavailable", "Preview lease changed after process start"),
+        })
+        const targetOrigin = yield* Effect.try({
+          try: () => requireOwnedOrigin(record.process?.origin),
+          catch: () =>
+            failure(
+              "prepare_implementation",
+              "visual_host_unavailable",
+              "Preview process origin was not authenticated",
+            ),
+        })
         yield* restore(
           Effect.tryPromise({
             try: (signal) => waitForOrigin(state, record, targetOrigin, signal),
@@ -451,27 +612,65 @@ function prepareImplementation(
               failure("prepare_implementation", "visual_host_unavailable", "Preview process did not become ready"),
           }),
         )
+        yield* Effect.tryPromise({
+          try: () => assertRecordLeaseLive(state, record),
+          catch: () =>
+            failure("prepare_implementation", "visual_host_unavailable", "Preview lease changed after readiness"),
+        })
         yield* Effect.try({
           try: () => startProxyServer(record, targetOrigin),
           catch: () => failure("prepare_implementation", "visual_host_unavailable", "Preview proxy could not start"),
         })
+        yield* Effect.tryPromise({
+          try: () => assertRecordLeaseLive(state, record),
+          catch: () =>
+            failure("prepare_implementation", "visual_host_unavailable", "Preview lease changed before publication"),
+        })
         record.captureURL = targetOrigin
+        record.allowedOrigins = Object.freeze([targetOrigin, ...input.plan.allowedOrigins])
       }
-      record.preview = WorkflowVisualHost.preparedPreview({
-        hostID: record.hostID,
-        url: capabilityURL(record),
-        workflowID: input.workflowID,
-        kind: "implementation",
-        revision: input.revision,
-        configSha256: input.plan.configSha256,
-        sourceSha256: contract.implementationSha256,
-        readySelectorSha256: createHash("sha256").update(contract.readySelector).digest("hex"),
-        scope,
+      return yield* Effect.tryPromise({
+        try: () =>
+          publishPreview(state, record, {
+            workflowID: input.workflowID,
+            kind: "implementation",
+            revision: input.revision,
+            configSha256: input.plan.configSha256,
+            sourceSha256: contract.implementationSha256,
+            readySelectorSha256: createHash("sha256").update(contract.readySelector).digest("hex"),
+            readySelector: contract.readySelector,
+            scope,
+          }),
+        catch: () =>
+          failure("prepare_implementation", "visual_host_unavailable", "Preview lease changed before publication"),
       })
-      record.readySelector = contract.readySelector
-      return record.preview
     }),
   )
+}
+
+async function publishPreview(
+  state: State,
+  record: HostRecord,
+  input: Omit<Parameters<typeof WorkflowVisualHost.preparedPreview>[0], "hostID" | "url"> & {
+    readonly readySelector: string
+  },
+): Promise<WorkflowVisualHost.PreparedPreview> {
+  await state.onBeforePreviewPublish?.(record.claim)
+  await assertRecordLeaseLive(state, record)
+  const preview = WorkflowVisualHost.preparedPreview({
+    hostID: record.hostID,
+    url: capabilityURL(record),
+    workflowID: input.workflowID,
+    kind: input.kind,
+    revision: input.revision,
+    configSha256: input.configSha256,
+    sourceSha256: input.sourceSha256,
+    readySelectorSha256: input.readySelectorSha256,
+    scope: input.scope,
+  })
+  record.readySelector = input.readySelector
+  record.preview = preview
+  return preview
 }
 
 function capture(
@@ -490,6 +689,7 @@ function capture(
         if (record.released || state.active.get(record.hostID) !== record) {
           throw failure("capture", "invalid_preview_handle", "Capture requires an active preview handle")
         }
+        await assertRecordLeaseLive(state, record)
         const readySelector = record.readySelector
         if (readySelector === undefined) {
           throw failure("capture", "capture_failed", "Prepared preview has no host-minted ready selector")
@@ -511,12 +711,14 @@ function capture(
             "A durable capture intent belongs to another or crashed owner",
           )
         }
-        let completed = false
+        let staged: EvidenceLedger.Item | undefined
         try {
+          await assertRecordLeaseLive(state, record)
           if ((await state.evidence.used(record.workflowID)) >= WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES) {
             throw failure("capture", "workflow_evidence_limit_exceeded", "Workflow evidence exceeds 128 MiB")
           }
           const viewport = validateViewport(input.viewport)
+          await assertRecordLeaseLive(state, record)
           const bytes = await state.browser.capture({
             url: record.captureURL ?? input.preview.url,
             viewport,
@@ -524,22 +726,45 @@ function capture(
             allowedOrigins: record.allowedOrigins,
             signal,
           })
+          await assertRecordLeaseLive(state, record)
           const image = WorkflowVisualHost.capturedImage(coordinates, bytes)
-          const item = await state.evidence.completeCapture({
+          await assertRecordLeaseLive(state, record)
+          staged = await state.evidence.completeCapture({
             receipt: image.receipt,
             bytes: image.bytes,
             ownerNonce,
             now: state.now(),
             limit: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
           })
-          completed = true
-          return capturedFromLedgerItem(item, "capture")
+          await assertRecordLeaseLive(state, record)
+          return capturedFromLedgerItem(staged, "capture")
         } catch (cause) {
-          if (!completed) {
+          if (staged !== undefined) {
+            try {
+              if (
+                staged.receipt === undefined ||
+                !(await state.evidence.rollbackStagedCapture({ receipt: staged.receipt }))
+              ) {
+                throw new Error("Exact staged evidence was not present", { cause })
+              }
+            } catch (rollbackCause) {
+              // oxlint-disable-next-line eslint/preserve-caught-error -- AggregateError retains both the primary and rollback failures.
+              throw new AggregateError(
+                [cause, rollbackCause],
+                "Capture failed and its exact staged evidence could not be rolled back",
+                { cause: rollbackCause },
+              )
+            }
+          } else {
             try {
               await state.evidence.clearCapture({ coordinates, ownerNonce })
-            } catch {
-              throw new Error("Capture failed and its exact durable intent could not be cleared", { cause })
+            } catch (cleanupCause) {
+              // oxlint-disable-next-line eslint/preserve-caught-error -- AggregateError retains both the primary and cleanup failures.
+              throw new AggregateError(
+                [cause, cleanupCause],
+                "Capture failed and its exact durable intent could not be cleared",
+                { cause: cleanupCause },
+              )
             }
           }
           throw cause
@@ -687,55 +912,378 @@ function recoverExpired(
   input: WorkflowVisualHost.RecoverExpiredInput,
 ): Effect.Effect<void, WorkflowVisualHost.Failure> {
   return Effect.tryPromise({
-    try: async () => {
-      const entries = await fs.readdir(state.root, { withFileTypes: true })
-      await Promise.all(
-        entries
-          .filter((entry) => entry.isDirectory() && /^[a-f0-9]{64}$/.test(entry.name))
-          .map(async (entry) => {
-            const hostID = WorkflowVisualHost.HostID.make(entry.name)
-            if (input.activeHostIDs.has(hostID)) return
-            const directory = path.join(state.root, entry.name)
-            const manifest = await readManifest(directory)
-            if (manifest.createdAt >= input.expiredBefore) return
-            const record = state.active.get(hostID)
-            if (record !== undefined) {
-              if (!(await release(state, record))) throw new Error("Active host shutdown was not confirmed")
-              return
-            }
-            if (manifest.processNonce !== undefined) {
-              const recovered = await settleWithin(
-                state.processOwnership.recover({ hostID, nonce: manifest.processNonce }),
-                state.finalizerTimeoutMs,
-              )
-              if (!recovered) throw new Error("Orphan process recovery was not confirmed")
-            }
-            await removeCapability(state.root, directory, undefined, state.hostRootPolicy)
-          }),
-      )
-    },
+    try: () =>
+      recoverLeaseCapabilities(state, undefined, undefined, (manifest) => {
+        return !input.activeHostIDs.has(manifest.body.hostID) && manifest.body.createdAt < input.expiredBefore
+      }),
     catch: () => failure("recover_expired", "cleanup_target_rejected", "Expired host cleanup was rejected"),
   })
 }
 
-async function createRecord(state: State, workflowID: string, workspace?: string): Promise<HostRecord> {
-  const hostID = WorkflowVisualHost.HostID.make(randomBytes(32).toString("hex"))
-  const directory = path.join(state.root, hostID)
-  if (workspace !== undefined && pathsOverlap(state.root, workspace)) {
+async function resolvePreviewLease(state: State, workflowID: WorkflowVisualHost.PreviewLeaseAuthority["workflowID"]) {
+  if (state.resolvePreviewLease === undefined || state.isPreviewLeaseLive === undefined) {
+    throw new TypeError("Workflow preview lease authority is unavailable")
+  }
+  const lease = WorkflowVisualHost.validatePreviewLeaseAuthority(await state.resolvePreviewLease(workflowID))
+  if (lease.workflowID !== workflowID || !(await state.isPreviewLeaseLive(lease))) {
+    throw new TypeError("Workflow preview lease is not live")
+  }
+  return lease
+}
+
+function sameLeaseTuple(
+  left: WorkflowVisualHost.PreviewLeaseAuthority,
+  right: WorkflowVisualHost.PreviewLeaseAuthority,
+) {
+  return (
+    left.workflowID === right.workflowID &&
+    left.stageID === right.stageID &&
+    left.attempt === right.attempt &&
+    left.leaseOwner === right.leaseOwner
+  )
+}
+
+async function assertLeaseLive(
+  state: State,
+  observed: WorkflowVisualHost.PreviewLeaseAuthority,
+): Promise<WorkflowVisualHost.PreviewLeaseAuthority> {
+  const current = await resolvePreviewLease(state, observed.workflowID)
+  if (!sameLeaseTuple(current, observed)) throw new TypeError("Workflow preview lease tuple changed")
+  return current
+}
+
+async function assertRecordLeaseLive(state: State, record: HostRecord): Promise<void> {
+  if (record.released || state.active.get(record.hostID) !== record) {
+    throw new TypeError("Workflow preview owner is no longer active")
+  }
+  record.claim = await VisualHostClaim.assertActive(state.root, record.claim)
+  await assertLeaseLive(state, record.lease)
+}
+
+async function recoverLeaseCapabilities(
+  state: State,
+  replacementLease?: WorkflowVisualHost.PreviewLeaseAuthority,
+  excludeHostID?: WorkflowVisualHost.HostID,
+  include: (claim: VisualHostClaim.Owned) => boolean = () => true,
+) {
+  const isLive = state.isPreviewLeaseLive
+  if (isLive === undefined) {
+    if (replacementLease !== undefined) throw new TypeError("Workflow preview lease authority is unavailable")
+    return
+  }
+  await guardHostRoot(state)
+  const claims = await VisualHostClaim.list(state.root)
+  const claimedHostIDs = new Set(claims.map((claim) => String(claim.body.hostID)))
+  const claimedStagingNames = new Set(
+    claims.map((claim) => `.host.${claim.body.hostID}.${claim.body.generation}.${claim.body.nonce}.pending`),
+  )
+  for (const entry of await fs.readdir(state.root, { withFileTypes: true })) {
+    if (!entry.name.startsWith(".host.") || !entry.name.endsWith(".pending")) continue
+    if (!claimedStagingNames.has(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new TypeError("Workflow record staging directory has no exact durable claim authority")
+    }
+  }
+  for (const claim of claims) {
+    const hostID = claim.body.hostID
+    if (hostID === excludeHostID) continue
+    if (!include(claim)) continue
+    if (
+      replacementLease !== undefined &&
+      (claim.body.workflowID !== replacementLease.workflowID || claim.body.stageID !== replacementLease.stageID)
+    ) {
+      continue
+    }
+    const active = state.active.get(hostID)
+    if (active !== undefined) {
+      if (await isLive(active.lease)) continue
+      const staleGate = async () => !(await isLive(active.lease))
+      if (!(await release(state, active, staleGate))) {
+        throw new Error("Stale active preview shutdown was not confirmed")
+      }
+      continue
+    }
+    if (await isLive(leaseFromClaim(claim.body))) continue
+    await recoverClaim(state, claim)
+  }
+  const unclaimed = (await fs.readdir(state.root, { withFileTypes: true })).filter(
+    (entry) => entry.isDirectory() && /^[a-f0-9]{64}$/.test(entry.name) && !claimedHostIDs.has(entry.name),
+  )
+  if (unclaimed.length > 0) {
+    throw new TypeError("Workflow capability has no durable claim authority")
+  }
+}
+
+async function recoverClaim(state: State, claim: VisualHostClaim.Owned): Promise<void> {
+  const isLive = state.isPreviewLeaseLive
+  if (isLive === undefined) throw new TypeError("Workflow preview lease authority is unavailable")
+  const lease = leaseFromClaim(claim.body)
+  const finalGate = async () => !(await isLive(lease))
+  if (!(await finalGate())) return
+  const directory = path.join(state.root, claim.body.hostID)
+  if (claim.state === "pending") {
+    await VisualHostClaim.rollbackPending(
+      state.root,
+      claim,
+      async () => {
+        const staging = path.join(
+          state.root,
+          `.host.${claim.body.hostID}.${claim.body.generation}.${claim.body.nonce}.pending`,
+        )
+        if ((await lexicalEntryExists(directory)) || (await lexicalEntryExists(staging))) {
+          throw new TypeError("Pending visual host claim has unauthorized side effects")
+        }
+        if (!(await finalGate())) throw new Error("Preview lease became live before pending claim rollback")
+      },
+      finalGate,
+    )
+    return
+  }
+  const record = await authenticatedRecoveryRecord(state, claim)
+  if (claim.state !== "releasing" && !(await finalGate())) return
+  const releasing =
+    claim.state === "releasing" ? claim : await VisualHostClaim.beginRelease(state.root, claim, finalGate)
+  if (releasing === undefined) return
+  await state.onClaimReleasing?.(releasing)
+  await VisualHostClaim.finishRelease(
+    state.root,
+    releasing,
+    async () => {
+      if (record?.kind === "final") {
+        await guardHostRoot(state, directory)
+        const manifest = await readManifest(directory)
+        if (!manifestMatchesClaim(manifest, claim)) {
+          throw new TypeError("Workflow capability manifest differs from its durable claim")
+        }
+        if (claim.body.kind === "script") {
+          const recovered = await settleWithin(
+            state.processOwnership.recover({ identity: identityFromClaim(claim.body), finalGate }),
+            state.finalizerTimeoutMs,
+          )
+          if (!recovered) throw new Error("Orphan process recovery was not confirmed")
+        }
+        await state.onBeforeCapabilityRemove?.(releasing)
+        if (!(await finalGate())) throw new Error("Preview lease became live before orphan cleanup")
+        await removeCapability(state.root, directory, undefined, state.hostRootPolicy, state.cleanupPolicy)
+      } else if (record?.kind === "staging") {
+        if (!(await finalGate())) throw new Error("Preview lease became live before record staging cleanup")
+        await removeExactUnpublishedRecord(state, record.directory, claim, record.identity)
+      }
+      if (!(await finalGate())) throw new Error("Preview lease became live before claim release")
+    },
+    {
+      beforeAuthorityDelete: async () => state.onBeforeClaimDelete?.(releasing),
+      finalGate,
+    },
+  )
+}
+
+async function authenticatedRecoveryRecord(
+  state: State,
+  claim: VisualHostClaim.Owned,
+): Promise<
+  | { readonly kind: "final"; readonly directory: string }
+  | { readonly kind: "staging"; readonly directory: string; readonly identity: Awaited<ReturnType<typeof fs.lstat>> }
+  | undefined
+> {
+  const finalDirectory = path.join(state.root, claim.body.hostID)
+  const prefix = `.host.${claim.body.hostID}.${claim.body.generation}.`
+  const stagingEntries = (await fs.readdir(state.root, { withFileTypes: true })).filter(
+    (entry) => entry.name.startsWith(prefix) && entry.name.endsWith(".pending"),
+  )
+  const expectedName = `${prefix}${claim.body.nonce}.pending`
+  if (stagingEntries.some((entry) => entry.name !== expectedName)) {
+    throw new TypeError("Workflow record staging authority is not bound to the claim nonce")
+  }
+  if (stagingEntries.length > 1) throw new TypeError("Multiple workflow record staging authorities are ambiguous")
+  if (await lexicalEntryExists(finalDirectory)) {
+    if (stagingEntries.length !== 0) throw new TypeError("Final workflow record conflicts with a staging authority")
+    await guardHostRoot(state, finalDirectory)
+    const manifestFile = path.join(finalDirectory, manifestName)
+    if (!(await lexicalEntryExists(manifestFile))) {
+      throw new TypeError("Final workflow capability has no complete exact manifest")
+    }
+    const manifest = await readManifest(finalDirectory)
+    if (!manifestMatchesClaim(manifest, claim)) {
+      throw new TypeError("Workflow capability manifest differs from its durable claim")
+    }
+    return { kind: "final", directory: finalDirectory }
+  }
+  const entry = stagingEntries[0]
+  if (entry === undefined) return undefined
+  if (!entry.isDirectory() || entry.isSymbolicLink()) {
+    throw new TypeError("Workflow record staging authority is not a directory")
+  }
+  const directory = path.join(state.root, entry.name)
+  await guardHostRoot(state, directory)
+  const contents = await fs.readdir(directory, { withFileTypes: true })
+  if (contents.length > 1 || (contents.length === 1 && contents[0]?.name !== manifestName)) {
+    throw new TypeError("Unexpected workflow record staging state")
+  }
+  const manifestEntry = contents[0]
+  if (manifestEntry !== undefined) {
+    if (!manifestEntry.isFile() || manifestEntry.isSymbolicLink()) {
+      throw new TypeError("Workflow record staging manifest has unknown identity")
+    }
+    const manifestFile = path.join(directory, manifestName)
+    const canonical = await fs.realpath(manifestFile)
+    const stat = await fs.lstat(manifestFile)
+    if (canonical !== manifestFile || !isSingleOwnerRegularFile(stat) || stat.size > MAX_AUTHORITY_FILE_BYTES) {
+      throw new TypeError("Workflow record staging manifest has unknown identity")
+    }
+    if (stat.size > 0) {
+      try {
+        const manifest = await readManifest(directory, claim.body.hostID)
+        if (!manifestMatchesClaim(manifest, claim)) {
+          throw new TypeError("Workflow record staging manifest differs from its durable claim")
+        }
+      } catch (cause) {
+        if (cause instanceof TypeError && cause.message.includes("differs from")) throw cause
+        const text = await fs.readFile(manifestFile, "utf8")
+        try {
+          JSON.parse(text)
+        } catch {
+          // A bounded, singly-owned syntactically partial manifest is a recognized pre-publication crash.
+          return { kind: "staging", directory, identity: await fs.lstat(directory) }
+        }
+        throw cause
+      }
+    }
+  }
+  return { kind: "staging", directory, identity: await fs.lstat(directory) }
+}
+
+function leaseFromClaim(body: VisualHostClaim.Body): WorkflowVisualHost.PreviewLeaseAuthority {
+  return WorkflowVisualHost.validatePreviewLeaseAuthority({
+    workflowID: body.workflowID,
+    stageID: body.stageID,
+    attempt: body.attempt,
+    leaseOwner: body.leaseOwner,
+    leaseExpiresAt: body.leaseExpiresAt,
+  })
+}
+
+function identityFromClaim(body: VisualHostClaim.Body): ProcessOwnership.Identity {
+  return { ...leaseFromClaim(body), hostID: body.hostID, nonce: body.nonce }
+}
+
+function sameProcessIdentity(left: ProcessOwnership.Identity, right: ProcessOwnership.Identity): boolean {
+  return (
+    sameLeaseTuple(left, right) &&
+    left.leaseExpiresAt === right.leaseExpiresAt &&
+    left.hostID === right.hostID &&
+    left.nonce === right.nonce
+  )
+}
+
+async function createRecord(
+  state: State,
+  input: {
+    readonly workflowID: string
+    readonly kind: "static" | "script"
+    readonly lease: WorkflowVisualHost.PreviewLeaseAuthority
+    readonly purpose: VisualHostClaim.Purpose
+    readonly revision: number
+    readonly configurationSha256: string
+    readonly sourceSha256: string
+    readonly workspace?: string
+  },
+): Promise<HostRecord> {
+  if (input.workspace !== undefined && pathsOverlap(state.root, input.workspace)) {
     throw new TypeError("Workflow host root overlaps the admitted workspace")
   }
   await guardHostRoot(state)
-  await fs.mkdir(directory)
-  await guardHostRoot(state, directory)
-  return {
-    hostID,
-    workflowID,
-    directory,
-    workspace,
-    createdAt: state.now(),
-    allowedOrigins: [],
-    released: false,
+  await assertLeaseLive(state, input.lease)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const hostID = WorkflowVisualHost.HostID.make(randomBytes(32).toString("hex"))
+    const nonce = randomBytes(32).toString("hex")
+    const createdAt = state.now()
+    const body = VisualHostClaim.make({
+      purpose: input.purpose,
+      kind: input.kind,
+      ...input.lease,
+      hostID,
+      nonce,
+      createdAt,
+      revision: input.revision,
+      configurationSha256: input.configurationSha256,
+      sourceSha256: input.sourceSha256,
+    })
+    const claimed = await VisualHostClaim.acquire(state.root, body)
+    if (claimed.status === "contended") {
+      const isLive = state.isPreviewLeaseLive
+      if (isLive === undefined || (await isLive(leaseFromClaim(claimed.claim.body)))) {
+        throw new TypeError("Visual Stage purpose already has a live host owner")
+      }
+      const active = state.active.get(claimed.claim.body.hostID)
+      if (active !== undefined) {
+        if (active.claim.key !== claimed.claim.key || active.claim.body.generation !== claimed.claim.body.generation) {
+          throw new TypeError("Active visual host differs from its durable claim")
+        }
+        const staleGate = async () => !(await isLive(active.lease))
+        if (!(await release(state, active, staleGate))) {
+          throw new TypeError("Stale active preview shutdown was not confirmed")
+        }
+        continue
+      }
+      await recoverClaim(state, claimed.claim)
+      continue
+    }
+    const activeClaim = await VisualHostClaim.assertActive(state.root, claimed.claim)
+    const directory = path.join(state.root, hostID)
+    const staging = path.join(
+      state.root,
+      `.host.${hostID}.${activeClaim.body.generation}.${activeClaim.body.nonce}.pending`,
+    )
+    const identity = identityFromClaim(body)
+    let created: Awaited<ReturnType<typeof fs.lstat>> | undefined
+    let published = false
+    try {
+      await assertLeaseLive(state, input.lease)
+      await fs.mkdir(staging)
+      created = await fs.lstat(staging)
+      await guardHostRoot(state, staging)
+      await state.onRecordStagingCreated?.(staging)
+      const staged: HostRecord = {
+        hostID,
+        workflowID: input.workflowID,
+        directory: staging,
+        workspace: input.workspace,
+        createdAt,
+        kind: input.kind,
+        lease: input.lease,
+        claim: activeClaim,
+        identity,
+        allowedOrigins: [],
+        processIdentity: input.kind === "script" ? identity : undefined,
+        released: false,
+      }
+      await writeManifest(state, staged)
+      await assertLeaseLive(state, input.lease)
+      await state.onRecordStaged?.(staging, directory)
+      await assertLeaseLive(state, input.lease)
+      await fs.rename(staging, directory)
+      published = true
+      await state.onRecordPublished?.(directory)
+      await guardHostRoot(state, directory)
+      const manifest = await readManifest(directory)
+      if (!manifestMatchesClaim(manifest, activeClaim)) {
+        throw new TypeError("Published workflow capability manifest differs from its durable claim")
+      }
+      return { ...staged, directory }
+    } catch (cause) {
+      const releasing = await VisualHostClaim.beginRelease(state.root, activeClaim)
+      await VisualHostClaim.finishRelease(state.root, releasing, async () => {
+        if (created !== undefined) {
+          const ownedDirectory = published ? directory : staging
+          if (await fs.exists(ownedDirectory)) {
+            await removeExactUnpublishedRecord(state, ownedDirectory, activeClaim, created)
+          }
+        }
+      })
+      throw cause
+    }
   }
+  throw new TypeError("Visual Stage purpose claim could not be reconciled")
 }
 
 function startStaticServer(
@@ -783,7 +1331,6 @@ function startStaticServer(
 }
 
 function startProxyServer(record: HostRecord, targetOrigin: string): void {
-  record.allowedOrigins = Object.freeze([targetOrigin])
   record.server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -832,6 +1379,7 @@ async function spawnPreviewProcess(
     deadline,
   })
   record.process = owned
+  await state.onProcessStarted?.(record.claim)
   record.logDrains = [
     drainBounded(owned.stdout, state.maxProcessLogBytes).catch(() => undefined),
     drainBounded(owned.stderr, state.maxProcessLogBytes).catch(() => undefined),
@@ -839,6 +1387,7 @@ async function spawnPreviewProcess(
 }
 
 async function waitForOrigin(state: State, record: HostRecord, origin: string, signal: AbortSignal): Promise<void> {
+  requireOwnedOrigin(origin)
   const deadline = Date.now() + state.startupTimeoutMs
   let exited = false
   void record.process?.exited.then(
@@ -851,35 +1400,106 @@ async function waitForOrigin(state: State, record: HostRecord, origin: string, s
   )
   while (Date.now() < deadline && !signal.aborted) {
     if (exited) throw new Error("preview process exited")
-    const ready = await fetch(origin, { redirect: "manual", signal: AbortSignal.timeout(500) }).then(
-      (response) => {
-        void response.body?.cancel()
-        return response.status < 500
-      },
-      () => false,
-    )
+    await assertRecordLeaseLive(state, record)
+    const ready = await state.probeOwnedOrigin(origin, signal).catch(() => false)
+    await assertRecordLeaseLive(state, record)
     if (ready) return
     await abortableDelay(state.pollIntervalMs, signal)
   }
   throw new Error("preview process startup timed out")
 }
 
-async function release(state: State, record: HostRecord): Promise<boolean> {
-  if (record.released) return false
-  record.released = true
-  if (state.active.get(record.hostID) === record) state.active.delete(record.hostID)
-  const serverStopped = await settleWithin(record.server?.stop(true), state.finalizerTimeoutMs)
-  let processStopped = true
-  if (record.process !== undefined && record.processIdentity !== undefined) {
-    processStopped = await settleWithin(
-      state.processOwnership.stop({ identity: record.processIdentity, process: record.process }),
-      state.finalizerTimeoutMs,
-    )
+async function probeOwnedOrigin(origin: string, signal: AbortSignal): Promise<boolean> {
+  requireOwnedOrigin(origin)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 500)
+  const abort = () => controller.abort(signal.reason)
+  signal.addEventListener("abort", abort, { once: true })
+  try {
+    const response = await fetch(origin, { redirect: "manual", signal: controller.signal })
+    void response.body?.cancel()
+    return response.status < 500
+  } finally {
+    clearTimeout(timer)
+    signal.removeEventListener("abort", abort)
   }
-  await settleWithin(Promise.all(record.logDrains ?? []), state.finalizerTimeoutMs)
-  if (!serverStopped || !processStopped) return false
-  await removeCapability(state.root, record.directory, record.workspace, state.hostRootPolicy)
-  return true
+}
+
+async function release(state: State, record: HostRecord, finalGate?: () => Promise<boolean>): Promise<boolean> {
+  if (record.released) return false
+  if (record.releaseTask !== undefined) {
+    try {
+      await record.releaseTask
+    } catch {
+      // The waiting caller revalidates and retries its own release authority below.
+    }
+    return record.released ? false : release(state, record, finalGate)
+  }
+  const task = releaseOnce(state, record, finalGate)
+  record.releaseTask = task
+  try {
+    return await task
+  } finally {
+    if (record.releaseTask === task) record.releaseTask = undefined
+  }
+}
+
+async function releaseOnce(state: State, record: HostRecord, finalGate?: () => Promise<boolean>): Promise<boolean> {
+  if (record.released) return false
+  if (finalGate !== undefined && !(await finalGate())) throw new Error("Preview lease became live before shutdown")
+  const releasing =
+    finalGate === undefined
+      ? await VisualHostClaim.beginRelease(state.root, record.claim)
+      : await VisualHostClaim.beginRelease(state.root, record.claim, finalGate)
+  if (releasing === undefined) return false
+  record.claim = releasing
+  if (finalGate !== undefined) {
+    await state.onAfterBeginRelease?.(record.claim)
+    if (!(await finalGate())) return false
+  }
+  let destructive = false
+  const finished = await VisualHostClaim.finishRelease(
+    state.root,
+    record.claim,
+    async () => {
+      await state.onBeforeServerStop?.(record.claim)
+      if (finalGate !== undefined && !(await finalGate())) return false
+      destructive = record.server !== undefined
+      const serverStopped = await settleWithin(record.server?.stop(true), state.finalizerTimeoutMs)
+      let processStopped = true
+      if (record.process !== undefined && record.processIdentity !== undefined) {
+        destructive = true
+        processStopped = await settleWithin(
+          state.processOwnership.stop({ identity: record.processIdentity, process: record.process, finalGate }),
+          state.finalizerTimeoutMs,
+        )
+      }
+      const logsDrained = await settleWithin(Promise.all(record.logDrains ?? []), state.finalizerTimeoutMs)
+      if (!serverStopped || !processStopped || !logsDrained) {
+        return false
+      }
+      await state.onBeforeCapabilityRemove?.(record.claim)
+      if (finalGate !== undefined && !(await finalGate())) return false
+      destructive = true
+      await removeCapability(state.root, record.directory, record.workspace, state.hostRootPolicy, state.cleanupPolicy)
+      if (finalGate !== undefined && !(await finalGate())) {
+        throw new Error("Preview lease became live before claim cleanup")
+      }
+      return true
+    },
+    {
+      beforeAuthorityDelete: async () => state.onBeforeClaimDelete?.(record.claim),
+      finalGate,
+    },
+  )
+  if (!finished && !destructive && finalGate !== undefined && !(await finalGate())) {
+    return false
+  }
+  if (finished) {
+    record.released = true
+    if (state.active.get(record.hostID) === record) state.active.delete(record.hostID)
+  }
+  return finished
 }
 
 async function removeCapability(
@@ -887,10 +1507,18 @@ async function removeCapability(
   directory: string,
   workspace?: string,
   rootPolicy?: (canonicalHostRoot: string) => void,
+  cleanupPolicy?: Options["cleanupPolicy"],
 ): Promise<void> {
   if (!(await fs.exists(directory))) return
   rootPolicy?.(root)
-  const target = WorkflowVisualHost.cleanupTarget({ hostRoots: [root], target: directory, workspace })
+  const admitted = WorkflowVisualHost.cleanupTarget({ hostRoots: [root], target: directory, workspace })
+  const target =
+    cleanupPolicy === undefined
+      ? admitted
+      : cleanupPolicy.verifyCleanupTarget(cleanupPolicy.authorizeCleanupTarget({ target: admitted, workspace }))
+  if (comparisonKey(target) !== comparisonKey(admitted)) {
+    throw new TypeError("Workflow cleanup authority changed its exact target")
+  }
   try {
     await fs.rm(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   } finally {
@@ -1164,25 +1792,112 @@ function capabilityURL(record: HostRecord): string {
   return `http://127.0.0.1:${record.server.port}/${record.hostID}/`
 }
 
-function requireScriptOrigin(origins: readonly string[]): string {
-  if (origins.length !== 1 || PreviewPlan.normalizeLocalOrigin(origins[0] ?? "") !== origins[0]) {
-    throw new TypeError("ambiguous script origin")
+function requireOwnedOrigin(origin: string | undefined): string {
+  if (origin === undefined || PreviewPlan.normalizeLocalOrigin(origin) !== origin) {
+    throw new TypeError("invalid owned origin")
   }
-  return origins[0]
+  const parsed = new URL(origin)
+  if (
+    parsed.protocol !== "http:" ||
+    parsed.hostname !== "127.0.0.1" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.pathname !== "/" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.port === ""
+  ) {
+    throw new TypeError("invalid owned origin")
+  }
+  return origin
 }
 
 async function writeManifest(state: State, record: HostRecord): Promise<void> {
   await guardHostRoot(state, record.directory)
-  await fs.writeFile(
-    path.join(record.directory, manifestName),
-    JSON.stringify({
-      hostID: record.hostID,
-      createdAt: record.createdAt,
-      ...(record.processIdentity === undefined ? {} : { processNonce: record.processIdentity.nonce }),
-    }),
-    { encoding: "utf8", flag: "wx" },
-  )
+  const body = {
+    hostID: record.hostID,
+    createdAt: record.createdAt,
+    kind: record.kind,
+    purpose: record.claim.body.purpose,
+    revision: record.claim.body.revision,
+    configurationSha256: record.claim.body.configurationSha256,
+    sourceSha256: record.claim.body.sourceSha256,
+    claimKey: record.claim.key,
+    claimGeneration: record.claim.body.generation,
+    claimSha256: record.claim.sha256,
+    workflowID: record.lease.workflowID,
+    stageID: record.lease.stageID,
+    attempt: record.lease.attempt,
+    leaseOwner: record.lease.leaseOwner,
+    leaseExpiresAt: record.lease.leaseExpiresAt,
+    nonce: record.identity.nonce,
+  }
+  const encoded = JSON.stringify(body)
+  if (Buffer.byteLength(encoded) > MAX_AUTHORITY_FILE_BYTES) throw new TypeError("host manifest is oversized")
+  const file = path.join(record.directory, manifestName)
+  const handle = await fs.open(file, "wx", 0o600)
+  try {
+    await handle.writeFile(encoded, "utf8")
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
   await guardHostRoot(state, record.directory)
+  const persisted = await readManifest(record.directory, record.hostID)
+  if (!manifestMatchesClaim(persisted, record.claim)) {
+    throw new TypeError("Persisted workflow capability manifest differs from its durable claim")
+  }
+}
+
+async function removeExactUnpublishedRecord(
+  state: State,
+  directory: string,
+  claim: VisualHostClaim.Owned,
+  created: Awaited<ReturnType<typeof fs.lstat>>,
+): Promise<void> {
+  const lexical = path.resolve(directory)
+  const finalName = String(claim.body.hostID)
+  const stagingName = `.host.${claim.body.hostID}.${claim.body.generation}.${claim.body.nonce}.pending`
+  const name = path.basename(lexical)
+  if (path.dirname(lexical) !== state.root || (name !== finalName && name !== stagingName)) {
+    throw new TypeError("Invalid workflow record staging path")
+  }
+  const canonical = await fs.realpath(lexical)
+  const stat = await fs.lstat(lexical)
+  if (
+    canonical !== lexical ||
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    stat.dev !== created.dev ||
+    stat.ino !== created.ino ||
+    stat.birthtimeMs !== created.birthtimeMs
+  ) {
+    throw new TypeError("Workflow record staging identity changed")
+  }
+  const entries = await fs.readdir(lexical, { withFileTypes: true })
+  if (entries.length > 1 || (entries.length === 1 && entries[0]?.name !== manifestName)) {
+    throw new TypeError("Unexpected workflow record staging state")
+  }
+  const entry = entries[0]
+  if (entry !== undefined) {
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      throw new TypeError("Workflow record staging manifest has unknown identity")
+    }
+    const manifestFile = path.join(lexical, manifestName)
+    const canonicalManifest = await fs.realpath(manifestFile)
+    const manifestStat = await fs.lstat(manifestFile)
+    if (canonicalManifest !== manifestFile || !isSingleOwnerRegularFile(manifestStat)) {
+      throw new TypeError("Workflow record staging manifest has unknown identity")
+    }
+    if (name === finalName) {
+      const manifest = await readManifest(lexical)
+      if (!manifestMatchesClaim(manifest, claim)) {
+        throw new TypeError("Workflow record staging manifest differs from its durable claim")
+      }
+    }
+    await fs.unlink(manifestFile)
+  }
+  await fs.rmdir(lexical)
 }
 
 async function writeReferenceFile(
@@ -1251,13 +1966,24 @@ async function guardMaterializedDirectory(state: State, capabilityRoot: string, 
   }
 }
 
+async function lexicalEntryExists(file: string): Promise<boolean> {
+  try {
+    await fs.lstat(file)
+    return true
+  } catch (cause) {
+    if (isFileSystemError(cause, "ENOENT")) return false
+    throw cause
+  }
+}
+
 function isFileSystemError(cause: unknown, code: string): cause is Error & { readonly code: string } {
   return cause instanceof Error && Reflect.get(cause, "code") === code
 }
 
 async function guardHostRoot(state: State, directory?: string): Promise<void> {
   const canonicalRoot = await fs.realpath(state.root)
-  if (canonicalRoot !== state.root || !(await fs.lstat(state.root)).isDirectory()) {
+  const rootStat = await fs.lstat(state.root)
+  if (canonicalRoot !== state.root || !rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new TypeError("Workflow host root identity changed")
   }
   state.hostRootPolicy?.(canonicalRoot)
@@ -1274,33 +2000,184 @@ async function guardHostRoot(state: State, directory?: string): Promise<void> {
   }
 }
 
-function requiredEnvironment(environment: Readonly<Record<string, string | undefined>>, name: string) {
-  const value = environment[name]
-  if (value === undefined || value === "") throw new TypeError(`${name} is required`)
-  return value
-}
-
-async function readManifest(directory: string): Promise<{
+async function readManifest(
+  directory: string,
+  expectedHostID?: WorkflowVisualHost.HostID,
+): Promise<{
+  readonly hostID: WorkflowVisualHost.HostID
   readonly createdAt: number
-  readonly processNonce?: string
+  readonly kind: "static" | "script"
+  readonly purpose: VisualHostClaim.Purpose
+  readonly revision: number
+  readonly configurationSha256: string
+  readonly sourceSha256: string
+  readonly claimKey: string
+  readonly claimGeneration: string
+  readonly claimSha256: string
+  readonly identity: ProcessOwnership.Identity
 }> {
-  const value: unknown = await Bun.file(path.join(directory, manifestName)).json()
-  const hasProcessNonce = value !== null && typeof value === "object" && Object.hasOwn(value, "processNonce")
+  const manifest = path.resolve(directory, manifestName)
+  const canonicalBefore = await fs.realpath(manifest)
+  const before = await fs.lstat(manifest)
+  if (
+    canonicalBefore !== manifest ||
+    !isSingleOwnerRegularFile(before) ||
+    before.size <= 0 ||
+    before.size > MAX_AUTHORITY_FILE_BYTES
+  ) {
+    throw new TypeError("invalid host manifest identity")
+  }
+  const handle = await fs.open(manifest, "r")
+  let text: string
+  try {
+    const opened = await handle.stat()
+    if (!isSingleOwnerRegularFile(opened) || !sameAuthorityFileIdentity(before, opened)) {
+      throw new TypeError("host manifest identity changed before read")
+    }
+    const bytes = Buffer.alloc(opened.size)
+    const read = await handle.read(bytes, 0, bytes.length, 0)
+    const overflow = Buffer.alloc(1)
+    const extra = await handle.read(overflow, 0, 1, bytes.length)
+    const afterHandle = await handle.stat()
+    const afterPath = await fs.lstat(manifest)
+    const canonicalAfter = await fs.realpath(manifest)
+    if (
+      read.bytesRead !== bytes.length ||
+      extra.bytesRead !== 0 ||
+      canonicalAfter !== manifest ||
+      !isSingleOwnerRegularFile(afterHandle) ||
+      !isSingleOwnerRegularFile(afterPath) ||
+      !sameAuthorityFileIdentity(opened, afterHandle) ||
+      !sameAuthorityFileIdentity(opened, afterPath)
+    ) {
+      throw new TypeError("host manifest identity changed during read")
+    }
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+  } finally {
+    await handle.close()
+  }
+  const value: unknown = JSON.parse(text)
+  if (JSON.stringify(value) !== text) throw new TypeError("host manifest is not canonical JSON")
   if (
     value === null ||
     typeof value !== "object" ||
-    !hasExactKeys(value, hasProcessNonce ? ["hostID", "createdAt", "processNonce"] : ["hostID", "createdAt"]) ||
+    !hasExactKeys(value, [
+      "hostID",
+      "createdAt",
+      "kind",
+      "purpose",
+      "revision",
+      "configurationSha256",
+      "sourceSha256",
+      "claimKey",
+      "claimGeneration",
+      "claimSha256",
+      "workflowID",
+      "stageID",
+      "attempt",
+      "leaseOwner",
+      "leaseExpiresAt",
+      "nonce",
+    ]) ||
     typeof Reflect.get(value, "hostID") !== "string" ||
-    path.basename(directory) !== Reflect.get(value, "hostID") ||
-    typeof Reflect.get(value, "createdAt") !== "number" ||
-    (hasProcessNonce && !/^[a-f0-9]{64}$/.test(String(Reflect.get(value, "processNonce"))))
+    String(expectedHostID ?? path.basename(directory)) !== Reflect.get(value, "hostID") ||
+    !Number.isSafeInteger(Reflect.get(value, "createdAt")) ||
+    Number(Reflect.get(value, "createdAt")) < 0 ||
+    (Reflect.get(value, "kind") !== "static" && Reflect.get(value, "kind") !== "script") ||
+    (Reflect.get(value, "purpose") !== "reference" && Reflect.get(value, "purpose") !== "implementation") ||
+    !Number.isSafeInteger(Reflect.get(value, "revision")) ||
+    Number(Reflect.get(value, "revision")) < 0 ||
+    !/^[a-f0-9]{64}$/.test(String(Reflect.get(value, "configurationSha256"))) ||
+    !/^[a-f0-9]{64}$/.test(String(Reflect.get(value, "sourceSha256"))) ||
+    !/^[a-f0-9]{64}$/.test(String(Reflect.get(value, "claimKey"))) ||
+    !/^[a-f0-9]{64}$/.test(String(Reflect.get(value, "claimGeneration"))) ||
+    !/^[a-f0-9]{64}$/.test(String(Reflect.get(value, "claimSha256"))) ||
+    !/^[a-f0-9]{64}$/.test(String(Reflect.get(value, "nonce")))
   ) {
     throw new TypeError("invalid host manifest")
   }
+  const hostID = WorkflowVisualHost.HostID.make(String(Reflect.get(value, "hostID")))
+  const lease = WorkflowVisualHost.validatePreviewLeaseAuthority({
+    workflowID: Reflect.get(value, "workflowID"),
+    stageID: Reflect.get(value, "stageID"),
+    attempt: Reflect.get(value, "attempt"),
+    leaseOwner: Reflect.get(value, "leaseOwner"),
+    leaseExpiresAt: Reflect.get(value, "leaseExpiresAt"),
+  })
   return {
+    hostID,
     createdAt: Reflect.get(value, "createdAt"),
-    ...(hasProcessNonce ? { processNonce: String(Reflect.get(value, "processNonce")) } : {}),
+    kind: Reflect.get(value, "kind") as "static" | "script",
+    purpose: Reflect.get(value, "purpose") as VisualHostClaim.Purpose,
+    revision: Number(Reflect.get(value, "revision")),
+    configurationSha256: String(Reflect.get(value, "configurationSha256")),
+    sourceSha256: String(Reflect.get(value, "sourceSha256")),
+    claimKey: String(Reflect.get(value, "claimKey")),
+    claimGeneration: String(Reflect.get(value, "claimGeneration")),
+    claimSha256: String(Reflect.get(value, "claimSha256")),
+    identity: { ...lease, hostID, nonce: String(Reflect.get(value, "nonce")) },
   }
+}
+
+function manifestMatchesClaim(
+  manifest: Awaited<ReturnType<typeof readManifest>>,
+  claim: VisualHostClaim.Owned,
+): boolean {
+  return (
+    manifest.hostID === claim.body.hostID &&
+    manifest.createdAt === claim.body.createdAt &&
+    manifest.kind === claim.body.kind &&
+    manifest.claimKey === claim.key &&
+    manifest.claimGeneration === claim.body.generation &&
+    manifest.claimSha256 === claim.sha256 &&
+    manifest.purpose === claim.body.purpose &&
+    manifest.revision === claim.body.revision &&
+    manifest.configurationSha256 === claim.body.configurationSha256 &&
+    manifest.sourceSha256 === claim.body.sourceSha256 &&
+    sameProcessIdentity(manifest.identity, identityFromClaim(claim.body))
+  )
+}
+
+function isSingleOwnerRegularFile(value: {
+  readonly nlink: number
+  isFile(): boolean
+  isSymbolicLink(): boolean
+}): boolean {
+  return value.isFile() && !value.isSymbolicLink() && value.nlink === 1
+}
+
+function sameAuthorityFileIdentity(
+  left: {
+    readonly dev: number
+    readonly ino: number
+    readonly mode: number
+    readonly nlink: number
+    readonly size: number
+    readonly mtimeMs: number
+    readonly ctimeMs: number
+    readonly birthtimeMs: number
+  },
+  right: {
+    readonly dev: number
+    readonly ino: number
+    readonly mode: number
+    readonly nlink: number
+    readonly size: number
+    readonly mtimeMs: number
+    readonly ctimeMs: number
+    readonly birthtimeMs: number
+  },
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    left.birthtimeMs === right.birthtimeMs
+  )
 }
 
 function pathsOverlap(left: string, right: string): boolean {

@@ -1469,9 +1469,14 @@ describe("Workflow local execution", () => {
 
         const detail = yield* workflow.get(input.id!)
         const history = yield* workflow.history({ workflowID: input.id!, limit: 50 })
-        expect(detail.stages[0].status).toBe("running")
-        expect(history.events.some((event) => event.type === "workflow.stage.succeeded")).toBe(false)
-        expect(history.events.some((event) => event.type === "workflow.succeeded")).toBe(false)
+        const retries = history.events.filter((event) => event.type === "workflow.stage.retry_scheduled")
+        const successes = history.events.filter((event) => event.type === "workflow.stage.succeeded")
+        expect(detail.stages[0].status).toBe("succeeded")
+        expect(retries).toHaveLength(1)
+        expect(retries[0]?.data).toMatchObject({ attempt: 1, leaseOwner: "worker-lease-loss" })
+        expect(successes).toHaveLength(1)
+        expect(successes[0]?.data).toMatchObject({ attempt: 2, leaseOwner: "worker-lease-loss" })
+        expect(history.events.some((event) => event.type === "workflow.succeeded")).toBe(true)
         expect((yield* execution.active).has(input.id!)).toBe(false)
       }),
     5_000,

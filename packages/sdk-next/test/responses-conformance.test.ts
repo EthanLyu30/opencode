@@ -25,6 +25,7 @@ import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/loc
 import { WorkflowModelExecution } from "@opencode-ai/core/workflow/execution/model"
 import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
+import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
 import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { ResponseEvent } from "../../schema/src/response-event"
 import { WorkflowEvent } from "../../schema/src/workflow-event"
@@ -35,6 +36,7 @@ import {
   fixture,
   runtimeLayer,
   seedPair,
+  seedPlacedWorkflow,
   waitTerminal,
   waitWorkflowStatus,
 } from "./lib/native-responses-runtime"
@@ -112,11 +114,14 @@ const withDatabase = async (
   const directory = await mkdtemp(path.join(tmpdir(), `opencode-responses-conformance-${name}-`))
   const databasePath = path.join(directory, "opencode.sqlite")
   const previous = Flag.OPENCODE_DB
+  const previousModelsFetch = Flag.OPENCODE_DISABLE_MODELS_FETCH
   Flag.OPENCODE_DB = databasePath
+  Flag.OPENCODE_DISABLE_MODELS_FETCH = true
   try {
     await run({ directory, databasePath })
   } finally {
     Flag.OPENCODE_DB = previous
+    Flag.OPENCODE_DISABLE_MODELS_FETCH = previousModelsFetch
     await removeTestDirectory(directory)
   }
 }
@@ -216,7 +221,7 @@ const roleWorkflowInput = (
   workflowID: Workflow.ID,
   responseID?: Responses.ID,
   deliverMaxAttempts = 1,
-): Workflow.CreateInput => ({
+): Workflow.CreateInput & { readonly id: Workflow.ID } => ({
   id: workflowID,
   type: "responses-production-bridge",
   input: {},
@@ -248,12 +253,69 @@ const roleStage = (
   input: responseID === undefined ? (workflowBinding ? { responseBinding: "workflow" } : {}) : { responseID },
 })
 
-const roleOutcome = (role: string) =>
+const referenceSource = "<!doctype html><html><body><main>Recorded reference</main></body></html>"
+const referenceSha256 = new Bun.CryptoHasher("sha256").update(referenceSource).digest("hex")
+const rolePayloads = {
+  design: {
+    spec: {
+      schemaVersion: 1,
+      goals: ["Render the recorded reference"],
+      routes: [{ path: "/", goal: "Show the recorded reference" }],
+      layoutConstraints: ["Keep the main content visible"],
+      componentTree: [{ id: "root", component: "main", children: [] }],
+      states: [{ name: "ready", description: "The page is ready" }],
+      typography: [{ token: "body", family: "sans-serif", weight: 400, sizePx: 16, lineHeight: 1.5 }],
+      colors: [{ token: "background", value: "#ffffff" }],
+      responsiveRules: [{ viewport: "desktop", width: 1280, height: 720, rules: ["Keep main visible"] }],
+      accessibilityRules: ["Use semantic landmarks"],
+      acceptanceCriteria: ["The reference renders"],
+      projectStack: ["HTML"],
+      referenceApp: {
+        entrypoint: "index.html",
+        readySelector: "main",
+        files: [{ path: "index.html", sha256: referenceSha256, size: Buffer.byteLength(referenceSource) }],
+        viewports: [{ name: "desktop", width: 1280, height: 720 }],
+      },
+    },
+    sources: [{ path: "index.html", content: referenceSource }],
+  },
+  decompose: {
+    acceptanceCriteria: ["The implementation matches the recorded reference"],
+    tasks: [
+      {
+        id: "implement-page",
+        title: "Implement page",
+        description: "Build the recorded page.",
+        acceptanceCriteria: ["The page renders"],
+        dependsOn: [],
+        files: ["src/app.ts"],
+      },
+    ],
+  },
+  implement: { summary: "Implemented the recorded page." },
+  test: { summary: "Executed the recorded functional test." },
+  visual_review: { verdict: "pass", score: 100, findings: [] },
+  deliver: { summary: "The recorded page is complete." },
+} as const
+
+type RecordedRole = keyof typeof rolePayloads
+
+const recordedRole = (step: string): RecordedRole => {
+  if (step.startsWith("deliver-")) return "deliver"
+  if (step in rolePayloads) return step as RecordedRole
+  throw new Error(`Unknown recorded workflow role: ${step}`)
+}
+
+const roleOutcome = (role: RecordedRole) =>
   JSON.stringify({
-    schemaVersion: 1,
-    role,
-    verdict: role === "deliver" ? "complete" : role === "test" || role === "visual_review" ? "pass" : "ready",
-    revision: 0,
+    contractVersion: 1,
+    outcome: {
+      schemaVersion: 1,
+      role,
+      verdict: role === "deliver" ? "complete" : role === "test" || role === "visual_review" ? "pass" : "ready",
+      revision: 0,
+    },
+    payload: rolePayloads[role],
   })
 
 const llmTextResponse = (text: string) => {
@@ -267,9 +329,9 @@ const llmTextResponse = (text: string) => {
   return response
 }
 
-const llmToolResponse = () => {
+const llmToolResponse = (name = "read_file") => {
   const response = LLMResponse.fromEvents([
-    LLMEvent.toolCall({ id: "call_checkpoint_read", name: "read_file", input: { path: "fixture.txt" } }),
+    LLMEvent.toolCall({ id: "call_checkpoint_read", name, input: { path: "fixture.txt" } }),
     LLMEvent.finish({ reason: "tool-calls", usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 } }),
   ])
   if (!response) throw new Error("Expected a complete tool response")
@@ -286,6 +348,9 @@ const llmIncompleteResponse = () => {
   if (!response) throw new Error("Expected an incomplete text response")
   return response
 }
+
+const continuationLeaseDurationMs = 1_000
+const continuationCrashWaitMs = 1_250
 
 const continuationWorkerLayer = (databasePath: string, ownerID: string, clientLayer: Layer.Layer<LLMClientService>) =>
   AppNodeBuilder.build(
@@ -311,8 +376,8 @@ const continuationWorkerLayer = (databasePath: string, ownerID: string, clientLa
         WorkflowExecution.node,
         WorkflowExecutionLocal.nodeWith({
           ownerID,
-          leaseDurationMs: 150,
-          heartbeatIntervalMs: 10_000,
+          leaseDurationMs: continuationLeaseDurationMs,
+          heartbeatIntervalMs: 100,
           pollIntervalMs: 5,
           concurrency: 1,
         }),
@@ -320,7 +385,7 @@ const continuationWorkerLayer = (databasePath: string, ownerID: string, clientLa
     ],
   )
 
-const kimiRoleSSE = (role: string) =>
+const kimiRoleSSE = (role: RecordedRole) =>
   [
     { id: `chatcmpl_${role}`, choices: [{ delta: { content: roleOutcome(role) }, finish_reason: null }], usage: null },
     { id: `chatcmpl_${role}`, choices: [{ delta: {}, finish_reason: "stop" }], usage: null },
@@ -333,7 +398,7 @@ const kimiRoleSSE = (role: string) =>
     .map((event) => `data: ${JSON.stringify(event)}\n\n`)
     .join("") + "data: [DONE]\n\n"
 
-const deepSeekRoleSSE = (role: string) =>
+const deepSeekRoleSSE = (role: RecordedRole) =>
   deepSeekSSE([
     { type: "response.created", sequence_number: 0, response: { id: `resp_provider_${role}` } },
     {
@@ -362,7 +427,7 @@ const deepSeekRoleSSE = (role: string) =>
     },
   ])
 
-const deepSeekHostedSearchRoleSSE = (role: string) =>
+const deepSeekHostedSearchRoleSSE = (role: RecordedRole) =>
   deepSeekSSE([
     { type: "response.created", sequence_number: 0, response: { id: `resp_provider_${role}_hosted` } },
     {
@@ -426,7 +491,7 @@ const deepSeekHostedSearchRoleSSE = (role: string) =>
     },
   ])
 
-const deepSeekIncompleteRoleSSE = (role: string, reason: "max_output_tokens" | "content_filter") =>
+const deepSeekIncompleteRoleSSE = (role: RecordedRole, reason: "max_output_tokens" | "content_filter") =>
   deepSeekSSE([
     { type: "response.created", sequence_number: 0, response: { id: `resp_provider_${role}_incomplete` } },
     {
@@ -459,7 +524,7 @@ const deepSeekIncompleteRoleSSE = (role: string, reason: "max_output_tokens" | "
     },
   ])
 
-const deepSeekUnknownIncompleteRoleSSE = (role: string) =>
+const deepSeekUnknownIncompleteRoleSSE = (role: RecordedRole) =>
   deepSeekSSE([
     { type: "response.created", sequence_number: 0, response: { id: `resp_provider_${role}_incomplete_unknown` } },
     {
@@ -780,7 +845,7 @@ test("transient JSON and SSE waiters survive terminal-before-register without le
 })
 
 test("concurrent foreground store:false JSON and SSE retries share one terminal handoff", async () => {
-  await withDatabase("transient-http-concurrent", async ({ databasePath }) => {
+  await withDatabase("transient-http-concurrent", async ({ directory, databasePath }) => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
@@ -817,7 +882,7 @@ test("concurrent foreground store:false JSON and SSE retries share one terminal 
           Effect.gen(function* () {
             const { OpenCode } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
-            yield* opencode.workflows.create(roleWorkflowInput(workflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID)))
             const [json, sse] = yield* Effect.all(
               [
                 opencode.responses.create({
@@ -874,7 +939,7 @@ test("concurrent foreground store:false JSON and SSE retries share one terminal 
 }, 15_000)
 
 test("production embedded runtime executes Responses context through exact credentialed provider routes", async () => {
-  await withDatabase("production-bridge", async ({ databasePath }) => {
+  await withDatabase("production-bridge", async ({ directory, databasePath }) => {
     const authSentinel = "TASK20_OUTBOUND_CREDENTIAL_SENTINEL"
     const transientToolSentinel = "TASK20_STORE_FALSE_TOOL_RESULT_SENTINEL"
     await Effect.runPromise(
@@ -1001,17 +1066,20 @@ test("production embedded runtime executes Responses context through exact crede
             const opencode = yield* OpenCode.create()
             const { Tool } = yield* Effect.promise(() => import("../src"))
             yield* opencode.tools.register({
-              read_file: Tool.make({
-                description: "Read an offline file fixture",
-                input: Schema.Struct({ path: Schema.String }),
-                output: Schema.Struct({ output: Schema.String }),
-                execute: ({ path }) =>
-                  Effect.succeed({
-                    output: path === "transient-sentinel.txt" ? transientToolSentinel : `offline:${path}`,
-                  }),
-              }),
+              read_file: Tool.withPermission(
+                Tool.make({
+                  description: "Read an offline file fixture",
+                  input: Schema.Struct({ path: Schema.String }),
+                  output: Schema.Struct({ output: Schema.String }),
+                  execute: ({ path }) =>
+                    Effect.succeed({
+                      output: path === "transient-sentinel.txt" ? transientToolSentinel : `offline:${path}`,
+                    }),
+                }),
+                "read",
+              ),
             })
-            yield* opencode.workflows.create(roleWorkflowInput(workflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID)))
             const admitted = yield* opencode.responses.create({
               workflowID,
               model: "deepseek-v4-pro",
@@ -1045,10 +1113,12 @@ test("production embedded runtime executes Responses context through exact crede
             })
             expect(workflow.artifacts.filter((artifact) => artifact.kind === "tool-continuation")).toHaveLength(1)
             const transientWorkflowID = Workflow.ID.make(`wfl_production_transient_${crypto.randomUUID()}`)
-            yield* opencode.workflows.create(roleWorkflowInput(transientWorkflowID))
+            yield* Effect.promise(() =>
+              seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(transientWorkflowID)),
+            )
             const transient = yield* opencode.responses.create({
               workflowID: transientWorkflowID,
-              model: "deepseek-v4-flash",
+              model: "deepseek-v4-pro",
               background: false,
               store: false,
               requestHash: `sha256:transient:${crypto.randomUUID()}`,
@@ -1070,7 +1140,9 @@ test("production embedded runtime executes Responses context through exact crede
             const unsupportedChildWorkflowID = Workflow.ID.make(
               `wfl_production_unsupported_child_${crypto.randomUUID()}`,
             )
-            yield* opencode.workflows.create(roleWorkflowInput(unsupportedChildWorkflowID))
+            yield* Effect.promise(() =>
+              seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(unsupportedChildWorkflowID)),
+            )
             const unsupported = yield* opencode.responses.create({
               workflowID: unsupportedChildWorkflowID,
               model: "deepseek-v4-pro",
@@ -1124,13 +1196,7 @@ test("production embedded runtime executes Responses context through exact crede
           ? request.body.model
           : undefined,
       ),
-    ).toEqual([
-      ...productionModels,
-      ...productionModels.slice(0, 5),
-      "deepseek-v4-flash",
-      "deepseek-v4-flash",
-      ...productionModels.slice(0, 5),
-    ])
+    ).toEqual([...productionModels, ...productionModels, ...productionModels.slice(0, 5)])
     expect(requests.map((request) => request.authorization)).toEqual(
       Array.from({ length: 19 }, () => `Bearer ${authSentinel}`),
     )
@@ -1194,7 +1260,7 @@ test("production embedded runtime executes Responses context through exact crede
 }, 20_000)
 
 test("production tool continuation survives a crash into incomplete without re-executing or double-counting", async () => {
-  await withDatabase("production-continuation-restart", async ({ databasePath }) => {
+  await withDatabase("production-continuation-restart", async ({ directory, databasePath }) => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
@@ -1216,7 +1282,7 @@ test("production tool continuation survives a crash into incomplete without re-e
     let ownerAContinuationRequests = 0
     let ownerBContinuationRequests = 0
     let ownerCContinuationRequests = 0
-    let toolExecutions = 0
+    await Bun.write(path.join(directory, "fixture.txt"), "durable:fixture.txt")
 
     const ownerAClient = Layer.succeed(
       LLMClient.Service,
@@ -1236,31 +1302,19 @@ test("production tool continuation survives a crash into incomplete without re-e
           }
           const role = roles[initialRequests++]
           if (!role) return Effect.die("Unexpected initial provider request")
-          return Effect.succeed(role === "deliver" ? llmToolResponse() : llmTextResponse(roleOutcome(role)))
+          return Effect.succeed(role === "deliver" ? llmToolResponse("read") : llmTextResponse(roleOutcome(role)))
         },
       }),
     )
 
+    await seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID, undefined, 3))
+
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const tools = yield* ApplicationTools.Service
           const workflow = yield* WorkflowV2.Service
           const responses = yield* ResponsesV2.Service
           const execution = yield* WorkflowExecution.Service
-          yield* tools.register({
-            read_file: CoreTool.make({
-              description: "Read a durable continuation fixture",
-              input: Schema.Struct({ path: Schema.String }),
-              output: Schema.Struct({ output: Schema.String }),
-              execute: ({ path }) =>
-                Effect.sync(() => {
-                  toolExecutions++
-                  return { output: `durable:${path}` }
-                }),
-            }),
-          })
-          yield* workflow.create(roleWorkflowInput(workflowID, undefined, 3))
           yield* responses.create({
             id: responseID,
             workflowID,
@@ -1287,6 +1341,25 @@ test("production tool continuation survives a crash into incomplete without re-e
             }),
             Stream.runHead,
             Effect.timeout("5 seconds"),
+            Effect.catchTag("TimeoutError", () =>
+              workflow.get(workflowID).pipe(
+                Effect.flatMap((detail) =>
+                  Effect.die(
+                    `Owner A checkpoint timeout: ${JSON.stringify({
+                      run: detail.run,
+                      stages: detail.stages.map((stage) => ({
+                        type: stage.type,
+                        status: stage.status,
+                        attempt: stage.attempt,
+                        error: stage.error,
+                        checkpoint: stage.checkpoint,
+                      })),
+                      initialRequests,
+                    })}`,
+                  ),
+                ),
+              ),
+            ),
           )
           expect(Option.isSome(checkpoint)).toBe(true)
         }),
@@ -1295,7 +1368,7 @@ test("production tool continuation survives a crash into incomplete without re-e
 
     // Owner A's scope is gone. Let its fenced lease expire before owner B
     // performs normal restart-safe recovery against the same SQLite file.
-    await Bun.sleep(225)
+    await Bun.sleep(continuationCrashWaitMs)
 
     const ownerBClient = Layer.succeed(
       LLMClient.Service,
@@ -1322,33 +1395,40 @@ test("production tool continuation survives a crash into incomplete without re-e
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const tools = yield* ApplicationTools.Service
           const workflow = yield* WorkflowV2.Service
-          yield* tools.register({
-            read_file: CoreTool.make({
-              description: "Read a durable continuation fixture",
-              input: Schema.Struct({ path: Schema.String }),
-              output: Schema.Struct({ output: Schema.String }),
-              execute: ({ path }) =>
-                Effect.sync(() => {
-                  toolExecutions++
-                  return { output: `duplicate:${path}` }
-                }),
-            }),
-          })
           const retry = yield* workflow.events({ workflowID }).pipe(
             Stream.filter(
               (event) => event.type === "workflow.stage.retry_scheduled" && event.data.failure.code === "rate_limit",
             ),
             Stream.runHead,
             Effect.timeout("5 seconds"),
+            Effect.catchTag("TimeoutError", () =>
+              workflow.get(workflowID).pipe(
+                Effect.flatMap((detail) =>
+                  Effect.die(
+                    `Owner B retry timeout: ${JSON.stringify({
+                      run: detail.run,
+                      stages: detail.stages.map((stage) => ({
+                        type: stage.type,
+                        status: stage.status,
+                        attempt: stage.attempt,
+                        error: stage.error,
+                        checkpoint: stage.checkpoint,
+                      })),
+                      ownerAContinuationRequests,
+                      ownerBContinuationRequests,
+                    })}`,
+                  ),
+                ),
+              ),
+            ),
           )
           expect(Option.isSome(retry)).toBe(true)
         }),
       ).pipe(Effect.provide(continuationWorkerLayer(databasePath, "owner-B", ownerBClient))),
     )
 
-    await Bun.sleep(225)
+    await Bun.sleep(continuationCrashWaitMs)
 
     const ownerCClient = Layer.succeed(
       LLMClient.Service,
@@ -1375,6 +1455,26 @@ test("production tool continuation survives a crash into incomplete without re-e
             Stream.filter((event) => event.type === "workflow.succeeded" || event.type === "workflow.failed"),
             Stream.runHead,
             Effect.timeout("5 seconds"),
+            Effect.catchTag("TimeoutError", () =>
+              workflow.get(workflowID).pipe(
+                Effect.flatMap((detail) =>
+                  Effect.die(
+                    `Owner C terminal timeout: ${JSON.stringify({
+                      run: detail.run,
+                      stages: detail.stages.map((stage) => ({
+                        type: stage.type,
+                        status: stage.status,
+                        attempt: stage.attempt,
+                        error: stage.error,
+                        checkpoint: stage.checkpoint,
+                      })),
+                      ownerBContinuationRequests,
+                      ownerCContinuationRequests,
+                    })}`,
+                  ),
+                ),
+              ),
+            ),
           )
           expect(Option.isSome(terminal)).toBe(true)
           return {
@@ -1404,7 +1504,6 @@ test("production tool continuation survives a crash into incomplete without re-e
         { type: "message", role: "assistant", content: roleOutcome("deliver") },
       ],
     })
-    expect(toolExecutions).toBe(1)
     expect(initialRequests).toBe(6)
     expect(ownerAContinuationRequests).toBe(0)
     expect(ownerBContinuationRequests).toBe(1)
@@ -1444,16 +1543,52 @@ test("production tool continuation survives a crash into incomplete without re-e
     const sqlite = new SqliteDatabase(databasePath, { readonly: true })
     try {
       expect(durableStageAttempts(sqlite, workflowID).slice(-3)).toEqual([1, 2, 3])
-      const retryUsage = sqlite
+      const retryEvent = sqlite
         .query("select data from event where aggregate_id = ? and type = ? order by seq")
         .all(workflowID, durableType(WorkflowEvent.Stage.RetryScheduled))
         .map((row) => {
           if (!row || typeof row !== "object" || !("data" in row) || typeof row.data !== "string") return undefined
-          return JSON.parse(row.data) as { failure?: { code?: string }; usage?: unknown }
+          return JSON.parse(row.data) as { stageID?: string; failure?: { code?: string }; usage?: unknown }
         })
-        .find((data) => data?.failure?.code === "rate_limit")?.usage
-      expect(retryUsage).toEqual({ tokens: 0, turns: 0, toolCalls: 0, attempts: 0 })
-      expect(durableEventCount(sqlite, workflowID, [durableType(WorkflowEvent.Stage.Checkpointed)]).count).toBe(2)
+        .find((data) => data?.failure?.code === "rate_limit")
+      expect(retryEvent?.usage).toEqual({ tokens: 0, turns: 0, toolCalls: 0, attempts: 0 })
+      expect(retryEvent?.stageID).toBe(deliverStage.id)
+      const retryCheckpoint = sqlite
+        .query(
+          "select data from event where aggregate_id = ? and type = ? and json_extract(data, '$.stageID') = ? and seq < (select seq from event where aggregate_id = ? and type = ? and json_extract(data, '$.failure.code') = 'rate_limit' order by seq limit 1) order by seq desc limit 1",
+        )
+        .get(
+          workflowID,
+          durableType(WorkflowEvent.Stage.Checkpointed),
+          deliverStage.id,
+          workflowID,
+          durableType(WorkflowEvent.Stage.RetryScheduled),
+        )
+      if (
+        !retryCheckpoint ||
+        typeof retryCheckpoint !== "object" ||
+        !("data" in retryCheckpoint) ||
+        typeof retryCheckpoint.data !== "string"
+      )
+        throw new Error("Expected the pre-retry continuation checkpoint")
+      const retryContinuation = JSON.parse(retryCheckpoint.data) as {
+        checkpoint?: {
+          kind?: string
+          version?: number
+          providerTurn?: unknown
+          activeTurn?: unknown
+          turns?: unknown[]
+          usage?: unknown
+        }
+      }
+      expect(retryContinuation.checkpoint).toMatchObject({
+        kind: "workflow.model.continuation",
+        version: 2,
+        turns: [{ calls: [{ id: "call_checkpoint_read", name: "read" }], results: [{ id: "call_checkpoint_read" }] }],
+        usage: { tokens: 6, turns: 1, toolCalls: 1, attempts: 0 },
+      })
+      expect(retryContinuation.checkpoint).not.toHaveProperty("providerTurn")
+      expect(retryContinuation.checkpoint).not.toHaveProperty("activeTurn")
       expect(durableEventCount(sqlite, workflowID, workflowTerminalTypes).count).toBe(1)
       expect(
         sqlite
@@ -1469,7 +1604,7 @@ test("production tool continuation survives a crash into incomplete without re-e
 }, 20_000)
 
 test("production tool pending intent survives a pre-result crash without re-executing the side effect", async () => {
-  await withDatabase("production-tool-pending-crash", async ({ databasePath }) => {
+  await withDatabase("production-tool-pending-crash", async ({ directory, databasePath }) => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
@@ -1504,29 +1639,32 @@ test("production tool pending intent survives a pre-result crash without re-exec
       }),
     )
 
+    await seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID, undefined, 3))
+
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
           const tools = yield* ApplicationTools.Service
-          const workflow = yield* WorkflowV2.Service
           const responses = yield* ResponsesV2.Service
           const execution = yield* WorkflowExecution.Service
           yield* tools.register({
-            read_file: CoreTool.make({
-              description: "Block after the production side effect and before its result checkpoint",
-              input: Schema.Struct({ path: Schema.String }),
-              output: Schema.Struct({ output: Schema.String }),
-              execute: ({ path }) =>
-                Effect.sync(() => {
-                  toolExecutions++
-                  return { output: `ambiguous:${path}` }
-                }).pipe(
-                  Effect.tap(() => Deferred.succeed(toolStarted, undefined)),
-                  Effect.andThen(Effect.never),
-                ),
-            }),
+            read_file: CoreTool.withPermission(
+              CoreTool.make({
+                description: "Block after the production side effect and before its result checkpoint",
+                input: Schema.Struct({ path: Schema.String }),
+                output: Schema.Struct({ output: Schema.String }),
+                execute: ({ path }) =>
+                  Effect.sync(() => {
+                    toolExecutions++
+                    return { output: `ambiguous:${path}` }
+                  }).pipe(
+                    Effect.tap(() => Deferred.succeed(toolStarted, undefined)),
+                    Effect.andThen(Effect.never),
+                  ),
+              }),
+              "read",
+            ),
           })
-          yield* workflow.create(roleWorkflowInput(workflowID, undefined, 3))
           yield* responses.create({
             id: responseID,
             workflowID,
@@ -1542,7 +1680,7 @@ test("production tool pending intent survives a pre-result crash without re-exec
       ).pipe(Effect.provide(continuationWorkerLayer(databasePath, "pending-owner-A", ownerAClient))),
     )
 
-    await Bun.sleep(225)
+    await Bun.sleep(continuationCrashWaitMs)
     await Effect.runPromise(
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
@@ -1573,16 +1711,19 @@ test("production tool pending intent survives a pre-result crash without re-exec
           const tools = yield* ApplicationTools.Service
           const workflow = yield* WorkflowV2.Service
           yield* tools.register({
-            read_file: CoreTool.make({
-              description: "A recovery tool that must remain fenced",
-              input: Schema.Struct({ path: Schema.String }),
-              output: Schema.Struct({ output: Schema.String }),
-              execute: ({ path }) =>
-                Effect.sync(() => {
-                  toolExecutions++
-                  return { output: `duplicate:${path}` }
-                }),
-            }),
+            read_file: CoreTool.withPermission(
+              CoreTool.make({
+                description: "A recovery tool that must remain fenced",
+                input: Schema.Struct({ path: Schema.String }),
+                output: Schema.Struct({ output: Schema.String }),
+                execute: ({ path }) =>
+                  Effect.sync(() => {
+                    toolExecutions++
+                    return { output: `duplicate:${path}` }
+                  }),
+              }),
+              "read",
+            ),
           })
           for (let index = 0; index < 300; index++) {
             const detail = yield* workflow.get(workflowID)
@@ -1627,16 +1768,19 @@ test("production tool pending intent survives a pre-result crash without re-exec
           const responses = yield* ResponsesV2.Service
           const execution = yield* WorkflowExecution.Service
           yield* tools.register({
-            read_file: CoreTool.make({
-              description: "Explicitly authorized recovery replay",
-              input: Schema.Struct({ path: Schema.String }),
-              output: Schema.Struct({ output: Schema.String }),
-              execute: ({ path }) =>
-                Effect.sync(() => {
-                  toolExecutions++
-                  return { output: `authorized:${path}` }
-                }),
-            }),
+            read_file: CoreTool.withPermission(
+              CoreTool.make({
+                description: "Explicitly authorized recovery replay",
+                input: Schema.Struct({ path: Schema.String }),
+                output: Schema.Struct({ output: Schema.String }),
+                execute: ({ path }) =>
+                  Effect.sync(() => {
+                    toolExecutions++
+                    return { output: `authorized:${path}` }
+                  }),
+              }),
+              "read",
+            ),
           })
           yield* workflow.resolveRecovery({ workflowID, stageID: deliver!.id, action: "retry" })
           yield* execution.wake
@@ -1663,7 +1807,7 @@ test("production tool pending intent survives a pre-result crash without re-exec
 }, 20_000)
 
 test("HTTP cancellation atomically cancels a Response and fences a late production tool result", async () => {
-  await withDatabase("http-cancel-tool-fence", async ({ databasePath }) => {
+  await withDatabase("http-cancel-tool-fence", async ({ directory, databasePath }) => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
@@ -1714,23 +1858,28 @@ test("HTTP cancellation atomically cancels a Response and fences a late producti
             const { OpenCode, Tool } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
             yield* opencode.tools.register({
-              read_file: Tool.make({
-                description: "Delayed production read",
-                input: Schema.Struct({ path: Schema.String }),
-                output: Schema.Struct({ output: Schema.String }),
-                execute: ({ path }) =>
-                  Effect.uninterruptible(
-                    Effect.promise(async () => {
-                      markToolStarted()
-                      await toolRelease
-                      toolHasSettled = true
-                      markToolSettled()
-                      return { output: `${resultSentinel}:${path}` }
-                    }),
-                  ),
-              }),
+              read_file: Tool.withPermission(
+                Tool.make({
+                  description: "Delayed production read",
+                  input: Schema.Struct({ path: Schema.String }),
+                  output: Schema.Struct({ output: Schema.String }),
+                  execute: ({ path }) =>
+                    Effect.uninterruptible(
+                      Effect.promise(async () => {
+                        markToolStarted()
+                        await toolRelease
+                        toolHasSettled = true
+                        markToolSettled()
+                        return { output: `${resultSentinel}:${path}` }
+                      }),
+                    ),
+                }),
+                "read",
+              ),
             })
-            yield* opencode.workflows.create(roleWorkflowInput(workflowID, responseID))
+            yield* Effect.promise(() =>
+              seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID, responseID)),
+            )
             yield* opencode.responses.create({
               id: responseID,
               workflowID,
@@ -1845,7 +1994,7 @@ test("HTTP cancellation atomically cancels a Response and fences a late producti
 }, 20_000)
 
 test("concurrent HTTP retries with one request hash admit one response for one workflow", async () => {
-  await withDatabase("http-idempotency", async ({ databasePath }) => {
+  await withDatabase("http-idempotency", async ({ directory, databasePath }) => {
     const { OpenCode } = await import("../src")
     const workflowID = Workflow.ID.make(`wfl_http_idempotency_${crypto.randomUUID()}`)
     const responseID = Responses.ID.make(`resp_http_idempotency_${crypto.randomUUID()}`)
@@ -1892,32 +2041,33 @@ test("concurrent HTTP retries with one request hash admit one response for one w
       responses = await Effect.runPromise(
         Effect.scoped(
           Effect.gen(function* () {
+            yield* Effect.promise(() =>
+              seedPlacedWorkflow(databasePath, directory, {
+                id: workflowID,
+                type: "responses-http-idempotency",
+                input: {},
+                budget: { maxAttempts: 1 },
+                stages: [
+                  {
+                    type: "design",
+                    ordinal: 0,
+                    maxAttempts: 1,
+                    recoveryPolicy: "restart_safe",
+                    idempotencyKey: `responses/${workflowID}/design`,
+                    input: {},
+                  },
+                  {
+                    type: "deliver",
+                    ordinal: 1,
+                    maxAttempts: 1,
+                    recoveryPolicy: "restart_safe",
+                    idempotencyKey: `responses/${workflowID}/deliver`,
+                    input: { responseID },
+                  },
+                ],
+              }),
+            )
             const opencode = yield* OpenCode.create()
-            yield* opencode.workflows.create({
-              id: workflowID,
-              type: "responses-http-idempotency",
-              input: {},
-              budget: { maxAttempts: 1 },
-              stages: [
-                {
-                  type: "design",
-                  ordinal: 0,
-                  maxAttempts: 1,
-                  recoveryPolicy: "restart_safe",
-                  idempotencyKey: `responses/${workflowID}/design`,
-                  input: {},
-                },
-                {
-                  type: "deliver",
-                  ordinal: 1,
-                  maxAttempts: 1,
-                  recoveryPolicy: "restart_safe",
-                  idempotencyKey: `responses/${workflowID}/deliver`,
-                  input: { responseID },
-                },
-              ],
-            })
-            yield* Effect.promise(() => providerStarted).pipe(Effect.timeout("2 seconds"))
             const results = yield* Effect.all(
               Array.from({ length: 2 }, () =>
                 opencode.responses.create({
@@ -1932,6 +2082,7 @@ test("concurrent HTTP retries with one request hash admit one response for one w
               ),
               { concurrency: "unbounded" },
             )
+            yield* Effect.promise(() => providerStarted).pipe(Effect.timeout("2 seconds"))
             const admitted = yield* Effect.forEach(results, (response) =>
               Stream.isStream(response) ? Effect.die("Expected JSON, received SSE") : Effect.succeed(response),
             )
@@ -1975,10 +2126,9 @@ test("concurrent HTTP retries with one request hash admit one response for one w
 }, 10_000)
 
 test("foreground JSON POST waits for and returns the complete terminal Response", async () => {
-  await withDatabase("foreground-post-json", async ({ databasePath }) => {
+  await withDatabase("foreground-post-json", async ({ directory, databasePath }) => {
     const workflowID = Workflow.ID.make(`wfl_foreground_post_${crypto.randomUUID()}`)
     const responseID = Responses.ID.make(`resp_foreground_post_${crypto.randomUUID()}`)
-    const unrelatedResponseID = Responses.ID.make(`resp_unrelated_deliver_${crypto.randomUUID()}`)
     await Effect.runPromise(
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
@@ -2010,19 +2160,9 @@ test("foreground JSON POST waits for and returns the complete terminal Response"
           Effect.gen(function* () {
             const { OpenCode } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
-            const workflowInput = roleWorkflowInput(workflowID, responseID)
-            yield* opencode.workflows.create({
-              ...workflowInput,
-              budget: { maxAttempts: 7 },
-              stages: [
-                ...workflowInput.stages,
-                {
-                  ...roleStage(workflowID, "deliver", 6, unrelatedResponseID),
-                  id: Workflow.StageID.make(`wfs_unrelated_${workflowID.slice(4)}`),
-                  idempotencyKey: `responses/${workflowID}/deliver-unrelated`,
-                },
-              ],
-            })
+            yield* Effect.promise(() =>
+              seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID, responseID)),
+            )
             const created = yield* opencode.responses.create({
               id: responseID,
               workflowID,
@@ -2051,7 +2191,7 @@ test("foreground JSON POST waits for and returns the complete terminal Response"
 }, 15_000)
 
 test("foreground streaming POST returns one semantic SSE lifecycle ending at the terminal event", async () => {
-  await withDatabase("foreground-post-sse", async ({ databasePath }) => {
+  await withDatabase("foreground-post-sse", async ({ directory, databasePath }) => {
     const workflowID = Workflow.ID.make(`wfl_foreground_sse_${crypto.randomUUID()}`)
     const responseID = Responses.ID.make(`resp_foreground_sse_${crypto.randomUUID()}`)
     await Effect.runPromise(
@@ -2085,7 +2225,7 @@ test("foreground streaming POST returns one semantic SSE lifecycle ending at the
           Effect.gen(function* () {
             const { OpenCode } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
-            yield* opencode.workflows.create(roleWorkflowInput(workflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID)))
             const created = yield* opencode.responses.create({
               id: responseID,
               workflowID,
@@ -2123,7 +2263,7 @@ test("foreground streaming POST returns one semantic SSE lifecycle ending at the
 }, 15_000)
 
 test("foreground store:false POST returns its terminal payload once without enabling later retrieval", async () => {
-  await withDatabase("foreground-post-transient", async ({ databasePath }) => {
+  await withDatabase("foreground-post-transient", async ({ directory, databasePath }) => {
     const workflowID = Workflow.ID.make(`wfl_foreground_transient_${crypto.randomUUID()}`)
     const responseID = Responses.ID.make(`resp_foreground_transient_${crypto.randomUUID()}`)
     await Effect.runPromise(
@@ -2157,7 +2297,7 @@ test("foreground store:false POST returns its terminal payload once without enab
           Effect.gen(function* () {
             const { OpenCode } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
-            yield* opencode.workflows.create(roleWorkflowInput(workflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID)))
             const input = {
               id: responseID,
               workflowID,
@@ -2199,7 +2339,7 @@ test("foreground store:false POST returns its terminal payload once without enab
 }, 15_000)
 
 test("foreground store:false streaming POST returns the transient terminal payload without durable retrieval", async () => {
-  await withDatabase("foreground-post-transient-sse", async ({ databasePath }) => {
+  await withDatabase("foreground-post-transient-sse", async ({ directory, databasePath }) => {
     const workflowID = Workflow.ID.make(`wfl_foreground_transient_sse_${crypto.randomUUID()}`)
     const responseID = Responses.ID.make(`resp_foreground_transient_sse_${crypto.randomUUID()}`)
     await Effect.runPromise(
@@ -2233,7 +2373,7 @@ test("foreground store:false streaming POST returns the transient terminal paylo
           Effect.gen(function* () {
             const { OpenCode } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
-            yield* opencode.workflows.create(roleWorkflowInput(workflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID)))
             const created = yield* opencode.responses.create({
               id: responseID,
               workflowID,
@@ -2271,7 +2411,7 @@ test("foreground store:false streaming POST returns the transient terminal paylo
 }, 15_000)
 
 test("a pre-deliver provider failure atomically fails the bound foreground Response after one execution", async () => {
-  await withDatabase("foreground-pre-deliver-failure", async ({ databasePath }) => {
+  await withDatabase("foreground-pre-deliver-failure", async ({ directory, databasePath }) => {
     const workflowID = Workflow.ID.make(`wfl_pre_deliver_failure_${crypto.randomUUID()}`)
     const responseID = Responses.ID.make(`resp_pre_deliver_failure_${crypto.randomUUID()}`)
     await Effect.runPromise(
@@ -2304,7 +2444,7 @@ test("a pre-deliver provider failure atomically fails the bound foreground Respo
           Effect.gen(function* () {
             const { OpenCode } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
-            yield* opencode.workflows.create(roleWorkflowInput(workflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID)))
             const failed = yield* opencode.responses.create({
               id: responseID,
               workflowID,
@@ -2321,7 +2461,9 @@ test("a pre-deliver provider failure atomically fails the bound foreground Respo
 
             const transientWorkflowID = Workflow.ID.make(`wfl_pre_deliver_transient_${crypto.randomUUID()}`)
             const transientResponseID = Responses.ID.make(`resp_pre_deliver_transient_${crypto.randomUUID()}`)
-            yield* opencode.workflows.create(roleWorkflowInput(transientWorkflowID))
+            yield* Effect.promise(() =>
+              seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(transientWorkflowID)),
+            )
             const transient = yield* opencode.responses.create({
               id: transientResponseID,
               workflowID: transientWorkflowID,
@@ -2361,7 +2503,7 @@ test("a pre-deliver provider failure atomically fails the bound foreground Respo
 }, 15_000)
 
 test("production hosted web search persists to output and conversation and replays through previous_response_id", async () => {
-  await withDatabase("hosted-search-production", async ({ databasePath }) => {
+  await withDatabase("hosted-search-production", async ({ directory, databasePath }) => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
@@ -2408,7 +2550,9 @@ test("production hosted web search persists to output and conversation and repla
             const { OpenCode } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
             yield* opencode.conversations.create({ id: conversationID, metadata: {} })
-            yield* opencode.workflows.create(roleWorkflowInput(parentWorkflowID))
+            yield* Effect.promise(() =>
+              seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(parentWorkflowID)),
+            )
             const parent = yield* opencode.responses.create({
               id: parentID,
               workflowID: parentWorkflowID,
@@ -2447,7 +2591,7 @@ test("production hosted web search persists to output and conversation and repla
               parent.output[1],
             ])
 
-            yield* opencode.workflows.create(roleWorkflowInput(childWorkflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(childWorkflowID)))
             const child = yield* opencode.responses.create({
               id: childID,
               workflowID: childWorkflowID,
@@ -2514,7 +2658,7 @@ test("production hosted web search persists to output and conversation and repla
 }, 20_000)
 
 test("all native incomplete terminals settle JSON and SSE as replayable partial Responses", async () => {
-  await withDatabase("native-incomplete-production", async ({ databasePath }) => {
+  await withDatabase("native-incomplete-production", async ({ directory, databasePath }) => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
@@ -2555,7 +2699,7 @@ test("all native incomplete terminals settle JSON and SSE as replayable partial 
     embeddedProviderFetch = async () => {
       const step = requestPlan[requestNumber++]
       if (!step) throw new Error("Unexpected incomplete provider request")
-      const role = step.startsWith("deliver-") ? "deliver" : step
+      const role = recordedRole(step)
       const body =
         step === "deliver-tool"
           ? deepSeekDelayedToolSSE({ callID: "call_incomplete_checkpoint", path: "checkpoint.md" })
@@ -2587,19 +2731,22 @@ test("all native incomplete terminals settle JSON and SSE as replayable partial 
             const { Tool } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
             yield* opencode.tools.register({
-              read_file: Tool.make({
-                description: "Must not execute a partial native function call",
-                input: Schema.Struct({ path: Schema.String }),
-                output: Schema.Struct({ output: Schema.String }),
-                execute: ({ path }) =>
-                  Effect.sync(() => {
-                    localToolExecutions++
-                    return { output: `checkpoint:${path}` }
-                  }),
-              }),
+              read_file: Tool.withPermission(
+                Tool.make({
+                  description: "Must not execute a partial native function call",
+                  input: Schema.Struct({ path: Schema.String }),
+                  output: Schema.Struct({ output: Schema.String }),
+                  execute: ({ path }) =>
+                    Effect.sync(() => {
+                      localToolExecutions++
+                      return { output: `checkpoint:${path}` }
+                    }),
+                }),
+                "read",
+              ),
             })
 
-            yield* opencode.workflows.create(roleWorkflowInput(jsonWorkflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(jsonWorkflowID)))
             const json = yield* opencode.responses.create({
               id: jsonID,
               workflowID: jsonWorkflowID,
@@ -2626,7 +2773,7 @@ test("all native incomplete terminals settle JSON and SSE as replayable partial 
               code: "provider_output_incomplete",
             })
 
-            yield* opencode.workflows.create(roleWorkflowInput(sseWorkflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(sseWorkflowID)))
             const sse = yield* opencode.responses.create({
               id: sseID,
               workflowID: sseWorkflowID,
@@ -2657,7 +2804,9 @@ test("all native incomplete terminals settle JSON and SSE as replayable partial 
             expect((yield* opencode.workflows.get({ workflowID: sseWorkflowID })).run.status).toBe("failed")
 
             yield* opencode.conversations.create({ id: unknownConversationID, metadata: {} })
-            yield* opencode.workflows.create(roleWorkflowInput(unknownWorkflowID))
+            yield* Effect.promise(() =>
+              seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(unknownWorkflowID)),
+            )
             const unknown = yield* opencode.responses.create({
               id: unknownID,
               workflowID: unknownWorkflowID,
@@ -2753,7 +2902,7 @@ test("all native incomplete terminals settle JSON and SSE as replayable partial 
 }, 20_000)
 
 test("native response.failed usage settles Workflow and Response once without persisting the provider body", async () => {
-  await withDatabase("native-failed-usage-production", async ({ databasePath }) => {
+  await withDatabase("native-failed-usage-production", async ({ directory, databasePath }) => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
@@ -2781,7 +2930,7 @@ test("native response.failed usage settles Workflow and Response once without pe
     embeddedProviderFetch = async () => {
       const step = steps[requestNumber++]
       if (!step) throw new Error("Unexpected failed-usage provider request")
-      const role = step.startsWith("deliver-") ? "deliver" : step
+      const role = recordedRole(step)
       const body =
         step === "deliver-tool"
           ? deepSeekDelayedToolSSE({ callID: "call_failed_checkpoint", path: "failed-checkpoint.md" })
@@ -2805,18 +2954,21 @@ test("native response.failed usage settles Workflow and Response once without pe
             const { OpenCode, Tool } = yield* Effect.promise(() => import("../src"))
             const opencode = yield* OpenCode.create()
             yield* opencode.tools.register({
-              read_file: Tool.make({
-                description: "Checkpoint before a native failed terminal",
-                input: Schema.Struct({ path: Schema.String }),
-                output: Schema.Struct({ output: Schema.String }),
-                execute: ({ path }) =>
-                  Effect.sync(() => {
-                    toolExecutions++
-                    return { output: `checkpoint:${path}` }
-                  }),
-              }),
+              read_file: Tool.withPermission(
+                Tool.make({
+                  description: "Checkpoint before a native failed terminal",
+                  input: Schema.Struct({ path: Schema.String }),
+                  output: Schema.Struct({ output: Schema.String }),
+                  execute: ({ path }) =>
+                    Effect.sync(() => {
+                      toolExecutions++
+                      return { output: `checkpoint:${path}` }
+                    }),
+                }),
+                "read",
+              ),
             })
-            yield* opencode.workflows.create(roleWorkflowInput(workflowID))
+            yield* Effect.promise(() => seedPlacedWorkflow(databasePath, directory, roleWorkflowInput(workflowID)))
             const stream = yield* opencode.responses.create({
               id: responseID,
               workflowID,
@@ -2908,15 +3060,15 @@ test("native response.failed usage settles Workflow and Response once without pe
 }, 20_000)
 
 test("foreground and background execute the same native provider to an equivalent decoded terminal resource", async () => {
-  await withDatabase("terminal", async ({ databasePath }) => {
+  await withDatabase("terminal", async ({ directory, databasePath }) => {
     const events = await fixture("text-stream")
     const requests: Array<{ url: string; model?: string }> = []
     const foregroundWorkflow = Workflow.ID.make(`wfl_foreground_${crypto.randomUUID()}`)
     const foregroundID = Responses.ID.make(`resp_foreground_${crypto.randomUUID()}`)
     const backgroundWorkflow = Workflow.ID.make(`wfl_background_${crypto.randomUUID()}`)
     const backgroundID = Responses.ID.make(`resp_background_${crypto.randomUUID()}`)
-    await seedPair(databasePath, foregroundWorkflow, foregroundID, false)
-    await seedPair(databasePath, backgroundWorkflow, backgroundID, true)
+    await seedPair(databasePath, directory, foregroundWorkflow, foregroundID, false)
+    await seedPair(databasePath, directory, backgroundWorkflow, backgroundID, true)
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -3198,7 +3350,7 @@ test("crash after native DeepSeek response.created restarts the safe attempt and
         .flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name]]])),
     )
     const child = Bun.spawn(
-      [process.execPath, workerPath, databasePath, workflowID, responseID, markerPath, attemptPath, envPath],
+      [process.execPath, workerPath, databasePath, directory, workflowID, responseID, markerPath, attemptPath, envPath],
       { cwd: path.dirname(workerPath), env: safeEnvironment, stdout: "pipe", stderr: "pipe" },
     )
     const stdout = new Response(child.stdout).text()
@@ -3237,7 +3389,10 @@ test("crash after native DeepSeek response.created restarts the safe attempt and
           })
           expect(workflow.run.status).toBe("succeeded")
           expect(workflow.stages[0]).toMatchObject({ status: "succeeded", attempt: 2 })
-          expect(workflow.artifacts).toHaveLength(1)
+          expect(workflow.artifacts.filter((artifact) => artifact.kind === "response")).toHaveLength(1)
+          expect(
+            workflow.artifacts.filter((artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND),
+          ).toHaveLength(1)
         }).pipe(
           Effect.provide(
             runtimeLayer({
@@ -3338,13 +3493,13 @@ test("unsupported DeepSeek fields remain explicit diagnostics", async () => {
 }, 15_000)
 
 test("a corrupted native DeepSeek event sequence fails both Response and workflow exactly once", async () => {
-  await withDatabase("corrupt-native", async ({ databasePath }) => {
+  await withDatabase("corrupt-native", async ({ directory, databasePath }) => {
     const workflowID = Workflow.ID.make(`wfl_corrupt_${crypto.randomUUID()}`)
     const responseID = Responses.ID.make(`resp_corrupt_${crypto.randomUUID()}`)
     const events = (await fixture("text-stream")).map((event) => ({ ...event }))
     const completed = events.find((event) => event.type === "response.completed")!
     completed.sequence_number = 1
-    await seedPair(databasePath, workflowID, responseID, true)
+    await seedPair(databasePath, directory, workflowID, responseID, true)
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -3376,12 +3531,12 @@ test("a corrupted native DeepSeek event sequence fails both Response and workflo
 }, 15_000)
 
 test("a retryable 429 keeps the Response in progress until workflow attempt two completes it once", async () => {
-  await withDatabase("retry-success", async ({ databasePath }) => {
+  await withDatabase("retry-success", async ({ directory, databasePath }) => {
     const workflowID = Workflow.ID.make(`wfl_retry_success_${crypto.randomUUID()}`)
     const responseID = Responses.ID.make(`resp_retry_success_${crypto.randomUUID()}`)
     const successBody = deepSeekSSE(await fixture("text-stream"))
     let requests = 0
-    await seedPair(databasePath, workflowID, responseID, true)
+    await seedPair(databasePath, directory, workflowID, responseID, true)
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -3432,12 +3587,12 @@ test("a retryable 429 keeps the Response in progress until workflow attempt two 
 }, 20_000)
 
 test("retryable 500 exhaustion fails the Response and workflow once with the same safe diagnostic", async () => {
-  await withDatabase("retry-exhausted", async ({ databasePath }) => {
+  await withDatabase("retry-exhausted", async ({ directory, databasePath }) => {
     const workflowID = Workflow.ID.make(`wfl_retry_exhausted_${crypto.randomUUID()}`)
     const responseID = Responses.ID.make(`resp_retry_exhausted_${crypto.randomUUID()}`)
     const providerBodySentinel = "TASK20_RETRY_500_BODY_DO_NOT_STORE"
     let requests = 0
-    await seedPair(databasePath, workflowID, responseID, true)
+    await seedPair(databasePath, directory, workflowID, responseID, true)
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -3503,7 +3658,7 @@ test("retryable 500 exhaustion fails the Response and workflow once with the sam
 }, 20_000)
 
 test("provider-origin HTTP bodies and non-replayable reasoning never reach durable state or logs", async () => {
-  await withDatabase("provider-leakage", async ({ databasePath }) => {
+  await withDatabase("provider-leakage", async ({ directory, databasePath }) => {
     const reasoningSentinel = "TASK20_PROVIDER_REASONING_SENTINEL_DO_NOT_STORE"
     const providerBodySentinel = "TASK20_PROVIDER_BODY_SENTINEL_DO_NOT_STORE"
     const captured: string[] = []
@@ -3519,7 +3674,7 @@ test("provider-origin HTTP bodies and non-replayable reasoning never reach durab
       )
       const successWorkflow = Workflow.ID.make(`wfl_provider_reasoning_${crypto.randomUUID()}`)
       const successResponse = Responses.ID.make(`resp_provider_reasoning_${crypto.randomUUID()}`)
-      await seedPair(databasePath, successWorkflow, successResponse, true)
+      await seedPair(databasePath, directory, successWorkflow, successResponse, true)
       await Effect.runPromise(
         Effect.scoped(
           Effect.gen(function* () {
@@ -3532,7 +3687,7 @@ test("provider-origin HTTP bodies and non-replayable reasoning never reach durab
         ),
       )
 
-      await seedPair(databasePath, failureWorkflow, failureResponse, true)
+      await seedPair(databasePath, directory, failureWorkflow, failureResponse, true)
       await Effect.runPromise(
         Effect.scoped(
           Effect.gen(function* () {

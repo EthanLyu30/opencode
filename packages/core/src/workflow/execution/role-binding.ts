@@ -632,6 +632,8 @@ export function decodePriorArtifacts(
     else if (artifact.kind === WorkflowDeliveryArtifact.KIND)
       push(WorkflowDeliveryArtifact.decode(commit, workflow.id, location))
     else if (artifact.kind === WorkflowTestLogArtifact.KIND) push(WorkflowTestLogArtifact.decode(commit, workflow.id))
+    else if (artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND)
+      push(WorkflowStageMachine.decodeOutcomeBinding(commit))
   }
   return decoded
 }

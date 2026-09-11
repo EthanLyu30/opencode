@@ -14,6 +14,7 @@ import { LocationServiceMap } from "@opencode-ai/core/location-services"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionAdmission } from "@opencode-ai/core/session/admission"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -153,12 +154,19 @@ function providerDesignEnvelope() {
   }
 }
 
-function providerResponse(value: unknown) {
+function providerResponse(
+  value: unknown,
+  usage: { readonly inputTokens: number; readonly outputTokens: number; readonly totalTokens: number } = {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+  },
+) {
   return LLMResponse.fromEvents([
     LLMEvent.textStart({ id: "outcome" }),
     LLMEvent.textDelta({ id: "outcome", text: JSON.stringify(value) }),
     LLMEvent.textEnd({ id: "outcome" }),
-    LLMEvent.finish({ reason: "stop" }),
+    LLMEvent.finish({ reason: "stop", usage }),
   ])
 }
 
@@ -262,6 +270,18 @@ const modelInput = (
   }
 }
 
+function createWorkflowSession(location: Location.Ref, sessionID: SessionV2.ID) {
+  const prepared = SessionAdmission.prepare({
+    id: sessionID,
+    agent: AgentV2.ID.make("broad-build"),
+    location,
+    project: { id: ProjectV2.ID.global, directory: location.directory },
+    visibility: "workflow",
+    timestamp: 0,
+  })
+  return EventV2.Service.use((events) => events.publish(prepared.entry.definition, prepared.entry.data, { location }))
+}
+
 function persistModelInput(input: WorkflowModelExecution.Input) {
   return EventV2.Service.use((events) =>
     events.publish(WorkflowEvent.Created, {
@@ -326,7 +346,7 @@ describe("Workflow Location tools", () => {
           const location = Location.Ref.make({ directory: AbsolutePath.make(workspace.path) })
           const foreignLocation = Location.Ref.make({ directory: AbsolutePath.make(foreign.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_foreign_location")
-          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location: foreignLocation }))
+          yield* createWorkflowSession(foreignLocation, sessionID)
 
           const failure = yield* WorkflowModelExecution.Service.use((models) =>
             models.execute(modelInput(location, sessionID, () => Effect.void)).pipe(Effect.flip),
@@ -350,7 +370,7 @@ describe("Workflow Location tools", () => {
           modelTimeline.length = 0
           const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_location_pending")
-          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          yield* createWorkflowSession(location, sessionID)
 
           const failure = yield* WorkflowModelExecution.Service.use((models) =>
             models
@@ -381,7 +401,7 @@ describe("Workflow Location tools", () => {
           modelTimeline.length = 0
           const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_versioned_tool_intent")
-          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          yield* createWorkflowSession(location, sessionID)
           let executions = 0
           yield* ApplicationTools.Service.use((tools) =>
             tools.register({
@@ -446,7 +466,7 @@ describe("Workflow Location tools", () => {
           modelTimeline.length = 0
           const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_provider_intent")
-          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          yield* createWorkflowSession(location, sessionID)
           let providerIntent: Readonly<Record<string, unknown>> | undefined
           const input = modelInput(location, sessionID, (checkpoint) => {
             if (typeof checkpoint.providerTurn === "object" && checkpoint.providerTurn !== null) {
@@ -481,6 +501,55 @@ describe("Workflow Location tools", () => {
     ),
   )
 
+  modelIt.live("reissues a provider request intent only after explicit recovery approval", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          modelTimeline.length = 0
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_provider_intent_approved")
+          yield* createWorkflowSession(location, sessionID)
+          let providerIntent: Readonly<Record<string, unknown>> | undefined
+          const first = modelInput(location, sessionID, (checkpoint) => {
+            if (typeof checkpoint.providerTurn === "object" && checkpoint.providerTurn !== null) {
+              providerIntent = checkpoint
+              return Effect.fail({
+                failure: {
+                  category: "transient" as const,
+                  code: "simulated_crash_after_provider_intent",
+                  message: "Simulated crash after the durable provider intent",
+                },
+                usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+              })
+            }
+            return Effect.void
+          })
+          yield* WorkflowModelExecution.Service.use((models) => models.execute(first).pipe(Effect.flip))
+          if (!providerIntent) throw new Error("provider intent was not checkpointed")
+          expect(modelRequests).toEqual([])
+
+          const response = providerResponse(providerDesignEnvelope())
+          if (!response) throw new Error("invalid approved provider response fixture")
+          modelResponses.push(response)
+          const approved = yield* WorkflowModelExecution.Service.use((models) =>
+            models.execute(
+              modelInput(location, sessionID, () => Effect.void, {
+                checkpoint: providerIntent,
+                recoveryAction: "retry",
+              }),
+            ),
+          )
+
+          expect(approved.outcome).toMatchObject({ role: "design", verdict: "ready" })
+          expect(modelRequests).toHaveLength(1)
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   modelIt.live("dispatches a deeply immutable request, resumes its durable result, and rejects drift", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -491,8 +560,12 @@ describe("Workflow Location tools", () => {
           modelTimeline.length = 0
           const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_provider_result")
-          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
-          const response = providerResponse(providerDesignEnvelope())
+          yield* createWorkflowSession(location, sessionID)
+          const response = providerResponse(providerDesignEnvelope(), {
+            inputTokens: 1,
+            outputTokens: 1,
+            totalTokens: 2,
+          })
           if (!response) throw new Error("invalid provider result fixture")
           modelResponses.push(response)
           let durableResult: Readonly<Record<string, unknown>> | undefined
@@ -518,7 +591,12 @@ describe("Workflow Location tools", () => {
             {},
             { budget },
           )
-          yield* WorkflowModelExecution.Service.use((models) => models.execute(input).pipe(Effect.flip))
+          const checkpointFailure = yield* WorkflowModelExecution.Service.use((models) =>
+            models.execute(input).pipe(Effect.flip),
+          )
+          expect(checkpointFailure).toMatchObject({
+            failure: { code: "simulated_crash_after_provider_result" },
+          })
           if (!durableResult) throw new Error("provider result was not checkpointed")
           expect(modelRequests).toHaveLength(1)
           const observed = modelRequests[0]
@@ -606,6 +684,34 @@ describe("Workflow Location tools", () => {
           const drifted = [
             { ...durableResult, contractFingerprint: "0".repeat(64) },
             { ...durableResult, routeFingerprint: "1".repeat(64) },
+            {
+              ...durableResult,
+              providerTurn: {
+                ...turn,
+                preTurnUsage: { tokens: 0, turns: 1, toolCalls: 0, attempts: 0 },
+              },
+            },
+            {
+              ...durableResult,
+              providerTurn: {
+                ...turn,
+                preTurnUsage: { tokens: 3, turns: 0, toolCalls: 0, attempts: 0 },
+              },
+            },
+            {
+              ...durableResult,
+              providerTurn: {
+                ...turn,
+                preTurnUsage: { tokens: 0, turns: 0, toolCalls: 1, attempts: 0 },
+              },
+            },
+            {
+              ...durableResult,
+              providerTurn: {
+                ...turn,
+                preTurnUsage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
+              },
+            },
           ]
           for (const checkpoint of drifted) {
             const failure = yield* WorkflowModelExecution.Service.use((models) =>
@@ -669,7 +775,7 @@ describe("Workflow Location tools", () => {
           ])
           if (!toolTurn) throw new Error("invalid offline tool response")
           modelResponses.push(toolTurn)
-          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          yield* createWorkflowSession(location, sessionID)
           let executions = 0
           yield* ApplicationTools.Service.use((tools) =>
             tools.register({
@@ -739,7 +845,7 @@ describe("Workflow Location tools", () => {
           const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_catalog_changed")
           let remainingExecutions = 0
-          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          yield* createWorkflowSession(location, sessionID)
           const applicationTools = yield* ApplicationTools.Service
           const probe = (label: string, execute = () => Effect.succeed({})) =>
             Tool.withPermission(
@@ -825,9 +931,7 @@ describe("Workflow Location tools", () => {
           if (!first || !second) throw new Error("invalid offline responses")
           modelResponses.push(first, second)
 
-          yield* SessionV2.Service.use((sessions) =>
-            sessions.create({ id: sessionID, location, agent: AgentV2.ID.make("broad-build") }),
-          )
+          yield* createWorkflowSession(location, sessionID)
           const applicationTools = yield* ApplicationTools.Service
           yield* applicationTools.register({
             location_probe: Tool.withPermission(
@@ -921,7 +1025,7 @@ describe("Workflow Location tools", () => {
           sandboxPolicies.clear()
           const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_shared_policy")
-          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          yield* createWorkflowSession(location, sessionID)
           const first = modelInput(
             location,
             sessionID,
@@ -1055,9 +1159,7 @@ describe("Workflow Location tools", () => {
         Effect.gen(function* () {
           const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
           const sessionID = SessionV2.ID.make("ses_workflow_location_matrix")
-          yield* SessionV2.Service.use((sessions) =>
-            sessions.create({ id: sessionID, location, agent: AgentV2.ID.make("broad-build") }),
-          )
+          yield* createWorkflowSession(location, sessionID)
 
           yield* Effect.gen(function* () {
             const agents = yield* AgentV2.Service
@@ -1149,9 +1251,7 @@ describe("Workflow Location tools", () => {
           const admitted = path.join(workspace.path, "admitted.txt")
           const escaped = path.join(outside.path, "outside.txt")
           yield* Effect.promise(() => Promise.all([fs.writeFile(admitted, "before"), fs.writeFile(escaped, "outside")]))
-          yield* SessionV2.Service.use((sessions) =>
-            sessions.create({ id: sessionID, location, agent: AgentV2.ID.make("broad-build") }),
-          )
+          yield* createWorkflowSession(location, sessionID)
 
           yield* Effect.gen(function* () {
             yield* WorkflowRoleAgents.reassert("design")
@@ -1227,7 +1327,7 @@ describe("Workflow Location tools", () => {
           const sessionID = SessionV2.ID.make("ses_workflow_location_commands")
           const escaped = path.join(outside.path, "outside.txt")
           yield* Effect.promise(() => fs.writeFile(escaped, "outside"))
-          yield* SessionV2.Service.use((sessions) => sessions.create({ id: sessionID, location }))
+          yield* createWorkflowSession(location, sessionID)
 
           yield* Effect.gen(function* () {
             const registry = yield* ToolRegistry.Service

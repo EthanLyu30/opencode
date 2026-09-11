@@ -1,6 +1,7 @@
 export * as DockerProcessOwnership from "./docker-process-ownership"
 
 import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
+import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
@@ -12,6 +13,7 @@ import { ProcessOwnership } from "./process-ownership"
 const labelDomain = "io.opencode.workflow.preview"
 const opaquePattern = /^[a-f0-9]{64}$/
 const relayPort = 18_080
+const targetPort = PreviewPlan.SCRIPT_PREVIEW_TARGET_PORT
 const supervisor = "/usr/local/bin/opencode-preview-supervisor"
 
 interface IdentitySnapshot {
@@ -39,6 +41,7 @@ interface OwnedState {
   readonly networkID: string
   readonly completion: Promise<{ readonly exit: number; readonly stdout: Uint8Array; readonly stderr: Uint8Array }>
   stopped: boolean
+  stopping?: Promise<void>
 }
 
 export interface Options {
@@ -125,7 +128,7 @@ export function make(options: Options): ProcessOwnership.Service {
             "--network",
             ownership.networkName,
             "--publish",
-            `127.0.0.1:${admitted.port}:${relayPort}/tcp`,
+            `127.0.0.1::${relayPort}/tcp`,
             "--read-only",
             "--cap-drop",
             "ALL",
@@ -145,7 +148,7 @@ export function make(options: Options): ProcessOwnership.Service {
             "/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=1777",
             "--tmpfs",
             "/home/sandbox:rw,nosuid,nodev,noexec,size=16777216,mode=700,uid=65532,gid=65532",
-            ...environmentArgv(input.plan.env, admitted.port),
+            ...environmentArgv(input.plan.env, targetPort),
             ...(input.archive === undefined
               ? ["--mount", `type=bind,src=${admitted.workspace},dst=/workspace,readonly`]
               : []),
@@ -158,7 +161,7 @@ export function make(options: Options): ProcessOwnership.Service {
             "--listen",
             `0.0.0.0:${relayPort}`,
             "--target",
-            `127.0.0.1:${admitted.port}`,
+            `127.0.0.1:${targetPort}`,
             "--",
             ...runtime,
           ],
@@ -223,6 +226,13 @@ export function make(options: Options): ProcessOwnership.Service {
         if (startedState !== true) {
           throw new Docker.Unavailable("Preview Docker container identity changed after start")
         }
+        const origin = await inspectPublishedOrigin(
+          options.engine,
+          config,
+          containerID,
+          ownership,
+          startBoundary(input, now),
+        )
         containerRunning = true
         rejectCancelledOrExpired(input.signal, input.deadline, now)
 
@@ -232,6 +242,7 @@ export function make(options: Options): ProcessOwnership.Service {
         // immediately while preserving the original promise's rejection semantics.
         void exited.catch(() => undefined)
         const process: ProcessOwnership.OwnedProcess = Object.freeze({
+          origin,
           exited,
           stdout: promisedStream(completion.then((value) => value.stdout)),
           stderr: promisedStream(completion.then((value) => value.stderr)),
@@ -264,42 +275,84 @@ export function make(options: Options): ProcessOwnership.Service {
     stop: async (input: Parameters<ProcessOwnership.Service["stop"]>[0]) => {
       const state = owned.get(input.process)
       if (state === undefined || state.stopped) return
-      const config = await DockerConfig.validate(options.config)
-      const running = await inspectContainerState(options.engine, config, state.containerID, state.ownership, true)
-      if (
-        running === undefined ||
-        !(await inspectNetwork(options.engine, config, state.networkID, state.ownership, true))
-      ) {
-        throw new Docker.Unavailable("Preview Docker ownership changed before stop")
+      if (state.stopping !== undefined) return state.stopping
+      const stopping = (async () => {
+        const config = await DockerConfig.validate(options.config)
+        const running = await inspectContainerState(options.engine, config, state.containerID, state.ownership, true)
+        if (
+          running === undefined ||
+          !(await inspectNetwork(options.engine, config, state.networkID, state.ownership, true))
+        ) {
+          throw new Docker.Unavailable("Preview Docker ownership changed before stop")
+        }
+        const failure = await cleanupOwned(
+          options.engine,
+          config,
+          state.ownership,
+          state.containerID,
+          state.networkID,
+          running,
+          undefined,
+          input.finalGate,
+        )
+        if (failure !== undefined) throw failure
+        state.stopped = true
+      })()
+      state.stopping = stopping
+      try {
+        await stopping
+      } finally {
+        if (state.stopping === stopping) state.stopping = undefined
       }
-      state.stopped = true
-      const failure = await cleanupOwned(
-        options.engine,
-        config,
-        state.ownership,
-        state.containerID,
-        state.networkID,
-        running,
-      )
-      if (failure !== undefined) throw failure
     },
-    recover: async (identity: ProcessOwnership.Identity) => {
+    recover: async (input: ProcessOwnership.RecoveryInput) => {
       const config = await DockerConfig.validate(options.config)
+      const identity = validateOwnershipIdentity(input.identity)
       const ownership = ownershipFor(identity, config)
       const containerIDs = await listExact(options.engine, config, "container", ownership.labels)
       const networkIDs = await listExact(options.engine, config, "network", ownership.labels)
       if (containerIDs.length === 0 && networkIDs.length === 0) return
-      if (containerIDs.length !== 1 || networkIDs.length !== 1) {
+      if (containerIDs.length > 1 || networkIDs.length > 1) {
         throw new Docker.Unavailable("Preview Docker recovery identity was ambiguous")
       }
       const containerID = containerIDs[0]
       const networkID = networkIDs[0]
-      const running = await inspectContainerState(options.engine, config, containerID, ownership, true)
-      if (running === undefined || !(await inspectNetwork(options.engine, config, networkID, ownership, true))) {
+      const running =
+        containerID === undefined
+          ? undefined
+          : await inspectContainerState(options.engine, config, containerID, ownership, true)
+      const networkMatches =
+        networkID === undefined ? undefined : await inspectNetwork(options.engine, config, networkID, ownership, true)
+      if ((containerID !== undefined && running === undefined) || (networkID !== undefined && !networkMatches)) {
         throw new Docker.Unavailable("Preview Docker recovery ownership did not match")
       }
-      const failure = await cleanupOwned(options.engine, config, ownership, containerID, networkID, running)
+      const failure =
+        containerID !== undefined && running !== undefined && networkID !== undefined
+          ? await cleanupOwned(
+              options.engine,
+              config,
+              ownership,
+              containerID,
+              networkID,
+              running,
+              undefined,
+              input.finalGate,
+            )
+          : containerID !== undefined && running !== undefined
+            ? await cleanupContainer(
+                options.engine,
+                config,
+                ownership,
+                containerID,
+                running,
+                undefined,
+                input.finalGate,
+              )
+            : undefined
       if (failure !== undefined) throw failure
+      if (containerID === undefined && networkID !== undefined) {
+        await removeNetwork(options.engine, config, networkID, undefined, input.finalGate)
+      }
     },
   })
   return Object.freeze({
@@ -399,23 +452,11 @@ async function validateStart(
   config: DockerConfig.ValidatedConfig,
   input: Parameters<ProcessOwnership.Service["start"]>[0],
 ) {
-  if (!opaquePattern.test(input.identity.hostID) || !opaquePattern.test(input.identity.nonce)) {
-    throw new TypeError("Preview process identity is not opaque")
-  }
+  validateOwnershipIdentity(input.identity)
   if (input.plan.kind !== "script" || !PreviewPlan.isFrozen(input.plan) || input.plan.argv === undefined) {
     throw new TypeError("Preview Docker ownership requires a frozen script plan")
   }
   PreviewPlan.verifyConfiguration(input.plan)
-  if (
-    input.plan.allowedOrigins.length !== 1 ||
-    PreviewPlan.normalizeLocalOrigin(input.plan.allowedOrigins[0]) !== input.plan.allowedOrigins[0]
-  ) {
-    throw new TypeError("Preview Docker ownership requires one canonical origin")
-  }
-  const port = Number(new URL(input.plan.allowedOrigins[0]).port)
-  if (!Number.isSafeInteger(port) || port <= 0 || port > 65_535 || port === relayPort) {
-    throw new TypeError("Preview port conflicts with the fixed relay")
-  }
   const hostRoot = await canonicalDDirectory(configuredHostRoot)
   const archive =
     input.archive === undefined ? undefined : WorkflowWorkspaceMaterialization.validateArchive(input.archive)
@@ -440,7 +481,6 @@ async function validateStart(
   }
   const snapshot = await snapshotTree(hostRoot, workspace, capabilityTemp)
   return {
-    port,
     workspace,
     capabilityTemp,
     relativeCwd:
@@ -483,7 +523,6 @@ async function revalidate(
   PreviewPlan.verifyConfiguration(input.plan)
   const current = await validateStart(configuredHostRoot, currentConfig, input)
   if (
-    current.port !== admitted.port ||
     current.workspace !== admitted.workspace ||
     current.capabilityTemp !== admitted.capabilityTemp ||
     current.relativeCwd !== admitted.relativeCwd ||
@@ -557,6 +596,11 @@ function ownershipFor(identity: ProcessOwnership.Identity, config: DockerConfig.
     }),
   )
   const labels = Object.freeze({
+    [`${labelDomain}.workflow`]: digest("workflow", identity.workflowID),
+    [`${labelDomain}.stage`]: digest("stage", identity.stageID),
+    [`${labelDomain}.attempt`]: digest("attempt", String(identity.attempt)),
+    [`${labelDomain}.lease-owner`]: digest("lease-owner", identity.leaseOwner),
+    [`${labelDomain}.lease-expires-at`]: digest("lease-expires-at", String(identity.leaseExpiresAt)),
     [`${labelDomain}.host`]: digest("host", identity.hostID),
     [`${labelDomain}.nonce`]: digest("nonce", identity.nonce),
     [`${labelDomain}.config`]: configIdentity,
@@ -565,6 +609,19 @@ function ownershipFor(identity: ProcessOwnership.Identity, config: DockerConfig.
   })
   const aggregate = digest("owned", Object.values(labels).join("\0")).slice(0, 48)
   return { containerName: `ocp-${aggregate}`, networkName: `ocpn-${aggregate}`, labels }
+}
+
+function validateOwnershipIdentity(input: ProcessOwnership.Identity): ProcessOwnership.Identity {
+  const lease = WorkflowVisualHost.validatePreviewLeaseAuthority({
+    workflowID: input.workflowID,
+    stageID: input.stageID,
+    attempt: input.attempt,
+    leaseOwner: input.leaseOwner,
+    leaseExpiresAt: input.leaseExpiresAt,
+  })
+  const hostID = WorkflowVisualHost.HostID.make(input.hostID)
+  if (!opaquePattern.test(input.nonce)) throw new TypeError("Preview Docker ownership nonce is invalid")
+  return Object.freeze({ ...lease, hostID, nonce: input.nonce })
 }
 
 function labelsArgv(labels: Readonly<Record<string, string>>) {
@@ -672,6 +729,74 @@ async function inspectContainerState(
     return undefined
   }
   return running
+}
+
+async function inspectPublishedOrigin(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  id: string,
+  ownership: Ownership,
+  boundary: {
+    readonly input: Pick<Parameters<ProcessOwnership.Service["start"]>[0], "signal" | "deadline">
+    readonly now: () => number
+  },
+) {
+  const result = await beforeDeadline(engine, config, boundary.input, boundary.now, ["container", "inspect", id])
+  const value = inspectObject(result, true)
+  if (
+    value === undefined ||
+    Reflect.get(value, "Id") !== id ||
+    Reflect.get(value, "Name") !== `/${ownership.containerName}`
+  ) {
+    throw new Docker.Unavailable("Preview Docker published origin identity did not match")
+  }
+  const dockerConfig = Reflect.get(value, "Config")
+  const state = Reflect.get(value, "State")
+  if (
+    dockerConfig === null ||
+    typeof dockerConfig !== "object" ||
+    !exactLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) ||
+    state === null ||
+    typeof state !== "object" ||
+    Reflect.get(state, "Running") !== true
+  ) {
+    throw new Docker.Unavailable("Preview Docker published origin identity did not match")
+  }
+  const hostConfig = Reflect.get(value, "HostConfig")
+  const networkSettings = Reflect.get(value, "NetworkSettings")
+  const requested = exactPortBinding(
+    hostConfig !== null && typeof hostConfig === "object" ? Reflect.get(hostConfig, "PortBindings") : undefined,
+    true,
+  )
+  const published = exactPortBinding(
+    networkSettings !== null && typeof networkSettings === "object" ? Reflect.get(networkSettings, "Ports") : undefined,
+    false,
+  )
+  if (requested !== "" || published === undefined) {
+    throw new Docker.Unavailable("Preview Docker loopback publication verification failed")
+  }
+  return `http://127.0.0.1:${published}`
+}
+
+function exactPortBinding(value: unknown, dynamicRequest: boolean): string | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined
+  const keys = Object.keys(value)
+  if (keys.length !== 1 || keys[0] !== `${relayPort}/tcp`) return undefined
+  const bindings = Reflect.get(value, keys[0])
+  if (!Array.isArray(bindings) || bindings.length !== 1) return undefined
+  const binding = bindings[0]
+  if (
+    binding === null ||
+    typeof binding !== "object" ||
+    Array.isArray(binding) ||
+    Object.keys(binding).sort().join("\0") !== "HostIp\0HostPort" ||
+    Reflect.get(binding, "HostIp") !== "127.0.0.1"
+  ) {
+    return undefined
+  }
+  const port = Reflect.get(binding, "HostPort")
+  if (dynamicRequest) return port === "" ? "" : undefined
+  return typeof port === "string" && /^(?:[1-9][0-9]{0,4})$/.test(port) && Number(port) <= 65_535 ? port : undefined
 }
 
 async function inspectNetwork(
@@ -814,6 +939,7 @@ async function cleanupOwned(
   networkID: string,
   running: boolean,
   deadline?: number,
+  finalGate?: () => Promise<boolean>,
 ): Promise<Error | undefined> {
   const failures: unknown[] = []
   for (const argv of [
@@ -821,6 +947,7 @@ async function cleanupOwned(
     ["container", "rm", "--force", containerID],
     ["network", "rm", networkID],
   ] as const) {
+    await requireFinalGate(finalGate)
     try {
       const result = await execute(engine, config, { argv, timeoutMs: cleanupTimeoutBefore(config, deadline) })
       if (result.exit !== 0) {
@@ -1009,12 +1136,14 @@ async function cleanupContainer(
   containerID: string,
   running: boolean,
   deadline?: number,
+  finalGate?: () => Promise<boolean>,
 ): Promise<Error | undefined> {
   const failures: unknown[] = []
   for (const argv of [
     ...(running ? [["container", "kill", containerID] as const] : []),
     ["container", "rm", "--force", containerID] as const,
   ]) {
+    await requireFinalGate(finalGate)
     try {
       const result = await execute(engine, config, { argv, timeoutMs: cleanupTimeoutBefore(config, deadline) })
       if (result.exit === 0) continue
@@ -1159,12 +1288,30 @@ async function observeCleanupBeforeDeadline(
   return result
 }
 
-async function removeNetwork(engine: Docker.Engine, config: DockerConfig.Config, networkID: string, deadline?: number) {
+async function removeNetwork(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  networkID: string,
+  deadline?: number,
+  finalGate?: () => Promise<boolean>,
+) {
+  await requireFinalGate(finalGate)
   const result = await execute(engine, config, {
     argv: ["network", "rm", networkID],
     timeoutMs: cleanupTimeoutBefore(config, deadline),
   })
   if (result.exit !== 0) throw new Docker.Unavailable("Preview Docker network cleanup failed")
+}
+
+async function requireFinalGate(finalGate: (() => Promise<boolean>) | undefined) {
+  if (finalGate === undefined) return
+  let stale: boolean
+  try {
+    stale = await finalGate()
+  } catch (cause) {
+    throw new Docker.Unavailable("Preview Docker recovery lease authority is unavailable", { cause })
+  }
+  if (!stale) throw new Docker.Unavailable("Preview Docker recovery lease became live")
 }
 
 interface LateResultObserver {

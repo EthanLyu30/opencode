@@ -69,6 +69,48 @@ describe("EvidenceLedger durable staging", () => {
     await restored.close()
   })
 
+  test("rolls back only the exact staged receipt and never removes committed evidence", async () => {
+    await using temp = await taskTemp()
+    const firstCoordinates = await evidenceCoordinates("wfs_evidence_rollback_staged")
+    const firstBytes = WorkflowVisualHost.deterministicPng(firstCoordinates.viewport)
+    const firstImage = WorkflowVisualHost.capturedImage(firstCoordinates, firstBytes)
+    const ledger = EvidenceLedger.open(temp.path)
+    await ledger.beginCapture({ coordinates: firstCoordinates, ownerNonce: "7".repeat(64), now: 1 })
+    await ledger.completeCapture({
+      receipt: firstImage.receipt,
+      bytes: firstBytes,
+      ownerNonce: "7".repeat(64),
+      now: 2,
+      limit: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+    })
+
+    expect(await ledger.rollbackStagedCapture({ receipt: firstImage.receipt })).toBe(true)
+    expect(await ledger.get(firstCoordinates)).toBeUndefined()
+    expect(await ledger.used(String(workflowID))).toBe(0)
+
+    const secondCoordinates = await evidenceCoordinates("wfs_evidence_rollback_committed")
+    const secondBytes = WorkflowVisualHost.deterministicPng(secondCoordinates.viewport)
+    const secondImage = WorkflowVisualHost.capturedImage(secondCoordinates, secondBytes)
+    const artifact = screenshotArtifact(secondImage, "wfa_evidence_rollback_committed")
+    await ledger.beginCapture({ coordinates: secondCoordinates, ownerNonce: "8".repeat(64), now: 3 })
+    await ledger.completeCapture({
+      receipt: secondImage.receipt,
+      bytes: secondBytes,
+      ownerNonce: "8".repeat(64),
+      now: 4,
+      limit: WorkflowVisualHost.MAX_WORKFLOW_EVIDENCE_BYTES,
+    })
+    await ledger.commit({ receipt: secondImage.receipt, artifact }, 5)
+
+    await expect(ledger.rollbackStagedCapture({ receipt: secondImage.receipt })).rejects.toThrow(/staged/i)
+    expect(await ledger.get(secondCoordinates)).toMatchObject({
+      state: "committed",
+      artifact: { artifactID: artifact.id },
+    })
+    expect(await ledger.used(String(workflowID))).toBe(secondBytes.byteLength)
+    await ledger.close()
+  })
+
   test("keeps quota plus item completion atomic at the exact aggregate boundary", async () => {
     await using temp = await taskTemp()
     const firstKey = await evidenceCoordinates("wfs_evidence_quota_a")

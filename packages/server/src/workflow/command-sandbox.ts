@@ -18,6 +18,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { Docker } from "./docker"
 import { DockerConfig } from "./docker-config"
+import { ProductionHostRuntime } from "./production-host-runtime"
 import { WorkflowRuntimeRecovery } from "./runtime-recovery"
 
 const labelDomain = "io.opencode.workflow"
@@ -216,7 +217,7 @@ export const layer = Layer.unwrap(
   Effect.map(WorkflowRuntimeRecovery.Service, (recovery) =>
     makeLayer({
       engine: Docker.production,
-      config: DockerConfig.fromEnvironment(process.env),
+      config: productionDockerConfig(process.env),
       recoveryReady: () => recovery.ready,
     }),
   ),
@@ -227,6 +228,14 @@ export const node = makeLocationNode({
   layer,
   deps: [WorkflowStore.node, SessionStore.node, Location.node, WorkflowRuntimeRecovery.node],
 })
+
+function productionDockerConfig(environment: Readonly<Record<string, string | undefined>>) {
+  try {
+    return ProductionHostRuntime.load(environment).dockerConfig
+  } catch {
+    return ProductionHostRuntime.unavailableDockerConfig()
+  }
+}
 
 export async function recover(input: {
   readonly engine: Docker.Engine

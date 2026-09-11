@@ -1433,6 +1433,16 @@ export type GlobalEvent = {
           failure: WorkflowFailure
           usage: WorkflowUsage
           notBefore: number
+          leaseFence?:
+            | {
+                variant: "live_execution"
+                expectedStatus: "leased" | "running"
+              }
+            | {
+                variant: "expired_recovery"
+                expectedStatus: "leased" | "running"
+                observedLeaseExpiresAt: number
+              }
         }
       }
     | {
@@ -1482,6 +1492,18 @@ export type GlobalEvent = {
           workflowID: string
           timestamp: number
           stageID?: string
+          attempt?: number
+          leaseOwner?: string
+          leaseFence?:
+            | {
+                variant: "live_execution"
+                expectedStatus: "leased" | "running"
+              }
+            | {
+                variant: "expired_recovery"
+                expectedStatus: "leased" | "running"
+                observedLeaseExpiresAt: number
+              }
           reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
           failure?: WorkflowFailure
           usage?: WorkflowUsage
@@ -4789,6 +4811,16 @@ export type SyncEventWorkflowStageRetryScheduled = {
       failure: WorkflowFailure
       usage: WorkflowUsage
       notBefore: number
+      leaseFence?:
+        | {
+            variant: "live_execution"
+            expectedStatus: "leased" | "running"
+          }
+        | {
+            variant: "expired_recovery"
+            expectedStatus: "leased" | "running"
+            observedLeaseExpiresAt: number
+          }
     }
   }
 }
@@ -4866,6 +4898,18 @@ export type SyncEventWorkflowApprovalRequested = {
       workflowID: string
       timestamp: number
       stageID?: string
+      attempt?: number
+      leaseOwner?: string
+      leaseFence?:
+        | {
+            variant: "live_execution"
+            expectedStatus: "leased" | "running"
+          }
+        | {
+            variant: "expired_recovery"
+            expectedStatus: "leased" | "running"
+            observedLeaseExpiresAt: number
+          }
       reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
       failure?: WorkflowFailure
       usage?: WorkflowUsage
@@ -6566,6 +6610,16 @@ export type WorkflowStageRetryScheduled = {
     failure: WorkflowFailure
     usage: WorkflowUsage
     notBefore: number
+    leaseFence?:
+      | {
+          variant: "live_execution"
+          expectedStatus: "leased" | "running"
+        }
+      | {
+          variant: "expired_recovery"
+          expectedStatus: "leased" | "running"
+          observedLeaseExpiresAt: number
+        }
   }
 }
 
@@ -6695,6 +6749,18 @@ export type WorkflowApprovalRequested = {
     workflowID: string
     timestamp: number
     stageID?: string
+    attempt?: number
+    leaseOwner?: string
+    leaseFence?:
+      | {
+          variant: "live_execution"
+          expectedStatus: "leased" | "running"
+        }
+      | {
+          variant: "expired_recovery"
+          expectedStatus: "leased" | "running"
+          observedLeaseExpiresAt: number
+        }
     reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
     failure?: WorkflowFailure
     usage?: WorkflowUsage
@@ -10204,6 +10270,16 @@ export type EventWorkflowStageRetryScheduled = {
     failure: WorkflowFailure
     usage: WorkflowUsage
     notBefore: number
+    leaseFence?:
+      | {
+          variant: "live_execution"
+          expectedStatus: "leased" | "running"
+        }
+      | {
+          variant: "expired_recovery"
+          expectedStatus: "leased" | "running"
+          observedLeaseExpiresAt: number
+        }
   }
 }
 
@@ -10257,6 +10333,18 @@ export type EventWorkflowApprovalRequested = {
     workflowID: string
     timestamp: number
     stageID?: string
+    attempt?: number
+    leaseOwner?: string
+    leaseFence?:
+      | {
+          variant: "live_execution"
+          expectedStatus: "leased" | "running"
+        }
+      | {
+          variant: "expired_recovery"
+          expectedStatus: "leased" | "running"
+          observedLeaseExpiresAt: number
+        }
     reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
     failure?: WorkflowFailure
     usage?: WorkflowUsage

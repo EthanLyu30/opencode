@@ -35,6 +35,7 @@ export interface Service {
     readonly now: number
     readonly limit: number
   }) => Promise<Item>
+  readonly rollbackStagedCapture: (input: { readonly receipt: WorkflowVisualHost.EvidenceReceipt }) => Promise<boolean>
   readonly get: (coordinates: WorkflowVisualHost.EvidenceCoordinates) => Promise<Item | undefined>
   readonly commit: (input: WorkflowVisualHost.BindEvidenceInput, now: number) => Promise<Item>
   readonly release: (input: WorkflowVisualHost.BindEvidenceInput, now: number) => Promise<Item>
@@ -66,6 +67,7 @@ export type Operation =
   | "insert-capture"
   | "delete-capture"
   | "complete-capture"
+  | "rollback-staged-capture"
   | "commit-item"
   | "release-item"
   | "abandon-item"
@@ -314,6 +316,7 @@ function makeService(state: State): Service {
         })
       }),
     completeCapture: async (input) => operate(state, () => completeCapture(state, input)),
+    rollbackStagedCapture: async (input) => operate(state, () => rollbackStagedCapture(state, input)),
     get: async (coordinatesInput) =>
       operate(state, () => {
         const coordinates = WorkflowVisualHost.validateEvidenceCoordinates(coordinatesInput)
@@ -392,6 +395,43 @@ function completeCapture(
     if (result.changes !== 1) throw new FatalEvidenceError(new Error("Evidence completion was not exact"))
     setUsed(state, workflowID, next)
     return requireItem(state, receipt.evidenceID)
+  })
+}
+
+function rollbackStagedCapture(state: State, input: { readonly receipt: WorkflowVisualHost.EvidenceReceipt }): boolean {
+  const receipt = WorkflowVisualHost.validateEvidenceReceipt(input.receipt)
+  return transaction(state, () => {
+    const existing = readItem(state, receipt.evidenceID)
+    if (existing === undefined) return false
+    assertCoordinates(existing.coordinates, receipt.coordinates)
+    assertReceipt(existing, receipt)
+    if (
+      existing.state !== "staged" ||
+      existing.ownerNonce !== undefined ||
+      existing.artifact !== undefined ||
+      existing.abandonment !== undefined ||
+      existing.bytes === undefined
+    ) {
+      throw new TypeError("Only the exact unbound staged capture may be rolled back")
+    }
+    const workflowID = String(receipt.coordinates.workflowID)
+    const previous = selectUsed(state, workflowID)
+    if (previous < receipt.evidenceBytes) {
+      throw new FatalEvidenceError(new Error("Evidence aggregate is below the staged capture being rolled back"))
+    }
+    const result = sql(state, "rollback-staged-capture", () =>
+      state.database.run(
+        `DELETE FROM workflow_evidence_item
+         WHERE evidence_id = ? AND state = 'staged' AND owner_nonce IS NULL
+           AND artifact_json IS NULL AND abandonment_json IS NULL
+           AND receipt_json = ? AND png_sha256 = ? AND evidence_bytes = ?
+           AND length(png_blob) = ?`,
+        [receipt.evidenceID, JSON.stringify(receipt), receipt.pngSha256, receipt.evidenceBytes, receipt.evidenceBytes],
+      ),
+    )
+    if (result.changes !== 1) throw new FatalEvidenceError(new Error("Staged evidence rollback was not exact"))
+    setUsed(state, workflowID, previous - receipt.evidenceBytes)
+    return true
   })
 }
 

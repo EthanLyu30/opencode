@@ -15,7 +15,7 @@ import { WorkflowProductionHostPlan } from "@opencode-ai/core/workflow/productio
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
-import { Effect, Layer } from "effect"
+import { DateTime, Effect, Layer } from "effect"
 import { WorkflowVisualHostServer } from "./visual-host"
 
 export interface ResolverDependencies {
@@ -47,13 +47,80 @@ export function makeImplementationResolver(
   return (input) => Effect.runPromise(resolveImplementationContract(dependencies, input))
 }
 
+export function makePreviewLeaseResolver(
+  dependencies: Pick<ResolverDependencies, "getWorkflow">,
+  now: () => number = Date.now,
+): NonNullable<WorkflowVisualHostServer.Options["resolvePreviewLease"]> {
+  return async (workflowID) => {
+    const detail = await Effect.runPromise(dependencies.getWorkflow(workflowID))
+    if (detail === undefined) throw new TypeError("Persisted visual Workflow authority is unavailable")
+    const stage = detail.stages.find((candidate) => candidate.id === detail.run.currentStageID)
+    if (
+      detail.run.id !== workflowID ||
+      detail.run.status !== "running" ||
+      detail.run.cancelRequestedAt !== undefined ||
+      stage === undefined ||
+      stage.workflowID !== workflowID ||
+      stage.type !== "visual_review" ||
+      (stage.status !== "leased" && stage.status !== "running") ||
+      stage.leaseOwner === undefined ||
+      stage.leaseExpiresAt === undefined ||
+      DateTime.toEpochMillis(stage.leaseExpiresAt) < now()
+    ) {
+      throw new TypeError("Persisted visual Stage lease is unavailable")
+    }
+    return WorkflowVisualHost.validatePreviewLeaseAuthority({
+      workflowID,
+      stageID: stage.id,
+      attempt: stage.attempt,
+      leaseOwner: stage.leaseOwner,
+      leaseExpiresAt: DateTime.toEpochMillis(stage.leaseExpiresAt),
+    })
+  }
+}
+
+export function makePreviewLeaseLiveProbe(
+  dependencies: Pick<ResolverDependencies, "getWorkflow">,
+  now: () => number = Date.now,
+): NonNullable<WorkflowVisualHostServer.Options["isPreviewLeaseLive"]> {
+  return async (observed) => {
+    const lease = WorkflowVisualHost.validatePreviewLeaseAuthority(observed)
+    const detail = await Effect.runPromise(dependencies.getWorkflow(lease.workflowID))
+    if (
+      detail === undefined ||
+      detail.run.id !== lease.workflowID ||
+      detail.run.status !== "running" ||
+      detail.run.cancelRequestedAt !== undefined
+    )
+      return false
+    const stage = detail.stages.find((candidate) => candidate.id === detail.run.currentStageID)
+    return (
+      stage !== undefined &&
+      stage.id === lease.stageID &&
+      stage.workflowID === lease.workflowID &&
+      stage.type === "visual_review" &&
+      (stage.status === "leased" || stage.status === "running") &&
+      stage.attempt === lease.attempt &&
+      stage.leaseOwner === lease.leaseOwner &&
+      stage.leaseExpiresAt !== undefined &&
+      DateTime.toEpochMillis(stage.leaseExpiresAt) >= now()
+    )
+  }
+}
+
 export function resolveImplementationContract(
   dependencies: ResolverDependencies,
   input: WorkflowVisualHost.PrepareImplementationInput,
 ) {
   return Effect.gen(function* () {
     const detail = yield* dependencies.getWorkflow(input.workflowID)
-    if (detail === undefined || detail.run.type !== "visual-build" || detail.run.location === undefined)
+    if (
+      detail === undefined ||
+      detail.run.type !== "visual-build" ||
+      detail.run.status !== "running" ||
+      detail.run.cancelRequestedAt !== undefined ||
+      detail.run.location === undefined
+    )
       return yield* invalid("Persisted visual Workflow authority is unavailable")
     const stage = detail.stages.find((candidate) => candidate.id === detail.run.currentStageID)
     if (
@@ -61,7 +128,9 @@ export function resolveImplementationContract(
       stage.workflowID !== detail.run.id ||
       stage.type !== "visual_review" ||
       (stage.status !== "leased" && stage.status !== "running") ||
-      revisionOf(stage) !== input.revision
+      revisionOf(stage) !== input.revision ||
+      stage.leaseOwner === undefined ||
+      stage.leaseExpiresAt === undefined
     )
       return yield* invalid("Persisted visual-review Stage authority is unavailable")
     const plan = yield* Effect.try({
@@ -125,6 +194,13 @@ export function resolveImplementationContract(
       implementationSha256: manifestSha256,
       readySelector: spec.referenceApp.readySelector,
       sealedSnapshot,
+      previewLease: WorkflowVisualHost.validatePreviewLeaseAuthority({
+        workflowID: detail.run.id,
+        stageID: stage.id,
+        attempt: stage.attempt,
+        leaseOwner: stage.leaseOwner,
+        leaseExpiresAt: DateTime.toEpochMillis(stage.leaseExpiresAt),
+      }),
     })
   })
 }
@@ -212,6 +288,8 @@ export function productionVisualHostLayer(
       return WorkflowVisualHostServer.productionLayer({
         environment,
         resolveImplementationContract: makeImplementationResolver(dependencies),
+        resolvePreviewLease: makePreviewLeaseResolver(dependencies),
+        isPreviewLeaseLive: makePreviewLeaseLiveProbe(dependencies),
       })
     }),
   )

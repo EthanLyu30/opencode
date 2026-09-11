@@ -181,7 +181,279 @@ describe("Workflow production evidence", () => {
       { imageID: expect.any(String), kind: "implementation", viewport: "mobile", revision: 0 },
     ])
     expect(prepared.second.authority).toEqual(prepared.first.authority)
+    expect(prepared.second.artifacts).toEqual(prepared.first.artifacts)
     expect(captures).toBe(4)
+    const staged = WorkflowVisualHost.inspectFakeEvidenceStore(evidenceStore)
+    expect(staged.items.map((item) => item.state)).toEqual(["staged", "staged", "staged", "staged"])
+    expect(staged.totalBytesByWorkflow[workflowID]).toBe(
+      staged.items.reduce((total, item) => total + item.receipt!.evidenceBytes, 0),
+    )
+  })
+
+  test("captures revision-zero references at the first actual visual stage even when its revision is nonzero", async () => {
+    const fixture = await workflowFixture()
+    try {
+      const designStage = roleStage("design", fixture.workflow)
+      const repairStage = roleStage("repair", fixture.workflow, 1)
+      const reviewStage = roleStage("visual_review", fixture.workflow, 1)
+      const design = persisted(WorkflowDesignArtifact.commitSpec(workflowID, spec), designStage, "first-visual-spec")
+      const reference = persisted(
+        WorkflowDesignArtifact.commitReferenceApp(workflowID, spec, [{ path: "index.html", content: source }]),
+        designStage,
+        "first-visual-reference",
+      )
+      const entries = Snapshot.canonicalEntries([
+        { path: RelativePath.make("index.html"), type: "file", sha256: "b".repeat(64), size: 1 },
+      ])
+      const manifestValue = WorkflowImplementationArtifact.derive({
+        workflowID,
+        revision: 1,
+        snapshotRef: Snapshot.ID.make("first-visual-baseline"),
+        before: [],
+        after: entries,
+      })
+      const manifest = persisted(
+        WorkflowImplementationArtifact.commit(workflowID, fixture.location, manifestValue),
+        repairStage,
+        "first-visual-manifest",
+      )
+      let captures = 0
+      const prepared = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            return yield* WorkflowProductionEvidence.make({
+              captureSnapshot: () => Effect.succeed(Snapshot.ID.make("first-visual-current")),
+              snapshotEntries: () => Effect.succeed(entries),
+              sealWorkspace: () => Effect.die("unused"),
+              runFunctionalTest: () => Effect.die("unused"),
+              visualHost: host,
+            }).prepare({
+              workflow: fixture.workflow,
+              stage: reviewStage,
+              revision: 1,
+              location: fixture.location,
+              priorArtifacts: [design, reference, manifest],
+              admission: { workflowInput: fixture.workflow.input, stageInput: reviewStage.input },
+            })
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHost.fakeLayer({
+              captureBytes: (input) => {
+                captures++
+                return WorkflowVisualHost.deterministicPng(input.viewport)
+              },
+              resolveImplementationContract: () => ({
+                implementationSha256: WorkflowImplementationArtifact.hash(manifestValue),
+                readySelector: "main",
+              }),
+            }),
+          ),
+        ),
+      )
+
+      const images = (prepared.artifacts ?? []).map((artifact) =>
+        WorkflowVisualReviewArtifact.decodeScreenshot(artifact, workflowID),
+      )
+      expect(images.map((image) => [image.kind, image.viewport, image.revision])).toEqual([
+        ["reference", "desktop", 0],
+        ["implementation", "desktop", 1],
+        ["reference", "mobile", 0],
+        ["implementation", "mobile", 1],
+      ])
+      expect(
+        images.filter((image) => image.kind === "reference").map((image) => image.evidenceReceipt?.coordinates.stageID),
+      ).toEqual([reviewStage.id, reviewStage.id])
+      expect(captures).toBe(4)
+    } finally {
+      await fixture.tmp[Symbol.asyncDispose]()
+    }
+  })
+
+  test("fails closed instead of recapturing when a prior visual outcome lost its reference artifacts", async () => {
+    const fixture = await firstVisualReferenceFixture()
+    try {
+      const priorReview = roleStage("visual_review", fixture.workflow, 0)
+      const visualOutcome = boundOutcome(
+        priorReview,
+        { schemaVersion: 1, role: "visual_review", verdict: "revise", revision: 0 },
+        [],
+        "missing-reference-history",
+      )
+      let captures = 0
+      const failure = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const host = yield* WorkflowVisualHost.Service
+            return yield* WorkflowProductionEvidence.make({
+              captureSnapshot: () => Effect.succeed(Snapshot.ID.make("missing-reference-current")),
+              snapshotEntries: () => Effect.succeed(fixture.entries),
+              sealWorkspace: () => Effect.die("unused"),
+              runFunctionalTest: () => Effect.die("unused"),
+              visualHost: host,
+            })
+              .prepare({
+                workflow: fixture.workflow,
+                stage: fixture.reviewStage,
+                revision: 1,
+                location: fixture.location,
+                priorArtifacts: [fixture.design, fixture.reference, fixture.manifest, visualOutcome],
+                admission: { workflowInput: fixture.workflow.input, stageInput: fixture.reviewStage.input },
+              })
+              .pipe(Effect.flip)
+          }),
+        ).pipe(
+          Effect.provide(
+            WorkflowVisualHost.fakeLayer({
+              captureBytes: (input) => {
+                captures++
+                return WorkflowVisualHost.deterministicPng(input.viewport)
+              },
+              resolveImplementationContract: () => ({
+                implementationSha256: WorkflowImplementationArtifact.hash(fixture.manifestValue),
+                readySelector: "main",
+              }),
+            }),
+          ),
+        ),
+      )
+
+      expect(failure).toMatchObject({ code: "invalid_visual_authority" })
+      expect(captures).toBe(0)
+    } finally {
+      await fixture.tmp[Symbol.asyncDispose]()
+    }
+  })
+
+  test("fails closed on staged, committed, released, or ambiguous ledger references with no EventV2 artifact", async () => {
+    for (const ledgerState of ["staged", "committed", "released", "ambiguous"] as const) {
+      const fixture = await firstVisualReferenceFixture()
+      try {
+        const priorReview = roleStage("visual_review", fixture.workflow, 0)
+        const evidenceStore = WorkflowVisualHost.makeFakeEvidenceStore()
+        let captures = 0
+        const failure = await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const host = yield* WorkflowVisualHost.Service
+              const referenceApp = WorkflowDesignArtifact.decodeReferenceApp(toCommit(fixture.reference), workflowID)
+              const preview = yield* host.materializeReference({ workflowID, referenceApp })
+              for (const [index, viewport] of spec.referenceApp.viewports.entries()) {
+                const captured = yield* host.capture({ preview, stageID: priorReview.id, viewport })
+                const commit = WorkflowVisualReviewArtifact.commitScreenshot(
+                  WorkflowVisualReviewArtifact.capturedImage({
+                    workflowID,
+                    kind: "reference",
+                    viewport: viewport.name,
+                    revision: 0,
+                    bytes: captured.bytes,
+                    evidenceReceipt: captured.receipt,
+                  }),
+                )
+                const artifact = persisted(commit, priorReview, `${ledgerState}-orphan-${index}`)
+                if (ledgerState === "committed" || ledgerState === "released") {
+                  yield* host.commitEvidence({ receipt: captured.receipt, artifact })
+                }
+                if (ledgerState === "released") yield* host.releaseEvidence({ receipt: captured.receipt, artifact })
+                if (ledgerState === "ambiguous") {
+                  const record = evidenceStore.items.get(captured.receipt.evidenceID)
+                  if (record === undefined) return yield* Effect.die("Seeded evidence is missing")
+                  record.state = "capturing"
+                }
+              }
+              return yield* WorkflowProductionEvidence.make({
+                captureSnapshot: () => Effect.succeed(Snapshot.ID.make(`orphan-${ledgerState}-current`)),
+                snapshotEntries: () => Effect.succeed(fixture.entries),
+                sealWorkspace: () => Effect.die("unused"),
+                runFunctionalTest: () => Effect.die("unused"),
+                visualHost: host,
+              })
+                .prepare({
+                  workflow: fixture.workflow,
+                  stage: fixture.reviewStage,
+                  revision: 1,
+                  location: fixture.location,
+                  priorArtifacts: [fixture.design, fixture.reference, fixture.manifest],
+                  admission: { workflowInput: fixture.workflow.input, stageInput: fixture.reviewStage.input },
+                })
+                .pipe(Effect.flip)
+            }),
+          ).pipe(
+            Effect.provide(
+              WorkflowVisualHost.fakeLayer({
+                evidenceStore,
+                captureBytes: (input) => {
+                  captures++
+                  return WorkflowVisualHost.deterministicPng(input.viewport)
+                },
+                resolveImplementationContract: () => ({
+                  implementationSha256: WorkflowImplementationArtifact.hash(fixture.manifestValue),
+                  readySelector: "main",
+                }),
+              }),
+            ),
+          ),
+        )
+
+        expect(failure).toMatchObject({ code: expect.stringMatching(/visual_authority|evidence_ambiguous/) })
+        expect(captures).toBe(spec.referenceApp.viewports.length)
+      } finally {
+        await fixture.tmp[Symbol.asyncDispose]()
+      }
+    }
+  })
+
+  test("fails closed on a partial prior reference viewport set", async () => {
+    const fixture = await firstVisualReferenceFixture()
+    try {
+      const failure = await prepareFirstVisualFailure(fixture, [referenceScreenshot(fixture, 0, "partial")])
+      expect(failure).toMatchObject({ code: "invalid_visual_authority" })
+    } finally {
+      await fixture.tmp[Symbol.asyncDispose]()
+    }
+  })
+
+  test("fails closed on duplicate prior reference viewport authority", async () => {
+    const fixture = await firstVisualReferenceFixture()
+    try {
+      const failure = await prepareFirstVisualFailure(fixture, [
+        referenceScreenshot(fixture, 0, "duplicate-a"),
+        referenceScreenshot(fixture, 0, "duplicate-b"),
+      ])
+      expect(failure).toMatchObject({ code: "reference_evidence_ambiguous" })
+    } finally {
+      await fixture.tmp[Symbol.asyncDispose]()
+    }
+  })
+
+  test("fails closed on foreign prior reference ownership", async () => {
+    const fixture = await firstVisualReferenceFixture()
+    try {
+      const candidate = referenceScreenshot(fixture, 0, "foreign")
+      const failure = await prepareFirstVisualFailure(fixture, [
+        Workflow.Artifact.make({
+          ...candidate,
+          workflowID: Workflow.ID.make("wfl_foreign_reference_owner"),
+        }),
+      ])
+      expect(failure).toMatchObject({ code: "invalid_prior_artifact" })
+    } finally {
+      await fixture.tmp[Symbol.asyncDispose]()
+    }
+  })
+
+  test("fails closed when a prior reference receipt drifts from its durable stage", async () => {
+    const fixture = await firstVisualReferenceFixture()
+    try {
+      const failure = await prepareFirstVisualFailure(fixture, [
+        referenceScreenshot(fixture, 0, "receipt-desktop"),
+        referenceScreenshot(fixture, 1, "receipt-mobile", Workflow.StageID.make("wfs_foreign_reference_receipt")),
+      ])
+      expect(failure).toMatchObject({ code: "reference_evidence_ambiguous" })
+    } finally {
+      await fixture.tmp[Symbol.asyncDispose]()
+    }
   })
 
   test("runs the frozen test from sealed Snapshot bytes while the live workspace changes and is restored", async () => {
@@ -647,6 +919,25 @@ describe("Workflow production evidence", () => {
       ).toThrow()
     }
   })
+
+  test("retains bound role outcomes when decoding delivery evidence", async () => {
+    const chain = await deliveryChainFixture()
+    const decoded = WorkflowRoleBinding.decodePriorArtifacts(
+      chain.fixture.workflow,
+      chain.fixture.location,
+      chain.artifacts,
+    )
+
+    expect(decoded.filter((artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND)).toHaveLength(3)
+    expect(() =>
+      WorkflowRoleBinding.validateDeliveryEvidenceChain(
+        chain.fixture.workflow,
+        chain.fixture.location,
+        0,
+        decoded.map((artifact) => artifact.artifact),
+      ),
+    ).not.toThrow()
+  })
 })
 
 async function deliveryChainFixture() {
@@ -824,6 +1115,102 @@ function boundOutcome(
     }),
     stage,
     `chain-outcome-${suffix}`,
+  )
+}
+
+async function firstVisualReferenceFixture() {
+  const fixture = await workflowFixture()
+  const designStage = roleStage("design", fixture.workflow)
+  const repairStage = roleStage("repair", fixture.workflow, 1)
+  const reviewStage = roleStage("visual_review", fixture.workflow, 1)
+  const design = persisted(WorkflowDesignArtifact.commitSpec(workflowID, spec), designStage, "authority-spec")
+  const reference = persisted(
+    WorkflowDesignArtifact.commitReferenceApp(workflowID, spec, [{ path: "index.html", content: source }]),
+    designStage,
+    "authority-reference",
+  )
+  const entries = Snapshot.canonicalEntries([
+    { path: RelativePath.make("index.html"), type: "file", sha256: "b".repeat(64), size: 1 },
+  ])
+  const manifestValue = WorkflowImplementationArtifact.derive({
+    workflowID,
+    revision: 1,
+    snapshotRef: Snapshot.ID.make("authority-baseline"),
+    before: [],
+    after: entries,
+  })
+  const manifest = persisted(
+    WorkflowImplementationArtifact.commit(workflowID, fixture.location, manifestValue),
+    repairStage,
+    "authority-manifest",
+  )
+  return { ...fixture, design, reference, entries, manifestValue, manifest, reviewStage }
+}
+
+function referenceScreenshot(
+  fixture: Awaited<ReturnType<typeof firstVisualReferenceFixture>>,
+  viewportIndex: number,
+  suffix: string,
+  receiptStageID = fixture.reviewStage.id,
+) {
+  const viewport = spec.referenceApp.viewports[viewportIndex]
+  if (viewport === undefined) throw new Error("missing reference viewport")
+  const bytes = WorkflowVisualHost.deterministicPng(viewport)
+  const identity = WorkflowVisualHost.referenceIdentity(
+    workflowID,
+    WorkflowDesignArtifact.decodeReferenceApp(toCommit(fixture.reference), workflowID),
+  )
+  const receipt = WorkflowVisualHost.capturedImage(
+    {
+      schemaVersion: 1,
+      workflowID,
+      stageID: receiptStageID,
+      viewport,
+      kind: "reference",
+      revision: 0,
+      configSha256: identity.configSha256,
+      sourceSha256: identity.sourceSha256,
+      readySelectorSha256: identity.readySelectorSha256,
+    },
+    bytes,
+  ).receipt
+  return persisted(
+    WorkflowVisualReviewArtifact.commitScreenshot(
+      WorkflowVisualReviewArtifact.capturedImage({
+        workflowID,
+        kind: "reference",
+        viewport: viewport.name,
+        revision: 0,
+        bytes,
+        evidenceReceipt: receipt,
+      }),
+    ),
+    fixture.reviewStage,
+    suffix,
+  )
+}
+
+function prepareFirstVisualFailure(
+  fixture: Awaited<ReturnType<typeof firstVisualReferenceFixture>>,
+  candidates: readonly Workflow.Artifact[],
+) {
+  return Effect.runPromise(
+    WorkflowProductionEvidence.make({
+      captureSnapshot: () => Effect.succeed(Snapshot.ID.make("authority-current")),
+      snapshotEntries: () => Effect.succeed(fixture.entries),
+      sealWorkspace: () => Effect.die("unused"),
+      runFunctionalTest: () => Effect.die("unused"),
+      visualHost: unavailableVisualHost(),
+    })
+      .prepare({
+        workflow: fixture.workflow,
+        stage: fixture.reviewStage,
+        revision: 1,
+        location: fixture.location,
+        priorArtifacts: [fixture.design, fixture.reference, fixture.manifest, ...candidates],
+        admission: { workflowInput: fixture.workflow.input, stageInput: fixture.reviewStage.input },
+      })
+      .pipe(Effect.flip),
   )
 }
 

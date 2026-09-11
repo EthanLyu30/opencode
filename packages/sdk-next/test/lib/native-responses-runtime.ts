@@ -1,4 +1,5 @@
 import { appendFileSync } from "node:fs"
+import path from "node:path"
 import { Effect, Layer, Schema } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { Database } from "@opencode-ai/core/database/database"
@@ -6,15 +7,19 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { ResponsesProjector } from "@opencode-ai/core/responses/projector"
 import { ResponsesStore } from "@opencode-ai/core/responses/store"
+import { SessionAdmission } from "@opencode-ai/core/session/admission"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
 import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
 import { WorkflowProjector } from "@opencode-ai/core/workflow/projector"
 import { WorkflowRetry } from "@opencode-ai/core/workflow/retry"
+import { WorkflowStageMachine } from "@opencode-ai/core/workflow/stage-machine"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { LLM, LLMError, Usage } from "../../../llm/src"
 import { LLMClient, Protocol, RequestExecutor, Route, WebSocketExecutor } from "../../../llm/src/route"
@@ -22,6 +27,7 @@ import * as DeepSeek from "../../../llm/src/providers/deepseek"
 import * as OpenAIResponses from "../../../llm/src/protocols/openai-responses"
 import { Responses } from "../../../schema/src/responses"
 import { Workflow } from "../../../schema/src/workflow"
+import { AbsolutePath, Agent, Location, Session } from "../../src"
 
 export const fixture = async (name: string) => {
   const value = await Bun.file(
@@ -229,6 +235,13 @@ export const runtimeLayer = (options: NativeRuntimeOptions) => {
               output: [{ type: "message", role: "assistant", content: generated.text }],
               usage: usage(generatedUsage),
             })
+            const outcome = {
+              schemaVersion: 1 as const,
+              role: "deliver" as const,
+              verdict: "complete" as const,
+              revision: typeof input.stage.input.revision === "number" ? input.stage.input.revision : 0,
+            }
+            const outcomeBody = WorkflowStageMachine.encodeOutcome(outcome)
             return {
               usage: {
                 tokens: generatedUsage.totalTokens ?? 0,
@@ -237,6 +250,14 @@ export const runtimeLayer = (options: NativeRuntimeOptions) => {
                 attempts: 0,
               },
               artifacts: [
+                {
+                  kind: WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
+                  uri: `workflow://${input.stage.workflowID}/stages/${input.stage.id}/role-outcome.json`,
+                  mime: WorkflowStageMachine.OUTCOME_ARTIFACT_MIME,
+                  sha256: new Bun.CryptoHasher("sha256").update(outcomeBody).digest("hex"),
+                  size: new TextEncoder().encode(outcomeBody).byteLength,
+                  metadata: outcome,
+                },
                 {
                   kind: "response",
                   uri: `response://${responseID}`,
@@ -304,6 +325,7 @@ export const admissionLayer = (databasePath: string) =>
     LayerNode.group([
       Database.node,
       EventV2.node,
+      SessionProjector.node,
       WorkflowProjector.node,
       WorkflowStore.node,
       ResponsesProjector.node,
@@ -314,7 +336,43 @@ export const admissionLayer = (databasePath: string) =>
     [[Database.node, Database.layerFromPath(databasePath)]],
   )
 
-export const workflowInput = (workflowID: Workflow.ID, responseID: Responses.ID): Workflow.CreateInput => ({
+/**
+ * Admit an executable test workflow through the same placement boundary used
+ * by production. Tests that only exercise the legacy public create contract
+ * intentionally keep using `WorkflowV2.create` directly.
+ */
+export const admitPlacedWorkflow = (directory: string, input: Workflow.CreateInput & { readonly id: Workflow.ID }) =>
+  Effect.gen(function* () {
+    const events = yield* EventV2.Service
+    const workflows = yield* WorkflowV2.Service
+    const location = Location.Ref.make({ directory: AbsolutePath.make(directory) })
+    const sessionID = Session.ID.make(`ses_${input.id.slice(4)}`)
+    const agent = Agent.ID.make("build")
+    const session = SessionAdmission.prepare({
+      id: sessionID,
+      agent,
+      location,
+      project: { id: ProjectV2.ID.global, directory: AbsolutePath.make(path.parse(directory).root) },
+      visibility: "workflow",
+      timestamp: Date.now(),
+    })
+    yield* events.publish(session.entry.definition, session.entry.data, { location })
+    return yield* workflows.admit({ ...input, location, sessionID, agent })
+  })
+
+export const seedPlacedWorkflow = (
+  databasePath: string,
+  directory: string,
+  input: Workflow.CreateInput & { readonly id: Workflow.ID },
+) =>
+  Effect.runPromise(
+    Effect.scoped(admitPlacedWorkflow(directory, input).pipe(Effect.provide(admissionLayer(databasePath)))),
+  )
+
+export const workflowInput = (
+  workflowID: Workflow.ID,
+  responseID: Responses.ID,
+): Workflow.CreateInput & { readonly id: Workflow.ID } => ({
   id: workflowID,
   type: "responses-native-conformance",
   input: {},
@@ -322,6 +380,9 @@ export const workflowInput = (workflowID: Workflow.ID, responseID: Responses.ID)
   stages: [
     {
       id: Workflow.StageID.make(`wfs_${workflowID.slice(4)}`),
+      // Responses are projected from the workflow's unique deliver stage. The
+      // injected executor therefore returns the legacy role-outcome binding
+      // required for a non-visual workflow in addition to its response artifact.
       type: "deliver",
       ordinal: 0,
       maxAttempts: 2,
@@ -332,11 +393,10 @@ export const workflowInput = (workflowID: Workflow.ID, responseID: Responses.ID)
   ],
 })
 
-export const createPair = (workflowID: Workflow.ID, responseID: Responses.ID, background: boolean) =>
+export const createPair = (directory: string, workflowID: Workflow.ID, responseID: Responses.ID, background: boolean) =>
   Effect.gen(function* () {
-    const workflows = yield* WorkflowV2.Service
     const responses = yield* ResponsesV2.Service
-    yield* workflows.create(workflowInput(workflowID, responseID))
+    yield* admitPlacedWorkflow(directory, workflowInput(workflowID, responseID))
     yield* responses.create({
       id: responseID,
       workflowID,
@@ -350,12 +410,15 @@ export const createPair = (workflowID: Workflow.ID, responseID: Responses.ID, ba
 
 export const seedPair = (
   databasePath: string,
+  directory: string,
   workflowID: Workflow.ID,
   responseID: Responses.ID,
   background: boolean,
 ) =>
   Effect.runPromise(
-    Effect.scoped(createPair(workflowID, responseID, background).pipe(Effect.provide(admissionLayer(databasePath)))),
+    Effect.scoped(
+      createPair(directory, workflowID, responseID, background).pipe(Effect.provide(admissionLayer(databasePath))),
+    ),
   )
 
 export const createResponse = (workflowID: Workflow.ID, responseID: Responses.ID, background: boolean) =>
@@ -381,7 +444,18 @@ export const waitTerminal = (workflowID: Workflow.ID, responseID: Responses.ID) 
       yield* Effect.sleep(10)
       workflow = yield* workflows.get(workflowID)
     }
-    if (workflow.run.status !== "succeeded") throw new Error(`workflow reached ${workflow.run.status}`)
+    if (workflow.run.status !== "succeeded")
+      throw new Error(
+        `workflow reached ${workflow.run.status}: ${JSON.stringify({
+          run: workflow.run,
+          stages: workflow.stages.map((stage) => ({
+            type: stage.type,
+            status: stage.status,
+            attempt: stage.attempt,
+            error: stage.error,
+          })),
+        })}`,
+      )
     return yield* responses.get(responseID)
   }).pipe(Effect.timeout("5 seconds"))
 

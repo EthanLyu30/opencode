@@ -17,10 +17,14 @@ export const create = Effect.fn("OpenCode.create")(function* () {
   )
   const tools = Context.get(context, ApplicationTools.Service)
   const permissions = Context.get(context, PermissionSaved.Service)
+  const applicationTools = Layer.succeed(ApplicationTools.Service, tools)
   const web = yield* Effect.acquireRelease(
     Effect.sync(() =>
       HttpRouter.toWebHandler(
-        createEmbeddedRoutes().pipe(
+        createEmbeddedRoutes({
+          buildApplicationServices: (services, replacements) =>
+            AppNodeBuilder.build(services, [...replacements, [ApplicationTools.node, applicationTools]]),
+        }).pipe(
           HttpRouter.provideRequest(Layer.succeed(PermissionSaved.Service, permissions)),
           Layer.provide(HttpServer.layerServices),
         ),

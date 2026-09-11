@@ -276,6 +276,75 @@ describe("Workflow role contracts", () => {
 })
 
 describe("Workflow role business-evidence authority", () => {
+  test("uses model contract messages for the same-attempt gate and falls back to preparation messages", async () => {
+    const current = stage("design")
+    const next = Workflow.Stage.make({
+      ...stage("decompose"),
+      status: "pending",
+      attempt: 0,
+      ordinal: 1,
+      time: { created: DateTime.makeUnsafe(1), updated: DateTime.makeUnsafe(1) },
+    })
+    const preparationMessages = [Message.user("preparation contract authority")]
+    const resultMessages = [Message.user("filtered response contract authority")]
+    const evidence = Layer.succeed(
+      WorkflowRoleExecution.Service,
+      WorkflowRoleExecution.Service.of({
+        prepare: () => Effect.succeed({ messages: preparationMessages }),
+        resolve: () =>
+          Effect.succeed({
+            artifacts: [
+              WorkflowDesignArtifact.commitSpec(workflowID, designSpec),
+              WorkflowDesignArtifact.commitReferenceApp(workflowID, designSpec, payloads.design.sources),
+            ],
+          }),
+      }),
+    )
+    const execute = (returnedMessages?: readonly Message[]) => {
+      const model = WorkflowModelExecution.layerWith((input) => {
+        const contractMessages = returnedMessages ?? preparationMessages
+        const strict = WorkflowRoleContract.build({
+          workflow: input.workflow,
+          stage: input.stage,
+          route: input.route,
+          priorArtifacts: input.artifacts,
+          messages: contractMessages,
+        })
+        return Effect.succeed({
+          contract: strict,
+          semantic: WorkflowRoleContract.decode(strict, {
+            contractVersion: 1,
+            outcome: outcomes.design,
+            payload: payloads.design,
+          }),
+          outcome: outcomes.design,
+          artifacts: [],
+          usage: { tokens: 4, turns: 1, toolCalls: 0, attempts: 0 },
+          providerUsage: { inputTokens: 3, outputTokens: 1, totalTokens: 4 },
+          ...(returnedMessages === undefined ? {} : { trustedMessages: returnedMessages }),
+        })
+      })
+      return Effect.gen(function* () {
+        const executor = yield* WorkflowExecutor.Service
+        return yield* executor.execute({
+          workflow,
+          stage: current,
+          stages: [current, next],
+          artifacts: [],
+          lease: { owner: "worker", attempt: 1, expiresAt: DateTime.makeUnsafe(60_000) },
+          saveCheckpoint: () => Effect.void,
+        })
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(WorkflowExecutor.roleLayerWith(evidence).pipe(Layer.provide(model))),
+        Effect.runPromise,
+      )
+    }
+
+    expect((await execute()).trustedMessages).toBe(preparationMessages)
+    expect((await execute(resultMessages)).trustedMessages).toBe(resultMessages)
+  })
+
   test("lets strict non-visual roles complete without evidence authority but never lets visual roles bypass it", async () => {
     const current = stage("design")
     const next = Workflow.Stage.make({

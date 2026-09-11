@@ -17,8 +17,12 @@ import { ResponsesStore } from "@opencode-ai/core/responses/store"
 import { EventTable } from "@opencode-ai/core/event/sql"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Location } from "@opencode-ai/schema/location"
 import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { Responses } from "@opencode-ai/schema/responses"
+import { AbsolutePath } from "@opencode-ai/schema/schema"
+import { Session } from "@opencode-ai/schema/session"
 import { HttpClientRequest } from "effect/unstable/http"
 import { LLM, LLMClient, Tool, ToolRuntime } from "@opencode-ai/llm"
 import { eq } from "drizzle-orm"
@@ -69,6 +73,14 @@ const createInput = (suffix: string): Workflow.CreateInput => ({
   ],
 })
 
+const admit = (workflow: WorkflowV2.Interface, input: Workflow.CreateInput) =>
+  workflow.admit({
+    ...input,
+    location: Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit") }),
+    sessionID: Session.ID.make("ses_workflow_cancel"),
+    agent: Agent.ID.make("build"),
+  })
+
 describe("Workflow cancellation", () => {
   projectorIt.effect("rejects artifact and success projection after durable cancellation wins the race", () =>
     Effect.gen(function* () {
@@ -76,11 +88,12 @@ describe("Workflow cancellation", () => {
       const workflow = yield* WorkflowV2.Service
       const store = yield* WorkflowStore.Service
       const input = createInput("cancel_fence")
-      yield* workflow.create(input)
+      yield* admit(workflow, input)
       const now = DateTime.toEpochMillis(yield* DateTime.now)
       const claimed = Option.getOrThrow(
         yield* store.claim({ owner: "worker-cancel-fence", now, leaseDurationMs: 5_000 }),
       )
+      yield* events.publish(WorkflowEvent.Started, { workflowID: input.id!, timestamp: DateTime.makeUnsafe(now) })
       yield* events.publish(WorkflowEvent.Stage.Started, {
         workflowID: input.id!,
         stageID: input.stages[0].id!,
@@ -161,7 +174,7 @@ describe("Workflow cancellation", () => {
         }
         yield* Effect.gen(function* () {
           const workflow = yield* WorkflowV2.Service
-          yield* workflow.create(input)
+          yield* admit(workflow, input)
           yield* workflow.cancel(input.id!)
           const detail = yield* workflow.get(input.id!)
           expect(detail.run.cancelRequestedAt).toBeDefined()
@@ -322,7 +335,7 @@ describe("Workflow cancellation", () => {
           const workflow = yield* WorkflowV2.Service
           const responses = yield* ResponsesV2.Service
           const execution = yield* WorkflowExecution.Service
-          yield* workflow.create(input)
+          yield* admit(workflow, input)
           yield* responses.create({
             id: responseID,
             workflowID: input.id!,

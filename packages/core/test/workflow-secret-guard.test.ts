@@ -13,6 +13,10 @@ import { WorkflowSecretGuard } from "@opencode-ai/core/workflow/secret-guard"
 import { WorkflowArtifactTable, WorkflowRunTable, WorkflowStageTable } from "@opencode-ai/core/workflow/sql"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { Workflow } from "@opencode-ai/schema/workflow"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Location } from "@opencode-ai/schema/location"
+import { AbsolutePath } from "@opencode-ai/schema/schema"
+import { Session } from "@opencode-ai/schema/session"
 import { testEffect } from "./lib/effect"
 
 const persistenceIt = testEffect(
@@ -151,11 +155,14 @@ describe("WorkflowSecretGuard", () => {
         expect(Exit.isFailure(rejected)).toBe(true)
 
         const workflowID = Workflow.ID.make(`wfl_secret_scan_${crypto.randomUUID()}`)
-        yield* workflow.create({
+        yield* workflow.admit({
           id: workflowID,
           type: "development",
           input: { brief: "Scan durable persistence" },
           budget: { maxAttempts: 1 },
+          location: Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit") }),
+          sessionID: Session.ID.make("ses_workflow_secret_guard"),
+          agent: Agent.ID.make("build"),
           stages: [
             {
               id: Workflow.StageID.make(`wfs_secret_scan_${crypto.randomUUID()}`),

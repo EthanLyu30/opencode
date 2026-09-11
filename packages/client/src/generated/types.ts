@@ -2775,6 +2775,13 @@ export type WorkflowsHistoryOutput = {
             readonly attempts: number
           }
           readonly notBefore: number
+          readonly leaseFence?:
+            | { readonly variant: "live_execution"; readonly expectedStatus: "leased" | "running" }
+            | {
+                readonly variant: "expired_recovery"
+                readonly expectedStatus: "leased" | "running"
+                readonly observedLeaseExpiresAt: number
+              }
         }
       }
     | {
@@ -2888,6 +2895,15 @@ export type WorkflowsHistoryOutput = {
           readonly workflowID: string
           readonly timestamp: number
           readonly stageID?: string
+          readonly attempt?: number
+          readonly leaseOwner?: string
+          readonly leaseFence?:
+            | { readonly variant: "live_execution"; readonly expectedStatus: "leased" | "running" }
+            | {
+                readonly variant: "expired_recovery"
+                readonly expectedStatus: "leased" | "running"
+                readonly observedLeaseExpiresAt: number
+              }
           readonly reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
           readonly failure?: {
             readonly category:
@@ -3338,6 +3354,13 @@ export type WorkflowsEventsOutput =
           readonly attempts: number
         }
         readonly notBefore: number
+        readonly leaseFence?:
+          | { readonly variant: "live_execution"; readonly expectedStatus: "leased" | "running" }
+          | {
+              readonly variant: "expired_recovery"
+              readonly expectedStatus: "leased" | "running"
+              readonly observedLeaseExpiresAt: number
+            }
       }
     }
   | {
@@ -3451,6 +3474,15 @@ export type WorkflowsEventsOutput =
         readonly workflowID: string
         readonly timestamp: number
         readonly stageID?: string
+        readonly attempt?: number
+        readonly leaseOwner?: string
+        readonly leaseFence?:
+          | { readonly variant: "live_execution"; readonly expectedStatus: "leased" | "running" }
+          | {
+              readonly variant: "expired_recovery"
+              readonly expectedStatus: "leased" | "running"
+              readonly observedLeaseExpiresAt: number
+            }
         readonly reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
         readonly failure?: {
           readonly category:

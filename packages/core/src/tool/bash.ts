@@ -13,9 +13,9 @@ import { PermissionV2 } from "../permission"
 import { PositiveInt } from "../schema"
 import { WorkflowCommandSandbox } from "../workflow/command-sandbox"
 import { WorkflowRoleAgents } from "../workflow/role-agents"
-import { WorkflowToolLineage } from "../workflow/tool-lineage"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
+import { ToolCatalogVersion } from "./catalog-version"
 import { Tools } from "./tools"
 
 export const name = "bash"
@@ -109,40 +109,76 @@ const layer = Layer.effectDiscard(
 
     yield* tools
       .register({
-        [name]: Tool.make({
-          description: `Execute one command. Workflow role agents run model-selected commands through the configured Location sandbox with role-specific workspace access and never fall back to host execution. Ordinary sessions use the host shell with filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}).`,
-          input: Input,
-          output: Output,
-          structured: StructuredOutput,
-          toStructuredOutput: ({ output }) => ({
-            truncated: output.truncated,
-            ...(output.exit === undefined ? {} : { exit: output.exit }),
-            ...(output.timeout === undefined ? {} : { timeout: output.timeout }),
-          }),
-          toModelOutput: ({ output }) => [
-            { type: "text", text: output.output },
-            { type: "text", text: modelOutput(output) },
-          ],
-          execute: (input, context) =>
-            Effect.gen(function* () {
-              const source = {
-                type: "tool" as const,
-                messageID: context.assistantMessageID,
-                callID: context.toolCallID,
-              }
-              const workflowRole = WorkflowRoleAgents.roleForAgent(context.agent)
-              if (workflowRole !== undefined) {
-                const lineage = context.workflowLineage
-                if (
-                  lineage === undefined ||
-                  lineage.sessionID !== context.sessionID ||
-                  lineage.agent !== context.agent ||
-                  lineage.role !== workflowRole
-                ) {
-                  return yield* new ToolFailure({
-                    message: "Workflow Bash requires verified workflow lineage",
+        [name]: ToolCatalogVersion.trusted(
+          Tool.make({
+            description: `Execute one command. Workflow role agents run model-selected commands through the configured Location sandbox with role-specific workspace access and never fall back to host execution. Ordinary sessions use the host shell with filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}).`,
+            input: Input,
+            output: Output,
+            structured: StructuredOutput,
+            toStructuredOutput: ({ output }) => ({
+              truncated: output.truncated,
+              ...(output.exit === undefined ? {} : { exit: output.exit }),
+              ...(output.timeout === undefined ? {} : { timeout: output.timeout }),
+            }),
+            toModelOutput: ({ output }) => [
+              { type: "text", text: output.output },
+              { type: "text", text: modelOutput(output) },
+            ],
+            execute: (input, context) =>
+              Effect.gen(function* () {
+                const source = {
+                  type: "tool" as const,
+                  messageID: context.assistantMessageID,
+                  callID: context.toolCallID,
+                }
+                const workflowRole = WorkflowRoleAgents.roleForAgent(context.agent)
+                if (workflowRole !== undefined) {
+                  const lineage = context.workflowLineage
+                  if (
+                    lineage === undefined ||
+                    lineage.sessionID !== context.sessionID ||
+                    lineage.agent !== context.agent ||
+                    lineage.role !== workflowRole
+                  ) {
+                    return yield* new ToolFailure({
+                      message: "Workflow Bash requires verified workflow lineage",
+                    })
+                  }
+                  yield* permission.assert({
+                    action: name,
+                    resources: [input.command],
+                    save: [input.command],
+                    sessionID: context.sessionID,
+                    agent: context.agent,
+                    source,
+                  })
+                  return yield* sandbox.run({
+                    role: workflowRole,
+                    workflowID: lineage.workflowID,
+                    stageID: lineage.stageID,
+                    policyDigest: lineage.policyDigest,
+                    sessionID: context.sessionID,
+                    agent: context.agent,
+                    assistantMessageID: context.assistantMessageID,
+                    toolCallID: context.toolCallID,
+                    command: input.command,
+                    ...(input.workdir === undefined ? {} : { workdir: input.workdir }),
+                    ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
                   })
                 }
+                const target = yield* mutation.resolve({ path: input.workdir ?? ".", kind: "directory" })
+                const external = target.externalDirectory
+                if (external)
+                  yield* permission.assert({
+                    ...LocationMutation.externalDirectoryPermission(external),
+                    sessionID: context.sessionID,
+                    agent: context.agent,
+                    source,
+                  })
+                const warnings = (yield* externalCommandDirectories(fs, input.command, target.canonical)).map(
+                  (directory) =>
+                    `Command argument references external directory ${path.join(directory, "*").replaceAll("\\", "/")}. Bash runs with host-user filesystem, process, and network authority; this scan is advisory only.`,
+                )
                 yield* permission.assert({
                   action: name,
                   resources: [input.command],
@@ -151,102 +187,69 @@ const layer = Layer.effectDiscard(
                   agent: context.agent,
                   source,
                 })
-                return yield* sandbox.run({
-                  role: workflowRole,
-                  workflowID: lineage.workflowID,
-                  stageID: lineage.stageID,
-                  policyDigest: lineage.policyDigest,
-                  sessionID: context.sessionID,
-                  agent: context.agent,
-                  assistantMessageID: context.assistantMessageID,
-                  toolCallID: context.toolCallID,
-                  command: input.command,
-                  ...(input.workdir === undefined ? {} : { workdir: input.workdir }),
-                  ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
-                })
-              }
-              const target = yield* mutation.resolve({ path: input.workdir ?? ".", kind: "directory" })
-              const external = target.externalDirectory
-              if (external)
-                yield* permission.assert({
-                  ...LocationMutation.externalDirectoryPermission(external),
-                  sessionID: context.sessionID,
-                  agent: context.agent,
-                  source,
-                })
-              const warnings = (yield* externalCommandDirectories(fs, input.command, target.canonical)).map(
-                (directory) =>
-                  `Command argument references external directory ${path.join(directory, "*").replaceAll("\\", "/")}. Bash runs with host-user filesystem, process, and network authority; this scan is advisory only.`,
-              )
-              yield* permission.assert({
-                action: name,
-                resources: [input.command],
-                save: [input.command],
-                sessionID: context.sessionID,
-                agent: context.agent,
-                source,
-              })
 
-              if ((yield* fs.stat(target.canonical)).type !== "Directory")
-                return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
+                if ((yield* fs.stat(target.canonical)).type !== "Directory")
+                  return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
 
-              const entries = yield* config.entries()
-              const shell =
-                Object.assign({}, ...entries.flatMap((entry) => (entry.type === "document" ? [entry.info] : [])))
-                  .shell ?? defaultShell()
-              const command = ChildProcess.make(input.command, [], {
-                cwd: target.canonical,
-                shell,
-                stdin: "ignore",
-                detached: process.platform !== "win32",
-                forceKillAfter: Duration.seconds(3),
-              })
-              const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
-              const result = yield* appProcess
-                .run(command, {
-                  combineOutput: true,
-                  timeout: Duration.millis(timeout),
-                  maxOutputBytes: MAX_CAPTURE_BYTES,
+                const entries = yield* config.entries()
+                const shell =
+                  Object.assign({}, ...entries.flatMap((entry) => (entry.type === "document" ? [entry.info] : [])))
+                    .shell ?? defaultShell()
+                const command = ChildProcess.make(input.command, [], {
+                  cwd: target.canonical,
+                  shell,
+                  stdin: "ignore",
+                  detached: process.platform !== "win32",
+                  forceKillAfter: Duration.seconds(3),
                 })
-                .pipe(
-                  Effect.catchTag("AppProcessError", (error) =>
-                    isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
-                  ),
-                )
-              if (!result) {
+                const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
+                const result = yield* appProcess
+                  .run(command, {
+                    combineOutput: true,
+                    timeout: Duration.millis(timeout),
+                    maxOutputBytes: MAX_CAPTURE_BYTES,
+                  })
+                  .pipe(
+                    Effect.catchTag("AppProcessError", (error) =>
+                      isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
+                    ),
+                  )
+                if (!result) {
+                  return {
+                    output: `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`,
+                    truncated: false,
+                    timeout: true,
+                    ...(warnings.length ? { warnings } : {}),
+                  }
+                }
+
+                const output = result.output?.toString("utf8") || "(no output)"
+                const notice = result.outputTruncated
+                  ? "[output capture truncated at the in-memory safety limit]"
+                  : undefined
                 return {
-                  output: `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`,
-                  truncated: false,
-                  timeout: true,
+                  exit: result.exitCode,
+                  output: notice ? `${output}\n\n${notice}` : output,
+                  truncated: result.outputTruncated === true,
                   ...(warnings.length ? { warnings } : {}),
                 }
-              }
-
-              const output = result.output?.toString("utf8") || "(no output)"
-              const notice = result.outputTruncated
-                ? "[output capture truncated at the in-memory safety limit]"
-                : undefined
-              return {
-                exit: result.exitCode,
-                output: notice ? `${output}\n\n${notice}` : output,
-                truncated: result.outputTruncated === true,
-                ...(warnings.length ? { warnings } : {}),
-              }
-            }).pipe(
-              Effect.mapError(
-                (error) =>
-                  new ToolFailure({
-                    message:
-                      error instanceof ToolFailure
-                        ? error.message
-                        : error instanceof WorkflowCommandSandbox.Unavailable ||
-                            error instanceof WorkflowCommandSandbox.Rejected
+              }).pipe(
+                Effect.mapError(
+                  (error) =>
+                    new ToolFailure({
+                      message:
+                        error instanceof ToolFailure
                           ? error.message
-                          : `Unable to execute command: ${input.command}`,
-                  }),
+                          : error instanceof WorkflowCommandSandbox.Unavailable ||
+                              error instanceof WorkflowCommandSandbox.Rejected
+                            ? error.message
+                            : `Unable to execute command: ${input.command}`,
+                    }),
+                ),
               ),
-            ),
-        }),
+          }),
+          "@opencode/location-tool/bash@1",
+        ),
       })
       .pipe(Effect.orDie)
   }),

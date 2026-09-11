@@ -12,8 +12,12 @@ import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Location } from "@opencode-ai/schema/location"
 import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { Responses } from "@opencode-ai/schema/responses"
+import { AbsolutePath } from "@opencode-ai/schema/schema"
+import { Session } from "@opencode-ai/schema/session"
 import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
@@ -48,6 +52,14 @@ const workerOptions: WorkflowExecutionLocal.Options = {
   concurrency: 1,
 }
 
+const admit = (workflow: WorkflowV2.Interface, input: Workflow.CreateInput) =>
+  workflow.admit({
+    ...input,
+    location: Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Audit") }),
+    sessionID: Session.ID.make("ses_workflow_recovery"),
+    agent: Agent.ID.make("build"),
+  })
+
 const eventually = <A, E, R>(effect: Effect.Effect<A, E, R>, predicate: (value: A) => boolean) =>
   Effect.gen(function* () {
     while (!predicate(yield* effect)) {
@@ -78,10 +90,12 @@ describe("Workflow recovery", () => {
           const workflow = yield* WorkflowV2.Service
           const now = DateTime.toEpochMillis(yield* DateTime.now)
           for (const input of inputs) {
-            yield* workflow.create(input)
-            const stage = Option.getOrThrow(
+            yield* admit(workflow, input)
+            const stage = Option.getOrThrowWith(
               yield* store.claim({ owner: "worker-recovery-first", now, leaseDurationMs: 10 }),
+              () => new Error(`No recovery seed candidate for ${input.id}`),
             )
+            yield* events.publish(WorkflowEvent.Started, { workflowID: input.id!, timestamp: DateTime.makeUnsafe(now) })
             yield* events.publish(WorkflowEvent.Stage.Started, {
               workflowID: input.id!,
               stageID: stage.id,
@@ -177,10 +191,11 @@ describe("Workflow recovery", () => {
           const store = yield* WorkflowStore.Service
           const workflow = yield* WorkflowV2.Service
           const now = DateTime.toEpochMillis(yield* DateTime.now)
-          yield* workflow.create(input)
+          yield* admit(workflow, input)
           const stage = Option.getOrThrow(
             yield* store.claim({ owner: "worker-recovery-cancel-first", now, leaseDurationMs: 10 }),
           )
+          yield* events.publish(WorkflowEvent.Started, { workflowID: input.id!, timestamp: DateTime.makeUnsafe(now) })
           yield* events.publish(WorkflowEvent.Stage.Started, {
             workflowID: input.id!,
             stageID: stage.id,
@@ -264,10 +279,11 @@ describe("Workflow recovery", () => {
           const workflow = yield* WorkflowV2.Service
           const now = DateTime.toEpochMillis(yield* DateTime.now)
           for (const input of [retryInput, failInput, oppositeInput]) {
-            yield* workflow.create(input)
+            yield* admit(workflow, input)
             const stage = Option.getOrThrow(
               yield* store.claim({ owner: "worker-recovery-resolution", now, leaseDurationMs: 5_000 }),
             )
+            yield* events.publish(WorkflowEvent.Started, { workflowID: input.id!, timestamp: DateTime.makeUnsafe(now) })
             yield* events.publish(WorkflowEvent.Stage.Started, {
               workflowID: input.id!,
               stageID: stage.id,
@@ -279,6 +295,9 @@ describe("Workflow recovery", () => {
               workflowID: input.id!,
               stageID: stage.id,
               timestamp: DateTime.makeUnsafe(now + 1),
+              attempt: stage.attempt,
+              leaseOwner: "worker-recovery-resolution",
+              leaseFence: { variant: "live_execution", expectedStatus: "running" },
               reason: "ambiguous_execution",
               failure: {
                 category: "ambiguous",
@@ -416,10 +435,11 @@ describe("Workflow recovery", () => {
           const store = yield* WorkflowStore.Service
           const workflow = yield* WorkflowV2.Service
           const now = DateTime.toEpochMillis(yield* DateTime.now)
-          yield* workflow.create(input)
+          yield* admit(workflow, input)
           const stage = Option.getOrThrow(
             yield* store.claim({ owner: "worker-checkpoint-usage", now, leaseDurationMs: 5_000 }),
           )
+          yield* events.publish(WorkflowEvent.Started, { workflowID: input.id!, timestamp: DateTime.makeUnsafe(now) })
           yield* events.publish(WorkflowEvent.Stage.Started, {
             workflowID: input.id!,
             stageID: stage.id,
@@ -462,6 +482,9 @@ describe("Workflow recovery", () => {
             workflowID: input.id!,
             stageID: stage.id,
             timestamp: DateTime.makeUnsafe(now + 2),
+            attempt: stage.attempt,
+            leaseOwner: "worker-checkpoint-usage",
+            leaseFence: { variant: "live_execution", expectedStatus: "running" },
             reason: "ambiguous_execution",
             failure: {
               category: "ambiguous",
@@ -534,7 +557,7 @@ describe("Workflow recovery", () => {
           } satisfies Workflow.CreateInput
 
           for (const input of [failInput, retryInput]) {
-            yield* workflow.create(input)
+            yield* admit(workflow, input)
             if (input.id === failInput.id) {
               yield* responses.create({
                 id: responseID,
@@ -549,6 +572,7 @@ describe("Workflow recovery", () => {
             const stage = Option.getOrThrow(
               yield* store.claim({ owner: "worker-recovery-atomic", now, leaseDurationMs: 5_000 }),
             )
+            yield* events.publish(WorkflowEvent.Started, { workflowID: input.id!, timestamp: DateTime.makeUnsafe(now) })
             yield* events.publish(WorkflowEvent.Stage.Started, {
               workflowID: input.id!,
               stageID: stage.id,
@@ -560,6 +584,9 @@ describe("Workflow recovery", () => {
               workflowID: input.id!,
               stageID: stage.id,
               timestamp: DateTime.makeUnsafe(now + 1),
+              attempt: stage.attempt,
+              leaseOwner: "worker-recovery-atomic",
+              leaseFence: { variant: "live_execution", expectedStatus: "running" },
               reason: "ambiguous_execution",
               failure: { category: "ambiguous", code: "lease_expired", message: "Ambiguous execution" },
               usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
@@ -667,7 +694,7 @@ describe("Workflow recovery", () => {
                 },
               ],
             }
-            yield* workflow.create(input)
+            yield* admit(workflow, input)
             const requestHash = `hash:recovery-provider-usage-${suffix}`
             const lease = storeResponse ? undefined : yield* responses.acquireTransient({ requestHash, responseID })
             const admitted = yield* responses.create({
@@ -684,6 +711,7 @@ describe("Workflow recovery", () => {
             const stage = Option.getOrThrow(
               yield* store.claim({ owner: `worker-provider-usage-${suffix}`, now, leaseDurationMs: 5_000 }),
             )
+            yield* events.publish(WorkflowEvent.Started, { workflowID, timestamp: DateTime.makeUnsafe(now) })
             yield* events.publish(WorkflowEvent.Stage.Started, {
               workflowID,
               stageID,
@@ -726,6 +754,9 @@ describe("Workflow recovery", () => {
               workflowID,
               stageID,
               timestamp: DateTime.makeUnsafe(now + 2),
+              attempt: stage.attempt,
+              leaseOwner: `worker-provider-usage-${suffix}`,
+              leaseFence: { variant: "live_execution", expectedStatus: "running" },
               reason: "ambiguous_execution",
               failure: { category: "ambiguous", code: "lease_expired", message: "Ambiguous execution" },
               usage: { tokens: 5, turns: 1, toolCalls: 0, attempts: 0 },
@@ -768,7 +799,7 @@ describe("Workflow recovery", () => {
 
         yield* Effect.gen(function* () {
           const workflow = yield* WorkflowV2.Service
-          yield* workflow.create(input)
+          yield* admit(workflow, input)
 
           const first = yield* workflow.history({ workflowID: input.id!, limit: 1 })
           const cursor = first.events.at(-1)?.durable?.seq

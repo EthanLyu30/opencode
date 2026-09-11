@@ -19,7 +19,7 @@ const recognizedFrameworkCases = [
   [
     "Vite dev",
     { scripts: { dev: "vite" }, devDependencies: { vite: "7.0.0" } },
-    ["bun", "run", "--no-env-file", "dev"],
+    ["bun", "run", "--no-env-file", "dev", "--", "--host", "0.0.0.0", "--port", "18081", "--strictPort"],
     "vite",
     "development",
     [".env", ".env.local", ".env.development", ".env.development.local"],
@@ -27,7 +27,7 @@ const recognizedFrameworkCases = [
   [
     "Vite preview",
     { scripts: { preview: "vite preview" }, devDependencies: { vite: "7.0.0" } },
-    ["bun", "run", "--no-env-file", "preview"],
+    ["bun", "run", "--no-env-file", "preview", "--", "--host", "0.0.0.0", "--port", "18081", "--strictPort"],
     "vite",
     "production",
     [".env", ".env.local", ".env.production", ".env.production.local"],
@@ -35,7 +35,7 @@ const recognizedFrameworkCases = [
   [
     "Next dev",
     { scripts: { dev: "next dev" }, dependencies: { next: "16.0.0" } },
-    ["bun", "run", "--no-env-file", "dev"],
+    ["bun", "run", "--no-env-file", "dev", "--", "--hostname", "0.0.0.0", "--port", "18081"],
     "next",
     "development",
     [".env.development.local", ".env.local", ".env.development", ".env"],
@@ -43,7 +43,7 @@ const recognizedFrameworkCases = [
   [
     "Next start",
     { scripts: { start: "next start" }, dependencies: { next: "16.0.0" } },
-    ["bun", "run", "--no-env-file", "start"],
+    ["bun", "run", "--no-env-file", "start", "--", "--hostname", "0.0.0.0", "--port", "18081"],
     "next",
     "production",
     [".env.production.local", ".env.local", ".env.production", ".env"],
@@ -468,7 +468,18 @@ describe("PreviewPlan.freeze", () => {
     const plan = freeze(root.path)
 
     expect(plan.kind).toBe("script")
-    expect(plan.argv).toEqual(["bun", "run", "--no-env-file", "dev"])
+    expect(plan.argv).toEqual([
+      "bun",
+      "run",
+      "--no-env-file",
+      "dev",
+      "--",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "18081",
+      "--strictPort",
+    ])
   })
 
   test("freezes explicit user argv and only allowlisted environment values", async () => {
@@ -487,15 +498,48 @@ describe("PreviewPlan.freeze", () => {
         env: { NODE_ENV: "production" },
       },
       {
-        environment: { CI: "1", UNTRUSTED: "ignored" },
-        envAllowlist: ["CI", "NODE_ENV"],
+        environment: { TASK23_INHERITED: "1", UNTRUSTED: "ignored" },
+        envAllowlist: ["TASK23_INHERITED", "NODE_ENV"],
       },
     )
 
     expect(plan.kind).toBe("script")
     expect(plan.argv).toEqual(["bun", "run", "--no-env-file", "storybook"])
-    expect(plan.env).toEqual({ CI: "1", NODE_ENV: "production" })
+    expect(plan.env).toEqual({ NODE_ENV: "production", TASK23_INHERITED: "1" })
     expect(Object.isFrozen(plan.env)).toBe(true)
+  })
+
+  test.each([
+    "OPENCODE_PREVIEW_PORT",
+    "PORT",
+    "PATH",
+    "CI",
+    "HOME",
+    "LANG",
+    "NO_COLOR",
+    "TEMP",
+    "TMP",
+    "opencode_preview_port",
+    "No_Color",
+  ])("rejects host-owned preview environment authority %s", async (name) => {
+    await using root = await tmpdir()
+    await fs.writeFile(
+      path.join(root.path, "package.json"),
+      JSON.stringify({ scripts: { storybook: "storybook dev" }, devDependencies: { storybook: "10.0.0" } }),
+    )
+
+    expect(() =>
+      freeze(
+        root.path,
+        {
+          kind: "script",
+          cwd: ".",
+          argv: ["bun", "run", "--no-env-file", "storybook"],
+          env: { [name]: "model-owned" },
+        },
+        { envAllowlist: [name] },
+      ),
+    ).toThrow(PreviewPlan.Invalid)
   })
 
   test("requires typed user configuration for an unknown project", async () => {

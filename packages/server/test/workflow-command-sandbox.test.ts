@@ -157,10 +157,19 @@ describe("WorkflowCommandSandboxServer", () => {
     expect(create.argv.join("\0").toLowerCase()).not.toContain("users\\administrator")
     expect(create.env).toEqual({
       DOCKER_CONFIG: fixture.dockerConfig,
+      DOCKER_CONTEXT: "default",
+      DOCKER_HOST: "",
+      DOCKER_TLS_VERIFY: "",
+      DOCKER_CERT_PATH: "",
+      BUILDX_BUILDER: "",
+      BUILDKIT_HOST: "",
+      PATH: path.win32.dirname(enginePath),
       TEMP: fixture.temp,
       TMP: fixture.temp,
     })
-    expect(Object.values(create.env).every((value) => value.startsWith("D:\\"))).toBe(true)
+    expect([create.env.DOCKER_CONFIG, create.env.TEMP, create.env.TMP].every((value) => value.startsWith("D:\\"))).toBe(
+      true,
+    )
     expect(create.timeoutMs).toBe(5_000)
     expect(create.maxOutputBytes).toBe(65_536)
     const start = fixture.engine.one("container", "start")

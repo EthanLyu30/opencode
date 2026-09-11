@@ -285,6 +285,7 @@ const injectedRoleLayer = Layer.effect(
               ),
             )
 
+          const trustedMessages = result.trustedMessages ?? preparation?.messages
           return {
             checkpoint: result.checkpoint,
             usage: result.usage,
@@ -293,7 +294,7 @@ const injectedRoleLayer = Layer.effect(
                 ? [...(result.artifacts ?? []), artifact]
                 : [...(result.artifacts ?? []), ...settlement.artifacts],
             ...(settlement === undefined ? {} : { roleReceipt: settlement.receipt }),
-            ...(preparation?.messages === undefined ? {} : { trustedMessages: preparation.messages }),
+            ...(trustedMessages === undefined ? {} : { trustedMessages }),
             ...(settlement?.dependencies === undefined ? {} : { trustedDependencies: settlement.dependencies }),
             responseSettlement: result.responseSettlement,
           }

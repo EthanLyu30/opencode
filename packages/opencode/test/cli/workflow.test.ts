@@ -531,6 +531,7 @@ describe("workflow CLI process", () => {
           timeoutMs: 10_000,
         })
         yield* child.waitForStderr("Workflow admitted", 8_000)
+        const cancellationStartedAt = Date.now()
         const result = yield* child.result.pipe(
           Effect.timeoutOrElse({
             duration: "5 seconds",
@@ -539,7 +540,7 @@ describe("workflow CLI process", () => {
         )
 
         expect(result.exitCode).toBe(130)
-        expect(result.durationMs).toBeLessThan(5_000)
+        expect(Date.now() - cancellationStartedAt).toBeLessThan(5_000)
         expect(result.stderr).toContain("Cancellation acknowledged")
         expect(result.stdout.trim().split("\n")).toHaveLength(1)
         expect(JSON.parse(result.stdout)).toMatchObject({ workflow: { status: "cancel_requested" } })
@@ -557,6 +558,7 @@ describe("workflow CLI process", () => {
           timeoutMs: 10_000,
         })
         yield* child.waitForStderr("Workflow admitted", 8_000)
+        const cancellationStartedAt = Date.now()
         const result = yield* child.result.pipe(
           Effect.timeoutOrElse({
             duration: "5 seconds",
@@ -565,7 +567,7 @@ describe("workflow CLI process", () => {
         )
 
         expect(result.exitCode).toBe(130)
-        expect(result.durationMs).toBeLessThan(5_000)
+        expect(Date.now() - cancellationStartedAt).toBeLessThan(5_000)
         expect(result.stdout.trim().split("\n")).toHaveLength(1)
         expect(JSON.parse(result.stdout)).toMatchObject({
           workflow: { id: "wfl_fixture", status: "succeeded" },

@@ -114,6 +114,16 @@ export interface ImplementationCaptureContract {
   readonly implementationSha256: string
   readonly readySelector: string
   readonly sealedSnapshot?: WorkflowWorkspaceMaterialization.Sealed
+  /** Persisted Stage lease observed by the trusted Server resolver. */
+  readonly previewLease?: PreviewLeaseAuthority
+}
+
+export interface PreviewLeaseAuthority {
+  readonly workflowID: Workflow.ID
+  readonly stageID: Workflow.StageID
+  readonly attempt: number
+  readonly leaseOwner: string
+  readonly leaseExpiresAt: number
 }
 
 export type ResolveImplementationContract = (
@@ -670,9 +680,12 @@ export function evidenceArtifactBinding(input: BindEvidenceInput): EvidenceArtif
 }
 
 export function validateImplementationCaptureContract(input: unknown): ImplementationCaptureContract {
+  const keys = ["implementationSha256", "readySelector"]
   if (
-    !hasExactDataKeys(input, ["implementationSha256", "readySelector"]) &&
-    !hasExactDataKeys(input, ["implementationSha256", "readySelector", "sealedSnapshot"])
+    !hasExactDataKeys(input, keys) &&
+    !hasExactDataKeys(input, [...keys, "sealedSnapshot"]) &&
+    !hasExactDataKeys(input, [...keys, "previewLease"]) &&
+    !hasExactDataKeys(input, [...keys, "sealedSnapshot", "previewLease"])
   ) {
     throw new TypeError("Implementation capture contract shape is not exact")
   }
@@ -682,10 +695,42 @@ export function validateImplementationCaptureContract(input: unknown): Implement
   }
   const sealedSnapshot =
     "sealedSnapshot" in input ? WorkflowWorkspaceMaterialization.validate(input.sealedSnapshot) : undefined
+  const previewLease = "previewLease" in input ? validatePreviewLeaseAuthority(input.previewLease) : undefined
   return Object.freeze({
     implementationSha256,
     readySelector: input.readySelector,
     ...(sealedSnapshot === undefined ? {} : { sealedSnapshot }),
+    ...(previewLease === undefined ? {} : { previewLease }),
+  })
+}
+
+export function validatePreviewLeaseAuthority(input: unknown): PreviewLeaseAuthority {
+  if (!hasExactDataKeys(input, ["workflowID", "stageID", "attempt", "leaseOwner", "leaseExpiresAt"])) {
+    throw new TypeError("Preview lease authority shape is not exact")
+  }
+  const workflowID = Schema.decodeUnknownSync(Workflow.ID)(input.workflowID)
+  const stageID = Schema.decodeUnknownSync(Workflow.StageID)(input.stageID)
+  if (
+    typeof input.attempt !== "number" ||
+    !Number.isSafeInteger(input.attempt) ||
+    input.attempt <= 0 ||
+    typeof input.leaseOwner !== "string" ||
+    input.leaseOwner.length === 0 ||
+    input.leaseOwner.length > 256 ||
+    input.leaseOwner.normalize("NFC") !== input.leaseOwner ||
+    /[\u0000-\u001f\u007f]/.test(input.leaseOwner) ||
+    typeof input.leaseExpiresAt !== "number" ||
+    !Number.isSafeInteger(input.leaseExpiresAt) ||
+    input.leaseExpiresAt < 0
+  ) {
+    throw new TypeError("Preview lease authority is invalid")
+  }
+  return Object.freeze({
+    workflowID,
+    stageID,
+    attempt: input.attempt,
+    leaseOwner: input.leaseOwner,
+    leaseExpiresAt: input.leaseExpiresAt,
   })
 }
 
