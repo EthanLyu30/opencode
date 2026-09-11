@@ -1451,7 +1451,10 @@ set "OPENCODE_WORKFLOW_SANDBOX_CONFIG=$($roots.DockerConfig)"
 set "OPENCODE_WORKFLOW_SANDBOX_TEMP=$($roots.DockerTemp)"
 
 set "OPENCODE_ENV_FILE=$environmentFile"
-if exist "%OPENCODE_ENV_FILE%" for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /c:"DEEPSEEK_API_KEY=" /c:"MOONSHOT_API_KEY=" "%OPENCODE_ENV_FILE%"`) do set "%%A=%%B"
+if exist "%OPENCODE_ENV_FILE%" for /f "usebackq tokens=1,* delims==" %%A in ("%OPENCODE_ENV_FILE%") do (
+  if "%%A"=="DEEPSEEK_API_KEY" set "%%A=%%B"
+  if "%%A"=="MOONSHOT_API_KEY" set "%%A=%%B"
+)
 
 "%OPENCODE_ROOT%\bin\opencode-local.exe" %*
 exit /b %ERRORLEVEL%

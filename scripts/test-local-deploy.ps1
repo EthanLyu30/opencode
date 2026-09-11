@@ -210,7 +210,7 @@ function Read-EnvironmentDump {
   param([Parameter(Mandatory = $true)][string]$Path)
   $values = @{}
   foreach ($line in Get-Content -LiteralPath $Path) {
-    if ($line -notmatch '^(?:OPENCODE_WORKFLOW_[A-Z_]+|PLAYWRIGHT_BROWSERS_PATH)=') { continue }
+    if ($line -notmatch '^(?:OPENCODE_WORKFLOW_[A-Z_]+|PLAYWRIGHT_BROWSERS_PATH|DEEPSEEK_API_KEY|MOONSHOT_API_KEY|IGNORED_API_KEY)=') { continue }
     $parts = $line.Split(@("="), 2, [StringSplitOptions]::None)
     if ($parts.Length -ne 2 -or $values.ContainsKey($parts[0])) { throw "Malformed environment dump" }
     $values[$parts[0]] = $parts[1]
@@ -631,6 +631,27 @@ await Bun.write(Bun.argv.at(-1), lines.length === 0 ? "" : `${lines}\n`)
   foreach ($entry in $expectedEnvironment.GetEnumerator()) {
     Assert-Equal $actualEnvironment[$entry.Key] $entry.Value "Launcher exported the wrong $($entry.Key)"
   }
+  $providerEnvironmentFile = Join-Path $sourceRoot "packages\llm\.env.local"
+  [IO.Directory]::CreateDirectory((Split-Path -Parent $providerEnvironmentFile)) | Out-Null
+  [IO.File]::WriteAllText(
+    $providerEnvironmentFile,
+    "DEEPSEEK_API_KEY=deepseek-test-value`nMOONSHOT_API_KEY=moonshot-test-value`nIGNORED_API_KEY=ignored-test-value`n",
+    [Text.UTF8Encoding]::new($false)
+  )
+  $providerDump = Join-Path $caseRoot "launcher-provider-environment.txt"
+  $providerProbe = Join-Path $caseRoot "dump-provider-environment.js"
+  $providerProbeText = @'
+const names = ["DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "IGNORED_API_KEY"]
+const lines = names.map((name) => `${name}=${process.env[name] ?? ""}`).join("\n")
+await Bun.write(Bun.argv.at(-1), `${lines}\n`)
+'@
+  [IO.File]::WriteAllText($providerProbe, $providerProbeText, [Text.UTF8Encoding]::new($false))
+  & $launcher $providerProbe $providerDump
+  Assert-Equal $LASTEXITCODE 0 "Generated launcher provider environment probe failed"
+  $actualProviderEnvironment = Read-EnvironmentDump $providerDump
+  Assert-Equal $actualProviderEnvironment["DEEPSEEK_API_KEY"] "deepseek-test-value" "Launcher did not load the DeepSeek key"
+  Assert-Equal $actualProviderEnvironment["MOONSHOT_API_KEY"] "moonshot-test-value" "Launcher did not load the Kimi key"
+  Assert-Equal $actualProviderEnvironment["IGNORED_API_KEY"] "" "Launcher loaded an unapproved environment key"
   $directDump = Join-Path $caseRoot "direct-binary-environment.txt"
   $savedWorkflowEnvironment = @{}
   try {
