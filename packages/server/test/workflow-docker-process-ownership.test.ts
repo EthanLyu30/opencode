@@ -158,6 +158,25 @@ describe("DockerProcessOwnership", () => {
     expect(fixture.engine.all("network", "rm")).toHaveLength(1)
   })
 
+  test("accepts inherited image metadata without relaxing the workflow ownership namespace", async () => {
+    await using fixture = await setup()
+    fixture.engine.containerImageLabels = {
+      "org.opencontainers.image.version": "1.3.14-slim",
+      "org.opencontainers.image.source": "https://github.com/oven-sh/bun",
+    }
+
+    const owned = await fixture.service.start(fixture.startInput())
+    await owned.exited
+    await fixture.service.stop({ identity: fixture.identity, process: owned })
+
+    await using forged = await setup()
+    forged.engine.containerImageLabels = {
+      "io.opencode.workflow.preview.unexpected": "f".repeat(64),
+    }
+    await expect(forged.service.start(forged.startInput())).rejects.toThrow("container ownership verification failed")
+    expect(forged.engine.all("container", "start")).toEqual([])
+  })
+
   test.each([
     ["non-loopback request", [{ HostIp: "0.0.0.0", HostPort: "" }], [{ HostIp: "127.0.0.1", HostPort: "4317" }]],
     ["fixed request", [{ HostIp: "127.0.0.1", HostPort: "4317" }], [{ HostIp: "127.0.0.1", HostPort: "4317" }]],
@@ -869,6 +888,7 @@ class FakeEngine implements Docker.Engine {
   containerName = ""
   networkLabels: Record<string, string> = {}
   containerLabels: Record<string, string> = {}
+  containerImageLabels: Record<string, string> = {}
   networkVisible = true
   containerVisible = true
   containerRunning = false
@@ -946,7 +966,9 @@ class FakeEngine implements Docker.Engine {
           {
             Id: this.containerID,
             Name: `/${this.containerName}`,
-            Config: { Labels: inspectedLabels(this.containerLabels, this.labelFailure) },
+            Config: {
+              Labels: { ...this.containerImageLabels, ...inspectedLabels(this.containerLabels, this.labelFailure) },
+            },
             State: { Running: this.containerRunning, ExitCode: this.containerRunning ? 0 : 23 },
             HostConfig: {
               PortBindings: { "18080/tcp": this.requestedBindings },

@@ -723,7 +723,7 @@ async function inspectContainerState(
   if (
     dockerConfig === null ||
     typeof dockerConfig !== "object" ||
-    !exactLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) ||
+    !exactContainerLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) ||
     typeof running !== "boolean"
   ) {
     return undefined
@@ -755,7 +755,7 @@ async function inspectPublishedOrigin(
   if (
     dockerConfig === null ||
     typeof dockerConfig !== "object" ||
-    !exactLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) ||
+    !exactContainerLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) ||
     state === null ||
     typeof state !== "object" ||
     Reflect.get(state, "Running") !== true
@@ -852,6 +852,15 @@ function exactLabels(value: unknown, expected: Readonly<Record<string, string>>)
     typeof value === "object" &&
     !Array.isArray(value) &&
     Object.keys(value).length === Object.keys(expected).length &&
+    Object.entries(expected).every(([key, item]) => Reflect.get(value, key) === item)
+  )
+}
+
+function exactContainerLabels(value: unknown, expected: Readonly<Record<string, string>>) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false
+  const owned = Object.keys(value).filter((key) => key.startsWith(`${labelDomain}.`))
+  return (
+    owned.length === Object.keys(expected).length &&
     Object.entries(expected).every(([key, item]) => Reflect.get(value, key) === item)
   )
 }
@@ -1252,7 +1261,7 @@ async function inspectContainerByName(
   return Reflect.get(value, "Name") === `/${ownership.containerName}` &&
     dockerConfig !== null &&
     typeof dockerConfig === "object" &&
-    exactLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) &&
+    exactContainerLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) &&
     typeof running === "boolean"
     ? { id, running }
     : undefined
