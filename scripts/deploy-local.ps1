@@ -201,8 +201,13 @@ function Set-ScopedChildEnvironment {
   param([Parameter(Mandatory = $true)][Collections.IDictionary]$Values)
   $saved = @{}
   foreach ($entry in $Values.GetEnumerator()) {
-    $saved[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, "Process")
-    [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, "Process")
+    $name = [string]$entry.Key
+    $saved[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    if ($null -eq $entry.Value) {
+      Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    } else {
+      [Environment]::SetEnvironmentVariable($name, $entry.Value, "Process")
+    }
   }
   return $saved
 }
@@ -210,7 +215,12 @@ function Set-ScopedChildEnvironment {
 function Restore-ScopedChildEnvironment {
   param([Parameter(Mandatory = $true)][Collections.IDictionary]$Values)
   foreach ($entry in $Values.GetEnumerator()) {
-    [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, "Process")
+    $name = [string]$entry.Key
+    if ($null -eq $entry.Value) {
+      Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    } else {
+      [Environment]::SetEnvironmentVariable($name, $entry.Value, "Process")
+    }
   }
 }
 

@@ -112,7 +112,7 @@ function Invoke-Deploy {
   try {
     $ErrorActionPreference = "Continue"
     Set-ProcessEnvironmentValue -Name "OPENCODE_DEPLOY_TEST_CRASH_AFTER" -Value $CrashAfter
-    $output = & "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" @arguments 2>&1
+    $output = & (Get-Process -Id $PID).Path @arguments 2>&1
     $exitCode = $LASTEXITCODE
   } finally {
     Set-ProcessEnvironmentValue -Name "OPENCODE_DEPLOY_TEST_CRASH_AFTER" -Value $previousCrashPoint
