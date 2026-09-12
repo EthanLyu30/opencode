@@ -535,31 +535,31 @@ git push fork dev
 
 **Produces:** a D-hosted, integrity-checked Node helper for screenshots, DOM geometry, computed styles, interactions, and Axe output, avoiding the known Windows Bun/Chromium deadlock path.
 
-- [ ] **Step 1: Write RED protocol and security tests.**
+- [x] **Step 1: Write RED protocol and security tests.**
 
 Test random bearer authentication, request IDs, bounded JSON lines, loopback-only URLs, allowed run/preview IDs, viewport allowlist, output-root confinement, timeout, navigation escape, popup/download denial, oversized screenshot rejection, process crash, and malformed helper response.
 
-- [ ] **Step 2: Define the browser request contract.**
+- [x] **Step 2: Define the browser request contract.**
 
 Requests include run ID, preview capability URL, viewport ID/dimensions/device scale, deterministic wait condition, interaction script ID from the sealed evaluator bundle, and output relative path. Every primary task declares exactly three fixed responsive viewports. Requests never include arbitrary JavaScript from task output.
 
-- [ ] **Step 3: Implement the Node helper.**
+- [x] **Step 3: Implement the Node helper.**
 
 Launch the pinned Chromium in a fresh per-run user-data directory under D, disable external network except the preview origin, set deterministic locale/timezone/color scheme/reduced-motion/font inputs, execute only evaluator-owned interaction modules, capture PNG, DOM boxes, computed style allowlist, console/page errors, accessibility tree summary, and Axe results.
 
-- [ ] **Step 4: Build and authenticate the runtime.**
+- [x] **Step 4: Build and authenticate the runtime.**
 
 Follow the proven Task23 pattern: use Bun to bundle for Node, copy the exact Node executable/helper/dependencies to `toolchain\browser\<build-hash>`, hash every file into a manifest, and refuse startup if any hash differs. Store the helper grant only in the parent/child environment.
 
-- [ ] **Step 5: Add lifecycle recovery.**
+- [x] **Step 5: Add lifecycle recovery.**
 
 The parent restarts a crashed helper once for an unstarted capture, never repeats an interaction after evidence publication, and records a typed infrastructure failure if capture disposition is uncertain.
 
-- [ ] **Step 6: Verify fixture capture determinism.**
+- [x] **Step 6: Verify fixture capture determinism.**
 
 Capture the same local fixture three times at every required viewport. Pixel hashes and DOM/style JSON must match after known PNG metadata normalization.
 
-- [ ] **Step 7: Commit and push.**
+- [x] **Step 7: Commit and push.**
 
 ```powershell
 git add packages/benchmark scripts/build-task24-browser-runtime.ps1

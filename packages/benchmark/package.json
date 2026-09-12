@@ -7,6 +7,7 @@
   "scripts": {
     "task24": "bun src/cli.ts",
     "migrate:generate": "bun script/generate-run-migrations.ts",
+    "browser:manifest": "bun script/build-browser-manifest.ts",
     "test": "bun test --timeout 30000 --only-failures",
     "typecheck": "tsgo --noEmit"
   },
