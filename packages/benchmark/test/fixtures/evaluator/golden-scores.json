@@ -1,0 +1,13 @@
+{
+  "exact": { "visualComposite": 100, "diagnosticTotal": 100, "qualifiedSuccess": true },
+  "spacingDrift": { "visualComposite": 93.75, "diagnosticTotal": 98.125, "qualifiedSuccess": true },
+  "wrongPalette": { "visualComposite": 70, "diagnosticTotal": 91, "qualifiedSuccess": false },
+  "typographyDrift": { "visualComposite": 90, "diagnosticTotal": 97, "qualifiedSuccess": true },
+  "missingMobile": { "visualComposite": 88, "diagnosticTotal": 96.4, "qualifiedSuccess": false },
+  "brokenInteraction": { "visualComposite": 90, "diagnosticTotal": 97, "qualifiedSuccess": true },
+  "functionalFailure": { "diagnosticTotal": 55, "qualifiedSuccess": false },
+  "accessibilityFailure": { "diagnosticTotal": 95, "qualifiedSuccess": false },
+  "promptLeakage": { "diagnosticTotal": 0, "qualifiedSuccess": false },
+  "evaluatorTampering": { "diagnosticTotal": 0, "qualifiedSuccess": false },
+  "buildScriptSubstitution": { "diagnosticTotal": 0, "qualifiedSuccess": false }
+}

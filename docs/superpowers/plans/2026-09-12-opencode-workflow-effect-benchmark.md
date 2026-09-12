@@ -579,35 +579,35 @@ git push fork dev
 
 **Produces:** reproducible 100-point diagnostics and strict qualified-success/disqualification outcomes.
 
-- [ ] **Step 1: Write RED golden-score tests.**
+- [x] **Step 1: Write RED golden-score tests.**
 
 Create controlled fixtures for exact match, spacing drift, wrong palette, typography drift, missing mobile behavior, broken interaction, functional failure, accessibility failure, prompt leakage, evaluator tampering, and build-script substitution. Store expected component scores and disqualifications.
 
-- [ ] **Step 2: Implement functional evaluation.**
+- [x] **Step 2: Implement functional evaluation.**
 
 Run only evaluator-owned commands in a constrained child process with a fixed environment and timeout. Parse machine-readable results, bind them to test hashes, and map mandatory/optional assertions to the 45-point functional score. Task-authored tests cannot replace evaluator tests.
 
-- [ ] **Step 3: Implement the visual composite.**
+- [x] **Step 3: Implement the visual composite.**
 
 Normalize images, calculate SSIM and pixel/color distance over declared masks, compare DOM geometry with tolerance bands, compare typography/computed-style fields, and score sealed responsive/interaction checkpoints. Aggregate exactly 35/20/25/10/10 within the visual subscore, then map to 30 diagnostic points. Report official Design2Code metrics for applicable tasks. A missing visual component is a harness failure; weights are never redistributed.
 
-- [ ] **Step 4: Implement requirements, quality, and accessibility.**
+- [x] **Step 4: Implement requirements, quality, and accessibility.**
 
 Requirements come from evaluator-owned machine-readable assertions. Quality uses fixed linters/typecheck plus bounded structural checks; it does not reward code volume. Accessibility/responsive combines Axe critical/serious violations, keyboard/focus checks, overflow/clipping, and declared responsive states.
 
-- [ ] **Step 5: Implement policy disqualification.**
+- [x] **Step 5: Implement policy disqualification.**
 
 Detect writes outside workspace, hidden-gold access attempts, external network, benchmark/evaluator process access, test deletion/modification, reference embedding, credential probing, output manipulation, human edits after start, or budget/time/tool ceiling violation. Security, hidden-test mutation, evaluator access, or fabricated evidence sets the diagnostic score to zero and makes `qualifiedSuccess=false`; other ceiling/requirement failures make the run unqualified under the sealed scoring rule.
 
-- [ ] **Step 6: Produce the blinded qualitative-audit package.**
+- [x] **Step 6: Produce the blinded qualitative-audit package.**
 
 For every primary run whose automatic visual composite is 70–79 inclusive, export anonymized, randomly ordered reference/candidate pairs plus reason-neutral task labels. Remove arm/model/runtime identity. Human preference is qualitative audit evidence only and cannot alter automatic scores or qualified-success state.
 
-- [ ] **Step 7: Bind evidence.**
+- [x] **Step 7: Bind evidence.**
 
 Every score component cites one or more content-addressed evidence files. The evaluation JSON includes evaluator/version hashes, task/gold hashes, binary/arm/run identity, timestamps, and reason codes. Re-evaluation over the same workspace/evidence must produce byte-identical canonical JSON.
 
-- [ ] **Step 8: Verify and commit.**
+- [x] **Step 8: Verify and commit.**
 
 Run evaluator tests, typecheck, and a mutation test that changes one fixture dimension/function/policy event at a time and observes the expected score change.
 
