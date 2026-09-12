@@ -64,6 +64,9 @@ export function fingerprintProviderRequest(input: FingerprintInput): string {
       reasoningEffort: input.route.reasoningEffort,
       requiredCapabilities: input.route.requiredCapabilities,
       model: modelDescriptor(input.request.model),
+      ...(input.route.benchmarkTransport === undefined
+        ? {}
+        : { benchmarkTransportSha256: input.route.benchmarkTransport.bindingSha256 }),
     },
     contractFingerprint: input.contractFingerprint,
     sequence: input.sequence,

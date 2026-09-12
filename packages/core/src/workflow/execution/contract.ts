@@ -7,6 +7,7 @@ import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { JsonSchema, Schema } from "effect"
 import { Hash } from "../../util/hash"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
+import { WorkflowBenchmarkTransport } from "../benchmark-transport"
 import { WorkflowPermissions } from "../permissions"
 import { WorkflowRouting } from "../routing"
 
@@ -306,6 +307,7 @@ export function verifyAuthority(input: {
     role,
     budget: input.workflow.budget,
     requested: WorkflowRouting.requestedFromStage(role, input.stage.input),
+    benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(input.workflow),
   })
   const messages =
     input.authority.messageSource === "default"

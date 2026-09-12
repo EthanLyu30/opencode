@@ -55,12 +55,22 @@ describe("Workflow protocol group", () => {
     ).toThrow()
   })
 
-  test.each(["directory", "workspaceID", "url", "model", "provider", "command", "placement", "idempotencyKey"])(
-    "strictly rejects public visual-build field %s",
-    (field) => {
-      expect(() =>
-        Schema.decodeUnknownSync(WorkflowVisualBuild.CreateInput)({ ...visualBuild, [field]: "forged" }),
-      ).toThrow()
-    },
-  )
+  test.each([
+    "directory",
+    "workspaceID",
+    "url",
+    "model",
+    "provider",
+    "command",
+    "placement",
+    "idempotencyKey",
+    "baseURL",
+    "endpoint",
+    "grant",
+    "benchmarkTransport",
+  ])("strictly rejects public visual-build field %s", (field) => {
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowVisualBuild.CreateInput)({ ...visualBuild, [field]: "forged" }),
+    ).toThrow()
+  })
 })

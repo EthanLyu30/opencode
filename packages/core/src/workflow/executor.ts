@@ -7,6 +7,7 @@ import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Context, DateTime, Effect, Layer, Schema, Scope } from "effect"
 import { makeGlobalNode } from "../effect/app-node"
 import { Hash } from "../util/hash"
+import { WorkflowBenchmarkTransport } from "./benchmark-transport"
 import { WorkflowModelExecution } from "./execution/model"
 import { WorkflowRoleContract } from "./execution/contract"
 import { WorkflowRoleExecution } from "./execution/role"
@@ -132,6 +133,7 @@ const injectedRoleLayer = Layer.effect(
                 role,
                 budget: input.workflow.budget,
                 requested: WorkflowRouting.requestedFromStage(role, input.stage.input),
+                benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(input.workflow),
               }),
             catch: routeFailure,
           })
@@ -339,6 +341,16 @@ function unsupportedRole(type: string): ExecutionFailure {
 }
 
 function routeFailure(error: unknown): ExecutionFailure {
+  if (error instanceof WorkflowBenchmarkTransport.Invalid) {
+    return {
+      failure: {
+        category: error.code === "expired" ? "authentication" : "invalid_request",
+        code: `benchmark_transport_${error.code}`,
+        message: WorkflowSecretGuard.sanitizeText(error.message),
+      },
+      usage: zeroUsage,
+    }
+  }
   if (error instanceof WorkflowRouting.InvalidRouteOverride) {
     return {
       failure: {

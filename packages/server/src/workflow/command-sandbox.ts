@@ -5,6 +5,7 @@ import { Location } from "@opencode-ai/core/location"
 import { SessionStore } from "@opencode-ai/core/session/store"
 import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
+import { WorkflowBenchmarkTransport } from "@opencode-ai/core/workflow/benchmark-transport"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
@@ -368,6 +369,7 @@ const reloadAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadAuthority"
         role: input.request.role,
         budget: detail.run.budget,
         requested: WorkflowRouting.requestedFromStage(input.request.role, stage.input),
+        benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(detail.run, input.now()),
       }),
     catch: () => rejected("Persisted Workflow route policy is invalid"),
   })

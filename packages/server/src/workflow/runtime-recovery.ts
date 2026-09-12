@@ -2,6 +2,7 @@ export * as WorkflowRuntimeRecovery from "./runtime-recovery"
 
 import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
+import { WorkflowBenchmarkTransport } from "@opencode-ai/core/workflow/benchmark-transport"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
 import { WorkflowRouting } from "@opencode-ai/core/workflow/routing"
 import { WorkflowStore } from "@opencode-ai/core/workflow/store"
@@ -182,6 +183,7 @@ async function currentAuthority(
       role,
       budget: detail.run.budget,
       requested: WorkflowRouting.requestedFromStage(role, stage.input),
+      benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(detail.run, now),
     })
   } catch {
     return undefined

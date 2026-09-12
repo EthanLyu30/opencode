@@ -21,6 +21,7 @@ import { SessionProjector } from "../session/projector"
 import { SessionStore } from "../session/store"
 import { SessionSchema } from "../session/schema"
 import { WorkflowBusinessArtifact } from "./artifacts/business"
+import { WorkflowBenchmarkTransport } from "./benchmark-transport"
 import { WorkflowExecution } from "./execution"
 import { WorkflowGraph } from "./graph"
 import { PreviewPlan } from "./preview-plan"
@@ -48,7 +49,7 @@ export class InvalidIdempotencyKey extends Schema.TaggedErrorClass<InvalidIdempo
 export class InvalidAdmission extends Schema.TaggedErrorClass<InvalidAdmission>()(
   "WorkflowAdmission.InvalidAdmission",
   {
-    reason: Schema.Literal("receipt_too_large"),
+    reason: Schema.Literals(["receipt_too_large", "benchmark_transport_invalid"]),
     message: Schema.String.check(Schema.isMaxLength(128)),
   },
 ) {}
@@ -184,6 +185,7 @@ const layer = Layer.effect(
     const projects = yield* ProjectV2.Service
     const execution = yield* WorkflowExecution.Service
     const locations = yield* LocationServiceMap.Service
+    const benchmarkTransport = yield* WorkflowBenchmarkTransport.Service
 
     const reconcile = Effect.fn("WorkflowAdmission.reconcile")(function* (expected: PreparedVisualBuild) {
       const winner = yield* responses.request(expected.response.resource.requestHash)
@@ -256,6 +258,17 @@ const layer = Layer.effect(
       admitVisualBuild: Effect.fn("WorkflowAdmission.admitVisualBuild")(function* (input, locationInput, keyInput) {
         const request = yield* Schema.decodeUnknownEffect(WorkflowVisualBuild.CreateInput)(input).pipe(Effect.orDie)
         const location = yield* Schema.decodeUnknownEffect(Location.Ref)(locationInput).pipe(Effect.orDie)
+        const transportBinding = yield* Effect.try({
+          try: () =>
+            benchmarkTransport.binding === undefined
+              ? undefined
+              : WorkflowBenchmarkTransport.decodeBinding(benchmarkTransport.binding, Date.now()),
+          catch: () =>
+            new InvalidAdmission({
+              reason: "benchmark_transport_invalid",
+              message: "Trusted benchmark transport authority is invalid or expired",
+            }),
+        })
         yield* guardSafe(request)
         const key = yield* Effect.try({
           try: () => normalizeKey(keyInput, request, location),
@@ -274,7 +287,7 @@ const layer = Layer.effect(
           return yield* agents.select()
         }).pipe(Effect.provide(locations.get(location)))
         const timestamp = yield* DateTime.now
-        const routeMatrix = buildRouteMatrix(request.budget)
+        const routeMatrix = buildRouteMatrix(request.budget, transportBinding)
         const graph = Schema.decodeUnknownSync(ResponsesAdmission.VisualBuildGraph)(
           WorkflowGraph.expandVisualBuild({
             maxRevisions: request.visual.maxRevisions,
@@ -282,7 +295,7 @@ const layer = Layer.effect(
             responseID: ids.responseID,
           }).map((stage, index) => ({ ...stage, id: ids.stageIDs[index] })),
         )
-        const workflowInput = WorkflowProductionHostPlan.withPlan(
+        const productionInput = WorkflowProductionHostPlan.withPlan(
           {
             schemaVersion: 1,
             prompt: request.prompt,
@@ -292,6 +305,10 @@ const layer = Layer.effect(
           },
           productionHostPlan,
         )
+        const workflowInput =
+          transportBinding === undefined
+            ? productionInput
+            : WorkflowBenchmarkTransport.withBinding(productionInput, transportBinding)
         const workflowCreate: Workflow.CreateInput = {
           id: ids.workflowID,
           type: WORKFLOW_TYPE,
@@ -450,9 +467,12 @@ function deterministicIDs(claim: string, maxRevisions: number) {
   })
 }
 
-function buildRouteMatrix(budget: Workflow.Budget): ResponsesAdmission.VisualBuildReceipt["routeMatrix"] {
+function buildRouteMatrix(
+  budget: Workflow.Budget,
+  benchmarkTransport?: WorkflowBenchmarkTransport.Binding,
+): ResponsesAdmission.VisualBuildReceipt["routeMatrix"] {
   const route = (role: WorkflowRole.Role) => {
-    const resolved = WorkflowRouting.resolve({ role, budget })
+    const resolved = WorkflowRouting.resolve({ role, budget, benchmarkTransport })
     return {
       providerID: resolved.providerID,
       modelID: resolved.modelID,
@@ -486,5 +506,6 @@ export const node = makeGlobalNode({
     ProjectV2.node,
     LocationServiceMap.node,
     WorkflowExecution.node,
+    WorkflowBenchmarkTransport.node,
   ],
 })

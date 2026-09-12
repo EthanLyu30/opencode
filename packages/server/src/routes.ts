@@ -15,6 +15,7 @@ import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
 import { WorkflowAdmission } from "@opencode-ai/core/workflow/admission"
+import { WorkflowBenchmarkTransport } from "@opencode-ai/core/workflow/benchmark-transport"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
 import { WorkflowRoleExecution } from "@opencode-ai/core/workflow/execution/role"
@@ -33,6 +34,7 @@ import { sessionLocationLayer } from "./middleware/session-location"
 import { WorkflowCommandSandboxServer } from "./workflow/command-sandbox"
 import { WorkflowRuntimeRecovery } from "./workflow/runtime-recovery"
 import { WorkflowProductionEvidenceServer } from "./workflow/production-evidence"
+import { ProductionHostRuntime } from "./workflow/production-host-runtime"
 
 const applicationServices = LayerNode.group([
   Database.node,
@@ -55,6 +57,7 @@ const applicationServices = LayerNode.group([
 
 function applicationReplacements(workflow: Parameters<typeof workflowReplacements>[0] = {}) {
   return [
+    [WorkflowBenchmarkTransport.node, ProductionHostRuntime.benchmarkTransportNode],
     [SessionExecution.node, SessionExecutionLocal.node],
     [WorkflowExecution.node, WorkflowExecutionLocal.node],
     ...workflowReplacements(workflow),

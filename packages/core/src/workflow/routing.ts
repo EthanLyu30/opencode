@@ -5,6 +5,7 @@ import { DeepSeek, Kimi } from "@opencode-ai/llm/providers"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Data, Schema } from "effect"
+import { WorkflowBenchmarkTransport } from "./benchmark-transport"
 import { WorkflowSecretGuard } from "./secret-guard"
 
 type Capability = Capabilities.ProviderCapability
@@ -109,12 +110,16 @@ export interface Route {
   readonly requiredCapabilities: ReadonlyArray<Capability>
   readonly budget: Workflow.Budget
   readonly model: Model
+  readonly benchmarkTransport?: WorkflowBenchmarkTransport.Binding
 }
 
 export interface ResolveInput {
   readonly role: WorkflowRole.Role
   readonly budget: Workflow.Budget
   readonly requested?: WorkflowRole.RequestedRoute
+  readonly benchmarkTransport?: WorkflowBenchmarkTransport.Binding
+  /** Trusted deterministic clock seam for benchmark admission and recovery tests. */
+  readonly now?: number
 }
 
 export function forResponseModel(route: Route, modelID: string): Route {
@@ -134,9 +139,12 @@ export function forResponseModel(route: Route, modelID: string): Route {
   return Object.freeze({
     ...route,
     modelID,
-    model: DeepSeek.configure({ providerOptions: { deepseek: { reasoningEffort: route.reasoningEffort } } }).responses(
-      modelID,
-    ),
+    model: DeepSeek.configure({
+      ...(route.benchmarkTransport === undefined
+        ? {}
+        : { baseURL: WorkflowBenchmarkTransport.baseURL(route.benchmarkTransport, "deepseek") }),
+      providerOptions: { deepseek: { reasoningEffort: route.reasoningEffort } },
+    }).responses(modelID),
   })
 }
 
@@ -161,12 +169,24 @@ export function resolve(input: ResolveInput): Route {
     }
   }
 
+  const benchmarkTransport =
+    input.benchmarkTransport === undefined
+      ? undefined
+      : WorkflowBenchmarkTransport.decodeBinding(input.benchmarkTransport, input.now ?? Date.now())
   const model =
     policy.providerID === "kimi"
-      ? Kimi.configure({ providerOptions: { kimi: { reasoningEffort: policy.reasoningEffort } } }).model(policy.modelID)
-      : DeepSeek.configure({ providerOptions: { deepseek: { reasoningEffort: policy.reasoningEffort } } }).responses(
-          policy.modelID,
-        )
+      ? Kimi.configure({
+          ...(benchmarkTransport === undefined
+            ? {}
+            : { baseURL: WorkflowBenchmarkTransport.baseURL(benchmarkTransport, "kimi", input.now) }),
+          providerOptions: { kimi: { reasoningEffort: policy.reasoningEffort } },
+        }).model(policy.modelID)
+      : DeepSeek.configure({
+          ...(benchmarkTransport === undefined
+            ? {}
+            : { baseURL: WorkflowBenchmarkTransport.baseURL(benchmarkTransport, "deepseek", input.now) }),
+          providerOptions: { deepseek: { reasoningEffort: policy.reasoningEffort } },
+        }).responses(policy.modelID)
 
   return Object.freeze({
     role: input.role,
@@ -177,6 +197,7 @@ export function resolve(input: ResolveInput): Route {
     requiredCapabilities: Object.freeze([...policy.requiredCapabilities]),
     budget: Object.freeze({ ...input.budget }),
     model,
+    ...(benchmarkTransport === undefined ? {} : { benchmarkTransport }),
   })
 }
 

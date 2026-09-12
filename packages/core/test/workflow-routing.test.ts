@@ -89,6 +89,25 @@ const cases = [
 ] as const
 
 describe("WorkflowRouting", () => {
+  test("keeps the unconfigured production route matrix byte-identical", () => {
+    const snapshot = cases.map(([role]) => {
+      const route = WorkflowRouting.resolve({ role, budget })
+      return {
+        role: route.role,
+        providerID: route.providerID,
+        modelID: route.modelID,
+        protocol: route.protocol,
+        reasoningEffort: route.reasoningEffort,
+        baseURL: route.model.route.endpoint.baseURL,
+        benchmarkTransportPresent: Object.hasOwn(route, "benchmarkTransport"),
+      }
+    })
+
+    expect(JSON.stringify(snapshot)).toBe(
+      '[{"role":"design","providerID":"kimi","modelID":"kimi-k3","protocol":"openai-chat","reasoningEffort":"max","baseURL":"https://api.moonshot.cn/v1","benchmarkTransportPresent":false},{"role":"decompose","providerID":"kimi","modelID":"kimi-k3","protocol":"openai-chat","reasoningEffort":"high","baseURL":"https://api.moonshot.cn/v1","benchmarkTransportPresent":false},{"role":"visual_review","providerID":"kimi","modelID":"kimi-k3","protocol":"openai-chat","reasoningEffort":"max","baseURL":"https://api.moonshot.cn/v1","benchmarkTransportPresent":false},{"role":"implement","providerID":"deepseek","modelID":"deepseek-v4-pro","protocol":"openai-responses","reasoningEffort":"max","baseURL":"https://api.deepseek.com","benchmarkTransportPresent":false},{"role":"test","providerID":"deepseek","modelID":"deepseek-v4-flash","protocol":"openai-responses","reasoningEffort":"high","baseURL":"https://api.deepseek.com","benchmarkTransportPresent":false},{"role":"repair","providerID":"deepseek","modelID":"deepseek-v4-pro","protocol":"openai-responses","reasoningEffort":"max","baseURL":"https://api.deepseek.com","benchmarkTransportPresent":false},{"role":"deliver","providerID":"deepseek","modelID":"deepseek-v4-pro","protocol":"openai-responses","reasoningEffort":"high","baseURL":"https://api.deepseek.com","benchmarkTransportPresent":false}]',
+    )
+  })
+
   test.each(cases)("routes %s deterministically", (role, providerID, modelID, protocol, effort, capabilities) => {
     const route = WorkflowRouting.resolve({ role, budget })
 

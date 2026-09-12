@@ -25,6 +25,7 @@ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { Database } from "@opencode-ai/core/database/database"
 import { WorkflowModelExecution } from "@opencode-ai/core/workflow/execution/model"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
+import { WorkflowBenchmarkTransport } from "@opencode-ai/core/workflow/benchmark-transport"
 import { WorkflowToolLineage } from "@opencode-ai/core/workflow/tool-lineage"
 import { WorkflowPermissions } from "@opencode-ai/core/workflow/permissions"
 import { WorkflowRoleAgents } from "@opencode-ai/core/workflow/role-agents"
@@ -71,6 +72,7 @@ const modelRequests: LLMRequest[] = []
 const modelResponses: LLMResponse[] = []
 const modelTimeline: string[] = []
 let modelCredentialReads = 0
+let modelCredentialMissing = false
 const modelClient = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
@@ -90,6 +92,7 @@ const credentials = Layer.mock(Credential.Service, {
   list: (integrationID) =>
     Effect.sync(() => {
       modelCredentialReads++
+      if (modelCredentialMissing) return []
       return [
         new Credential.Info({
           id: Credential.ID.create(),
@@ -334,6 +337,65 @@ const expectedRules = (role: WorkflowRole.Role) => [
 ]
 
 describe("Workflow Location tools", () => {
+  modelIt.live("fails closed with a typed benchmark-auth error before provider access", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (workspace) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          modelCredentialReads = 0
+          const location = Location.Ref.make({ directory: AbsolutePath.make(workspace.path) })
+          const sessionID = SessionV2.ID.make("ses_workflow_benchmark_auth")
+          yield* createWorkflowSession(location, sessionID)
+          const now = Date.now()
+          const transport = WorkflowBenchmarkTransport.freezeProfile({
+            authority: "server",
+            profile: {
+              schemaVersion: 1,
+              campaignID: "task24-model-campaign",
+              runID: "task24-model-run",
+              brokerOrigin: "http://127.0.0.1:43191",
+              providerPaths: { kimi: "/v1/kimi", deepseek: "/v1/deepseek" },
+              expiresAt: now + 60_000,
+              grant: "expected-task24-model-grant-that-is-long-enough",
+            },
+            expectedCampaignID: "task24-model-campaign",
+            expectedRunID: "task24-model-run",
+            now,
+          })
+          const base = modelInput(location, sessionID, () => Effect.void)
+          const input = {
+            ...base,
+            route: WorkflowRouting.resolve({
+              role: "design",
+              budget: base.workflow.budget,
+              benchmarkTransport: transport,
+            }),
+          }
+
+          const failure = yield* WorkflowModelExecution.Service.use((models) => models.execute(input).pipe(Effect.flip))
+
+          if (!("failure" in failure)) throw new Error("expected a workflow execution failure")
+          expect(failure.failure).toMatchObject({
+            category: "authentication",
+            code: "benchmark_transport_grant_mismatch",
+          })
+          modelCredentialMissing = true
+          const missing = yield* WorkflowModelExecution.Service.use((models) => models.execute(input).pipe(Effect.flip))
+          modelCredentialMissing = false
+          if (!("failure" in missing)) throw new Error("expected a workflow execution failure")
+          expect(missing.failure).toMatchObject({
+            category: "authentication",
+            code: "benchmark_transport_missing_grant",
+          })
+          expect(modelCredentialReads).toBeGreaterThan(0)
+          expect(modelRequests).toHaveLength(0)
+        }),
+      (workspace) => Effect.promise(() => workspace[Symbol.asyncDispose]()),
+    ),
+  )
+
   modelIt.live("rejects a real Session bound to a foreign Location before credentials or provider access", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),

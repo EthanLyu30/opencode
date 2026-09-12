@@ -253,7 +253,7 @@ git push fork dev
 
 **Produces:** an opt-in server-side loopback endpoint/grant binding that survives crash recovery without exposing endpoint selection in public visual-build requests or changing the normal production visual-build path.
 
-- [ ] **Step 1: Write RED security and recovery tests.**
+- [x] **Step 1: Write RED security and recovery tests.**
 
 Cover all of these cases:
 
@@ -264,7 +264,7 @@ Cover all of these cases:
 - provider-request fingerprints include the bound transport identity without including the grant value;
 - a process crash followed by recovery resolves the same persisted endpoint and never falls back to the public provider URL.
 
-- [ ] **Step 2: Run focused Core and Server tests and observe RED.**
+- [x] **Step 2: Run focused Core and Server tests and observe RED.**
 
 ```powershell
 Push-Location 'D:\OpenCode-Audit\packages\core'
@@ -275,27 +275,27 @@ Push-Location 'D:\OpenCode-Audit\packages\server'
 Pop-Location
 ```
 
-- [ ] **Step 3: Define the trusted transport contract.**
+- [x] **Step 3: Define the trusted transport contract.**
 
 Read a runner-created JSON file only at server composition time. Validate an exact `127.0.0.1` origin, two provider-specific base paths, campaign/run identity, expiry, and a nonempty short-lived grant. Expose the validated profile through an injected Core service. Do not add it to Protocol schemas or generated clients.
 
-- [ ] **Step 4: Bind the profile at admission.**
+- [x] **Step 4: Bind the profile at admission.**
 
 Persist a nonsecret transport reference containing campaign ID, broker origin, provider paths, expiry, and grant fingerprint. Store the actual grant only in the isolated benchmark credential store. Exact-create reconciliation must reject a changed transport binding.
 
-- [ ] **Step 5: Configure the native routes without protocol translation.**
+- [x] **Step 5: Configure the native routes without protocol translation.**
 
 Kimi remains Chat Completions and only its base URL/auth change. DeepSeek V4 Pro/Flash remain native Responses routes and only their base URL/auth change. Do not translate Kimi events into Responses or DeepSeek Responses into Chat inside the benchmark transport.
 
-- [ ] **Step 6: Make recovery transport-stable.**
+- [x] **Step 6: Make recovery transport-stable.**
 
 Reconstruct the configured model before creating/checking `ProviderRequest` fingerprints. An expired or missing grant after restart yields a typed recoverable benchmark-auth error; it must never switch to direct provider credentials.
 
-- [ ] **Step 7: Verify production-default identity.**
+- [x] **Step 7: Verify production-default identity.**
 
 Add a snapshot/fingerprint test proving route selection is byte-for-byte unchanged when the environment variable is absent. Run Core/Server focused suites and package typechecks.
 
-- [ ] **Step 8: Commit and push.**
+- [x] **Step 8: Commit and push.**
 
 ```powershell
 git add packages/core packages/server

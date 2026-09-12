@@ -18,6 +18,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionStore } from "@opencode-ai/core/session/store"
 import { WorkflowAdmission } from "@opencode-ai/core/workflow/admission"
+import { WorkflowBenchmarkTransport } from "@opencode-ai/core/workflow/benchmark-transport"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { WorkflowRunTable } from "@opencode-ai/core/workflow/sql"
@@ -64,6 +65,50 @@ const it = testEffect(
   ),
 )
 
+const benchmarkNow = 1_800_000_000_000
+const benchmarkBinding = (port: number) =>
+  WorkflowBenchmarkTransport.freezeProfile({
+    authority: "server",
+    profile: {
+      schemaVersion: 1,
+      campaignID: "task24-admission-campaign",
+      runID: "task24-admission-run",
+      brokerOrigin: `http://127.0.0.1:${port}`,
+      providerPaths: { kimi: "/v1/kimi", deepseek: "/v1/deepseek" },
+      expiresAt: benchmarkNow + 60_000,
+      grant: `task24-admission-grant-${port}-that-is-long-enough`,
+    },
+    expectedCampaignID: "task24-admission-campaign",
+    expectedRunID: "task24-admission-run",
+    now: benchmarkNow,
+  })
+let activeBenchmarkBinding = benchmarkBinding(43191)
+const dynamicBenchmarkTransport = Layer.succeed(
+  WorkflowBenchmarkTransport.Service,
+  WorkflowBenchmarkTransport.Service.of({
+    get binding() {
+      return activeBenchmarkBinding
+    },
+  }),
+)
+const measuredIt = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      Database.node,
+      EventV2.node,
+      SessionStore.node,
+      ResponsesStore.node,
+      WorkflowStore.node,
+      WorkflowAdmission.node,
+    ]),
+    [
+      [WorkflowExecution.node, execution],
+      [ProjectV2.node, projects],
+      [WorkflowBenchmarkTransport.node, dynamicBenchmarkTransport],
+    ],
+  ),
+)
+
 const input = (overrides: Partial<WorkflowVisualBuild.CreateInput> = {}) =>
   WorkflowVisualBuild.CreateInput.make({
     prompt: "Build the visual experience",
@@ -99,6 +144,25 @@ const rowCounts = Effect.gen(function* () {
 })
 
 describe("WorkflowAdmission", () => {
+  measuredIt.effect("rejects exact-create reconciliation when the trusted transport binding changes", () =>
+    Effect.gen(function* () {
+      activeBenchmarkBinding = benchmarkBinding(43191)
+      const root = yield* workspace()
+      const admission = yield* WorkflowAdmission.Service
+      const location = locationOf(root.path)
+      const first = yield* admission.admitVisualBuild(input(), location, "transport-reconciliation")
+      activeBenchmarkBinding = benchmarkBinding(43192)
+
+      const failure = yield* admission.admitVisualBuild(input(), location, "transport-reconciliation").pipe(Effect.flip)
+
+      expect(failure._tag).toBe("Workflow.ConflictError")
+      expect(first.workflow.input[WorkflowBenchmarkTransport.RESERVED_INPUT_KEY]).toMatchObject({
+        brokerOrigin: "http://127.0.0.1:43191",
+      })
+      expect(yield* rowCounts).toEqual([1, 1, 1, 1, 12, 3])
+    }),
+  )
+
   it.effect("rolls back the complete admission when the Workflow projector fails", () =>
     Effect.gen(function* () {
       const root = yield* workspace()
@@ -319,6 +383,24 @@ describe("WorkflowAdmission", () => {
             .pipe(Effect.exit),
         ),
       ).toBe(true)
+      expect(yield* rowCounts).toEqual([0, 0, 0, 0, 0, 0])
+    }),
+  )
+
+  it.effect("rejects public benchmark transport authority before publishing an event", () =>
+    Effect.gen(function* () {
+      const root = yield* workspace()
+      const admission = yield* WorkflowAdmission.Service
+      for (const field of ["baseURL", "endpoint", "grant", "benchmarkTransport"] as const) {
+        const payload = { ...input(), [field]: "forged-public-authority" }
+        expect(
+          Exit.isFailure(
+            yield* admission
+              .admitVisualBuild(payload as WorkflowVisualBuild.CreateInput, locationOf(root.path))
+              .pipe(Effect.exit),
+          ),
+        ).toBe(true)
+      }
       expect(yield* rowCounts).toEqual([0, 0, 0, 0, 0, 0])
     }),
   )

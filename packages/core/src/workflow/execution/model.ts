@@ -24,6 +24,7 @@ import { WorkflowRouting } from "../routing"
 import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowToolLineage } from "../tool-lineage"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
+import { WorkflowBenchmarkTransport } from "../benchmark-transport"
 import { WorkflowRoleContract } from "./contract"
 import { WorkflowRoleExecution } from "./role"
 import * as WorkflowProviderRequest from "./provider-request"
@@ -1143,7 +1144,21 @@ function credentialedModel(credentials: Credential.Interface, route: WorkflowRou
     Effect.flatMap((saved) => {
       const value = saved.at(-1)?.value
       const secret = value?.type === "key" ? value.key : value?.type === "oauth" ? value.access : undefined
-      if (secret === undefined)
+      if (route.benchmarkTransport !== undefined) {
+        try {
+          WorkflowBenchmarkTransport.verifyGrant(route.benchmarkTransport, secret)
+        } catch (cause) {
+          const code =
+            cause instanceof WorkflowBenchmarkTransport.Invalid
+              ? `benchmark_transport_${cause.code}`
+              : "benchmark_transport_invalid"
+          const message =
+            cause instanceof WorkflowBenchmarkTransport.Invalid
+              ? cause.message
+              : "Persisted benchmark transport authority is invalid"
+          return Effect.fail(executionFailure("authentication", code, message, 0))
+        }
+      } else if (secret === undefined) {
         return Effect.fail(
           executionFailure(
             "authentication",
@@ -1151,6 +1166,7 @@ function credentialedModel(credentials: Credential.Interface, route: WorkflowRou
             `No credential is configured for ${route.providerID}`,
           ),
         )
+      }
       return Effect.succeed(Model.update(route.model, { route: route.model.route.with({ auth: Auth.bearer(secret) }) }))
     }),
   )
