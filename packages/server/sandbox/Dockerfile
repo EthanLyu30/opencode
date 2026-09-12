@@ -11,6 +11,7 @@ RUN apt-get update \
   && git config --system --add safe.directory /workspace
 
 COPY --chmod=0555 opencode-preview-supervisor.ts /usr/local/bin/opencode-preview-supervisor
+COPY --chmod=0555 opencode-preview-ingress.ts /usr/local/bin/opencode-preview-ingress
 
 USER 65532:65532
 WORKDIR /workspace

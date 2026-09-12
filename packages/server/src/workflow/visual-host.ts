@@ -178,6 +178,7 @@ export function productionLayer(input: ProductionLayerOptions) {
         engine: input.engine ?? Docker.production,
         config: runtime.dockerConfig,
         hostRoot: contract.roots.previewCapabilityRoot,
+        relayIngress: true,
       }),
       resolveImplementationContract: input.resolveImplementationContract,
       resolvePreviewLease: input.resolvePreviewLease,

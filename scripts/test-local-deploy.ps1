@@ -139,6 +139,7 @@ function Write-FixtureSandboxSources {
   New-Item -ItemType Directory -Path $sandboxSource -Force | Out-Null
   [IO.File]::WriteAllText((Join-Path $sandboxSource "Dockerfile"), "FROM scratch`n# $Marker`n", [Text.UTF8Encoding]::new($false))
   [IO.File]::WriteAllText((Join-Path $sandboxSource "opencode-preview-supervisor.ts"), "export const marker = `"$Marker`"`n", [Text.UTF8Encoding]::new($false))
+  [IO.File]::WriteAllText((Join-Path $sandboxSource "opencode-preview-ingress.ts"), "export const ingressMarker = `"$Marker`"`n", [Text.UTF8Encoding]::new($false))
 }
 
 function Write-SandboxManifest {
@@ -200,6 +201,7 @@ function Write-SandboxManifest {
     archiveSha256 = $archiveSha256
     dockerfileSha256 = (Get-FileHash -LiteralPath (Join-Path $SourceRoot "packages\server\sandbox\Dockerfile") -Algorithm SHA256).Hash.ToLowerInvariant()
     supervisorSha256 = (Get-FileHash -LiteralPath (Join-Path $SourceRoot "packages\server\sandbox\opencode-preview-supervisor.ts") -Algorithm SHA256).Hash.ToLowerInvariant()
+    ingressSha256 = (Get-FileHash -LiteralPath (Join-Path $SourceRoot "packages\server\sandbox\opencode-preview-ingress.ts") -Algorithm SHA256).Hash.ToLowerInvariant()
     engine = $EnginePath
     engineSha256 = (Get-FileHash -LiteralPath $EnginePath -Algorithm SHA256).Hash.ToLowerInvariant()
   }
@@ -276,7 +278,7 @@ function New-FixtureSource {
   & git -C $Root config user.email "opencode-deploy-test@example.invalid"
   & git -C $Root config core.autocrlf false
   "fixture" | Set-Content -LiteralPath (Join-Path $Root "fixture.txt") -NoNewline -Encoding ASCII
-  & git -C $Root add fixture.txt packages/server/sandbox/Dockerfile packages/server/sandbox/opencode-preview-supervisor.ts
+  & git -C $Root add fixture.txt packages/server/sandbox/Dockerfile packages/server/sandbox/opencode-preview-supervisor.ts packages/server/sandbox/opencode-preview-ingress.ts
   & git -C $Root commit --quiet -m "fixture source"
   Assert-Equal $LASTEXITCODE 0 "Could not commit fixture source"
   return [PSCustomObject]@{
@@ -431,7 +433,7 @@ try {
   & git -C $sourceRoot config user.email "opencode-deploy-test@example.invalid"
   & git -C $sourceRoot config core.autocrlf false
   "fixture" | Set-Content -LiteralPath (Join-Path $sourceRoot "fixture.txt") -NoNewline -Encoding ASCII
-  & git -C $sourceRoot add fixture.txt packages/server/sandbox/Dockerfile packages/server/sandbox/opencode-preview-supervisor.ts
+  & git -C $sourceRoot add fixture.txt packages/server/sandbox/Dockerfile packages/server/sandbox/opencode-preview-supervisor.ts packages/server/sandbox/opencode-preview-ingress.ts
   & git -C $sourceRoot commit --quiet -m "fixture source"
   Assert-Equal $LASTEXITCODE 0 "Could not commit fixture source"
   $fixtureCommit = ((& git -C $sourceRoot rev-parse HEAD) | Select-Object -First 1).Trim()

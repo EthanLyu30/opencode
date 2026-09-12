@@ -158,6 +158,82 @@ describe("DockerProcessOwnership", () => {
     expect(fixture.engine.all("network", "rm")).toHaveLength(1)
   })
 
+  test("keeps the untrusted preview internal and publishes only through a mountless trusted ingress relay", async () => {
+    await using fixture = await setup({ relayIngress: true })
+
+    const owned = await fixture.service.start(fixture.startInput())
+
+    const networks = fixture.engine.all("network", "create")
+    expect(networks).toHaveLength(2)
+    expect(networks[0]?.argv).toContain("--internal")
+    expect(networks[1]?.argv).not.toContain("--internal")
+    const containers = fixture.engine.all("container", "create")
+    expect(containers).toHaveLength(2)
+    const preview = containers[0]!
+    const ingress = containers[1]!
+    expect(valuesAfter(preview.argv, "--network")).toEqual([fixture.engine.networkNames[0]])
+    expect(preview.argv).not.toContain("--publish")
+    expect(valuesAfter(ingress.argv, "--network")).toEqual([fixture.engine.networkNames[1]])
+    expect(valuesAfter(ingress.argv, "--publish")).toEqual(["127.0.0.1::18080/tcp"])
+    expect(valuesAfter(ingress.argv, "--mount")).toEqual([])
+    expect(ingress.argv).toContain("/usr/local/bin/opencode-preview-ingress")
+    expect(fixture.engine.all("network", "connect")).toHaveLength(1)
+    expect(owned.origin).toBe(`http://127.0.0.1:${fixture.port}`)
+
+    await fixture.service.stop({ identity: fixture.identity, process: owned })
+
+    expect(fixture.engine.all("container", "rm")).toHaveLength(2)
+    expect(fixture.engine.all("network", "rm")).toHaveLength(2)
+  })
+
+  test("cleans both relay pairs when trusted-ingress creation settles after the caller deadline", async () => {
+    await using fixture = await setup({ relayIngress: true, engineTimeoutMs: 120, cleanupTimeoutMs: 20 })
+    const ingressCreateStarted = deferred<void>()
+    fixture.engine.onRelayContainerCreate = (index, signal) => {
+      if (index === 0) return Promise.resolve()
+      ingressCreateStarted.resolve()
+      return rejectAfterAbort(signal)
+    }
+    const start = fixture.service.start({ ...fixture.startInput(), deadline: Date.now() + 250 })
+    const rejection = expect(start).rejects.toBeInstanceOf(Docker.Timeout)
+
+    await within(ingressCreateStarted.promise, 500, "trusted-ingress create did not begin")
+    await rejection
+    await waitUntil(
+      () => fixture.engine.all("container", "rm").length === 2 && fixture.engine.all("network", "rm").length === 2,
+      3_000,
+    )
+
+    expect(fixture.engine.all("container", "start")).toEqual([])
+    expect(fixture.engine.all("container", "rm")).toHaveLength(2)
+    expect(fixture.engine.all("network", "rm")).toHaveLength(2)
+  })
+
+  test("recovers both exact relay pairs after a process restart", async () => {
+    await using fixture = await setup({ relayIngress: true })
+    await fixture.service.start(fixture.startInput())
+    fixture.engine.recovery = true
+    let gateCalls = 0
+    const restarted = DockerProcessOwnership.make({
+      engine: fixture.engine,
+      config: fixture.config,
+      hostRoot: fixture.hostRoot,
+      relayIngress: true,
+    })
+
+    await restarted.recover({
+      identity: fixture.identity,
+      finalGate: async () => {
+        gateCalls++
+        return true
+      },
+    })
+
+    expect(gateCalls).toBeGreaterThanOrEqual(4)
+    expect(fixture.engine.all("container", "rm")).toHaveLength(2)
+    expect(fixture.engine.all("network", "rm")).toHaveLength(2)
+  })
+
   test("accepts inherited image metadata without relaxing the workflow ownership namespace", async () => {
     await using fixture = await setup()
     fixture.engine.containerImageLabels = {
@@ -882,8 +958,12 @@ describe("DockerProcessOwnership", () => {
 
 class FakeEngine implements Docker.Engine {
   readonly containerID = "c".repeat(64)
+  readonly ingressContainerID = "f".repeat(64)
   readonly networkID = "b".repeat(64)
+  readonly ingressNetworkID = "a".repeat(64)
   readonly invocations: Docker.Invocation[] = []
+  readonly networkNames: string[] = []
+  readonly containerNames: string[] = []
   networkName = ""
   containerName = ""
   networkLabels: Record<string, string> = {}
@@ -903,6 +983,8 @@ class FakeEngine implements Docker.Engine {
   onNetworkCreate?: (signal: AbortSignal | undefined) => Promise<void>
   onNetworkRemove?: () => void
   onContainerCreate?: (signal: AbortSignal | undefined) => Promise<void>
+  onRelayNetworkCreate?: (index: number, signal: AbortSignal | undefined) => Promise<void>
+  onRelayContainerCreate?: (index: number, signal: AbortSignal | undefined) => Promise<void>
   onContainerRemove?: () => void
   stallFirstNetworkInspect?: Promise<void>
   private networkInspections = 0
@@ -916,6 +998,7 @@ class FakeEngine implements Docker.Engine {
       readonly exitedKillFailure?: boolean
       readonly exitBeforeKill?: boolean
       readonly holdRunning?: boolean
+      readonly relayIngress?: boolean
     },
   ) {
     this.labelFailure = options.labelFailure
@@ -923,6 +1006,7 @@ class FakeEngine implements Docker.Engine {
 
   execute = async (input: Docker.Invocation): Promise<Docker.Result> => {
     this.invocations.push(input)
+    if (this.options.relayIngress) return this.executeRelay(input)
     const [scope, action] = input.argv
     if (scope === "network" && action === "create") {
       this.networkName = input.argv.at(-1) ?? ""
@@ -1014,6 +1098,135 @@ class FakeEngine implements Docker.Engine {
     return result()
   }
 
+  private readonly relayNetworkLabels: Record<string, string>[] = []
+  private readonly relayContainerLabels: Record<string, string>[] = []
+  private relayConnected = false
+  private relayPreviewRunning = false
+  private relayIngressRunning = false
+  private readonly relayNetworkRemoved = [false, false]
+  private readonly relayContainerRemoved = [false, false]
+
+  private executeRelay = async (input: Docker.Invocation): Promise<Docker.Result> => {
+    const [scope, action, target] = input.argv
+    const networkIDs = [this.networkID, this.ingressNetworkID]
+    const containerIDs = [this.containerID, this.ingressContainerID]
+    if (scope === "network" && action === "create") {
+      const index = this.networkNames.length
+      this.networkNames.push(input.argv.at(-1) ?? "")
+      this.relayNetworkLabels.push(labels(input.argv))
+      await this.onRelayNetworkCreate?.(index, input.signal)
+      return result({ stdout: `${networkIDs[index]}\n` })
+    }
+    if (scope === "network" && action === "ls") {
+      const index = this.relayNetworkLabels.findIndex((items) =>
+        Object.entries(items).every(([key, value]) => input.argv.includes(`label=${key}=${value}`)),
+      )
+      return result({
+        stdout: this.recovery && index >= 0 && !this.relayNetworkRemoved[index] ? `${networkIDs[index]}\n` : "",
+      })
+    }
+    if (scope === "network" && action === "inspect") {
+      const index =
+        networkIDs.indexOf(target ?? "") >= 0
+          ? networkIDs.indexOf(target ?? "")
+          : this.networkNames.indexOf(target ?? "")
+      if (index < 0 || this.relayNetworkRemoved[index]) return result({ exit: 1, stderr: "network is not visible" })
+      return result({
+        stdout: JSON.stringify([
+          {
+            Id: networkIDs[index],
+            Name: this.networkNames[index],
+            Internal: index === 0,
+            Driver: "bridge",
+            Labels: this.relayNetworkLabels[index],
+          },
+        ]),
+      })
+    }
+    if (scope === "network" && action === "connect") {
+      this.relayConnected = true
+      return result()
+    }
+    if (scope === "container" && action === "create") {
+      const index = this.containerNames.length
+      this.containerNames.push(valueAfter(input.argv, "--name"))
+      this.relayContainerLabels.push(labels(input.argv))
+      await this.onRelayContainerCreate?.(index, input.signal)
+      return result({ stdout: `${containerIDs[index]}\n` })
+    }
+    if (scope === "container" && action === "ls") {
+      const index = this.relayContainerLabels.findIndex((items) =>
+        Object.entries(items).every(([key, value]) => input.argv.includes(`label=${key}=${value}`)),
+      )
+      return result({
+        stdout: this.recovery && index >= 0 && !this.relayContainerRemoved[index] ? `${containerIDs[index]}\n` : "",
+      })
+    }
+    if (scope === "container" && action === "start") {
+      if (target === this.containerID) this.relayPreviewRunning = true
+      if (target === this.ingressContainerID) this.relayIngressRunning = true
+      return result()
+    }
+    if (scope === "container" && action === "inspect") {
+      const index =
+        containerIDs.indexOf(target ?? "") >= 0
+          ? containerIDs.indexOf(target ?? "")
+          : this.containerNames.indexOf(target ?? "")
+      if (index < 0 || this.relayContainerRemoved[index]) {
+        return result({ exit: 1, stderr: "container is not visible" })
+      }
+      const running = index === 0 ? this.relayPreviewRunning : this.relayIngressRunning
+      const networkID = (value: string) => (running ? value : "")
+      const networks =
+        index === 0
+          ? { [this.networkNames[0]!]: { NetworkID: networkID(this.networkID) } }
+          : {
+              [this.networkNames[1]!]: { NetworkID: networkID(this.ingressNetworkID) },
+              ...(this.relayConnected ? { [this.networkNames[0]!]: { NetworkID: networkID(this.networkID) } } : {}),
+            }
+      return result({
+        stdout: JSON.stringify([
+          {
+            Id: containerIDs[index],
+            Name: `/${this.containerNames[index]}`,
+            Config: { Labels: { ...this.containerImageLabels, ...this.relayContainerLabels[index] } },
+            State: { Running: running, ExitCode: running ? 0 : 23 },
+            HostConfig: { PortBindings: index === 1 ? { "18080/tcp": this.requestedBindings } : {} },
+            NetworkSettings: {
+              Ports: index === 1 ? { "18080/tcp": this.publishedBindings } : {},
+              Networks: networks,
+            },
+          },
+        ]),
+      })
+    }
+    if (scope === "container" && action === "wait") {
+      this.relayPreviewRunning = false
+      return result({ stdout: "23\n" })
+    }
+    if (scope === "container" && action === "logs") {
+      return result({ stdout: "preview stdout", stderr: "preview stderr" })
+    }
+    if (scope === "container" && action === "kill") {
+      if (target === this.containerID) this.relayPreviewRunning = false
+      if (target === this.ingressContainerID) this.relayIngressRunning = false
+      return result()
+    }
+    if (scope === "container" && action === "rm") {
+      const index = containerIDs.indexOf(input.argv.at(-1) ?? "")
+      if (index >= 0) this.relayContainerRemoved[index] = true
+      this.onContainerRemove?.()
+      return result()
+    }
+    if (scope === "network" && action === "rm") {
+      const index = networkIDs.indexOf(target ?? "")
+      if (index >= 0) this.relayNetworkRemoved[index] = true
+      this.onNetworkRemove?.()
+      return result()
+    }
+    return result()
+  }
+
   one(...prefix: string[]) {
     const found = this.all(...prefix)
     expect(found).toHaveLength(1)
@@ -1034,6 +1247,7 @@ async function setup(
     readonly exitedKillFailure?: boolean
     readonly exitBeforeKill?: boolean
     readonly holdRunning?: boolean
+    readonly relayIngress?: boolean
     readonly engineTimeoutMs?: number
     readonly cleanupTimeoutMs?: number
     readonly beforePreflight?: (signal: AbortSignal) => Promise<void>
@@ -1094,6 +1308,7 @@ async function setup(
     hostRoot,
     now: options.now,
     beforePreflight: options.beforePreflight,
+    relayIngress: options.relayIngress,
   })
   const dockerEnv = {
     DOCKER_CONFIG: dockerConfig,

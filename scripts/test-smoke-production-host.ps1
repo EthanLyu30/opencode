@@ -181,6 +181,7 @@ describe("production host smoke orchestration", () => {
     expect(result).toEqual({
       status: "ok",
       image,
+      ingressSha256: "0".repeat(64),
       readySelector: "#ready",
       viewport: { width: 800, height: 600 },
       screenshotBytes: expect.any(Number),
@@ -393,6 +394,7 @@ async function writeManifest(manifestImage: string) {
     archiveSha256: createHash("sha256").update(archive).digest("hex"),
     dockerfileSha256: "e".repeat(64),
     supervisorSha256: "f".repeat(64),
+    ingressSha256: "0".repeat(64),
   }
   await fs.writeFile(path.join(runtimeSandbox, "workflow-sandbox.manifest.json"), JSON.stringify(manifest) + "\n")
 }

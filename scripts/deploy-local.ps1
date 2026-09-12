@@ -19,6 +19,7 @@ $sandboxBaseImage = "oven/bun@sha256:621f249399228db47cf34611ee662585e77e015250e
 $sandboxRegistryImage = "registry@sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278"
 $sandboxDockerfileRelative = "packages\server\sandbox\Dockerfile"
 $sandboxSupervisorRelative = "packages\server\sandbox\opencode-preview-supervisor.ts"
+$sandboxIngressRelative = "packages\server\sandbox\opencode-preview-ingress.ts"
 $sourceBinaryRelative = "packages\opencode\dist\opencode-windows-x64\bin\opencode.exe"
 $managedLeaves = [ordered]@{
   Data = "data\workflow-host"
@@ -488,6 +489,7 @@ function Read-ExactSandboxManifest {
     "engine",
     "engineSha256",
     "image",
+    "ingressSha256",
     "platform",
     "registry",
     "schema",
@@ -504,6 +506,7 @@ function Read-ExactSandboxManifest {
     $manifest.engine,
     $manifest.engineSha256,
     $manifest.image,
+    $manifest.ingressSha256,
     $manifest.platform,
     $manifest.registry,
     $manifest.supervisorSha256
@@ -513,14 +516,17 @@ function Read-ExactSandboxManifest {
   }
   $reviewedDockerfile = Resolve-CanonicalDFile -Value (Join-Path $SourceRoot $sandboxDockerfileRelative) -Name "Reviewed sandbox Dockerfile"
   $reviewedSupervisor = Resolve-CanonicalDFile -Value (Join-Path $SourceRoot $sandboxSupervisorRelative) -Name "Reviewed sandbox supervisor"
+  $reviewedIngress = Resolve-CanonicalDFile -Value (Join-Path $SourceRoot $sandboxIngressRelative) -Name "Reviewed sandbox ingress"
   if (
     -not (Test-PathContained -Parent $SourceRoot -Child $reviewedDockerfile -Strict) -or
-    -not (Test-PathContained -Parent $SourceRoot -Child $reviewedSupervisor -Strict)
+    -not (Test-PathContained -Parent $SourceRoot -Child $reviewedSupervisor -Strict) -or
+    -not (Test-PathContained -Parent $SourceRoot -Child $reviewedIngress -Strict)
   ) {
     throw "Reviewed sandbox sources escaped SourceRoot"
   }
   $dockerfileSha256 = (Get-FileHash -LiteralPath $reviewedDockerfile -Algorithm SHA256).Hash.ToLowerInvariant()
   $supervisorSha256 = (Get-FileHash -LiteralPath $reviewedSupervisor -Algorithm SHA256).Hash.ToLowerInvariant()
+  $ingressSha256 = (Get-FileHash -LiteralPath $reviewedIngress -Algorithm SHA256).Hash.ToLowerInvariant()
   $engine = Resolve-CanonicalDFile -Value $manifest.engine -Name "Sandbox engine"
   $expectedEngine = Resolve-CanonicalDFile -Value $sandboxEnginePath -Name "Approved sandbox engine"
   if (-not $engine.Equals($expectedEngine, [StringComparison]::Ordinal)) {
@@ -541,7 +547,8 @@ function Read-ExactSandboxManifest {
     $manifest.archiveSha256 -notmatch '^[a-f0-9]{64}$' -or
     $archiveNameMatch.Groups[1].Value -cne $manifest.archiveSha256 -or
     $manifest.dockerfileSha256 -cne $dockerfileSha256 -or
-    $manifest.supervisorSha256 -cne $supervisorSha256
+    $manifest.supervisorSha256 -cne $supervisorSha256 -or
+    $manifest.ingressSha256 -cne $ingressSha256
   ) {
     throw "Sandbox manifest release evidence is invalid"
   }
@@ -566,6 +573,7 @@ function Read-ExactSandboxManifest {
     Engine = $engine
     EngineSha256 = $manifest.engineSha256
     Image = $manifest.image
+    IngressSha256 = $manifest.ingressSha256
     Registry = $manifest.registry
     SupervisorSha256 = $manifest.supervisorSha256
   }
@@ -1288,9 +1296,11 @@ $sandbox = Read-ExactSandboxManifest -Root $deployment -SourceRoot $source
 if ($LASTEXITCODE -ne 0) { throw "SourceRoot changed while sandbox release evidence was inspected" }
 $reviewedDockerfileAfter = Resolve-CanonicalDFile -Value (Join-Path $source $sandboxDockerfileRelative) -Name "Reviewed sandbox Dockerfile"
 $reviewedSupervisorAfter = Resolve-CanonicalDFile -Value (Join-Path $source $sandboxSupervisorRelative) -Name "Reviewed sandbox supervisor"
+$reviewedIngressAfter = Resolve-CanonicalDFile -Value (Join-Path $source $sandboxIngressRelative) -Name "Reviewed sandbox ingress"
 if (
   (Get-FileHash -LiteralPath $reviewedDockerfileAfter -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sandbox.DockerfileSha256 -or
-  (Get-FileHash -LiteralPath $reviewedSupervisorAfter -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sandbox.SupervisorSha256
+  (Get-FileHash -LiteralPath $reviewedSupervisorAfter -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sandbox.SupervisorSha256 -or
+  (Get-FileHash -LiteralPath $reviewedIngressAfter -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sandbox.IngressSha256
 ) {
   throw "Reviewed sandbox sources changed while release evidence was inspected"
 }
@@ -1355,6 +1365,7 @@ foreach ($name in @(
     "Engine",
     "EngineSha256",
     "Image",
+    "IngressSha256",
     "Registry",
     "SupervisorSha256"
   )) {
@@ -1478,6 +1489,7 @@ $buildInfoText = @(
   "Sandbox registry: $($sandbox.Registry)",
   "Sandbox Dockerfile SHA256: $($sandbox.DockerfileSha256)",
   "Sandbox supervisor SHA256: $($sandbox.SupervisorSha256)",
+  "Sandbox ingress SHA256: $($sandbox.IngressSha256)",
   "Sandbox engine: $($sandbox.Engine)",
   "Sandbox engine SHA256: $($sandbox.EngineSha256)",
   "Deployment root: $deployment"

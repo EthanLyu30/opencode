@@ -15,6 +15,8 @@ const opaquePattern = /^[a-f0-9]{64}$/
 const relayPort = 18_080
 const targetPort = PreviewPlan.SCRIPT_PREVIEW_TARGET_PORT
 const supervisor = "/usr/local/bin/opencode-preview-supervisor"
+const ingress = "/usr/local/bin/opencode-preview-ingress"
+const ingressLabelDomain = "io.opencode.workflow.preview-ingress"
 
 interface IdentitySnapshot {
   readonly canonical: string
@@ -35,10 +37,26 @@ interface Ownership {
   readonly labels: Readonly<Record<string, string>>
 }
 
+interface RelayOwnership {
+  readonly preview: Ownership
+  readonly ingress: Ownership
+}
+
 interface OwnedState {
   readonly ownership: Ownership
   readonly containerID: string
   readonly networkID: string
+  readonly completion: Promise<{ readonly exit: number; readonly stdout: Uint8Array; readonly stderr: Uint8Array }>
+  stopped: boolean
+  stopping?: Promise<void>
+}
+
+interface RelayOwnedState {
+  readonly ownership: RelayOwnership
+  readonly previewContainerID: string
+  readonly previewNetworkID: string
+  readonly ingressContainerID: string
+  readonly ingressNetworkID: string
   readonly completion: Promise<{ readonly exit: number; readonly stdout: Uint8Array; readonly stderr: Uint8Array }>
   stopped: boolean
   stopping?: Promise<void>
@@ -50,9 +68,11 @@ export interface Options {
   readonly hostRoot: string
   readonly now?: () => number
   readonly beforePreflight?: (signal: AbortSignal) => Promise<void>
+  readonly relayIngress?: boolean
 }
 
 export function make(options: Options): ProcessOwnership.Service {
+  if (options.relayIngress === true) return makeRelay(options)
   const owned = new WeakMap<ProcessOwnership.OwnedProcess, OwnedState>()
   const now = options.now ?? Date.now
 
@@ -368,6 +388,524 @@ export function make(options: Options): ProcessOwnership.Service {
   })
 }
 
+function makeRelay(options: Options): ProcessOwnership.Service {
+  const owned = new WeakMap<ProcessOwnership.OwnedProcess, RelayOwnedState>()
+  const now = options.now ?? Date.now
+
+  const internal = Object.freeze({
+    available: true,
+    start: async (input: Parameters<ProcessOwnership.Service["start"]>[0]) => {
+      rejectCancelledOrExpired(input.signal, input.deadline, now)
+      await options.beforePreflight?.(input.signal)
+      const config = await DockerConfig.validate(options.config)
+      const admitted = await validateStart(options.hostRoot, config, input)
+      const ownership = relayOwnershipFor(input.identity, config)
+      const state: {
+        previewNetworkID?: string
+        previewNetworkVerified: boolean
+        ingressNetworkID?: string
+        ingressNetworkVerified: boolean
+        previewContainerID?: string
+        previewContainerVerified: boolean
+        previewContainerRunning: boolean
+        ingressContainerID?: string
+        ingressContainerVerified: boolean
+        ingressContainerRunning: boolean
+      } = {
+        previewNetworkVerified: false,
+        ingressNetworkVerified: false,
+        previewContainerVerified: false,
+        previewContainerRunning: false,
+        ingressContainerVerified: false,
+        ingressContainerRunning: false,
+      }
+      let detachedResourceCleanup = false
+
+      try {
+        const previewNetwork = await beforeDeadline(
+          options.engine,
+          config,
+          input,
+          now,
+          [
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            "--internal",
+            ...labelsArgv(ownership.preview.labels),
+            ownership.preview.networkName,
+          ],
+          config.limits.maxOutputBytes,
+          {
+            timeoutMs: detachedCleanupTimeout(config),
+            detached: () => {
+              detachedResourceCleanup = true
+            },
+            settle: async (late, deadline) => {
+              await cleanupLateNetworkMode(options.engine, config, ownership.preview, true, late, deadline)
+            },
+          },
+        )
+        if (
+          previewNetwork.exit !== 0 ||
+          previewNetwork.truncated ||
+          !opaquePattern.test(previewNetwork.stdout.trim())
+        ) {
+          throw new Docker.Unavailable("Preview Docker internal network could not be created")
+        }
+        state.previewNetworkID = previewNetwork.stdout.trim()
+        state.previewNetworkVerified = await inspectNetwork(
+          options.engine,
+          config,
+          state.previewNetworkID,
+          ownership.preview,
+          false,
+          startBoundary(input, now),
+        )
+        if (!state.previewNetworkVerified) {
+          throw new Docker.Unavailable("Preview Docker internal network ownership verification failed")
+        }
+
+        const ingressNetwork = await beforeDeadline(
+          options.engine,
+          config,
+          input,
+          now,
+          [
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            ...labelsArgv(ownership.ingress.labels),
+            ownership.ingress.networkName,
+          ],
+          config.limits.maxOutputBytes,
+          {
+            timeoutMs: detachedCleanupTimeout(config),
+            detached: () => {
+              detachedResourceCleanup = true
+            },
+            settle: async (late, deadline) => {
+              await cleanupLateNetworkMode(options.engine, config, ownership.ingress, false, late, deadline)
+              const cleanup = await cleanupRelayStartFailurePair(options.engine, config, ownership.preview, true, {
+                networkID: state.previewNetworkID,
+                networkVerified: state.previewNetworkVerified,
+                containerID: state.previewContainerID,
+                containerVerified: state.previewContainerVerified,
+                containerRunning: state.previewContainerRunning,
+              })
+              if (cleanup !== undefined) throw cleanup
+            },
+          },
+        )
+        if (
+          ingressNetwork.exit !== 0 ||
+          ingressNetwork.truncated ||
+          !opaquePattern.test(ingressNetwork.stdout.trim())
+        ) {
+          throw new Docker.Unavailable("Preview Docker ingress network could not be created")
+        }
+        state.ingressNetworkID = ingressNetwork.stdout.trim()
+        state.ingressNetworkVerified = await inspectNetworkMode(
+          options.engine,
+          config,
+          state.ingressNetworkID,
+          ownership.ingress,
+          false,
+          false,
+          startBoundary(input, now),
+        )
+        if (!state.ingressNetworkVerified) {
+          throw new Docker.Unavailable("Preview Docker ingress network ownership verification failed")
+        }
+
+        rejectCancelledOrExpired(input.signal, input.deadline, now)
+        await revalidate(options.hostRoot, config, input, admitted)
+        const runtime = normalizeRuntime(input.plan.argv ?? [])
+        const previewCreate = await beforeDeadline(
+          options.engine,
+          config,
+          input,
+          now,
+          [
+            "container",
+            "create",
+            "--name",
+            ownership.preview.containerName,
+            ...labelsArgv(ownership.preview.labels),
+            "--pull",
+            "never",
+            "--network",
+            ownership.preview.networkName,
+            ...sandboxContainerArgv(config),
+            ...environmentArgv(input.plan.env, targetPort),
+            ...(input.archive === undefined
+              ? ["--mount", `type=bind,src=${admitted.workspace},dst=/workspace,readonly`]
+              : []),
+            "--mount",
+            `type=bind,src=${admitted.capabilityTemp},dst=/opencode/tmp`,
+            "--workdir",
+            admitted.relativeCwd === "." ? "/workspace" : `/workspace/${admitted.relativeCwd}`,
+            config.image,
+            supervisor,
+            "--listen",
+            `0.0.0.0:${relayPort}`,
+            "--target",
+            `127.0.0.1:${targetPort}`,
+            "--",
+            ...runtime,
+          ],
+          config.limits.maxOutputBytes,
+          {
+            timeoutMs: detachedCleanupTimeout(config),
+            detached: () => {
+              detachedResourceCleanup = true
+            },
+            settle: async (late, deadline) => {
+              await cleanupLateContainer(
+                options.engine,
+                config,
+                ownership.preview,
+                state.previewNetworkID,
+                late,
+                deadline,
+              )
+              const cleanup = await cleanupRelayStartFailurePair(options.engine, config, ownership.ingress, false, {
+                networkID: state.ingressNetworkID,
+                networkVerified: state.ingressNetworkVerified,
+                containerID: state.ingressContainerID,
+                containerVerified: state.ingressContainerVerified,
+                containerRunning: state.ingressContainerRunning,
+              })
+              if (cleanup !== undefined) throw cleanup
+            },
+          },
+        )
+        if (previewCreate.exit !== 0 || previewCreate.truncated || !opaquePattern.test(previewCreate.stdout.trim())) {
+          throw new Docker.Unavailable("Preview Docker application container or pinned image is unavailable")
+        }
+        state.previewContainerID = previewCreate.stdout.trim()
+        const previewCreated = await inspectContainerState(
+          options.engine,
+          config,
+          state.previewContainerID,
+          ownership.preview,
+          false,
+          startBoundary(input, now),
+        )
+        state.previewContainerVerified = previewCreated !== undefined
+        state.previewContainerRunning = previewCreated ?? false
+        if (!state.previewContainerVerified) {
+          throw new Docker.Unavailable("Preview Docker application container ownership verification failed")
+        }
+
+        if (input.archive !== undefined) {
+          const imported = await execute(options.engine, config, {
+            argv: ["container", "cp", "-", `${state.previewContainerID}:/`],
+            stdin: WorkflowWorkspaceMaterialization.tarBytes(input.archive),
+            timeoutMs: Math.min(config.limits.engineTimeoutMs, input.deadline - now()),
+            maxOutputBytes: config.limits.maxOutputBytes,
+            signal: input.signal,
+          })
+          if (imported.exit !== 0 || imported.truncated) {
+            throw new Docker.Unavailable("Host-sealed Snapshot import into preview container failed")
+          }
+        }
+
+        const ingressCreate = await beforeDeadline(
+          options.engine,
+          config,
+          input,
+          now,
+          [
+            "container",
+            "create",
+            "--name",
+            ownership.ingress.containerName,
+            ...labelsArgv(ownership.ingress.labels),
+            "--pull",
+            "never",
+            "--network",
+            ownership.ingress.networkName,
+            "--publish",
+            `127.0.0.1::${relayPort}/tcp`,
+            ...sandboxContainerArgv(config),
+            ...ingressEnvironmentArgv(),
+            config.image,
+            ingress,
+            "--listen",
+            `0.0.0.0:${relayPort}`,
+            "--target",
+            `${ownership.preview.containerName}:${relayPort}`,
+          ],
+          config.limits.maxOutputBytes,
+          {
+            timeoutMs: detachedCleanupTimeout(config),
+            detached: () => {
+              detachedResourceCleanup = true
+            },
+            settle: async (late, deadline) => {
+              await cleanupLateContainer(
+                options.engine,
+                config,
+                ownership.ingress,
+                state.ingressNetworkID,
+                late,
+                deadline,
+                false,
+              )
+              const cleanup = await cleanupRelayStartFailurePair(options.engine, config, ownership.preview, true, {
+                networkID: state.previewNetworkID,
+                networkVerified: state.previewNetworkVerified,
+                containerID: state.previewContainerID,
+                containerVerified: state.previewContainerVerified,
+                containerRunning: state.previewContainerRunning,
+              })
+              if (cleanup !== undefined) throw cleanup
+            },
+          },
+        )
+        if (ingressCreate.exit !== 0 || ingressCreate.truncated || !opaquePattern.test(ingressCreate.stdout.trim())) {
+          throw new Docker.Unavailable("Preview Docker trusted ingress container or pinned image is unavailable")
+        }
+        state.ingressContainerID = ingressCreate.stdout.trim()
+        const ingressCreated = await inspectContainerState(
+          options.engine,
+          config,
+          state.ingressContainerID,
+          ownership.ingress,
+          false,
+          startBoundary(input, now),
+        )
+        state.ingressContainerVerified = ingressCreated !== undefined
+        state.ingressContainerRunning = ingressCreated ?? false
+        if (!state.ingressContainerVerified) {
+          throw new Docker.Unavailable("Preview Docker trusted ingress ownership verification failed")
+        }
+
+        const connected = await beforeDeadline(
+          options.engine,
+          config,
+          input,
+          now,
+          ["network", "connect", state.previewNetworkID, state.ingressContainerID],
+          config.limits.maxOutputBytes,
+        )
+        if (connected.exit !== 0 || connected.truncated) {
+          throw new Docker.Unavailable("Preview Docker trusted ingress could not join the internal network")
+        }
+        if (
+          !(await inspectContainerNetworks(
+            options.engine,
+            config,
+            state.previewContainerID,
+            ownership.preview,
+            [[ownership.preview.networkName, state.previewNetworkID]],
+            startBoundary(input, now),
+          )) ||
+          !(await inspectContainerNetworks(
+            options.engine,
+            config,
+            state.ingressContainerID,
+            ownership.ingress,
+            [
+              [ownership.ingress.networkName, state.ingressNetworkID],
+              [ownership.preview.networkName, state.previewNetworkID],
+            ],
+            startBoundary(input, now),
+          ))
+        ) {
+          throw new Docker.Unavailable("Preview Docker trusted ingress network topology verification failed")
+        }
+
+        rejectCancelledOrExpired(input.signal, input.deadline, now)
+        await revalidate(options.hostRoot, config, input, admitted)
+        const previewStarted = await beforeDeadline(options.engine, config, input, now, [
+          "container",
+          "start",
+          state.previewContainerID,
+        ])
+        if (previewStarted.exit !== 0 || previewStarted.truncated) {
+          throw new Docker.Unavailable("Preview Docker application container did not start")
+        }
+        state.previewContainerRunning =
+          (await inspectContainerState(
+            options.engine,
+            config,
+            state.previewContainerID,
+            ownership.preview,
+            true,
+            startBoundary(input, now),
+          )) === true
+        if (!state.previewContainerRunning) {
+          throw new Docker.Unavailable("Preview Docker application identity changed after start")
+        }
+
+        const ingressStarted = await beforeDeadline(options.engine, config, input, now, [
+          "container",
+          "start",
+          state.ingressContainerID,
+        ])
+        if (ingressStarted.exit !== 0 || ingressStarted.truncated) {
+          throw new Docker.Unavailable("Preview Docker trusted ingress did not start")
+        }
+        state.ingressContainerRunning =
+          (await inspectContainerState(
+            options.engine,
+            config,
+            state.ingressContainerID,
+            ownership.ingress,
+            true,
+            startBoundary(input, now),
+          )) === true
+        if (!state.ingressContainerRunning) {
+          throw new Docker.Unavailable("Preview Docker trusted ingress identity changed after start")
+        }
+        const origin = await inspectPublishedOrigin(
+          options.engine,
+          config,
+          state.ingressContainerID,
+          ownership.ingress,
+          startBoundary(input, now),
+        )
+        if (
+          !(await inspectContainerNetworks(
+            options.engine,
+            config,
+            state.previewContainerID,
+            ownership.preview,
+            [[ownership.preview.networkName, state.previewNetworkID]],
+            startBoundary(input, now),
+          )) ||
+          !(await inspectContainerNetworks(
+            options.engine,
+            config,
+            state.ingressContainerID,
+            ownership.ingress,
+            [
+              [ownership.ingress.networkName, state.ingressNetworkID],
+              [ownership.preview.networkName, state.previewNetworkID],
+            ],
+            startBoundary(input, now),
+          ))
+        ) {
+          throw new Docker.Unavailable("Preview Docker relay topology changed after start")
+        }
+        rejectCancelledOrExpired(input.signal, input.deadline, now)
+
+        const completion = settle(options.engine, config, state.previewContainerID, ownership.preview, input.signal)
+        const exited = completion.then((value) => value.exit)
+        void exited.catch(() => undefined)
+        const process: ProcessOwnership.OwnedProcess = Object.freeze({
+          origin,
+          exited,
+          stdout: promisedStream(completion.then((value) => value.stdout)),
+          stderr: promisedStream(completion.then((value) => value.stderr)),
+        })
+        owned.set(process, {
+          ownership,
+          previewContainerID: state.previewContainerID,
+          previewNetworkID: state.previewNetworkID,
+          ingressContainerID: state.ingressContainerID,
+          ingressNetworkID: state.ingressNetworkID,
+          completion,
+          stopped: false,
+        })
+        return process
+      } catch (cause) {
+        const cleanup = detachedResourceCleanup
+          ? Promise.resolve(undefined)
+          : cleanupRelayStartFailure(options.engine, config, ownership, state)
+        const cleanupResult = await observeCleanupBeforeDeadline(cleanup, input, now)
+        if (cleanupResult !== detachedCleanup && cleanupResult !== undefined) {
+          throw new Error(`Preview start cleanup failed: ${cleanupResult.message}`, { cause })
+        }
+        throw cause
+      }
+    },
+    stop: async (input: Parameters<ProcessOwnership.Service["stop"]>[0]) => {
+      const state = owned.get(input.process)
+      if (state === undefined || state.stopped) return
+      if (state.stopping !== undefined) return state.stopping
+      const stopping = (async () => {
+        const config = await DockerConfig.validate(options.config)
+        const previewRunning = await inspectContainerState(
+          options.engine,
+          config,
+          state.previewContainerID,
+          state.ownership.preview,
+          true,
+        )
+        const ingressRunning = await inspectContainerState(
+          options.engine,
+          config,
+          state.ingressContainerID,
+          state.ownership.ingress,
+          true,
+        )
+        if (
+          previewRunning === undefined ||
+          ingressRunning === undefined ||
+          !(await inspectNetwork(options.engine, config, state.previewNetworkID, state.ownership.preview, true)) ||
+          !(await inspectNetworkMode(
+            options.engine,
+            config,
+            state.ingressNetworkID,
+            state.ownership.ingress,
+            false,
+            true,
+          ))
+        ) {
+          throw new Docker.Unavailable("Preview Docker relay ownership changed before stop")
+        }
+        const failure = await cleanupRelayOwned(
+          options.engine,
+          config,
+          state.ownership,
+          {
+            previewContainerID: state.previewContainerID,
+            previewNetworkID: state.previewNetworkID,
+            previewRunning,
+            ingressContainerID: state.ingressContainerID,
+            ingressNetworkID: state.ingressNetworkID,
+            ingressRunning,
+          },
+          input.finalGate,
+        )
+        if (failure !== undefined) throw failure
+        state.stopped = true
+      })()
+      state.stopping = stopping
+      try {
+        await stopping
+      } finally {
+        if (state.stopping === stopping) state.stopping = undefined
+      }
+    },
+    recover: async (input: ProcessOwnership.RecoveryInput) => {
+      const config = await DockerConfig.validate(options.config)
+      const ownership = relayOwnershipFor(validateOwnershipIdentity(input.identity), config)
+      const ingressFailure = await recoverPair(options.engine, config, ownership.ingress, false, input.finalGate)
+      if (ingressFailure !== undefined) throw ingressFailure
+      const previewFailure = await recoverPair(options.engine, config, ownership.preview, true, input.finalGate)
+      if (previewFailure !== undefined) throw previewFailure
+    },
+  })
+
+  return Object.freeze({
+    ...internal,
+    start: (input: Parameters<ProcessOwnership.Service["start"]>[0]) =>
+      startAtCallerBoundary({
+        input,
+        now,
+        run: (signal) => internal.start({ ...input, signal }),
+        cleanup: (process) => internal.stop({ identity: input.identity, process }),
+        detachedTimeoutMs: detachedCleanupTimeout(options.config),
+      }),
+  })
+}
+
 async function startAtCallerBoundary(input: {
   readonly input: Parameters<ProcessOwnership.Service["start"]>[0]
   readonly now: () => number
@@ -611,6 +1149,28 @@ function ownershipFor(identity: ProcessOwnership.Identity, config: DockerConfig.
   return { containerName: `ocp-${aggregate}`, networkName: `ocpn-${aggregate}`, labels }
 }
 
+function relayOwnershipFor(identity: ProcessOwnership.Identity, config: DockerConfig.Config): RelayOwnership {
+  const preview = ownershipFor(identity, config)
+  const digest = (scope: string, value: string) => createHash("sha256").update(`${scope}\0${value}`).digest("hex")
+  const labels = Object.freeze(
+    Object.fromEntries(
+      Object.entries(preview.labels).map(([key, value]) => {
+        const name = key.slice(`${labelDomain}.`.length)
+        return [`${ingressLabelDomain}.${name}`, name === "kind" ? digest("kind", "trusted-ingress-relay") : value]
+      }),
+    ),
+  )
+  const aggregate = preview.containerName.slice("ocp-".length)
+  return {
+    preview,
+    ingress: {
+      containerName: `ocpr-${aggregate}`,
+      networkName: `ocpi-${aggregate}`,
+      labels,
+    },
+  }
+}
+
 function validateOwnershipIdentity(input: ProcessOwnership.Identity): ProcessOwnership.Identity {
   const lease = WorkflowVisualHost.validatePreviewLeaseAuthority({
     workflowID: input.workflowID,
@@ -640,6 +1200,37 @@ function environmentArgv(environment: Readonly<Record<string, string>>, port: nu
     "TMP=/opencode/tmp",
   ]
   return values.flatMap((value) => ["--env", value])
+}
+
+function ingressEnvironmentArgv() {
+  return ["CI=1", "HOME=/home/sandbox", "LANG=C.UTF-8", "NO_COLOR=1", "TEMP=/tmp", "TMP=/tmp"].flatMap((value) => [
+    "--env",
+    value,
+  ])
+}
+
+function sandboxContainerArgv(config: DockerConfig.Config) {
+  return [
+    "--read-only",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges=true",
+    "--user",
+    "65532:65532",
+    "--pids-limit",
+    String(config.limits.pids),
+    "--memory",
+    String(config.limits.memoryBytes),
+    "--cpus",
+    String(config.limits.cpus),
+    "--stop-timeout",
+    "3",
+    "--tmpfs",
+    "/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=1777",
+    "--tmpfs",
+    "/home/sandbox:rw,nosuid,nodev,noexec,size=16777216,mode=700,uid=65532,gid=65532",
+  ]
 }
 
 function normalizeRuntime(argv: readonly string[]) {
@@ -811,21 +1402,37 @@ async function inspectNetwork(
   },
   timeoutMs = config.limits.engineTimeoutMs,
 ) {
+  return inspectNetworkMode(engine, config, id, ownership, true, strict, boundary, timeoutMs)
+}
+
+async function inspectNetworkMode(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  id: string,
+  ownership: Ownership,
+  internal: boolean,
+  strict = false,
+  boundary?: {
+    readonly input: Pick<Parameters<ProcessOwnership.Service["start"]>[0], "signal" | "deadline">
+    readonly now: () => number
+  },
+  timeoutMs = config.limits.engineTimeoutMs,
+) {
   const argv = ["network", "inspect", id]
   const result =
     boundary === undefined
       ? await execute(engine, config, { argv, timeoutMs })
       : await beforeDeadline(engine, config, boundary.input, boundary.now, argv)
   const value = inspectObject(result, strict)
-  return value !== undefined && exactNetwork(value, id, ownership)
+  return value !== undefined && exactNetwork(value, id, ownership, internal)
 }
 
-function exactNetwork(value: object, id: string, ownership: Ownership) {
+function exactNetwork(value: object, id: string, ownership: Ownership, internal = true) {
   return (
     Reflect.get(value, "Id") === id &&
     Reflect.get(value, "Name") === ownership.networkName &&
     Reflect.get(value, "Driver") === "bridge" &&
-    Reflect.get(value, "Internal") === true &&
+    Reflect.get(value, "Internal") === internal &&
     exactLabels(Reflect.get(value, "Labels"), ownership.labels)
   )
 }
@@ -858,11 +1465,66 @@ function exactLabels(value: unknown, expected: Readonly<Record<string, string>>)
 
 function exactContainerLabels(value: unknown, expected: Readonly<Record<string, string>>) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false
-  const owned = Object.keys(value).filter((key) => key.startsWith(`${labelDomain}.`))
+  const owned = Object.keys(value).filter((key) => key.startsWith("io.opencode.workflow."))
   return (
     owned.length === Object.keys(expected).length &&
     Object.entries(expected).every(([key, item]) => Reflect.get(value, key) === item)
   )
+}
+
+async function inspectContainerNetworks(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  id: string,
+  ownership: Ownership,
+  expected: ReadonlyArray<readonly [name: string, id: string]>,
+  boundary?: {
+    readonly input: Pick<Parameters<ProcessOwnership.Service["start"]>[0], "signal" | "deadline">
+    readonly now: () => number
+  },
+) {
+  const argv = ["container", "inspect", id]
+  const result =
+    boundary === undefined
+      ? await execute(engine, config, { argv, timeoutMs: config.limits.engineTimeoutMs })
+      : await beforeDeadline(engine, config, boundary.input, boundary.now, argv)
+  const value = inspectObject(result, true)
+  if (
+    value === undefined ||
+    Reflect.get(value, "Id") !== id ||
+    Reflect.get(value, "Name") !== `/${ownership.containerName}`
+  ) {
+    return false
+  }
+  const dockerConfig = Reflect.get(value, "Config")
+  const state = Reflect.get(value, "State")
+  const running = state !== null && typeof state === "object" ? Reflect.get(state, "Running") : undefined
+  const networkSettings = Reflect.get(value, "NetworkSettings")
+  const networks =
+    networkSettings !== null && typeof networkSettings === "object"
+      ? Reflect.get(networkSettings, "Networks")
+      : undefined
+  if (
+    dockerConfig === null ||
+    typeof dockerConfig !== "object" ||
+    !exactContainerLabels(Reflect.get(dockerConfig, "Labels"), ownership.labels) ||
+    typeof running !== "boolean" ||
+    networks === null ||
+    typeof networks !== "object" ||
+    Array.isArray(networks) ||
+    Object.keys(networks).sort().join("\0") !==
+      expected
+        .map(([name]) => name)
+        .sort()
+        .join("\0")
+  ) {
+    return false
+  }
+  return expected.every(([name, networkID]) => {
+    const item = Reflect.get(networks, name)
+    const actual = item !== null && typeof item === "object" ? Reflect.get(item, "NetworkID") : undefined
+    return actual === networkID || (running === false && actual === "")
+  })
 }
 
 async function settle(
@@ -981,6 +1643,171 @@ async function cleanupOwned(
   return failures.length === 0 ? undefined : new AggregateError(failures, "Preview Docker cleanup failed")
 }
 
+async function cleanupRelayOwned(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: RelayOwnership,
+  state: {
+    readonly previewContainerID: string
+    readonly previewNetworkID: string
+    readonly previewRunning: boolean
+    readonly ingressContainerID: string
+    readonly ingressNetworkID: string
+    readonly ingressRunning: boolean
+  },
+  finalGate?: () => Promise<boolean>,
+): Promise<Error | undefined> {
+  const failures: unknown[] = []
+  const ingressFailure = await cleanupOwned(
+    engine,
+    config,
+    ownership.ingress,
+    state.ingressContainerID,
+    state.ingressNetworkID,
+    state.ingressRunning,
+    undefined,
+    finalGate,
+  ).catch((cause) => (cause instanceof Error ? cause : new Error("Trusted ingress cleanup failed", { cause })))
+  if (ingressFailure !== undefined) failures.push(ingressFailure)
+  const previewFailure = await cleanupOwned(
+    engine,
+    config,
+    ownership.preview,
+    state.previewContainerID,
+    state.previewNetworkID,
+    state.previewRunning,
+    undefined,
+    finalGate,
+  ).catch((cause) => (cause instanceof Error ? cause : new Error("Preview cleanup failed", { cause })))
+  if (previewFailure !== undefined) failures.push(previewFailure)
+  return failures.length === 0 ? undefined : new AggregateError(failures, "Preview Docker relay cleanup failed")
+}
+
+async function cleanupRelayStartFailure(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: RelayOwnership,
+  state: {
+    readonly previewNetworkID?: string
+    readonly previewNetworkVerified: boolean
+    readonly ingressNetworkID?: string
+    readonly ingressNetworkVerified: boolean
+    readonly previewContainerID?: string
+    readonly previewContainerVerified: boolean
+    readonly previewContainerRunning: boolean
+    readonly ingressContainerID?: string
+    readonly ingressContainerVerified: boolean
+    readonly ingressContainerRunning: boolean
+  },
+): Promise<Error | undefined> {
+  const failures: unknown[] = []
+  for (const cleanup of [
+    () =>
+      cleanupRelayStartFailurePair(engine, config, ownership.ingress, false, {
+        networkID: state.ingressNetworkID,
+        networkVerified: state.ingressNetworkVerified,
+        containerID: state.ingressContainerID,
+        containerVerified: state.ingressContainerVerified,
+        containerRunning: state.ingressContainerRunning,
+      }),
+    () =>
+      cleanupRelayStartFailurePair(engine, config, ownership.preview, true, {
+        networkID: state.previewNetworkID,
+        networkVerified: state.previewNetworkVerified,
+        containerID: state.previewContainerID,
+        containerVerified: state.previewContainerVerified,
+        containerRunning: state.previewContainerRunning,
+      }),
+  ]) {
+    const failure = await cleanup().catch((cause) =>
+      cause instanceof Error ? cause : new Docker.Unavailable("Preview relay cleanup failed", { cause }),
+    )
+    if (failure !== undefined) failures.push(failure)
+  }
+  return failures.length === 0 ? undefined : new AggregateError(failures, "Preview Docker relay start cleanup failed")
+}
+
+async function cleanupRelayStartFailurePair(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  internal: boolean,
+  pair: {
+    readonly networkID?: string
+    readonly networkVerified: boolean
+    readonly containerID?: string
+    readonly containerVerified: boolean
+    readonly containerRunning: boolean
+  },
+): Promise<Error | undefined> {
+  const failures: unknown[] = []
+  const discoveredNetwork =
+    pair.networkID === undefined
+      ? await inspectNetworkByNameMode(engine, config, ownership, internal).catch(() => undefined)
+      : undefined
+  const networkID = pair.networkID ?? discoveredNetwork
+  let networkVerified = pair.networkVerified || discoveredNetwork !== undefined
+  if (!networkVerified && networkID !== undefined) {
+    networkVerified = await inspectNetworkMode(engine, config, networkID, ownership, internal, false).catch(() => false)
+  }
+  const discoveredContainer =
+    pair.containerID === undefined
+      ? await inspectContainerByName(engine, config, ownership).catch(() => undefined)
+      : undefined
+  const containerID = pair.containerID ?? discoveredContainer?.id
+  let running = pair.containerVerified ? pair.containerRunning : discoveredContainer?.running
+  if (running === undefined && containerID !== undefined) {
+    running = await inspectContainerState(engine, config, containerID, ownership, false).catch(() => undefined)
+  }
+  if (networkVerified && networkID !== undefined && containerID !== undefined && running !== undefined) {
+    return cleanupOwned(engine, config, ownership, containerID, networkID, running)
+  }
+  if (containerID !== undefined && running !== undefined) {
+    const failure = await cleanupContainer(engine, config, ownership, containerID, running)
+    if (failure !== undefined) failures.push(failure)
+  }
+  if (networkVerified && networkID !== undefined) {
+    try {
+      await removeNetwork(engine, config, networkID)
+    } catch (cause) {
+      failures.push(cause)
+    }
+  }
+  return failures.length === 0 ? undefined : new AggregateError(failures, "Preview Docker relay pair cleanup failed")
+}
+
+async function recoverPair(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  internal: boolean,
+  finalGate: () => Promise<boolean>,
+): Promise<Error | undefined> {
+  const containerIDs = await listExact(engine, config, "container", ownership.labels)
+  const networkIDs = await listExact(engine, config, "network", ownership.labels)
+  if (containerIDs.length === 0 && networkIDs.length === 0) return undefined
+  if (containerIDs.length > 1 || networkIDs.length > 1) {
+    throw new Docker.Unavailable("Preview Docker recovery identity was ambiguous")
+  }
+  const containerID = containerIDs[0]
+  const networkID = networkIDs[0]
+  const running =
+    containerID === undefined ? undefined : await inspectContainerState(engine, config, containerID, ownership, true)
+  const networkMatches =
+    networkID === undefined ? undefined : await inspectNetworkMode(engine, config, networkID, ownership, internal, true)
+  if ((containerID !== undefined && running === undefined) || (networkID !== undefined && !networkMatches)) {
+    throw new Docker.Unavailable("Preview Docker recovery ownership did not match")
+  }
+  if (containerID !== undefined && running !== undefined && networkID !== undefined) {
+    return cleanupOwned(engine, config, ownership, containerID, networkID, running, undefined, finalGate)
+  }
+  if (containerID !== undefined && running !== undefined) {
+    return cleanupContainer(engine, config, ownership, containerID, running, undefined, finalGate)
+  }
+  if (networkID !== undefined) await removeNetwork(engine, config, networkID, undefined, finalGate)
+  return undefined
+}
+
 async function cleanupLateNetwork(
   engine: Docker.Engine,
   config: DockerConfig.Config,
@@ -988,8 +1815,19 @@ async function cleanupLateNetwork(
   late: Readonly<LateResultState>,
   deadline: number,
 ) {
+  return cleanupLateNetworkMode(engine, config, ownership, true, late, deadline)
+}
+
+async function cleanupLateNetworkMode(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  internal: boolean,
+  late: Readonly<LateResultState>,
+  deadline: number,
+) {
   const discoveryDeadline = lateDiscoveryDeadline(config, deadline, 1)
-  const networkID = await discoverLateNetwork(engine, config, ownership, late, discoveryDeadline)
+  const networkID = await discoverLateNetwork(engine, config, ownership, late, discoveryDeadline, undefined, internal)
   if (networkID !== undefined) await removeNetwork(engine, config, networkID, deadline)
 }
 
@@ -1000,10 +1838,11 @@ async function cleanupLateContainer(
   networkID: string | undefined,
   late: Readonly<LateResultState>,
   deadline: number,
+  internal = true,
 ) {
   const discoveryDeadline = lateDiscoveryDeadline(config, deadline, 4)
   const [authenticatedNetworkID, authenticatedContainer] = await Promise.all([
-    discoverLateNetwork(engine, config, ownership, undefined, discoveryDeadline, networkID),
+    discoverLateNetwork(engine, config, ownership, undefined, discoveryDeadline, networkID, internal),
     discoverLateContainer(engine, config, ownership, late, discoveryDeadline),
   ])
 
@@ -1042,17 +1881,19 @@ async function discoverLateNetwork(
   late: Readonly<LateResultState> | undefined,
   deadline: number,
   knownID?: string,
+  internal = true,
 ): Promise<string | undefined> {
   let knownChecked = false
   let returnedChecked = false
   while (Date.now() < deadline) {
     if (!knownChecked && knownID !== undefined) {
       knownChecked = true
-      const verified = await inspectNetwork(
+      const verified = await inspectNetworkMode(
         engine,
         config,
         knownID,
         ownership,
+        internal,
         false,
         undefined,
         cleanupTimeoutBefore(config, deadline),
@@ -1063,11 +1904,12 @@ async function discoverLateNetwork(
       returnedChecked = true
       const returnedID = lateResourceID(late.result)
       if (returnedID !== undefined) {
-        const verified = await inspectNetwork(
+        const verified = await inspectNetworkMode(
           engine,
           config,
           returnedID,
           ownership,
+          internal,
           false,
           undefined,
           cleanupTimeoutBefore(config, deadline),
@@ -1075,7 +1917,9 @@ async function discoverLateNetwork(
         if (verified) return returnedID
       }
     }
-    const discovered = await inspectNetworkByName(engine, config, ownership, deadline).catch(() => undefined)
+    const discovered = await inspectNetworkByNameMode(engine, config, ownership, internal, deadline).catch(
+      () => undefined,
+    )
     if (discovered !== undefined) return discovered
     await pauseLateDiscovery(deadline)
   }
@@ -1231,6 +2075,16 @@ async function inspectNetworkByName(
   ownership: Ownership,
   deadline?: number,
 ): Promise<string | undefined> {
+  return inspectNetworkByNameMode(engine, config, ownership, true, deadline)
+}
+
+async function inspectNetworkByNameMode(
+  engine: Docker.Engine,
+  config: DockerConfig.Config,
+  ownership: Ownership,
+  internal: boolean,
+  deadline?: number,
+): Promise<string | undefined> {
   const result = await execute(engine, config, {
     argv: ["network", "inspect", ownership.networkName],
     timeoutMs: cleanupTimeoutBefore(config, deadline),
@@ -1238,7 +2092,9 @@ async function inspectNetworkByName(
   const value = inspectObject(result, false)
   if (value === undefined) return undefined
   const id = Reflect.get(value, "Id")
-  return typeof id === "string" && opaquePattern.test(id) && exactNetwork(value, id, ownership) ? id : undefined
+  return typeof id === "string" && opaquePattern.test(id) && exactNetwork(value, id, ownership, internal)
+    ? id
+    : undefined
 }
 
 async function inspectContainerByName(

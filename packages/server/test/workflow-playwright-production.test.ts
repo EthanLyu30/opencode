@@ -3,6 +3,7 @@ import fsSync from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { PlaywrightCapture } from "../src/workflow/playwright"
+import type { PlaywrightNodeRuntime } from "../src/workflow/playwright-node-runtime"
 
 const suiteRoot = "D:\\OpenCode-Task23-Final\\playwright-production-policy"
 
@@ -11,6 +12,71 @@ afterAll(async () => {
 })
 
 describe("PlaywrightCapture production root policy", () => {
+  test("uses the authenticated Node helper with a minimal D-scoped environment", async () => {
+    await using fixture = await rootsFixture("node-helper")
+    const helper = await helperRelease(fixture.runtime)
+    let invocation: PlaywrightNodeRuntime.Invocation | undefined
+    const runtime = PlaywrightCapture.productionRuntime({
+      browserRoot: fixture.runtime,
+      tempRoot: fixture.cache,
+      browserExecutablePath: fixture.executable,
+      browserRuntimePolicy: () => undefined,
+      browserCachePolicy: () => undefined,
+      helperRunner: {
+        execute: async (input) => {
+          invocation = input
+          return {
+            exit: 0,
+            stdout: JSON.stringify({
+              protocolVersion: 1,
+              pngBase64: Buffer.from([137, 80, 78, 71]).toString("base64"),
+            }),
+            stderr: "",
+            truncated: false,
+          }
+        },
+      },
+    })
+
+    expect(await runtime.capture(captureInput())).toEqual(Uint8Array.of(137, 80, 78, 71))
+    expect(invocation?.executable).toBe(helper.node)
+    expect(invocation?.argv).toEqual([helper.helper])
+    expect(invocation?.cwd).toBe(fixture.cache)
+    expect(invocation?.env.TEMP).toBe(fixture.cache)
+    expect(invocation?.env.PLAYWRIGHT_BROWSERS_PATH).toBe(fixture.runtime)
+    expect(Object.keys(invocation?.env ?? {}).some((key) => /key|token|secret|authorization/i.test(key))).toBe(false)
+    expect(JSON.parse(invocation?.stdin.trim() ?? "{}")).toMatchObject({
+      protocolVersion: 1,
+      browserExecutablePath: fixture.executable,
+      tempRoot: fixture.cache,
+      url: "http://127.0.0.1:3210/",
+    })
+    await runtime.close()
+  })
+
+  test("rejects a replaced Node helper release before starting a child", async () => {
+    await using fixture = await rootsFixture("node-helper-replaced")
+    const helper = await helperRelease(fixture.runtime)
+    let executeCalls = 0
+    const runtime = PlaywrightCapture.productionRuntime({
+      browserRoot: fixture.runtime,
+      tempRoot: fixture.cache,
+      browserExecutablePath: fixture.executable,
+      browserRuntimePolicy: () => undefined,
+      browserCachePolicy: () => undefined,
+      helperRunner: {
+        execute: async () => {
+          executeCalls++
+          throw new Error("helper must not run")
+        },
+      },
+    })
+    await fs.writeFile(helper.helper, "changed helper")
+
+    await expect(runtime.capture(captureInput())).rejects.toThrow(/helper release identity changed/i)
+    expect(executeCalls).toBe(0)
+  })
+
   test("rejects a lexical browser-runtime junction before accepting production roots", async () => {
     await using fixture = await rootsFixture("constructor-alias")
     const outside = path.join(fixture.root, "outside-runtime")
@@ -486,4 +552,25 @@ async function rootsFixture(name: string) {
       await fs.rm(root, { recursive: true, force: true })
     },
   }
+}
+
+async function helperRelease(runtime: string) {
+  const node = path.join(runtime, "opencode-node-test.exe")
+  const helper = path.join(runtime, "opencode-playwright-helper-test.mjs")
+  await fs.writeFile(node, "test node")
+  await fs.writeFile(helper, "test helper")
+  const sha256 = (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex")
+  await fs.writeFile(
+    path.join(runtime, "opencode-playwright-runtime.manifest.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      protocolVersion: 1,
+      nodeFile: path.basename(node),
+      nodeSha256: sha256("test node"),
+      helperFile: path.basename(helper),
+      helperSha256: sha256("test helper"),
+      sourceSha256: "0".repeat(64),
+    })}\n`,
+  )
+  return { node, helper }
 }

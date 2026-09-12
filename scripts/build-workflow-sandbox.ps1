@@ -63,8 +63,10 @@ $bunDirectory = Resolve-VerifiedPath -Path (Split-Path -Parent $bunRuntime) -Kin
 $context = Resolve-VerifiedPath -Path (Join-Path $repository "packages\server\sandbox") -Kind Directory
 $sourceDockerfile = Resolve-VerifiedPath -Path (Join-Path $context "Dockerfile") -Kind File
 $sourceSupervisor = Resolve-VerifiedPath -Path (Join-Path $context "opencode-preview-supervisor.ts") -Kind File
+$sourceIngress = Resolve-VerifiedPath -Path (Join-Path $context "opencode-preview-ingress.ts") -Kind File
 $sourceDockerfileSha256 = (Get-FileHash -LiteralPath $sourceDockerfile -Algorithm SHA256).Hash.ToLowerInvariant()
 $sourceSupervisorSha256 = (Get-FileHash -LiteralPath $sourceSupervisor -Algorithm SHA256).Hash.ToLowerInvariant()
+$sourceIngressSha256 = (Get-FileHash -LiteralPath $sourceIngress -Algorithm SHA256).Hash.ToLowerInvariant()
 $dataVhd = Resolve-VerifiedPath -Path $DockerDataVhd -Kind File
 $mainVhd = Resolve-VerifiedPath -Path $DockerMainVhd -Kind File
 if (-not [string]::Equals($bunRuntime, $pinnedBunRuntime, [StringComparison]::OrdinalIgnoreCase)) {
@@ -136,7 +138,8 @@ try {
   Assert-StrictDescendant -Parent $stageRoot -Child $stagedContext
   [IO.File]::Copy($sourceDockerfile, (Join-Path $stagedContext "Dockerfile"), $false)
   [IO.File]::Copy($sourceSupervisor, (Join-Path $stagedContext "opencode-preview-supervisor.ts"), $false)
-  Assert-ReleaseSource -SourceContext $context -StagedContext $stagedContext -DockerfileSha256 $sourceDockerfileSha256 -SupervisorSha256 $sourceSupervisorSha256
+  [IO.File]::Copy($sourceIngress, (Join-Path $stagedContext "opencode-preview-ingress.ts"), $false)
+  Assert-ReleaseSource -SourceContext $context -StagedContext $stagedContext -DockerfileSha256 $sourceDockerfileSha256 -SupervisorSha256 $sourceSupervisorSha256 -IngressSha256 $sourceIngressSha256
 
   Invoke-Docker -Engine $engine -Arguments @("version", "--format", "{{.Server.Version}}") | Out-Null
   Invoke-Docker -Engine $engine -Arguments @("pull", $bunBase) | Out-Null
@@ -203,17 +206,18 @@ try {
     archiveSha256 = $archiveSha256
     dockerfileSha256 = $sourceDockerfileSha256
     supervisorSha256 = $sourceSupervisorSha256
+    ingressSha256 = $sourceIngressSha256
   }
   [IO.File]::WriteAllText($stagedManifest, ($manifest | ConvertTo-Json -Depth 3) + "`n", [Text.UTF8Encoding]::new($false))
 
-  Assert-ReleaseSource -SourceContext $context -StagedContext $stagedContext -DockerfileSha256 $sourceDockerfileSha256 -SupervisorSha256 $sourceSupervisorSha256
+  Assert-ReleaseSource -SourceContext $context -StagedContext $stagedContext -DockerfileSha256 $sourceDockerfileSha256 -SupervisorSha256 $sourceSupervisorSha256 -IngressSha256 $sourceIngressSha256
   Assert-StagedRelease -ManifestPath $stagedManifest -ArchivePath $stagedArchive -ExpectedImage $exactReference -ExpectedEngine $engine -ExpectedBase $bunBase -ExpectedRegistry $registryImage -Context $stagedContext -VerificationRoot $stageRoot -Bun $bunRuntime
   Publish-ImmutableFile -Source $stagedArchive -Destination (Join-Path $outputRoot $archiveName) -Sha256 $archiveSha256
   $manifestDestination = Join-Path $outputRoot "workflow-sandbox.manifest.json"
   $preserveStage = $true
   $manifestPublication = Publish-Manifest -Source $stagedManifest -Destination $manifestDestination -Backup (Join-Path $stageRoot "workflow-sandbox.previous.manifest.json")
   try {
-    Assert-ReleaseSource -SourceContext $context -StagedContext $stagedContext -DockerfileSha256 $sourceDockerfileSha256 -SupervisorSha256 $sourceSupervisorSha256
+    Assert-ReleaseSource -SourceContext $context -StagedContext $stagedContext -DockerfileSha256 $sourceDockerfileSha256 -SupervisorSha256 $sourceSupervisorSha256 -IngressSha256 $sourceIngressSha256
     Assert-PublishedRelease -Root $outputRoot -ExpectedImage $exactReference -ExpectedEngine $engine -ExpectedBase $bunBase -ExpectedRegistry $registryImage -Context $stagedContext -VerificationRoot $stageRoot -Bun $bunRuntime
     $preserveStage = $false
   } catch {
@@ -463,19 +467,25 @@ function Assert-ReleaseSource {
     [string]$SourceContext,
     [string]$StagedContext,
     [string]$DockerfileSha256,
-    [string]$SupervisorSha256
+    [string]$SupervisorSha256,
+    [string]$IngressSha256
   )
   $sourceDockerfile = Resolve-VerifiedPath -Path (Join-Path $SourceContext "Dockerfile") -Kind File
   $sourceSupervisor = Resolve-VerifiedPath -Path (Join-Path $SourceContext "opencode-preview-supervisor.ts") -Kind File
+  $sourceIngress = Resolve-VerifiedPath -Path (Join-Path $SourceContext "opencode-preview-ingress.ts") -Kind File
   $stagedDockerfile = Resolve-VerifiedPath -Path (Join-Path $StagedContext "Dockerfile") -Kind File
   $stagedSupervisor = Resolve-VerifiedPath -Path (Join-Path $StagedContext "opencode-preview-supervisor.ts") -Kind File
+  $stagedIngress = Resolve-VerifiedPath -Path (Join-Path $StagedContext "opencode-preview-ingress.ts") -Kind File
   Assert-StrictDescendant -Parent $StagedContext -Child $stagedDockerfile
   Assert-StrictDescendant -Parent $StagedContext -Child $stagedSupervisor
+  Assert-StrictDescendant -Parent $StagedContext -Child $stagedIngress
   foreach ($candidate in @(
     [pscustomobject]@{ Path = $sourceDockerfile; Sha256 = $DockerfileSha256 },
     [pscustomobject]@{ Path = $stagedDockerfile; Sha256 = $DockerfileSha256 },
     [pscustomobject]@{ Path = $sourceSupervisor; Sha256 = $SupervisorSha256 },
-    [pscustomobject]@{ Path = $stagedSupervisor; Sha256 = $SupervisorSha256 }
+    [pscustomobject]@{ Path = $stagedSupervisor; Sha256 = $SupervisorSha256 },
+    [pscustomobject]@{ Path = $sourceIngress; Sha256 = $IngressSha256 },
+    [pscustomobject]@{ Path = $stagedIngress; Sha256 = $IngressSha256 }
   )) {
     if ((Get-FileHash -LiteralPath $candidate.Path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $candidate.Sha256) {
       throw "Workflow sandbox release source changed during the build"
@@ -663,7 +673,7 @@ function Assert-StagedRelease {
     [string]$Bun
   )
   $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-  $expectedKeys = @("schema", "image", "engine", "engineSha256", "base", "registry", "platform", "archive", "archiveSha256", "dockerfileSha256", "supervisorSha256")
+  $expectedKeys = @("schema", "image", "engine", "engineSha256", "base", "registry", "platform", "archive", "archiveSha256", "dockerfileSha256", "supervisorSha256", "ingressSha256")
   $actualKeys = @($manifest.PSObject.Properties.Name)
   $actualShape = (($actualKeys | Sort-Object) -join "`n")
   $expectedShape = (($expectedKeys | Sort-Object) -join "`n")
@@ -683,7 +693,8 @@ function Assert-StagedRelease {
     $manifest.archive -cne $expectedArchive -or
     $manifest.archiveSha256 -cne $archiveSha256 -or
     $manifest.dockerfileSha256 -cne (Get-FileHash -LiteralPath (Join-Path $Context "Dockerfile") -Algorithm SHA256).Hash.ToLowerInvariant() -or
-    $manifest.supervisorSha256 -cne (Get-FileHash -LiteralPath (Join-Path $Context "opencode-preview-supervisor.ts") -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manifest.supervisorSha256 -cne (Get-FileHash -LiteralPath (Join-Path $Context "opencode-preview-supervisor.ts") -Algorithm SHA256).Hash.ToLowerInvariant() -or
+    $manifest.ingressSha256 -cne (Get-FileHash -LiteralPath (Join-Path $Context "opencode-preview-ingress.ts") -Algorithm SHA256).Hash.ToLowerInvariant()
   ) {
     throw "Staged workflow sandbox manifest is not fully authenticated"
   }

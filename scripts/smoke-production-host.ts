@@ -24,6 +24,7 @@ const manifestKeys = [
   "engine",
   "engineSha256",
   "image",
+  "ingressSha256",
   "platform",
   "registry",
   "schema",
@@ -54,6 +55,7 @@ export interface SmokeDependencies {
 export interface SmokeResult {
   readonly status: "ok"
   readonly image: string
+  readonly ingressSha256: string
   readonly readySelector: "#ready"
   readonly viewport: { readonly width: 800; readonly height: 600 }
   readonly screenshotBytes: number
@@ -138,11 +140,12 @@ export async function runProductionHostSmoke(
       engine: dependencies.engine ?? Docker.production,
       config: runtime.dockerConfig,
       hostRoot: runtime.contract.roots.previewCapabilityRoot,
+      relayIngress: dependencies.engine === undefined,
     })
     browser = PlaywrightCapture.productionRuntime({
       browserRoot: runtime.contract.roots.browserRuntimeRoot,
       tempRoot: runtime.contract.roots.browserCacheRoot,
-      timeoutMs,
+      timeoutMs: Math.min(timeoutMs, 15_000),
       browserRuntimePolicy: runtime.contract.policy.verifyBrowserRuntimeRoot,
       browserCachePolicy: runtime.contract.policy.verifyBrowserCacheRoot,
       ...(dependencies.browserType === undefined ? {} : { browserType: dependencies.browserType }),
@@ -178,6 +181,7 @@ export async function runProductionHostSmoke(
     result = Object.freeze({
       status: "ok",
       image: release.image,
+      ingressSha256: release.ingressSha256,
       readySelector: "#ready",
       viewport,
       screenshotBytes: bytes.byteLength,
@@ -267,6 +271,7 @@ async function validateReleaseManifest(
     !sha256Pattern.test(manifest.engineSha256) ||
     !sha256Pattern.test(manifest.archiveSha256) ||
     !sha256Pattern.test(manifest.dockerfileSha256) ||
+    !sha256Pattern.test(manifest.ingressSha256) ||
     !sha256Pattern.test(manifest.supervisorSha256) ||
     manifest.archive !== `workflow-sandbox.${manifest.archiveSha256}.oci.tar`
   ) {

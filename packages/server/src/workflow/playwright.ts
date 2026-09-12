@@ -3,6 +3,7 @@ export * as PlaywrightCapture from "./playwright"
 import { chromium } from "playwright"
 import fs from "node:fs"
 import path from "node:path"
+import { PlaywrightNodeRuntime } from "./playwright-node-runtime"
 
 export interface LaunchOptions {
   readonly headless: true
@@ -342,6 +343,8 @@ export interface ProductionRuntimeOptions {
   readonly browserCachePolicy: (canonicalBrowserCache: string) => void
   /** Trusted test seam; production uses Playwright's Chromium binding. */
   readonly browserType?: BrowserType
+  /** Trusted test seam; production invokes the authenticated Node helper release. */
+  readonly helperRunner?: PlaywrightNodeRuntime.Runner
 }
 
 export function productionRuntime(input: ProductionRuntimeOptions): Runtime {
@@ -352,6 +355,7 @@ export function productionRuntime(input: ProductionRuntimeOptions): Runtime {
   const tempRoot = requireProductionDirectory(input.tempRoot)
   const executablePath = input.browserExecutablePath ?? chromium.executablePath()
   const executableIdentity = requireProductionExecutable(browserRoot, executablePath)
+  const helperRelease = input.browserType === undefined ? PlaywrightNodeRuntime.loadRelease(browserRoot) : undefined
   const verifyBoundary = () => {
     input.browserRuntimePolicy(browserRoot)
     input.browserCachePolicy(tempRoot)
@@ -360,8 +364,40 @@ export function productionRuntime(input: ProductionRuntimeOptions): Runtime {
     if (requireProductionExecutable(browserRoot, executablePath) !== executableIdentity) {
       throw new TypeError("Playwright production executable identity changed")
     }
+    helperRelease?.verify()
   }
   verifyBoundary()
+  if (helperRelease !== undefined) {
+    let closed = false
+    return {
+      capture: async (capture) => {
+        if (closed) throw new Error("Playwright runtime is closed")
+        verifyBoundary()
+        const screenshot = await PlaywrightNodeRuntime.capture(
+          helperRelease,
+          {
+            browserExecutablePath: executablePath,
+            tempRoot,
+            browserRoot,
+            url: capture.url,
+            viewport: capture.viewport,
+            readySelector: capture.readySelector,
+            allowedOrigins: capture.allowedOrigins,
+            timeoutMs: input.timeoutMs ?? 15_000,
+            signal: capture.signal,
+          },
+          input.helperRunner,
+        )
+        verifyBoundary()
+        return screenshot
+      },
+      close: async () => {
+        if (closed) return
+        closed = true
+        verifyBoundary()
+      },
+    }
+  }
   return makeRuntime({
     tempRoot,
     timeoutMs: input.timeoutMs,
