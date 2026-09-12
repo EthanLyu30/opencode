@@ -359,40 +359,40 @@ git push fork dev
 **Files:**
 
 - Create: `packages/benchmark/src/broker/{server.ts,grant.ts,policy.ts,pricing.ts,reservation.ts,ledger.ts,redaction.ts,stream.ts}`
-- Create: `packages/benchmark/test/broker/{server.test.ts,grant.test.ts,reservation.test.ts,ledger.test.ts,redaction.test.ts}`
+- Create: `packages/benchmark/test/broker/{server.test.ts,grant.test.ts,reservation.test.ts,ledger.test.ts,redaction.test.ts,stream.test.ts}`
 - Create redacted fixtures: `packages/benchmark/test/fixtures/provider/{kimi-chat.sse,deepseek-responses.sse,failed.sse,incomplete.sse}`
 
 **Produces:** an authenticated local proxy that enforces exact model/protocol routes, reserves worst-case spend before dispatch, streams provider events unchanged, and reconciles actual usage without leaking content.
 
-- [ ] **Step 1: Write RED tests for authorization, routing, and pre-dispatch rejection.**
+- [x] **Step 1: Write RED tests for authorization, routing, and pre-dispatch rejection.**
 
 Assert that only `POST /v1/kimi/chat/completions` and `POST /v1/deepseek/responses` exist; the Kimi route accepts only `kimi-k3`; the DeepSeek route accepts only `deepseek-v4-pro` or `deepseek-v4-flash`; wrong paths/models/protocols return a typed local error before any upstream fetch.
 
-- [ ] **Step 2: Write RED accounting tests.**
+- [x] **Step 2: Write RED accounting tests.**
 
 Cover cached/uncached input, output/reasoning tokens, both provider currencies, price-revision binding, parallel reservations, cancellation, upstream 4xx/5xx, malformed SSE, missing usage, duplicate terminal events, broker restart, and exact exhaustion at the ceiling.
 
-- [ ] **Step 3: Implement short-lived grants.**
+- [x] **Step 3: Implement short-lived grants.**
 
 Generate a random per-run bearer grant. Store only its hash, campaign ID, run ID, allowed provider/model/protocol set, expiry, and maximum calls. Compare hashes in constant time. Revoke it when the run becomes terminal.
 
-- [ ] **Step 4: Implement provider-native reservations.**
+- [x] **Step 4: Implement provider-native reservations.**
 
 Require explicit maximum output tokens on every request. Bound input tokens conservatively from UTF-8 body bytes plus fixed overhead, apply the sealed price revision, and atomically reserve micros in CNY for Kimi or USD for DeepSeek. Reject with `BUDGET_RESERVATION_EXCEEDED` before opening an upstream connection.
 
-- [ ] **Step 5: Stream without transformation.**
+- [x] **Step 5: Stream without transformation.**
 
 Forward headers from an allowlist, inject the real provider key only upstream, and pipe response bytes unchanged to the child. Parse a side branch of the byte stream for terminal usage and protocol conformance. Never buffer a complete response solely for logging.
 
-- [ ] **Step 6: Settle the append-only ledger.**
+- [x] **Step 6: Settle the append-only ledger.**
 
 On a valid terminal usage record, settle actual charge and release the unused reservation. On missing/invalid usage, charge the full reservation. Ledger records include request/run IDs, UTC times, provider/model/protocol, route, request/response byte counts, input/cache/output/reasoning tokens when known, reservation/settlement money, HTTP/result class, stream terminal type, price hash, and request/response SHA-256—not bodies.
 
-- [ ] **Step 7: Add redaction and leakage tests.**
+- [x] **Step 7: Add redaction and leakage tests.**
 
 Seed fixtures with canary strings shaped like API keys, prompts, source code, tool arguments, and response text. Recursively scan logs, SQLite text columns, JSON errors, stdout/stderr, and report models; all canaries must be absent.
 
-- [ ] **Step 8: Verify and commit.**
+- [x] **Step 8: Verify and commit.**
 
 ```powershell
 Push-Location 'D:\OpenCode-Audit\packages\benchmark'

@@ -1,0 +1,8 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_fixture","status":"in_progress"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":1,"delta":"CANARY_RESPONSE_TEXT"}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_fixture","status":"completed","usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":5},"output_tokens":8,"output_tokens_details":{"reasoning_tokens":3},"total_tokens":20}}}
