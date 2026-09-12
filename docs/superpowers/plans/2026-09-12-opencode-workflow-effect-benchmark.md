@@ -316,35 +316,35 @@ git push fork dev
 
 **Produces:** reproducible source locks and clean per-run workspaces without allowing a task process to see hidden gold or another arm.
 
-- [ ] **Step 1: Write RED tests for immutable source identity and path isolation.**
+- [x] **Step 1: Write RED tests for immutable source identity and path isolation.**
 
 Test SHA-256 mismatch, mutable branch URL rejection, archive traversal, NTFS reparse-point escape, hidden-file leakage, dirty reused workspace rejection, and run-to-run byte inequality caused by undeclared files.
 
-- [ ] **Step 2: Implement official-upstream resolution.**
+- [x] **Step 2: Implement official-upstream resolution.**
 
 At setup time, query the official OpenCode release source, resolve the latest stable tag, resolve it to a commit, download/checkout exactly that commit under `toolchain\upstream-src`, and record repository URL, tag, commit, archive hash, lock timestamp, and license. A campaign never uses a moving `main`, `dev`, or `latest` reference after sealing.
 
-- [ ] **Step 3: Implement benchmark-dataset source locking.**
+- [x] **Step 3: Implement benchmark-dataset source locking.**
 
 Resolve exact licensed revisions for Design2Code-Hard and the JS/visual subset of SWE-bench Multimodal. Record dataset repository/revision, subset selector, item IDs, asset hashes, normalization version, and license. Cache downloaded data only under `assets\public` and `cache\sources`.
 
-- [ ] **Step 4: Implement safe bundle validation.**
+- [x] **Step 4: Implement safe bundle validation.**
 
 Every task bundle has `task.json`, `starter\`, optional public `assets\`, hidden `gold\`, and `LICENSES.json`. Validate that declared workspace files cannot escape `starter`, that gold files are outside materialized workspaces, and that the prompt cannot contain gold hashes, reference image bytes, expected DOM snapshots, or evaluator commands.
 
-- [ ] **Step 5: Materialize a fresh run.**
+- [x] **Step 5: Materialize a fresh run.**
 
 Copy or extract only `starter` and public assets into `workspaces\<campaign>\<run-id>\repo`, set read/write permissions for that run, and emit a pre-run tree hash. Create separate D-only `data`, `config`, `cache`, `temp`, and `output` directories for the child process.
 
-- [ ] **Step 6: Add setup automation.**
+- [x] **Step 6: Add setup automation.**
 
 `setup-task24-sources.ps1` accepts the Task24 root and bundled Bun path, refuses C-owned output, downloads into a staging child of `tmp`, verifies hashes, then atomically publishes to the recorded destination. It preserves the prior valid source lock on failure.
 
-- [ ] **Step 7: Verify offline after the one-time source fetch.**
+- [x] **Step 7: Verify offline after the one-time source fetch.**
 
 Run corpus tests, disconnect the test HTTP fixture, rematerialize all fixture bundles, and verify identical tree hashes.
 
-- [ ] **Step 8: Commit and push.**
+- [x] **Step 8: Commit and push.**
 
 ```powershell
 git add packages/benchmark scripts/setup-task24-sources.ps1 benchmarks/task24/README.md
