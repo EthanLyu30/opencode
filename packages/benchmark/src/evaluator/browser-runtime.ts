@@ -2,6 +2,8 @@ import { createHash, randomBytes } from "node:crypto"
 import fsSync from "node:fs"
 import path from "node:path"
 import { canonicalJson } from "../campaign/canonical"
+import { verifyPublishedPdfReport, type PublishedPdfReport } from "../report/pdf"
+import { decodeBrowserPdfResponseLine, type BrowserPdfRequest } from "../report/pdf-protocol"
 import { Task24Root } from "../root"
 import {
   BROWSER_PROTOCOL_VERSION,
@@ -70,6 +72,7 @@ export interface BrowserProcessRunner {
 
 export interface BrowserRuntime {
   readonly capture: (input: BrowserRuntimeCaptureInput) => Promise<PublishedEvidence>
+  readonly renderPdf: (input: BrowserRuntimePdfInput) => Promise<PublishedPdfReport>
 }
 
 export interface BrowserRuntimeCaptureInput {
@@ -79,6 +82,14 @@ export interface BrowserRuntimeCaptureInput {
   readonly viewportID: ViewportID
   readonly readySelector: string
   readonly interactionScriptID: InteractionScriptID
+  readonly timeoutMs: number
+  readonly signal: AbortSignal
+}
+
+export interface BrowserRuntimePdfInput {
+  readonly reportID: string
+  readonly reportURL: string
+  readonly evidenceHashes: readonly string[]
   readonly timeoutMs: number
   readonly signal: AbortSignal
 }
@@ -203,8 +214,104 @@ export function makeBrowserRuntime(input: {
       }
       throw new BrowserCaptureFailure("TASK24_BROWSER_INTERNAL", "uncertain", "Browser retry loop failed")
     },
+    renderPdf: async (report) => {
+      const id = requestID()
+      const token = validateGrant(grant())
+      const request: BrowserPdfRequest = {
+        protocolVersion: BROWSER_PROTOCOL_VERSION,
+        operation: "report-pdf",
+        authorization: `Bearer ${token}`,
+        requestID: id,
+        reportID: report.reportID,
+        reportURL: report.reportURL,
+        outputRelativePath: report.reportID,
+        evidenceHashes: report.evidenceHashes,
+        timeoutMs: report.timeoutMs,
+      }
+      const target = path.join(outputRoot, report.reportID)
+      if (fsSync.existsSync(target)) throw new TypeError("TASK24_PDF_ALREADY_PUBLISHED")
+      let prior: BrowserCaptureFailure | undefined
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (fsSync.existsSync(target)) {
+          throw new BrowserCaptureFailure(
+            "TASK24_PDF_DISPOSITION_UNCERTAIN",
+            "uncertain",
+            "PDF evidence appeared before a safe retry",
+            prior ? { cause: prior } : undefined,
+          )
+        }
+        try {
+          return await invokePdf(input.release, runner, outputRoot, tempRoot, token, request, report.signal)
+        } catch (cause) {
+          const failure = classifyFailure(cause)
+          if (failure.disposition !== "unstarted" || attempt === 1) throw failure
+          prior = failure
+        }
+      }
+      throw new BrowserCaptureFailure("TASK24_BROWSER_INTERNAL", "uncertain", "Browser PDF retry loop failed")
+    },
   }
   return Object.freeze(runtime)
+}
+
+async function invokePdf(
+  release: BrowserRelease,
+  runner: BrowserProcessRunner,
+  outputRoot: string,
+  tempRoot: string,
+  grant: string,
+  request: BrowserPdfRequest,
+  signal: AbortSignal,
+): Promise<PublishedPdfReport> {
+  release.verify()
+  let result: BrowserProcessResult
+  try {
+    result = await runner.execute({
+      executable: release.nodeExecutable,
+      argv: [release.helper],
+      cwd: tempRoot,
+      env: helperEnvironment(release, outputRoot, tempRoot, grant),
+      stdin: canonicalJson(request) + "\n",
+      timeoutMs: Math.min(180_000, request.timeoutMs + 15_000),
+      signal,
+    })
+  } catch (cause) {
+    throw classifyFailure(cause)
+  }
+  release.verify()
+  if (result.truncated) {
+    throw new BrowserCaptureFailure(
+      "TASK24_BROWSER_HELPER_OUTPUT_LIMIT",
+      result.started ? "uncertain" : "unstarted",
+      "Browser helper output exceeded its limit",
+    )
+  }
+  let response
+  try {
+    response = decodeBrowserPdfResponseLine(result.stdout.trim(), request.requestID)
+  } catch (cause) {
+    throw new BrowserCaptureFailure(
+      "TASK24_PDF_HELPER_RESPONSE_INVALID",
+      result.started ? "uncertain" : "unstarted",
+      `Browser helper returned malformed PDF output: ${safeError(result.stderr)}`,
+      { cause },
+    )
+  }
+  if (!response.ok) throw new BrowserCaptureFailure(response.error.code, response.disposition, response.error.message)
+  if (response.evidence.pdfRootRelativePath !== request.outputRelativePath) {
+    throw new BrowserCaptureFailure(
+      "TASK24_PDF_HELPER_RESPONSE_INVALID",
+      "uncertain",
+      "Browser helper published PDF under an unexpected identity",
+    )
+  }
+  return verifyPublishedPdfReport({
+    outputRoot,
+    reportID: response.evidence.pdfRootRelativePath,
+    pdfSha256: response.evidence.pdfSha256,
+    evidenceSha256: response.evidence.evidenceSha256,
+    pdfBytes: response.evidence.pdfBytes,
+  })
 }
 
 async function invoke(

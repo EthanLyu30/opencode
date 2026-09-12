@@ -3,6 +3,8 @@ import { chromium, type BrowserContext, type Page } from "playwright"
 import fs from "node:fs/promises"
 import path from "node:path"
 import readline from "node:readline"
+import { publishPdfReport } from "../report/pdf"
+import { decodeBrowserPdfRequestLine, isPdfRequestLine, type BrowserPdfRequest } from "../report/pdf-protocol"
 import {
   BROWSER_PROTOCOL_VERSION,
   decodeBrowserRequestLine,
@@ -69,7 +71,9 @@ process.once("SIGTERM", cancel)
 
 try {
   if (first.done) throw new HelperFailure("TASK24_BROWSER_REQUEST_INVALID", "request frame is missing")
-  const request = decodeBrowserRequestLine(first.value, grant)
+  const request = isPdfRequestLine(first.value)
+    ? decodeBrowserPdfRequestLine(first.value, grant)
+    : decodeBrowserRequestLine(first.value, grant)
   requestID = request.requestID
   profile = path.join(tempRoot, `browser-profile-${request.requestID}`)
   await fs.mkdir(profile, { recursive: false })
@@ -77,8 +81,8 @@ try {
     chromium.launchPersistentContext(profile, {
       executablePath: browserExecutable,
       headless: true,
-      viewport: request.viewport,
-      deviceScaleFactor: request.viewport.deviceScaleFactor,
+      viewport: request.operation === "report-pdf" ? { width: 1440, height: 900 } : request.viewport,
+      deviceScaleFactor: request.operation === "report-pdf" ? 1 : request.viewport.deviceScaleFactor,
       locale: "en-US",
       timezoneId: "UTC",
       colorScheme: "light",
@@ -93,38 +97,62 @@ try {
     request.timeoutMs,
     abort.signal,
   )
-  const evidence = await runCapture(context, request)
-  const published = await publishCapture({
-    outputRoot,
-    relative: request.outputRelativePath,
-    screenshot: evidence.screenshot,
-    evidence: {
-      schemaVersion: 1,
-      requestID: request.requestID,
-      runID: request.runID,
-      previewID: request.previewID,
-      viewportID: request.viewportID,
-      dom: evidence.dom,
-      consoleErrors: evidence.consoleErrors,
-      pageErrors: evidence.pageErrors,
-      accessibility: evidence.accessibility,
-      axe: evidence.axe,
-    },
-  })
-  process.stdout.write(
-    `${JSON.stringify({
-      protocolVersion: BROWSER_PROTOCOL_VERSION,
-      requestID: request.requestID,
-      disposition: "published",
-      ok: true,
+  if (request.operation === "report-pdf") {
+    const pdf = await runPdf(context, request)
+    const published = await publishPdfReport({
+      outputRoot,
+      reportID: request.reportID,
+      pdf,
+      evidenceHashes: request.evidenceHashes,
+    })
+    process.stdout.write(
+      `${JSON.stringify({
+        protocolVersion: BROWSER_PROTOCOL_VERSION,
+        requestID: request.requestID,
+        disposition: "published",
+        ok: true,
+        evidence: {
+          pdfRootRelativePath: request.outputRelativePath,
+          pdfSha256: published.sha256,
+          evidenceSha256: published.evidenceSha256,
+          pdfBytes: published.bytes,
+        },
+      })}\n`,
+    )
+  } else {
+    const evidence = await runCapture(context, request)
+    const published = await publishCapture({
+      outputRoot,
+      relative: request.outputRelativePath,
+      screenshot: evidence.screenshot,
       evidence: {
-        captureRootRelativePath: request.outputRelativePath,
-        screenshotSha256: published.screenshotSha256,
-        evidenceSha256: published.evidenceSha256,
-        screenshotBytes: published.screenshotBytes,
+        schemaVersion: 1,
+        requestID: request.requestID,
+        runID: request.runID,
+        previewID: request.previewID,
+        viewportID: request.viewportID,
+        dom: evidence.dom,
+        consoleErrors: evidence.consoleErrors,
+        pageErrors: evidence.pageErrors,
+        accessibility: evidence.accessibility,
+        axe: evidence.axe,
       },
-    })}\n`,
-  )
+    })
+    process.stdout.write(
+      `${JSON.stringify({
+        protocolVersion: BROWSER_PROTOCOL_VERSION,
+        requestID: request.requestID,
+        disposition: "published",
+        ok: true,
+        evidence: {
+          captureRootRelativePath: request.outputRelativePath,
+          screenshotSha256: published.screenshotSha256,
+          evidenceSha256: published.evidenceSha256,
+          screenshotBytes: published.screenshotBytes,
+        },
+      })}\n`,
+    )
+  }
 } catch (cause) {
   const error = helperError(cause)
   process.stdout.write(
@@ -269,6 +297,98 @@ async function runCapture(current: BrowserContext, request: BrowserCaptureReques
     consoleErrors,
     pageErrors,
   }
+}
+
+async function runPdf(current: BrowserContext, request: BrowserPdfRequest): Promise<Uint8Array> {
+  let policyViolation: string | undefined
+  await bounded(
+    current.route("**/*", async (route) => {
+      const url = route.request().url()
+      if (!isAdmittedPreviewRequest(url, request.reportURL)) {
+        if (route.request().resourceType() === "document") policyViolation = "navigation escaped the report origin"
+        await route.abort("blockedbyclient")
+        return
+      }
+      const response = await route.fetch({ maxRedirects: 0, timeout: request.timeoutMs })
+      try {
+        const location = header(response.headers(), "location")
+        if (
+          new Set([301, 302, 303, 307, 308]).has(response.status()) &&
+          location &&
+          !isAdmittedPreviewRequest(new URL(location, url).href, request.reportURL)
+        ) {
+          policyViolation = "navigation escaped the report origin"
+          await route.abort("blockedbyclient")
+          return
+        }
+        await route.fulfill({ response })
+      } finally {
+        await response.dispose()
+      }
+    }),
+    request.timeoutMs,
+    abort.signal,
+  )
+  const pages = current.pages()
+  const page = pages[0] ?? (await bounded(current.newPage(), request.timeoutMs, abort.signal))
+  for (const extra of pages.slice(1)) await closeBounded(() => extra.close())
+  page.on("popup", (popup) => {
+    policyViolation = "popup creation is forbidden"
+    void popup.close().catch(() => undefined)
+  })
+  page.on("download", (download) => {
+    policyViolation = "downloads are forbidden"
+    void download.cancel().catch(() => undefined)
+  })
+  page.on("framenavigated", (frame) => {
+    if (
+      frame === page.mainFrame() &&
+      frame.url() !== "about:blank" &&
+      !isAdmittedPreviewRequest(frame.url(), request.reportURL)
+    ) {
+      policyViolation = "navigation escaped the report origin"
+    }
+  })
+  disposition = "uncertain"
+  await bounded(
+    page.goto(request.reportURL, { waitUntil: "domcontentloaded", timeout: request.timeoutMs }),
+    request.timeoutMs,
+    abort.signal,
+  )
+  await bounded(
+    page.addStyleTag({
+      content:
+        "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}",
+    }),
+    request.timeoutMs,
+    abort.signal,
+  )
+  await bounded(
+    page.evaluate(() => document.fonts.ready),
+    request.timeoutMs,
+    abort.signal,
+  )
+  await bounded(
+    page.emulateMedia({ media: "print", colorScheme: "light", reducedMotion: "reduce" }),
+    request.timeoutMs,
+    abort.signal,
+  )
+  await twoFrames(page, request.timeoutMs)
+  if (policyViolation) throw new HelperFailure("TASK24_BROWSER_POLICY_VIOLATION", policyViolation)
+  const pdf = await bounded(
+    page.pdf({
+      format: "A4",
+      displayHeaderFooter: false,
+      printBackground: true,
+      preferCSSPageSize: true,
+      tagged: true,
+      outline: true,
+    }),
+    request.timeoutMs,
+    abort.signal,
+  )
+  if (policyViolation) throw new HelperFailure("TASK24_BROWSER_POLICY_VIOLATION", policyViolation)
+  return Uint8Array.from(pdf)
 }
 
 async function runInteraction(page: Page, id: BrowserCaptureRequest["interactionScriptID"], timeoutMs: number) {

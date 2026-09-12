@@ -16,6 +16,7 @@ export type InteractionScriptID = "none" | "primary-click" | "menu-toggle"
 export type CaptureDisposition = "unstarted" | "uncertain" | "published"
 
 export interface BrowserCaptureRequest {
+  readonly operation?: never
   readonly protocolVersion: 1
   readonly authorization: string
   readonly requestID: string

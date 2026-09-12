@@ -631,31 +631,31 @@ git push fork dev
 
 **Produces:** exact A–B/A–C inference, guardrail decisions, cost effectiveness, and sanitized human/machine-readable reports.
 
-- [ ] **Step 1: Write RED statistical fixtures.**
+- [x] **Step 1: Write RED statistical fixtures.**
 
 Include clear win, clear loss, interval crossing zero, gain below 10 points, one-family regression, functional regression beyond 5 points, security incident, unequal budget, cost ratio above 2×, all-failure, missing run, D/E one-pass, and D/E second-pass-trigger cases.
 
-- [ ] **Step 2: Implement deterministic clustered bootstrap.**
+- [x] **Step 2: Implement deterministic clustered bootstrap.**
 
 Use a documented PRNG and the sealed seed. Resample task IDs 10,000 times, carrying all repeats/arms for each selected task. Compute percentile 95% intervals for A–B, A–C, and the preregistered A–`max(B,C)` gating contrast, plus diagnostic/cost secondary metrics. Verify results against hand-calculated small samples and stored golden vectors.
 
-- [ ] **Step 3: Implement the preregistered decision engine.**
+- [x] **Step 3: Implement the preregistered decision engine.**
 
 The result is one of `demonstrated`, `not demonstrated`, `promising but inconclusive`, `quality gain at disproportionate cost`, or `incomplete`, accompanied by each satisfied/failed rule and no editorial override. Enforce the 10-point/interval/family/functional/security/equal-budget/2×-cost rules exactly. Missing/invalidated runs produce an incomplete campaign, not an imputed success or failure, unless the sealed failure policy explicitly classifies that terminal condition.
 
-- [ ] **Step 4: Implement report models and exports.**
+- [x] **Step 4: Implement report models and exports.**
 
 Lead with qualified-success rates, A–B/A–C and gating effects with intervals, decision, family checks, guardrails, total provider-native spend, and cost per qualified success. Then show diagnostic subscores, first-pass functional/visual success, repair loops, changed files, time/tokens/tool calls/retries/recovery, actual billed cost, cache-normalized token consumption, quality/cost and quality/time Pareto frontiers, D/E context, exclusions, harness failures, failure taxonomy, and an evidence index.
 
-- [ ] **Step 5: Render HTML and PDF without a model.**
+- [x] **Step 5: Render HTML and PDF without a model.**
 
 Render a self-contained HTML report, then print it to PDF through the authenticated browser helper. Include campaign/source/binary/model/protocol/price/exchange-rate/evaluator hashes and limitations covering sample size, public-data contamination, cache effects, provider variability, and Windows-only execution. Exclude keys, grants, prompts, full model output, and request/response bodies; include only explicitly sanitized patch excerpts and anonymized screenshots required for representative case studies.
 
-- [ ] **Step 6: Verify report determinism and accessibility.**
+- [x] **Step 6: Verify report determinism and accessibility.**
 
 Regenerate JSON/CSV/HTML twice and compare hashes. Normalize PDF creation metadata before comparing its content hash. Validate tables, chart text alternatives, contrast, pagination, Chinese/Latin font embedding, and no clipped columns.
 
-- [ ] **Step 7: Commit and push.**
+- [x] **Step 7: Commit and push.**
 
 ```powershell
 git add packages/benchmark

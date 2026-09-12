@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "campaignID": "campaign-fixture",
+  "generatedAt": "2026-09-12T00:00:00.000Z",
+  "decision": "demonstrated",
+  "decisionReasons": ["GAIN_AT_LEAST_10PP", "INTERVAL_LOWER_ABOVE_ZERO"],
+  "armSummaries": [
+    {
+      "armID": "A",
+      "runs": 4,
+      "qualifiedSuccesses": 4,
+      "qualifiedRate": 1,
+      "functionalRate": 1,
+      "meanDiagnosticScore": 94
+    },
+    {
+      "armID": "B",
+      "runs": 4,
+      "qualifiedSuccesses": 2,
+      "qualifiedRate": 0.5,
+      "functionalRate": 0.75,
+      "meanDiagnosticScore": 78
+    },
+    {
+      "armID": "C",
+      "runs": 4,
+      "qualifiedSuccesses": 1,
+      "qualifiedRate": 0.25,
+      "functionalRate": 0.5,
+      "meanDiagnosticScore": 70
+    }
+  ],
+  "contrasts": [
+    { "label": "A-B", "estimate": 0.5, "lower95": 0.25, "upper95": 0.75 },
+    { "label": "A-C", "estimate": 0.75, "lower95": 0.5, "upper95": 1 },
+    { "label": "A-best-control", "estimate": 0.5, "lower95": 0.25, "upper95": 0.75 }
+  ],
+  "familyChecks": [{ "family": "dashboard", "effect": 0.5 }],
+  "guardrails": { "functionalRegression": 0, "securityIncidents": 0, "equalBudgets": true },
+  "cost": {
+    "kimiCnyMicros": "1000000",
+    "deepseekUsdMicros": "1000000",
+    "totalCnyMicros": "8200000",
+    "costPerQualifiedSuccessCnyMicros": "2050000",
+    "costRatio": 1.5
+  },
+  "runs": [
+    {
+      "runID": "run-a",
+      "taskID": "task-1",
+      "family": "dashboard",
+      "armID": "A",
+      "qualifiedSuccess": true,
+      "functionalSuccess": true,
+      "firstPassFunctionalSuccess": true,
+      "firstPassVisualSuccess": false,
+      "diagnosticScore": 94,
+      "visualComposite": 82,
+      "durationMs": 1000,
+      "inputTokens": 100,
+      "cachedInputTokens": 10,
+      "outputTokens": 50,
+      "toolCalls": 3,
+      "retries": 0,
+      "revisionLoops": 1,
+      "changedFiles": 4,
+      "recoveryCount": 0,
+      "costCnyMicros": "2050000",
+      "failureCategory": null
+    }
+  ],
+  "metadata": {
+    "campaignSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "sourceSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "modifiedBinarySha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "upstreamBinarySha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "evaluatorSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "modelRevisionSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "protocolRevisionSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+    "priceRevisionSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+    "exchangeRateSha256": "9999999999999999999999999999999999999999999999999999999999999999"
+  },
+  "limitations": ["Fixture sample is intentionally small.", "此夹具用于验证中英文 PDF 字体。"],
+  "exclusions": [],
+  "harnessFailures": [],
+  "evidenceHashes": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+}

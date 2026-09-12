@@ -15,6 +15,8 @@ import {
 } from "../../src/evaluator/browser-runtime"
 import { decodeBrowserRequestLine } from "../../src/evaluator/browser-protocol"
 import { publishCapture } from "../../src/evaluator/capture"
+import { decodeBrowserPdfRequestLine } from "../../src/report/pdf-protocol"
+import { publishPdfReport } from "../../src/report/pdf"
 
 const cleanup: string[] = []
 afterEach(async () => {
@@ -142,9 +144,37 @@ describe("Task24 authenticated browser runtime", () => {
     await expect(failure).rejects.toMatchObject({ disposition: "uncertain" })
     expect(calls).toBe(1)
   })
+
+  test("renders a PDF through the same authenticated, integrity-checked helper", async () => {
+    const fixture = await runtimeFixture("pdf", "reports")
+    let invocation: BrowserInvocation | undefined
+    const runtime = makeBrowserRuntime({
+      release: fixture.release,
+      outputRoot: fixture.output,
+      tempRoot: fixture.temp,
+      grant: () => "g".repeat(43),
+      requestID: () => "a".repeat(32),
+      runner: {
+        execute: async (input) => {
+          invocation = input
+          return publishPdfSuccess(input)
+        },
+      },
+    })
+    const result = await runtime.renderPdf({
+      reportID: "campaign-fixture",
+      reportURL: "http://127.0.0.1:3210/campaign-fixture/",
+      evidenceHashes: ["1".repeat(64)],
+      timeoutMs: 30_000,
+      signal: new AbortController().signal,
+    })
+    expect(result.bytes).toBeGreaterThan(16)
+    const request = decodeBrowserPdfRequestLine(invocation?.stdin.trim() ?? "", "g".repeat(43))
+    expect(request.operation).toBe("report-pdf")
+  })
 })
 
-async function runtimeFixture(label: string) {
+async function runtimeFixture(label: string, destination: "runs" | "reports" = "runs") {
   const layout = Task24Root.ensure()
   const base = path.join(layout.toolchain, "browser")
   await fs.mkdir(base, { recursive: true })
@@ -170,12 +200,40 @@ async function runtimeFixture(label: string) {
   const root = path.join(base, buildSha256)
   await fs.rename(staging, root)
   cleanup.push(root)
-  const output = path.join(layout.runs, `browser-runtime-test-${crypto.randomUUID()}`)
+  const output = path.join(layout[destination], `browser-runtime-test-${crypto.randomUUID()}`)
   const temp = path.join(layout.tmp, `browser-runtime-test-${crypto.randomUUID()}`)
   await fs.mkdir(output)
   await fs.mkdir(temp)
   cleanup.push(output, temp)
   return { release: loadBrowserRelease(root), output, temp }
+}
+
+async function publishPdfSuccess(input: BrowserInvocation) {
+  const request = decodeBrowserPdfRequestLine(input.stdin.trim(), input.env.TASK24_BROWSER_GRANT ?? "")
+  const published = await publishPdfReport({
+    outputRoot: input.env.TASK24_BROWSER_OUTPUT_ROOT ?? "",
+    reportID: request.reportID,
+    pdf: Buffer.from("%PDF-1.7\n1 0 obj<<>>endobj\n%%EOF\n", "latin1"),
+    evidenceHashes: request.evidenceHashes,
+  })
+  return {
+    started: true,
+    exit: 0,
+    stdout: JSON.stringify({
+      protocolVersion: 1,
+      requestID: request.requestID,
+      disposition: "published",
+      ok: true,
+      evidence: {
+        pdfRootRelativePath: request.outputRelativePath,
+        pdfSha256: published.sha256,
+        evidenceSha256: published.evidenceSha256,
+        pdfBytes: published.bytes,
+      },
+    }),
+    stderr: "",
+    truncated: false,
+  } as const
 }
 
 async function releaseFiles(root: string): Promise<BrowserReleaseFile[]> {
