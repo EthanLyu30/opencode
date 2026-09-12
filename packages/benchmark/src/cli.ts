@@ -6,6 +6,8 @@ import { canonicalJson } from "./campaign/canonical"
 import { sealCampaign, verifyCampaign, type CampaignVerification } from "./campaign/seal"
 import { CampaignID, Sha256, type SealedCampaign } from "./schema"
 import { Task24Root, type Task24Layout } from "./root"
+import { RuntimeCommands, type RuntimeCommandService } from "./run/commands"
+import type { CampaignStage } from "./run/budget"
 
 const CurrentCampaign = Schema.Struct({
   schemaVersion: Schema.Literal(1),
@@ -24,6 +26,7 @@ export interface CliDependencies {
   readonly seal: (value: unknown) => SealedCampaign
   readonly verify: (value: unknown) => CampaignVerification
   readonly output: (value: unknown) => void
+  readonly runtime?: RuntimeCommandService
 }
 
 function invalidCommand(): never {
@@ -88,7 +91,22 @@ function campaignPath(layout: Task24Layout, id: string): string {
 }
 
 export async function runCli(argv: readonly string[], dependencies: CliDependencies = defaults): Promise<void> {
-  if (argv[0] !== "campaign" || (argv[1] !== "seal" && argv[1] !== "verify")) invalidCommand()
+  if (argv[0] !== "campaign") {
+    const parsed = runtimeArgs(argv)
+    const layout = dependencies.root(parsed.root)
+    const runtime = dependencies.runtime ?? RuntimeCommands
+    const value =
+      parsed.command === "status"
+        ? await runtime.status(layout)
+        : parsed.command === "run"
+          ? await runtime.run(layout, parsed.stage)
+          : parsed.command === "resume"
+            ? await runtime.resume(layout)
+            : await runtime.cancel(layout, parsed.runID)
+    dependencies.output(value)
+    return
+  }
+  if (argv[1] !== "seal" && argv[1] !== "verify") invalidCommand()
   const layout = dependencies.root(parseRoot(argv))
   const pointerPath = win32.join(layout.runs, "current-campaign.json")
 
@@ -110,6 +128,32 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
     throw new Error("CAMPAIGN_POINTER_MISMATCH")
   }
   dependencies.output({ command: "campaign.verify", id: pointer.id, sha256: pointer.sha256, ok: true })
+}
+
+type RuntimeArguments =
+  | { readonly command: "status"; readonly root: string }
+  | { readonly command: "run"; readonly root: string; readonly stage: CampaignStage }
+  | { readonly command: "resume"; readonly root: string }
+  | { readonly command: "cancel"; readonly root: string; readonly runID: string }
+
+function runtimeArgs(input: readonly string[]): RuntimeArguments {
+  const argv = [...input]
+  let root = Task24Root.fixed
+  const rootIndex = argv.indexOf("--root")
+  if (rootIndex >= 0) {
+    const candidate = argv[rootIndex + 1]
+    if (rootIndex !== argv.length - 2 || !candidate) invalidCommand()
+    root = candidate
+    argv.splice(rootIndex, 2)
+  }
+  if (argv.length === 1 && argv[0] === "status") return { command: "status", root }
+  if (argv.length === 1 && argv[0] === "resume") return { command: "resume", root }
+  if (argv.length === 2 && argv[0] === "cancel" && argv[1]) return { command: "cancel", runID: argv[1], root }
+  if (argv.length === 3 && argv[0] === "run" && argv[1] === "--stage") {
+    const stage = argv[2]
+    if (stage === "offline" || stage === "pilot" || stage === "campaign") return { command: "run", stage, root }
+  }
+  return invalidCommand()
 }
 
 if (import.meta.main) {

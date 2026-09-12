@@ -74,4 +74,25 @@ describe("task24 CLI", () => {
     const state = harness()
     expect(runCli(["campaign", "spend"], state.dependencies)).rejects.toThrow("TASK24_COMMAND_INVALID")
   })
+
+  test("routes status, staged run, resume, and cancellation commands without weakening stage parsing", async () => {
+    const state = harness()
+    const calls: string[] = []
+    const dependencies: CliDependencies = {
+      ...state.dependencies,
+      runtime: {
+        status: async () => (calls.push("status"), { command: "status" }),
+        run: async (_layout, stage) => (calls.push(`run:${stage}`), { command: "run", stage }),
+        resume: async () => (calls.push("resume"), { command: "resume" }),
+        cancel: async (_layout, runID) => (calls.push(`cancel:${runID}`), { command: "cancel", runID }),
+      },
+    }
+    await runCli(["status"], dependencies)
+    await runCli(["run", "--stage", "offline"], dependencies)
+    await runCli(["resume"], dependencies)
+    await runCli(["cancel", "run-a"], dependencies)
+    expect(calls).toEqual(["status", "run:offline", "resume", "cancel:run-a"])
+    expect(state.output).toHaveLength(4)
+    await expect(runCli(["run", "--stage", "pilot-ish"], dependencies)).rejects.toThrow("TASK24_COMMAND_INVALID")
+  })
 })

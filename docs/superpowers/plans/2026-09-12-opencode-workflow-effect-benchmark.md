@@ -477,7 +477,7 @@ git push fork dev
 
 **Produces:** exactly-once run admission, at-most-one active attempt, crash-safe state, deterministic arm ordering, and budget-aware dispatch.
 
-- [ ] **Step 1: Write RED state-machine tests.**
+- [x] **Step 1: Write RED state-machine tests.**
 
 Use the fixed lifecycle:
 
@@ -490,31 +490,31 @@ running/evaluating -> interrupted -> resumable | failed
 
 Reject backward transitions, duplicate active attempts, seal-hash changes, reused workspaces, and completion without evaluation evidence.
 
-- [ ] **Step 2: Define SQLite tables.**
+- [x] **Step 2: Define SQLite tables.**
 
 Persist campaigns, tasks, arms, runs, attempts, leases, state events, reservations, request ledgers, process records, evidence, evaluations, adjudications, and report builds. Use unique constraints for `(campaign_id, task_id, arm_id, repetition)` and monotonically increasing per-run event sequence.
 
-- [ ] **Step 3: Implement deterministic balanced ordering.**
+- [x] **Step 3: Implement deterministic balanced ordering.**
 
 Derive order from the sealed seed using a balanced Latin-square schedule across tasks and repetitions. Store the full order before the first run so a crash cannot reshuffle later arms.
 
-- [ ] **Step 4: Implement leases and recovery.**
+- [x] **Step 4: Implement leases and recovery.**
 
 Lease acquisition and renewal are atomic. On restart, inspect expired leases, process liveness, broker ledger state, product Workflow status, workspace hash, and evaluation state. Resume observation/evaluation when safe; never duplicate a provider call whose disposition is unknown. Unknown paid calls require adjudication and retain their reservation charge.
 
-- [ ] **Step 5: Implement cancellation and concurrency.**
+- [x] **Step 5: Implement cancellation and concurrency.**
 
 Start with concurrency 1 for pilot and make higher concurrency an explicit sealed setting. Cancellation revokes the grant, terminates the process tree, waits for broker settlement, records the final state, and leaves evidence intact.
 
-- [ ] **Step 6: Add campaign/run status commands.**
+- [x] **Step 6: Add campaign/run status commands.**
 
 Implement `task24 status`, `task24 run --stage offline|pilot|campaign`, `task24 resume`, and `task24 cancel`. `run --stage pilot|campaign` refuses to start without a separate signed local approval envelope containing provider-native ceilings and matching campaign/stage hashes.
 
-- [ ] **Step 7: Verify fault injection.**
+- [x] **Step 7: Verify fault injection.**
 
 Kill the scheduler at every state boundary in table-driven tests, restart, and assert no double dispatch, no lost settlement, stable order, and a terminal or explicitly adjudication-required state.
 
-- [ ] **Step 8: Commit and push.**
+- [x] **Step 8: Commit and push.**
 
 ```powershell
 git add packages/benchmark

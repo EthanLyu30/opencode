@@ -71,6 +71,7 @@ export const Preregistration = Schema.Struct({
   visualQualifiedThreshold: PositiveFinite,
   viewportFloor: PositiveFinite,
   costRatioLimit: PositiveFinite,
+  maxConcurrency: PositiveInt,
   seed: Schema.NonEmptyString,
   budget: Budget,
 })

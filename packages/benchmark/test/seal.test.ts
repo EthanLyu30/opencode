@@ -53,6 +53,7 @@ const fixture = () => ({
     visualQualifiedThreshold: 75,
     viewportFloor: 65,
     costRatioLimit: 2,
+    maxConcurrency: 1,
     seed: "task24-fixed-seed",
     budget: {
       aggregateInputTokens: 200_000,
@@ -186,5 +187,15 @@ describe("campaign seal", () => {
     const zeroExchange = fixture()
     zeroExchange.exchangeRate.decimalRate = "0"
     expect(() => sealCampaign(zeroExchange)).toThrow("CAMPAIGN_EXCHANGE_RATE_INVALID")
+  })
+
+  test("binds an explicit positive concurrency ceiling into the campaign seal", () => {
+    const higherConcurrency = fixture()
+    higherConcurrency.preregistration.maxConcurrency = 2
+    expect(sealCampaign(higherConcurrency).preregistration.maxConcurrency).toBe(2)
+
+    const invalid = fixture()
+    invalid.preregistration.maxConcurrency = 0
+    expect(() => sealCampaign(invalid)).toThrow()
   })
 })
