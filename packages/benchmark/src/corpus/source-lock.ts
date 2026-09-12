@@ -154,8 +154,13 @@ export async function resolveOfficialUpstream(
   const response = await request("https://api.github.com/repos/anomalyco/opencode/releases/latest", {
     headers: { Accept: "application/vnd.github+json", "User-Agent": "opencode-task24-benchmark" },
   })
-  if (!response.ok) throw new TypeError(`Official OpenCode release lookup failed with HTTP ${response.status}`)
-  const tag = parseStableRelease(await response.json())
+  const tag = response.ok
+    ? parseStableRelease(await response.json())
+    : response.status === 403 || response.status === 429
+      ? await resolveLatestReleaseRedirect(request)
+      : (() => {
+          throw new TypeError(`Official OpenCode release lookup failed with HTTP ${response.status}`)
+        })()
   const revision = assertImmutableRevision(await (input.resolveTag ?? resolveRemoteTag)(repositoryUrl, tag))
   const archive = await request(`https://github.com/anomalyco/opencode/archive/${revision}.tar.gz`, {
     headers: { "User-Agent": "opencode-task24-benchmark" },
@@ -171,6 +176,24 @@ export async function resolveOfficialUpstream(
     lockedAt: (input.now ?? (() => new Date()))().toISOString(),
     license: "MIT",
   })
+}
+
+async function resolveLatestReleaseRedirect(request: typeof fetch): Promise<string> {
+  const response = await request("https://github.com/anomalyco/opencode/releases/latest", {
+    redirect: "manual",
+    headers: { "User-Agent": "opencode-task24-benchmark" },
+  })
+  if (![301, 302, 303, 307, 308].includes(response.status)) {
+    throw new TypeError(`Official OpenCode release redirect failed with HTTP ${response.status}`)
+  }
+  const location = response.headers.get("location")
+  if (location === null) throw new TypeError("Official OpenCode release redirect is missing a location")
+  const target = new URL(location, "https://github.com")
+  const match = /^\/anomalyco\/opencode\/releases\/tag\/(v?\d+\.\d+\.\d+)$/.exec(target.pathname)
+  if (target.origin !== "https://github.com" || target.search || target.hash || match === null) {
+    throw new TypeError("Official OpenCode release redirect is invalid")
+  }
+  return parseStableRelease({ tag_name: match[1], draft: false, prerelease: false })
 }
 
 export async function stageOfficialUpstream(input: {
@@ -198,6 +221,7 @@ export async function stageOfficialUpstream(input: {
       archive,
       destination: extraction,
       expectedSha256: input.source.archiveSha256,
+      allowSafeInternalSymlinks: true,
     })
     return { checkout: extracted.root, archive }
   } catch (cause) {

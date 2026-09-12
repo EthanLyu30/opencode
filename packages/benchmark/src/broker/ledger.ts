@@ -6,7 +6,7 @@ import { canonicalJson } from "../campaign/canonical"
 import { Task24Root } from "../root"
 import type { GrantAuthority, GrantRoute } from "./grant"
 import { routeKey, verifyGrant } from "./grant"
-import type { PriceBook, ProviderUsage } from "./pricing"
+import type { CompiledPrice, PriceBook, ProviderUsage } from "./pricing"
 import { settlePrice, validateUsage, worstCasePrice } from "./pricing"
 
 type Currency = "CNY" | "USD"
@@ -197,7 +197,7 @@ function service(database: Database, prices: PriceBook): Service {
     reserve(input) {
       active()
       validateReservation(input)
-      const price = prices[input.provider]
+      const price = prices.forRequest(input.provider, input.model, input.at)
       if (input.priceSha256 !== price.sha256) throw new TypeError("BROKER_PRICE_REVISION_MISMATCH")
       const amount = worstCasePrice(price, {
         inputTokens: input.inputTokenBound,
@@ -256,7 +256,7 @@ function service(database: Database, prices: PriceBook): Service {
           .query<ReservationRow, [string]>("SELECT * FROM broker_reservation WHERE request_id = ?")
           .get(input.requestID)
         if (!reservation || reservation.state !== "active") throw new TypeError("BROKER_RESERVATION_NOT_ACTIVE")
-        const price = prices[reservation.provider]
+        const price = prices.bySha256(reservation.price_sha256)
         if (reservation.price_sha256 !== price.sha256) throw new TypeError("BROKER_PRICE_REVISION_MISMATCH")
         const reserved = BigInt(reservation.reserved_micros)
         const charge = actualCharge(price, input.usage, reserved)
@@ -455,7 +455,7 @@ function immediate<T>(database: Database, operation: () => T): T {
   }
 }
 
-function actualCharge(price: PriceBook["kimi"], usage: ProviderUsage | undefined, reserved: bigint): bigint {
+function actualCharge(price: CompiledPrice, usage: ProviderUsage | undefined, reserved: bigint): bigint {
   if (!usage) return reserved
   try {
     validateUsage(usage)

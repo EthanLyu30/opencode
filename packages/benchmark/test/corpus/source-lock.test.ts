@@ -52,6 +52,34 @@ describe("Task24 source locks", () => {
     expect(calls).toHaveLength(2)
   })
 
+  test("falls back to the official latest-release redirect when anonymous GitHub API quota is exhausted", async () => {
+    const archive = Uint8Array.from([31, 139, 8, 0, 1, 2, 3, 4])
+    const calls: string[] = []
+    const source = await resolveOfficialUpstream({
+      fetch: (async (input: string | URL | Request) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+        calls.push(url)
+        if (url.includes("api.github.com")) return new Response("rate limit", { status: 403 })
+        if (url.endsWith("/releases/latest")) {
+          return new Response(null, { status: 302, headers: { location: "/anomalyco/opencode/releases/tag/v1.18.30" } })
+        }
+        return new Response(archive)
+      }) as typeof fetch,
+      resolveTag: async (_repositoryUrl, tag) => {
+        expect(tag).toBe("v1.18.30")
+        return "a".repeat(40)
+      },
+      now: () => new Date("2026-09-12T12:00:00.000Z"),
+    })
+
+    expect(source.tag).toBe("v1.18.30")
+    expect(calls).toEqual([
+      "https://api.github.com/repos/anomalyco/opencode/releases/latest",
+      "https://github.com/anomalyco/opencode/releases/latest",
+      `https://github.com/anomalyco/opencode/archive/${"a".repeat(40)}.tar.gz`,
+    ])
+  })
+
   test("seals exact upstream and dataset metadata and rejects tampering", () => {
     const upstream = {
       id: "opencode-upstream",

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { canonicalJson } from "../src/campaign/canonical"
 import { sealCampaign, verifyCampaign } from "../src/campaign/seal"
+import { priceFixture } from "./broker/price-fixture"
 
 const sha = (digit: string) => digit.repeat(64)
 
@@ -95,28 +96,7 @@ const fixture = () => ({
     { id: "D", runtime: "upstream", mode: "direct", routes: direct("deepseek", "deepseek-v4-pro", "responses") },
     { id: "E", runtime: "upstream", mode: "direct", routes: direct("kimi", "kimi-k3", "chat_completions") },
   ],
-  pricing: {
-    kimi: {
-      provider: "kimi",
-      currency: "CNY",
-      sourceUrl: "https://platform.kimi.com/",
-      capturedAt: "2026-09-12T12:00:00.000Z",
-      inputMicrosPerMillion: "1000000",
-      cachedInputMicrosPerMillion: "100000",
-      outputMicrosPerMillion: "3000000",
-      reasoningMicrosPerMillion: "3000000",
-    },
-    deepseek: {
-      provider: "deepseek",
-      currency: "USD",
-      sourceUrl: "https://api-docs.deepseek.com/quick_start/pricing",
-      capturedAt: "2026-09-12T12:00:00.000Z",
-      inputMicrosPerMillion: "1000000",
-      cachedInputMicrosPerMillion: "100000",
-      outputMicrosPerMillion: "3000000",
-      reasoningMicrosPerMillion: "3000000",
-    },
-  },
+  pricing: priceFixture.map((price) => ({ ...price })),
   exchangeRate: {
     base: "CNY",
     quote: "USD",
@@ -147,6 +127,16 @@ describe("campaign seal", () => {
 
   test("produces the same seal for the same decoded campaign", () => {
     expect(sealCampaign(fixture())).toEqual(sealCampaign(fixture()))
+  })
+
+  test("binds ordinary 40-character Git commits independently from binary hashes", () => {
+    const campaign = fixture()
+    campaign.binaries.modified.commit = "a".repeat(40)
+    campaign.binaries.upstream.commit = "c".repeat(40)
+    expect(sealCampaign(campaign).binaries).toMatchObject({
+      modified: { commit: "a".repeat(40), sha256: sha("b") },
+      upstream: { commit: "c".repeat(40), sha256: sha("d") },
+    })
   })
 
   test("detects any post-seal mutation", () => {
@@ -181,7 +171,7 @@ describe("campaign seal", () => {
 
   test("rejects zero provider prices and zero presentation exchange rates", () => {
     const zeroPrice = fixture()
-    zeroPrice.pricing.kimi.inputMicrosPerMillion = "0"
+    zeroPrice.pricing[0]!.inputMicrosPerMillion = "0"
     expect(() => sealCampaign(zeroPrice)).toThrow("CAMPAIGN_PRICING_INVALID")
 
     const zeroExchange = fixture()
@@ -189,10 +179,10 @@ describe("campaign seal", () => {
     expect(() => sealCampaign(zeroExchange)).toThrow("CAMPAIGN_EXCHANGE_RATE_INVALID")
   })
 
-  test("binds an explicit positive concurrency ceiling into the campaign seal", () => {
+  test("fixes campaign concurrency to one for fair provider and workspace ordering", () => {
     const higherConcurrency = fixture()
     higherConcurrency.preregistration.maxConcurrency = 2
-    expect(sealCampaign(higherConcurrency).preregistration.maxConcurrency).toBe(2)
+    expect(() => sealCampaign(higherConcurrency)).toThrow("CAMPAIGN_PREREGISTRATION_INVALID")
 
     const invalid = fixture()
     invalid.preregistration.maxConcurrency = 0

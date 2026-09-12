@@ -35,6 +35,9 @@ function harness(initial: Record<string, unknown> = {}) {
       (value as { sha256?: string }).sha256 === sha
         ? ({ ok: true, campaign: value } as never)
         : { ok: false, reason: "CAMPAIGN_HASH_MISMATCH" },
+    validateCandidate: async () => {
+      throw new Error("UNEXPECTED_CANDIDATE_VALIDATION")
+    },
     output: (value) => output.push(value),
   }
   return { dependencies, files, output }
@@ -68,6 +71,40 @@ describe("task24 CLI", () => {
     await runCli(["campaign", "verify", "--root", layout.root], state.dependencies)
 
     expect(state.output).toEqual([{ command: "campaign.verify", id: "fixture", sha256: sha, ok: true }])
+  })
+
+  test("validates a candidate without creating the final campaign seal", async () => {
+    const state = harness()
+    let calls = 0
+    const dependencies: CliDependencies = {
+      ...state.dependencies,
+      validateCandidate: async () => {
+        calls += 1
+        return {
+          command: "campaign.validate" as const,
+          id: "task24-candidate",
+          candidateSha256: "b".repeat(64),
+          wouldSealSha256: "c".repeat(64),
+          taskCount: 16,
+          ok: true as const,
+        }
+      },
+    }
+
+    await runCli(["campaign", "validate", "--root", layout.root], dependencies)
+
+    expect(calls).toBe(1)
+    expect(state.output).toEqual([
+      {
+        command: "campaign.validate",
+        id: "task24-candidate",
+        candidateSha256: "b".repeat(64),
+        wouldSealSha256: "c".repeat(64),
+        taskCount: 16,
+        ok: true,
+      },
+    ])
+    expect(state.files.has(`${layout.runs}\\current-campaign.json`)).toBe(false)
   })
 
   test("rejects unsupported commands before reading campaign files", async () => {

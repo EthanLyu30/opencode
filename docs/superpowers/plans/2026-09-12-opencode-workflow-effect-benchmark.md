@@ -78,32 +78,32 @@ D:\OpenCode-Benchmark\Task24\
 
 ### Stage gates
 
-| Gate | Scope | Paid calls | Required evidence before advancing |
-| --- | --- | --- | --- |
-| Task24A | Harness, broker fakes, evaluator, scheduler, reports, full offline E2E | Zero | Focused tests, package typecheck, recovery replay, redaction scan, deterministic report hashes |
-| Task24B | Three-task pilot across A–E | Explicit capped budget | Per-request ledger reconciliation, protocol trace, evaluator sanity, no hidden leakage, pilot report |
-| Task24C | Full sealed campaign | New explicit capped budget | User approval after reviewing Task24B and a fresh preflight cost envelope |
-| Task24D | Analysis, report, independent audit, cleanup | Zero unless rerun separately approved | Reproducible statistics, evidence index, JSON/CSV/HTML/PDF outputs, retained rollback material |
+| Gate    | Scope                                                                  | Paid calls                            | Required evidence before advancing                                                                   |
+| ------- | ---------------------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Task24A | Harness, broker fakes, evaluator, scheduler, reports, full offline E2E | Zero                                  | Focused tests, package typecheck, recovery replay, redaction scan, deterministic report hashes       |
+| Task24B | Three-task pilot across A–E                                            | Explicit capped budget                | Per-request ledger reconciliation, protocol trace, evaluator sanity, no hidden leakage, pilot report |
+| Task24C | Full sealed campaign                                                   | New explicit capped budget            | User approval after reviewing Task24B and a fresh preflight cost envelope                            |
+| Task24D | Analysis, report, independent audit, cleanup                           | Zero unless rerun separately approved | Reproducible statistics, evidence index, JSON/CSV/HTML/PDF outputs, retained rollback material       |
 
 ---
 
 ## File and Interface Map
 
-| Area | Responsibility | Primary files |
-| --- | --- | --- |
-| Package | CLI, schemas, canonicalization, D-root enforcement | `packages/benchmark/{package.json,tsconfig.json,src/cli.ts,src/schema.ts,src/root.ts}` |
-| Campaign | Immutable preregistration, source/model/binary locks, hashes | `packages/benchmark/src/campaign/{canonical.ts,seal.ts,verify.ts}` |
-| Workflow transport | Trusted persisted loopback endpoint profile | `packages/core/src/workflow/{benchmark-transport.ts,admission.ts,routing.ts,execution/model.ts}`, Server composition/tests |
-| Corpus | Public-source locks, hidden task bundles, clean workspace materialization | `packages/benchmark/src/corpus/{source-lock.ts,manifest.ts,materialize.ts,validate.ts}` |
-| Broker | Credential isolation, protocol enforcement, hard caps, usage ledger | `packages/benchmark/src/broker/{server.ts,grant.ts,policy.ts,pricing.ts,ledger.ts,redaction.ts}` |
-| Arms | Modified workflow/direct and upstream direct black-box adapters | `packages/benchmark/src/arms/{types.ts,workflow.ts,direct.ts,upstream.ts,config.ts,process.ts}` |
-| Scheduler | Durable queue, leases, resume, cancellation, deterministic order | `packages/benchmark/src/run/{sql.ts,store.ts,scheduler.ts,state.ts,budget.ts}` |
-| Browser | Authenticated Node/Playwright capture and DOM/a11y extraction | `packages/benchmark/src/evaluator/{browser-runtime.ts,browser-node-helper.ts}` |
-| Evaluation | Functional, visual, policy, static, requirements, score | `packages/benchmark/src/evaluator/{functional.ts,visual.ts,policy.ts,quality.ts,score.ts}` |
-| Statistics | Qualified-success contrasts, clustered bootstrap, guardrails | `packages/benchmark/src/statistics/{aggregate.ts,bootstrap.ts,decision.ts}` |
-| Reports | Sanitized JSON, CSV, HTML, PDF, evidence index | `packages/benchmark/src/report/{model.ts,json.ts,csv.ts,html.ts,pdf.ts}` |
-| Automation | Setup, browser runtime build, command wrapper | `scripts/{setup-task24-sources.ps1,build-task24-browser-runtime.ps1,task24.ps1}` |
-| Tracked config | Campaign template, task schemas, authoring rules | `benchmarks/task24/{campaign.template.json,schemas,README.md,.gitignore}` |
+| Area               | Responsibility                                                            | Primary files                                                                                                              |
+| ------------------ | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Package            | CLI, schemas, canonicalization, D-root enforcement                        | `packages/benchmark/{package.json,tsconfig.json,src/cli.ts,src/schema.ts,src/root.ts}`                                     |
+| Campaign           | Immutable preregistration, source/model/binary locks, hashes              | `packages/benchmark/src/campaign/{canonical.ts,seal.ts,verify.ts}`                                                         |
+| Workflow transport | Trusted persisted loopback endpoint profile                               | `packages/core/src/workflow/{benchmark-transport.ts,admission.ts,routing.ts,execution/model.ts}`, Server composition/tests |
+| Corpus             | Public-source locks, hidden task bundles, clean workspace materialization | `packages/benchmark/src/corpus/{source-lock.ts,manifest.ts,materialize.ts,validate.ts}`                                    |
+| Broker             | Credential isolation, protocol enforcement, hard caps, usage ledger       | `packages/benchmark/src/broker/{server.ts,grant.ts,policy.ts,pricing.ts,ledger.ts,redaction.ts}`                           |
+| Arms               | Modified workflow/direct and upstream direct black-box adapters           | `packages/benchmark/src/arms/{types.ts,workflow.ts,direct.ts,upstream.ts,config.ts,process.ts}`                            |
+| Scheduler          | Durable queue, leases, resume, cancellation, deterministic order          | `packages/benchmark/src/run/{sql.ts,store.ts,scheduler.ts,state.ts,budget.ts}`                                             |
+| Browser            | Authenticated Node/Playwright capture and DOM/a11y extraction             | `packages/benchmark/src/evaluator/{browser-runtime.ts,browser-node-helper.ts}`                                             |
+| Evaluation         | Functional, visual, policy, static, requirements, score                   | `packages/benchmark/src/evaluator/{functional.ts,visual.ts,policy.ts,quality.ts,score.ts}`                                 |
+| Statistics         | Qualified-success contrasts, clustered bootstrap, guardrails              | `packages/benchmark/src/statistics/{aggregate.ts,bootstrap.ts,decision.ts}`                                                |
+| Reports            | Sanitized JSON, CSV, HTML, PDF, evidence index                            | `packages/benchmark/src/report/{model.ts,json.ts,csv.ts,html.ts,pdf.ts}`                                                   |
+| Automation         | Setup, browser runtime build, command wrapper                             | `scripts/{setup-task24-sources.ps1,build-task24-browser-runtime.ps1,task24.ps1}`                                           |
+| Tracked config     | Campaign template, task schemas, authoring rules                          | `benchmarks/task24/{campaign.template.json,schemas,README.md,.gitignore}`                                                  |
 
 The central interfaces are fixed before implementation:
 
@@ -121,7 +121,7 @@ export interface SealedCampaign {
   readonly sources: readonly SourceLock[]
   readonly tasks: readonly SealedTask[]
   readonly arms: readonly ArmDefinition[]
-  readonly pricing: Readonly<Record<ProviderID, PriceRevision>>
+  readonly pricing: readonly PriceRevision[]
   readonly exchangeRate: ExchangeRateLock
   readonly toolchain: ToolchainLock
   readonly evaluator: EvaluatorLock
@@ -670,22 +670,29 @@ git push fork dev
 **Files:**
 
 - Modify: `benchmarks/task24/campaign.template.json`
+- Modify: `benchmarks/task24/schemas/campaign.schema.json`
 - Modify: `benchmarks/task24/README.md`
+- Modify: `packages/benchmark/src/{schema.ts,cli.ts}`
+- Modify: `packages/benchmark/src/campaign/seal.ts`
+- Create: `packages/benchmark/src/campaign/{candidate.ts,fairness.ts}`
+- Modify: `packages/benchmark/src/corpus/{source-lock.ts,archive.ts}`
+- Modify: `packages/benchmark/src/broker/{pricing.ts,ledger.ts,server.ts}`
+- Create/modify: focused tests under `packages/benchmark/test`
 - Create local-only bundles under `D:\OpenCode-Benchmark\Task24\assets\tasks`
-- Create local-only `D:\OpenCode-Benchmark\Task24\runs\preregistration.json`
+- Create local-only `D:\OpenCode-Benchmark\Task24\runs\preregistration.candidate.json`
 - Create local-only `D:\OpenCode-Benchmark\Task24\runs\sources.lock.json`
 
 **Produces:** 12 primary web tasks plus four non-visual guardrails, with hidden evaluator assets and a complete candidate preregistration ready for the final post-verification seal.
 
-- [ ] **Step 1: Import four Design2Code-Hard tasks.**
+- [x] **Step 1: Import four Design2Code-Hard tasks.**
 
 Select four licensed tasks with distinct layout families and responsive references. Normalize assets without changing pixels, preserve upstream IDs/licenses, and create functional/interaction assertions only from observable task requirements.
 
-- [ ] **Step 2: Import four SWE-bench Multimodal JS visual tasks.**
+- [x] **Step 2: Import four SWE-bench Multimodal JS visual tasks.**
 
 Select four JavaScript/TypeScript web issues whose accepted outcome is observable through tests and visual evidence. Pin repository base commits and issue assets, exclude tasks that require inaccessible services or subjective manual judgment, and preserve upstream provenance.
 
-- [ ] **Step 3: Author four private real-web tasks.**
+- [x] **Step 3: Author four private real-web tasks.**
 
 Use these fixed families:
 
@@ -696,41 +703,43 @@ Use these fixed families:
 
 Write independent hidden functional tests, reference images for every required viewport, DOM/style expectations, accessibility checks, build commands, mandatory requirements, and score masks. Place hidden files only in each bundle's `gold` directory.
 
-- [ ] **Step 4: Author four non-visual guardrails.**
+- [x] **Step 4: Author four non-visual guardrails.**
 
 Cover repository debugging, API/data transformation, stateful backend behavior, and multi-file refactoring. Give them deterministic tests and no visual points; map their outcome to the fixed guardrail comparison so workflow overhead cannot hide coding regressions.
 
-- [ ] **Step 5: Validate task leakage and difficulty.**
+- [x] **Step 5: Validate task leakage and difficulty.**
 
 Run static canary scans between prompts/starter trees and gold bundles. Verify clean builds, evaluator-owned tests, reference capture, offline dependency availability, expected time limits, and no evaluator reliance on machine-specific absolute paths.
 
-- [ ] **Step 6: Freeze the full toolchain and fairness fingerprint.**
+- [x] **Step 6: Freeze the full toolchain and fairness fingerprint.**
 
 Record the candidate modified/upstream source revisions, Bun/package-manager versions, Docker engine and image digest, Chromium revision, browser helper hash, operating-system build, fonts and their hashes, locale, timezone, viewports, allowed dependency mirrors, evaluator commands, and external-network policy. Fail validation when a required component is floating or resolves outside its approved D-drive root.
 
-- [ ] **Step 7: Freeze model/protocol/effort and run order.**
+- [x] **Step 7: Freeze model/protocol/effort and run order.**
 
 The seal records exact `kimi-k3`, `deepseek-v4-pro`, and `deepseek-v4-flash` IDs; Kimi Chat and DeepSeek Responses protocols; the fixed workflow role matrix; direct-arm variants; arm repetition policy; balanced order seed; evaluator weights; thresholds; and decision rules.
 
-- [ ] **Step 8: Validate the candidate preregistration without sealing it.**
+- [x] **Step 8: Validate the candidate preregistration without sealing it.**
 
 Run:
 
 ```powershell
-& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' --cwd 'D:\OpenCode-Audit\packages\benchmark' run task24 campaign validate --root 'D:\OpenCode-Benchmark\Task24'
+& 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe' run --cwd 'D:\OpenCode-Audit\packages\benchmark' task24 -- campaign validate --root 'D:\OpenCode-Benchmark\Task24'
 ```
 
 Write `preregistration.candidate.json` and its validation report. Do not create the final campaign seal until Task24A code review, commit, deployment, and offline acceptance have fixed the final modified binary hash.
 
-- [ ] **Step 9: Commit only templates/documentation.**
+- [x] **Step 9: Commit the candidate validators, schemas, tests, templates, and documentation.**
 
-Do not add local task gold, source locks, preregistration files, or sealed campaigns to Git.
+Do not add local task gold, source locks, preregistration files, candidate campaign artifacts, or sealed campaigns to Git. Task24.10 also records the production validation changes required by the real source/corpus exercise: per-model/rate-class pricing, immutable source-asset verification, safe materialization of explicitly trusted internal archive symlinks, GitHub release-resolution fallback, and candidate/fairness validation. The scored Flash route retains the official `deepseek-v4-flash` API identifier verified against the current DeepSeek documentation.
 
 ```powershell
-git add benchmarks/task24
-git commit -m "docs(benchmark): define task24 corpus"
+git add benchmarks/task24 packages/benchmark docs/superpowers/plans/2026-09-12-opencode-workflow-effect-benchmark.md
+git commit -m "feat(benchmark): freeze task24 corpus candidate"
 git push fork dev
 ```
+
+Task24.10 evidence before commit: 16/16 bundles passed manifest/hash/path validation; all eight private/guardrail starters failed their evaluator-owned tests while their hidden expected solutions passed; all four SWE-bench baselines failed while accepted patches passed inside digest-pinned official images with `--network none`; source lock SHA-256 is `7c1e4e818f1bb76a5fd93571525687c7fdb0b51bf4cb06ac1bf33bec7a82496a`; the latest candidate validation succeeded for 16 tasks. The candidate hash and fairness hash remain intentionally regenerable until Task24.11 replaces provisional binary identities and creates the final seal.
 
 ---
 

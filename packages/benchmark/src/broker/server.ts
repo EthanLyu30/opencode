@@ -103,6 +103,8 @@ async function handle(request: Request, options: StartBrokerOptions, ledger: Led
     }
     const requestID = crypto.randomUUID()
     reservedRequestID = requestID
+    const reservedAt = new Date().toISOString()
+    const price = options.prices.forRequest(authorized.provider, authorized.model, reservedAt)
     ledger.reserve({
       requestID,
       campaignID: options.campaignID,
@@ -115,8 +117,8 @@ async function handle(request: Request, options: StartBrokerOptions, ledger: Led
       requestSha256: digest(bytes),
       inputTokenBound: conservativeInputTokens(bytes.byteLength),
       maximumOutputTokens: authorized.maximumOutputTokens,
-      priceSha256: options.prices[authorized.provider].sha256,
-      at: new Date().toISOString(),
+      priceSha256: price.sha256,
+      at: reservedAt,
     })
     let upstream: Response
     try {

@@ -1,6 +1,9 @@
 import { Schema } from "effect"
 
 export const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)).annotate({ identifier: "Sha256" })
+export const GitRevision = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/)).annotate({
+  identifier: "GitRevision",
+})
 export const IsoDateTime = Schema.String.check(
   Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/),
 ).annotate({ identifier: "IsoDateTime" })
@@ -78,7 +81,7 @@ export const Preregistration = Schema.Struct({
 
 export const BinaryLock = Schema.Struct({
   version: Schema.NonEmptyString,
-  commit: Sha256,
+  commit: GitRevision,
   sha256: Sha256,
   sourceUrl: HttpsUrl,
 })
@@ -103,6 +106,8 @@ export const SealedTask = Schema.Struct({
 
 export const PriceRevision = Schema.Struct({
   provider: ProviderID,
+  model: ModelID,
+  rateClass: Schema.Literals(["standard", "peak", "off_peak"]),
   currency: Schema.Literals(["CNY", "USD"]),
   sourceUrl: HttpsUrl,
   capturedAt: IsoDateTime,
@@ -161,7 +166,7 @@ export const CampaignInput = Schema.Struct({
   sources: Schema.NonEmptyArray(SourceLock),
   tasks: Schema.Array(SealedTask),
   arms: Schema.Array(ArmDefinition),
-  pricing: Schema.Struct({ kimi: PriceRevision, deepseek: PriceRevision }),
+  pricing: Schema.NonEmptyArray(PriceRevision),
   exchangeRate: ExchangeRateLock,
   toolchain: ToolchainLock,
   evaluator: EvaluatorLock,

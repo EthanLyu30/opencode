@@ -4,6 +4,7 @@ import path from "node:path"
 import { BrokerLedger } from "../../src/broker/ledger"
 import { compilePriceBook } from "../../src/broker/pricing"
 import { Task24Root } from "../../src/root"
+import { priceFixture } from "./price-fixture"
 
 const cleanup: string[] = []
 afterEach(async () => {
@@ -15,28 +16,7 @@ afterEach(async () => {
   }
 })
 
-const prices = compilePriceBook({
-  kimi: {
-    provider: "kimi",
-    currency: "CNY",
-    sourceUrl: "https://example.test/kimi-price",
-    capturedAt: "2026-09-12T12:00:00.000Z",
-    inputMicrosPerMillion: "1000000",
-    cachedInputMicrosPerMillion: "100000",
-    outputMicrosPerMillion: "3000000",
-    reasoningMicrosPerMillion: "3000000",
-  },
-  deepseek: {
-    provider: "deepseek",
-    currency: "USD",
-    sourceUrl: "https://example.test/deepseek-price",
-    capturedAt: "2026-09-12T12:00:00.000Z",
-    inputMicrosPerMillion: "1000000",
-    cachedInputMicrosPerMillion: "100000",
-    outputMicrosPerMillion: "3000000",
-    reasoningMicrosPerMillion: "3000000",
-  },
-})
+const prices = compilePriceBook(priceFixture)
 
 describe("Task24 broker ledger", () => {
   test("survives restart, settles once, and preserves an append-only hash chain without bodies", async () => {
@@ -57,8 +37,8 @@ describe("Task24 broker ledger", () => {
       requestSha256: "a".repeat(64),
       inputTokenBound: 200,
       maximumOutputTokens: 50,
-      priceSha256: prices.deepseek.sha256,
-      at: "2026-09-12T12:00:00.000Z",
+      priceSha256: prices.forRequest("deepseek", "deepseek-v4-pro", "2026-09-14T01:30:00.000Z").sha256,
+      at: "2026-09-14T01:30:00.000Z",
     })
     first.close()
 
@@ -77,6 +57,9 @@ describe("Task24 broker ledger", () => {
     expect(rows).toHaveLength(1)
     expect(rows[0]?.previousSha256).toBe("0".repeat(64))
     expect(rows[0]?.recordSha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(rows[0]?.priceSha256).toBe(
+      prices.forRequest("deepseek", "deepseek-v4-pro", "2026-09-14T01:30:00.000Z").sha256,
+    )
     expect(JSON.stringify(rows)).not.toContain("CANARY_PROMPT_SOURCE_CODE")
     second.close()
   })

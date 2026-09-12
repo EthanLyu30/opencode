@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, win32 } from "node:path"
 import { Schema } from "effect"
 import { canonicalJson } from "./campaign/canonical"
+import { validateCandidateAtLayout } from "./campaign/candidate"
 import { sealCampaign, verifyCampaign, type CampaignVerification } from "./campaign/seal"
 import { CampaignID, Sha256, type SealedCampaign } from "./schema"
 import { Task24Root, type Task24Layout } from "./root"
@@ -27,6 +28,16 @@ export interface CliDependencies {
   readonly verify: (value: unknown) => CampaignVerification
   readonly output: (value: unknown) => void
   readonly runtime?: RuntimeCommandService
+  readonly validateCandidate: (layout: Task24Layout) => Promise<CandidateValidationSummary>
+}
+
+export interface CandidateValidationSummary {
+  readonly command: "campaign.validate"
+  readonly id: string
+  readonly candidateSha256: string
+  readonly wouldSealSha256: string
+  readonly taskCount: number
+  readonly ok: true
 }
 
 function invalidCommand(): never {
@@ -83,6 +94,7 @@ const defaults: CliDependencies = {
   writeCurrentJson,
   seal: sealCampaign,
   verify: verifyCampaign,
+  validateCandidate: validateCandidateAtLayout,
   output: (value) => process.stdout.write(canonicalJson(value) + "\n"),
 }
 
@@ -106,9 +118,14 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
     dependencies.output(value)
     return
   }
-  if (argv[1] !== "seal" && argv[1] !== "verify") invalidCommand()
+  if (argv[1] !== "seal" && argv[1] !== "verify" && argv[1] !== "validate") invalidCommand()
   const layout = dependencies.root(parseRoot(argv))
   const pointerPath = win32.join(layout.runs, "current-campaign.json")
+
+  if (argv[1] === "validate") {
+    dependencies.output(await dependencies.validateCandidate(layout))
+    return
+  }
 
   if (argv[1] === "seal") {
     const candidate = await dependencies.readJson(win32.join(layout.runs, "preregistration.candidate.json"))

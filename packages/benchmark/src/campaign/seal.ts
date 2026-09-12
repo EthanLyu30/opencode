@@ -127,17 +127,27 @@ function validateCampaign(input: CampaignInput): void {
     preregistration.minimumEffectPoints !== 10 ||
     preregistration.visualQualifiedThreshold !== 75 ||
     preregistration.viewportFloor !== 65 ||
-    preregistration.costRatioLimit !== 2
+    preregistration.costRatioLimit !== 2 ||
+    preregistration.maxConcurrency !== 1
   ) {
     throw new CampaignSealError("CAMPAIGN_PREREGISTRATION_INVALID")
   }
 
+  const expectedPrices = new Set([
+    "kimi:kimi-k3:standard:CNY",
+    "deepseek:deepseek-v4-pro:peak:USD",
+    "deepseek:deepseek-v4-pro:off_peak:USD",
+    "deepseek:deepseek-v4-flash:peak:USD",
+    "deepseek:deepseek-v4-flash:off_peak:USD",
+  ])
+  const priceKeys = input.pricing.map(
+    (price) => `${price.provider}:${price.model}:${price.rateClass}:${price.currency}`,
+  )
   if (
-    input.pricing.kimi.provider !== "kimi" ||
-    input.pricing.kimi.currency !== "CNY" ||
-    input.pricing.deepseek.provider !== "deepseek" ||
-    input.pricing.deepseek.currency !== "USD" ||
-    [input.pricing.kimi, input.pricing.deepseek].some((price) =>
+    input.pricing.length !== expectedPrices.size ||
+    new Set(priceKeys).size !== input.pricing.length ||
+    priceKeys.some((key) => !expectedPrices.has(key)) ||
+    input.pricing.some((price) =>
       [
         price.inputMicrosPerMillion,
         price.cachedInputMicrosPerMillion,
@@ -154,8 +164,7 @@ function validateCampaign(input: CampaignInput): void {
   }
 
   assertTimestamp(input.createdAt)
-  assertTimestamp(input.pricing.kimi.capturedAt)
-  assertTimestamp(input.pricing.deepseek.capturedAt)
+  for (const price of input.pricing) assertTimestamp(price.capturedAt)
   assertTimestamp(input.exchangeRate.capturedAt)
 
   if (

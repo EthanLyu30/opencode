@@ -13,6 +13,7 @@
     "visualQualifiedThreshold": 75,
     "viewportFloor": 65,
     "costRatioLimit": 2,
+    "maxConcurrency": 1,
     "seed": "replace-before-seal",
     "budget": {
       "aggregateInputTokens": 1,
@@ -122,9 +123,11 @@
       ]
     }
   ],
-  "pricing": {
-    "kimi": {
+  "pricing": [
+    {
       "provider": "kimi",
+      "model": "kimi-k3",
+      "rateClass": "standard",
       "currency": "CNY",
       "sourceUrl": "https://platform.kimi.com/",
       "capturedAt": "1970-01-01T00:00:00.000Z",
@@ -133,8 +136,46 @@
       "outputMicrosPerMillion": "0",
       "reasoningMicrosPerMillion": "0"
     },
-    "deepseek": {
+    {
       "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "rateClass": "peak",
+      "currency": "USD",
+      "sourceUrl": "https://api-docs.deepseek.com/quick_start/pricing",
+      "capturedAt": "1970-01-01T00:00:00.000Z",
+      "inputMicrosPerMillion": "0",
+      "cachedInputMicrosPerMillion": "0",
+      "outputMicrosPerMillion": "0",
+      "reasoningMicrosPerMillion": "0"
+    },
+    {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "rateClass": "off_peak",
+      "currency": "USD",
+      "sourceUrl": "https://api-docs.deepseek.com/quick_start/pricing",
+      "capturedAt": "1970-01-01T00:00:00.000Z",
+      "inputMicrosPerMillion": "0",
+      "cachedInputMicrosPerMillion": "0",
+      "outputMicrosPerMillion": "0",
+      "reasoningMicrosPerMillion": "0"
+    },
+    {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "rateClass": "peak",
+      "currency": "USD",
+      "sourceUrl": "https://api-docs.deepseek.com/quick_start/pricing",
+      "capturedAt": "1970-01-01T00:00:00.000Z",
+      "inputMicrosPerMillion": "0",
+      "cachedInputMicrosPerMillion": "0",
+      "outputMicrosPerMillion": "0",
+      "reasoningMicrosPerMillion": "0"
+    },
+    {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "rateClass": "off_peak",
       "currency": "USD",
       "sourceUrl": "https://api-docs.deepseek.com/quick_start/pricing",
       "capturedAt": "1970-01-01T00:00:00.000Z",
@@ -143,7 +184,7 @@
       "outputMicrosPerMillion": "0",
       "reasoningMicrosPerMillion": "0"
     }
-  },
+  ],
   "exchangeRate": {
     "base": "CNY",
     "quote": "USD",

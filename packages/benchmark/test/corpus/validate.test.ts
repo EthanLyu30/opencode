@@ -98,4 +98,58 @@ describe("Task24 task bundle validation", () => {
     expect(await Bun.file(path.join(extracted.root, "file.txt")).text()).toBe("archive fixture")
     expect(extracted.entries).toContain("root/file.txt")
   })
+
+  test("allows only explicitly enabled symlinks that resolve inside a trusted source archive", async () => {
+    const fixture = await taskFixture("archive-safe-link")
+    disposals.push(() => fixture.dispose())
+    const source = path.join(fixture.root, "linked-archive", "root")
+    const archive = path.join(fixture.root, "linked.tar.gz")
+    await fs.mkdir(path.join(source, "files"), { recursive: true })
+    await Bun.write(path.join(source, "files", "target.txt"), "trusted target")
+    await fs.symlink("files/target.txt", path.join(source, "link.txt"), "file")
+    const child = Bun.spawn(["tar", "-czf", archive, "-C", path.dirname(source), "root"], {
+      stdout: "ignore",
+      stderr: "pipe",
+    })
+    expect(await child.exited).toBe(0)
+
+    await expect(
+      safeExtractTar({
+        archive,
+        destination: path.join(fixture.root, "linked-default"),
+        expectedSha256: await sha256File(archive),
+      }),
+    ).rejects.toThrow(/link/i)
+    const extracted = await safeExtractTar({
+      archive,
+      destination: path.join(fixture.root, "linked-approved"),
+      expectedSha256: await sha256File(archive),
+      allowSafeInternalSymlinks: true,
+    })
+    expect(await Bun.file(path.join(extracted.root, "link.txt")).text()).toBe("trusted target")
+  })
+
+  test("rejects an explicitly enabled archive link that escapes its extracted root", async () => {
+    const fixture = await taskFixture("archive-escape-link")
+    disposals.push(() => fixture.dispose())
+    const source = path.join(fixture.root, "escape-archive", "root")
+    const archive = path.join(fixture.root, "escape.tar.gz")
+    await fs.mkdir(source, { recursive: true })
+    await Bun.write(path.join(fixture.root, "escape-archive", "outside.txt"), "outside")
+    await fs.symlink("../outside.txt", path.join(source, "escape.txt"), "file")
+    const child = Bun.spawn(["tar", "-czf", archive, "-C", path.dirname(source), "root"], {
+      stdout: "ignore",
+      stderr: "pipe",
+    })
+    expect(await child.exited).toBe(0)
+
+    await expect(
+      safeExtractTar({
+        archive,
+        destination: path.join(fixture.root, "escape-output"),
+        expectedSha256: await sha256File(archive),
+        allowSafeInternalSymlinks: true,
+      }),
+    ).rejects.toThrow(/link|path/i)
+  })
 })

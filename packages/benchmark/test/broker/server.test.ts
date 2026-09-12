@@ -4,6 +4,7 @@ import path from "node:path"
 import { startBroker } from "../../src/broker/server"
 import { compilePriceBook } from "../../src/broker/pricing"
 import { Task24Root } from "../../src/root"
+import { priceFixture } from "./price-fixture"
 
 const cleanup: string[] = []
 afterEach(async () => {
@@ -15,28 +16,7 @@ afterEach(async () => {
   }
 })
 
-const prices = compilePriceBook({
-  kimi: {
-    provider: "kimi",
-    currency: "CNY",
-    sourceUrl: "https://example.test/kimi-price",
-    capturedAt: "2026-09-12T12:00:00.000Z",
-    inputMicrosPerMillion: "1000000",
-    cachedInputMicrosPerMillion: "100000",
-    outputMicrosPerMillion: "3000000",
-    reasoningMicrosPerMillion: "3000000",
-  },
-  deepseek: {
-    provider: "deepseek",
-    currency: "USD",
-    sourceUrl: "https://example.test/deepseek-price",
-    capturedAt: "2026-09-12T12:00:00.000Z",
-    inputMicrosPerMillion: "1000000",
-    cachedInputMicrosPerMillion: "100000",
-    outputMicrosPerMillion: "3000000",
-    reasoningMicrosPerMillion: "3000000",
-  },
-})
+const prices = compilePriceBook(priceFixture)
 
 async function fixture(name: string) {
   return Bun.file(path.join(import.meta.dir, "..", "fixtures", "provider", name)).text()
