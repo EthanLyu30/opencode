@@ -171,6 +171,36 @@ export const SealedCampaign = Schema.Struct({
   sha256: Sha256,
 })
 
+export const RunRoots = Schema.Struct({
+  runRoot: Schema.NonEmptyString,
+  repo: Schema.NonEmptyString,
+  data: Schema.NonEmptyString,
+  config: Schema.NonEmptyString,
+  cache: Schema.NonEmptyString,
+  temp: Schema.NonEmptyString,
+  output: Schema.NonEmptyString,
+})
+
+export const ArmLaunchSnapshot = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  armID: ArmID,
+  runtime: RuntimeID,
+  mode: ArmMode,
+  executable: Schema.NonEmptyString,
+  executableSha256: Sha256,
+  version: Schema.NonEmptyString,
+  cwd: Schema.NonEmptyString,
+  roots: RunRoots,
+  promptSha256: Sha256,
+  referenceFiles: Schema.Array(Schema.NonEmptyString),
+  routes: Schema.NonEmptyArray(RouteDefinition),
+  budget: Budget,
+  brokerOrigin: Schema.NonEmptyString,
+  brokerGrantSha256: Sha256,
+  expectedOutput: Schema.NonEmptyString,
+})
+
 export type CampaignInput = typeof CampaignInput.Type
 export type SealedCampaign = typeof SealedCampaign.Type
 export type ArmDefinition = typeof ArmDefinition.Type
+export type ArmLaunchSnapshot = typeof ArmLaunchSnapshot.Type

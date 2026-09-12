@@ -24,12 +24,17 @@ export function authorizeRequest(pathname: string, body: unknown): AuthorizedReq
   if (stream !== true) throw new BrokerRequestError(400, "BROKER_STREAM_REQUIRED")
   if (pathname === "/v1/kimi/chat/completions") {
     if (model !== "kimi-k3") throw new BrokerRequestError(400, "BROKER_ROUTE_MODEL_INVALID")
+    const completion = Reflect.get(body, "max_completion_tokens")
+    const compatible = Reflect.get(body, "max_tokens")
+    if (completion !== undefined && compatible !== undefined) {
+      throw new BrokerRequestError(400, "BROKER_MAX_OUTPUT_TOKENS_AMBIGUOUS")
+    }
     return Object.freeze({
       route: pathname,
       provider: "kimi",
       model,
       protocol: "chat_completions",
-      maximumOutputTokens: positiveInt(Reflect.get(body, "max_completion_tokens")),
+      maximumOutputTokens: positiveInt(completion ?? compatible),
     })
   }
   if (pathname === "/v1/deepseek/responses") {

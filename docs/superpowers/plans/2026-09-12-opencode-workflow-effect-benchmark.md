@@ -416,15 +416,15 @@ git push fork dev
 
 **Produces:** uniform start/cancel/collect behavior for A–E while preserving the intended treatment differences.
 
-- [ ] **Step 1: Write RED command/environment snapshot tests.**
+- [x] **Step 1: Write RED command/environment snapshot tests.**
 
 Each snapshot must bind binary hash, working directory, isolated D-only roots, task prompt hash, model, effort/variant, protocol, permissions, aggregate input/output-token, tool/step, retry, and wall-time ceilings, broker grant, and expected output locations. Assert that no real provider key is present.
 
-- [ ] **Step 2: Implement the common process supervisor.**
+- [x] **Step 2: Implement the common process supervisor.**
 
 Start child processes without a shell, capture bounded stdout/stderr to run-owned files, record PID/start time/executable hash, enforce wall time, cancel the full process tree, and classify exit, signal, timeout, lease loss, and user cancellation distinctly.
 
-- [ ] **Step 3: Implement arm A.**
+- [x] **Step 3: Implement arm A.**
 
 Invoke the modified deployment as:
 
@@ -434,7 +434,7 @@ opencode workflow run <task-prompt> --format json
 
 Pass the prompt as one shell-free argv value and persist only its hash in process metadata. Supply the trusted benchmark transport file and isolated OpenCode roots. The CLI must enter the same deployed production visual-build admission and role prompts used outside benchmarking; the adapter must not inject stage prompts, artifacts, or extra decomposition. Follow its Workflow SSE/JSON identifiers until terminal, export the final delivery artifact, and record stage/model/protocol evidence. Fail if the observed stage route differs from the sealed Kimi/DeepSeek matrix.
 
-- [ ] **Step 4: Implement arms B and C.**
+- [x] **Step 4: Implement arms B and C.**
 
 Generate an isolated `opencode.json` containing only the loopback provider definitions and model metadata required for that arm. DeepSeek uses bundled `@ai-sdk/openai` and must hit `/responses`; Kimi uses `@ai-sdk/openai-compatible` and must hit `/chat/completions`. Invoke:
 
@@ -447,15 +447,15 @@ Use identical task input/reference media, allowed dependency set, permission pol
 
 Materialize public reference media at identical relative workspace paths and name those paths in the shared task prompt. Use the same declared attachment mechanism where the product supports one; do not OCR, caption, resize, or otherwise derive extra arm-specific reference content. A model's inability to consume an identically exposed medium is an observed capability difference, not a reason to enrich only that arm.
 
-- [ ] **Step 5: Implement arms D and E.**
+- [x] **Step 5: Implement arms D and E.**
 
 Use the frozen upstream binary and the same isolated configs, workspace materialization, broker, task prompt, and direct-run envelope as B/C. Never patch or import benchmark code into the upstream checkout. Only its executable path/hash and version differ.
 
-- [ ] **Step 6: Prove the wire protocol before a paid campaign.**
+- [x] **Step 6: Prove the wire protocol before a paid campaign.**
 
 Against a local fake broker, assert exact request paths, models, auth grant, stream semantics, required maximum-output field, and terminal usage parsing. DeepSeek on any arm must reach `/v1/deepseek/responses`; Kimi must reach `/v1/kimi/chat/completions`.
 
-- [ ] **Step 7: Verify and commit.**
+- [x] **Step 7: Verify and commit.**
 
 Run all arm tests, package typecheck, and a fake five-arm smoke. Commit:
 
