@@ -1,0 +1,23 @@
+# Local credentials and approvals
+.env*
+*.key
+*.approval.json
+
+# Local benchmark inputs and outputs
+assets/
+cache/
+toolchain/
+workspaces/
+runs/
+reports/
+tmp/
+gold/
+**/gold/
+sources.lock.json
+preregistration.candidate.json
+campaign.sealed.json
+current-campaign.json
+
+# Test/editor residue
+*.tmp
+*.log

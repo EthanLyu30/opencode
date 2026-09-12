@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode.ai/schemas/task24/campaign.schema.json",
+  "title": "Task24 sealed campaign",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "createdAt",
+    "preregistration",
+    "binaries",
+    "sources",
+    "tasks",
+    "arms",
+    "pricing",
+    "exchangeRate",
+    "toolchain",
+    "evaluator",
+    "sha256"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "createdAt": { "$ref": "#/$defs/timestamp" },
+    "preregistration": { "$ref": "#/$defs/preregistration" },
+    "binaries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modified", "upstream"],
+      "properties": {
+        "modified": { "$ref": "#/$defs/binary" },
+        "upstream": { "$ref": "#/$defs/binary" }
+      }
+    },
+    "sources": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/source" } },
+    "tasks": { "type": "array", "minItems": 16, "maxItems": 16, "items": { "$ref": "task.schema.json" } },
+    "arms": { "type": "array", "minItems": 5, "maxItems": 5, "items": { "$ref": "#/$defs/arm" } },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kimi", "deepseek"],
+      "properties": {
+        "kimi": { "$ref": "#/$defs/price" },
+        "deepseek": { "$ref": "#/$defs/price" }
+      }
+    },
+    "exchangeRate": { "$ref": "#/$defs/exchangeRate" },
+    "toolchain": { "$ref": "#/$defs/toolchain" },
+    "evaluator": { "$ref": "#/$defs/evaluator" },
+    "sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "timestamp": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$" },
+    "positiveInteger": { "type": "integer", "minimum": 1 },
+    "positiveNumber": { "type": "number", "exclusiveMinimum": 0 },
+    "decimal": { "type": "string", "pattern": "^(?:0|[1-9]\\d*)(?:\\.\\d+)?$" },
+    "httpsUrl": { "type": "string", "pattern": "^https://[^\\s]+$" },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aggregateInputTokens", "aggregateOutputTokens", "maxToolCalls", "maxRetries", "maxDurationMs"],
+      "properties": {
+        "aggregateInputTokens": { "$ref": "#/$defs/positiveInteger" },
+        "aggregateOutputTokens": { "$ref": "#/$defs/positiveInteger" },
+        "maxToolCalls": { "$ref": "#/$defs/positiveInteger" },
+        "maxRetries": { "$ref": "#/$defs/positiveInteger" },
+        "maxDurationMs": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "preregistration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primaryTaskCount",
+        "guardrailTaskCount",
+        "primaryRepeats",
+        "upstreamRepeats",
+        "upstreamSecondPassThresholdPoints",
+        "bootstrapResamples",
+        "minimumEffectPoints",
+        "visualQualifiedThreshold",
+        "viewportFloor",
+        "costRatioLimit",
+        "seed",
+        "budget"
+      ],
+      "properties": {
+        "primaryTaskCount": { "const": 12 },
+        "guardrailTaskCount": { "const": 4 },
+        "primaryRepeats": { "const": 2 },
+        "upstreamRepeats": { "const": 1 },
+        "upstreamSecondPassThresholdPoints": { "const": 5 },
+        "bootstrapResamples": { "const": 10000 },
+        "minimumEffectPoints": { "const": 10 },
+        "visualQualifiedThreshold": { "const": 75 },
+        "viewportFloor": { "const": 65 },
+        "costRatioLimit": { "const": 2 },
+        "seed": { "type": "string", "minLength": 1 },
+        "budget": { "$ref": "#/$defs/budget" }
+      }
+    },
+    "binary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "commit", "sha256", "sourceUrl"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "commit": { "$ref": "#/$defs/sha256" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "sourceUrl": { "$ref": "#/$defs/httpsUrl" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "url", "revision", "sha256", "license"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+        "kind": { "enum": ["git", "archive", "dataset"] },
+        "url": { "$ref": "#/$defs/httpsUrl" },
+        "revision": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "license": { "type": "string", "minLength": 1 }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "provider", "model", "protocol", "effort"],
+      "properties": {
+        "role": { "enum": ["all", "design", "decompose", "implement", "test", "visual_review", "repair", "deliver"] },
+        "provider": { "enum": ["kimi", "deepseek"] },
+        "model": { "enum": ["kimi-k3", "deepseek-v4-pro", "deepseek-v4-flash"] },
+        "protocol": { "enum": ["chat_completions", "responses"] },
+        "effort": { "enum": ["high", "max"] }
+      }
+    },
+    "arm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "runtime", "mode", "routes"],
+      "properties": {
+        "id": { "enum": ["A", "B", "C", "D", "E"] },
+        "runtime": { "enum": ["modified", "upstream"] },
+        "mode": { "enum": ["workflow", "direct"] },
+        "routes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/route" } }
+      }
+    },
+    "price": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "currency",
+        "sourceUrl",
+        "capturedAt",
+        "inputMicrosPerMillion",
+        "cachedInputMicrosPerMillion",
+        "outputMicrosPerMillion",
+        "reasoningMicrosPerMillion"
+      ],
+      "properties": {
+        "provider": { "enum": ["kimi", "deepseek"] },
+        "currency": { "enum": ["CNY", "USD"] },
+        "sourceUrl": { "$ref": "#/$defs/httpsUrl" },
+        "capturedAt": { "$ref": "#/$defs/timestamp" },
+        "inputMicrosPerMillion": { "$ref": "#/$defs/decimal" },
+        "cachedInputMicrosPerMillion": { "$ref": "#/$defs/decimal" },
+        "outputMicrosPerMillion": { "$ref": "#/$defs/decimal" },
+        "reasoningMicrosPerMillion": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "exchangeRate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "quote", "decimalRate", "sourceUrl", "capturedAt"],
+      "properties": {
+        "base": { "const": "CNY" },
+        "quote": { "const": "USD" },
+        "decimalRate": { "$ref": "#/$defs/decimal" },
+        "sourceUrl": { "$ref": "#/$defs/httpsUrl" },
+        "capturedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bunVersion", "nodeVersion", "playwrightVersion", "chromiumRevision", "operatingSystem", "sha256"],
+      "properties": {
+        "bunVersion": { "type": "string", "minLength": 1 },
+        "nodeVersion": { "type": "string", "minLength": 1 },
+        "playwrightVersion": { "type": "string", "minLength": 1 },
+        "chromiumRevision": { "type": "string", "minLength": 1 },
+        "operatingSystem": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "evaluator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "sha256", "diagnosticWeights", "visualWeights"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "diagnosticWeights": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["functional", "visual", "requirements", "quality", "accessibilityResponsive"],
+          "properties": {
+            "functional": { "const": 45 },
+            "visual": { "const": 30 },
+            "requirements": { "const": 10 },
+            "quality": { "const": 10 },
+            "accessibilityResponsive": { "const": 5 }
+          }
+        },
+        "visualWeights": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ssim", "pixelColor", "domGeometry", "typographyStyle", "responsiveInteraction"],
+          "properties": {
+            "ssim": { "const": 35 },
+            "pixelColor": { "const": 20 },
+            "domGeometry": { "const": 25 },
+            "typographyStyle": { "const": 10 },
+            "responsiveInteraction": { "const": 10 }
+          }
+        }
+      }
+    }
+  }
+}

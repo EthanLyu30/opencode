@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode.ai/schemas/task24/task.schema.json",
+  "title": "Task24 sealed task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "kind", "stratum", "family", "bundleSha256", "goldSha256"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "kind": { "enum": ["primary", "guardrail"] },
+    "stratum": { "enum": ["private", "design2code", "swebench-multimodal", "guardrail"] },
+    "family": { "type": "string", "minLength": 1 },
+    "bundleSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "goldSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

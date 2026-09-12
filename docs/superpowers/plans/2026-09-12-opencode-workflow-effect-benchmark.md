@@ -175,7 +175,7 @@ export interface EvaluationResult {
 
 **Produces:** a private workspace package, strict D-root policy, canonical JSON, and an immutable campaign manifest whose hash binds every later run.
 
-- [ ] **Step 1: Write RED tests for root confinement and seal immutability.**
+- [x] **Step 1: Write RED tests for root confinement and seal immutability.**
 
 ```ts
 test("rejects every Task24 root outside the configured D directory", () => {
@@ -188,7 +188,7 @@ test("detects any post-seal mutation", async () => {
 })
 ```
 
-- [ ] **Step 2: Run the focused tests and observe RED.**
+- [x] **Step 2: Run the focused tests and observe RED.**
 
 Run from `packages/benchmark` with the bundled Bun:
 
@@ -199,25 +199,25 @@ $Bun = 'D:\OpenCode-Toolchain\bun-1.3.14\bun-windows-x64\bun.exe'
 
 Expected: missing package/modules or assertion failures.
 
-- [ ] **Step 3: Add strict Effect Schemas and canonical serialization.**
+- [x] **Step 3: Add strict Effect Schemas and canonical serialization.**
 
 Implement schema version 1 for campaign, arm, task, binary lock, source lock, provider price revision, exchange-rate lock, toolchain lock, evaluator lock, run envelope, score, and report. Canonical JSON recursively sorts object keys, preserves array order, rejects non-finite numbers, encodes bigint money as decimal strings, and normalizes line endings before hashing.
 
 Add exact direct dependencies for Playwright 1.59.1, Sharp 0.33.5, and Axe Core 4.11.4 to `packages/benchmark`; use the repository's Effect/TypeScript catalog versions. Keep the package `private: true` and expose only the `task24` CLI plus test/typecheck scripts.
 
-- [ ] **Step 4: Enforce the exact root and create only declared child directories.**
+- [x] **Step 4: Enforce the exact root and create only declared child directories.**
 
 `Task24Root.make()` resolves the configured path, verifies the drive root is `D:\`, verifies the last path components equal `OpenCode-Benchmark\Task24`, and returns typed child paths. It must not accept symlinks/reparse points that resolve outside the root.
 
-- [ ] **Step 5: Implement `task24 campaign seal` and `campaign verify`.**
+- [x] **Step 5: Implement `task24 campaign seal` and `campaign verify`.**
 
 Sealing must fail unless every source, task bundle, model/protocol/effort, binary, provider price revision, dated cited exchange-rate snapshot, toolchain/evaluator version, timeout, tool ceiling, token ceiling, retry ceiling, repetition rule, seed, and arm order is concrete. Write the immutable seal to `runs\<campaign-id>\campaign.sealed.json`; later commands accept only a valid seal hash.
 
-- [ ] **Step 6: Keep local benchmark data out of Git.**
+- [x] **Step 6: Keep local benchmark data out of Git.**
 
 The tracked `.gitignore` ignores local lock material, datasets, gold bundles, raw runs, reports, and keys while retaining only templates, schemas, and authoring instructions.
 
-- [ ] **Step 7: Verify package boundaries.**
+- [x] **Step 7: Verify package boundaries.**
 
 ```powershell
 & $Bun test test/root.test.ts test/seal.test.ts
@@ -226,7 +226,7 @@ The tracked `.gitignore` ignores local lock material, datasets, gold bundles, ra
 
 Expected: tests and typecheck exit 0.
 
-- [ ] **Step 8: Commit and push.**
+- [x] **Step 8: Commit and push.**
 
 ```powershell
 git add package.json packages/benchmark benchmarks/task24
