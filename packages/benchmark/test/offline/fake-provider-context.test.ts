@@ -1,6 +1,41 @@
 import { test, expect } from "bun:test"
 import { createFakeProvider } from "../../src/offline/fake-provider"
 
+test.each(["kimi", "deepseek"])("fake %s edit uses the write tool actually advertised by the CLI", async (provider) => {
+  const fake = createFakeProvider()
+  const tool = { type: "function", name: "write", parameters: { type: "object" } }
+  const response = await fake.upstream(
+    new Request(
+      provider === "kimi" ? "https://api.moonshot.cn/v1/chat/completions" : "https://api.deepseek.com/responses",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer sk-TASK24_FAKE_${provider.toUpperCase()}` },
+        body: JSON.stringify({
+          model: provider === "kimi" ? "kimi-k3" : "deepseek-v4-pro",
+          stream: true,
+          tools:
+            provider === "kimi"
+              ? [{ type: "function", function: { name: "write", parameters: tool.parameters } }]
+              : [tool],
+        }),
+      },
+    ),
+  )
+  const events = (await response.text())
+    .split("\n")
+    .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
+    .map((line) => JSON.parse(line.slice(6)))
+  const call =
+    provider === "kimi"
+      ? events[0].choices[0].delta.tool_calls[0].function
+      : events.find((event) => event.type === "response.output_item.done").item
+  expect(call.name).toBe("write")
+  expect(JSON.parse(call.arguments)).toEqual({
+    filePath: "task24-offline-provider-edit.txt",
+    content: "TASK24_OFFLINE_BINARY_EDIT\n",
+  })
+})
+
 test("fake delivery resumes the workflow Response context without a default stage message", async () => {
   const fake = createFakeProvider()
   const request = (provider: string, body: unknown) =>

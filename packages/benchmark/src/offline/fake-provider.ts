@@ -79,8 +79,10 @@ export function createFakeProvider(options: FakeProviderOptions = {}): FakeProvi
               : responsesStream(terminal)
             : workflow === undefined && callIndex === 0
               ? protocol === "chat_completions"
-                ? chatPatchStream()
-                : responsesPatchStream()
+                ? chatPatchStream(containsNamedTool(body, "write"))
+                : containsNamedTool(body, "write")
+                  ? responsesWriteStream()
+                  : responsesPatchStream()
               : protocol === "chat_completions"
                 ? chatStream(terminal, content)
                 : responsesStream(terminal, content)
@@ -107,6 +109,7 @@ export function createFakeProvider(options: FakeProviderOptions = {}): FakeProvi
 function containsNamedTool(value: unknown, name: string): boolean {
   if (Array.isArray(value)) return value.some((item) => containsNamedTool(item, name))
   if (!record(value)) return false
+  if (value.type === "function" && record(value.function) && value.function.name === name) return true
   if (value.name === name && (value.type === "function" || record(value.function))) return true
   return Object.values(value).some((item) => containsNamedTool(item, name))
 }
@@ -180,7 +183,7 @@ function responsesWebfetchStream(url: string): string {
   return frames.map((frame) => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join("")
 }
 
-function chatPatchStream(): string {
+function chatPatchStream(useWrite: boolean): string {
   const patchText = offlinePatch()
   const chunks = [
     {
@@ -194,7 +197,9 @@ function chatPatchStream(): string {
                 index: 0,
                 id: "call_offline_patch",
                 type: "function",
-                function: { name: "apply_patch", arguments: JSON.stringify({ patchText }) },
+                function: useWrite
+                  ? { name: "write", arguments: JSON.stringify(offlineWrite()) }
+                  : { name: "apply_patch", arguments: JSON.stringify({ patchText }) },
               },
             ],
           },
@@ -221,6 +226,50 @@ function chatPatchStream(): string {
     },
   ]
   return chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n"
+}
+
+function responsesWriteStream(): string {
+  const argumentsText = JSON.stringify(offlineWrite())
+  const item = { id: "item_offline_write", call_id: "call_offline_write", type: "function_call", name: "write" }
+  const frames = [
+    { type: "response.created", sequence_number: 0, response: { id: "resp_offline_write", status: "in_progress" } },
+    {
+      type: "response.output_item.added",
+      sequence_number: 1,
+      output_index: 0,
+      item: { ...item, arguments: "", status: "in_progress" },
+    },
+    {
+      type: "response.function_call_arguments.delta",
+      sequence_number: 2,
+      output_index: 0,
+      item_id: item.id,
+      delta: argumentsText,
+    },
+    {
+      type: "response.function_call_arguments.done",
+      sequence_number: 3,
+      output_index: 0,
+      item_id: item.id,
+      arguments: argumentsText,
+    },
+    {
+      type: "response.output_item.done",
+      sequence_number: 4,
+      output_index: 0,
+      item: { ...item, arguments: argumentsText, status: "completed" },
+    },
+    {
+      type: "response.completed",
+      sequence_number: 5,
+      response: { id: "resp_offline_write", status: "completed", output: [], usage: validResponsesUsage },
+    },
+  ]
+  return frames.map((frame) => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join("")
+}
+
+function offlineWrite() {
+  return { filePath: "task24-offline-provider-edit.txt", content: "TASK24_OFFLINE_BINARY_EDIT\n" }
 }
 
 function responsesPatchStream(): string {

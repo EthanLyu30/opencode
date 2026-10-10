@@ -44,6 +44,10 @@ describe("Task24 direct arms", () => {
         "json",
       ])
       expect(launch.args).toContain("--auto")
+      expect(launch.args.slice(launch.args.indexOf("--title"), launch.args.indexOf("--title") + 2)).toEqual([
+        "--title",
+        `Task24 run-${armID.toLowerCase()}`,
+      ])
       expect(launch.args).toContain("--file")
       expect(launch.args.at(-1)).toContain("CANARY_TASK_PROMPT")
       // The production CLI's variadic --file must not consume the positional prompt.

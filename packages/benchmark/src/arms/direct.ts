@@ -38,6 +38,8 @@ export async function prepareDirectArm(input: ArmInput): Promise<DirectArmLaunch
     "--format",
     "json",
     "--auto",
+    "--title",
+    `Task24 ${input.runID}`,
     ...input.referenceFiles.flatMap((file) => ["--file", file]),
     "--",
     input.prompt,
