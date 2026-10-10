@@ -11,10 +11,20 @@ import { WorkflowTestLogArtifact } from "../artifacts/test-log"
 import { WorkflowVisualReviewArtifact } from "../artifacts/visual-review"
 import { WorkflowRoleContract } from "./contract"
 import type { DecodedPriorArtifact, ResolverInput, ResolverOutput } from "./role"
+import { WorkflowBenchmarkTransport } from "../benchmark-transport"
+import { WorkflowProductionHostPlan } from "../production-host-plan"
+import { WorkflowVisualHost } from "../visual-host"
+import { WorkflowVisualEvidence } from "../visual-evidence"
+import { Hash } from "../../util/hash"
+import { deflateSync } from "node:zlib"
 
 export function resolve(input: ResolverInput): ResolverOutput {
   const role = Schema.decodeUnknownSync(WorkflowRole.Role)(input.stage.type)
   const semantic = input.semantic
+  // Task24's fake evidence is isolated from the production resolver and never
+  // used to score visual quality. Keep its lineage compatible with current gates.
+  const offline = WorkflowBenchmarkTransport.fromWorkflow(input.workflow)?.evidenceMode === "deterministic_offline"
+  const productionPlan = offline ? WorkflowProductionHostPlan.fromWorkflow(input.workflow) : undefined
   if (semantic.outcome.role !== role) throw new Error("Deterministic evidence role mismatch")
   if (semantic.outcome.role === "design") {
     const { spec, sources } = Schema.decodeUnknownSync(WorkflowRoleContract.DesignPayload)(semantic.payload)
@@ -60,12 +70,12 @@ export function resolve(input: ResolverInput): ResolverOutput {
     return {
       artifacts: [
         WorkflowImplementationArtifact.commit(input.workflow.id, input.location, {
-          schemaVersion: 1,
+          schemaVersion: productionPlan ? 2 : 1,
           workflowID: input.workflow.id,
           revision: input.revision,
           snapshotRef: plan?.snapshotRef ?? `snapshot:deterministic-${input.contextDigest.slice(0, 24)}`,
           workspaceSha256,
-          changes,
+          changes: productionPlan ? changes.map((change) => ({ change: "added", ...change })) : changes,
         }),
       ],
     }
@@ -78,10 +88,13 @@ export function resolve(input: ResolverInput): ResolverOutput {
     const implementationSha256 = WorkflowImplementationArtifact.hash(manifest)
     const pass = input.semantic.outcome.verdict === "pass"
     const content = pass ? "deterministic test pass\n" : "deterministic test failure\n"
-    const log = WorkflowTestLogArtifact.commit(input.workflow.id, input.revision, content)
+    const log = productionPlan
+      ? WorkflowTestLogArtifact.commitExact(input.workflow.id, input.stage.id, input.revision, content)
+      : WorkflowTestLogArtifact.commit(input.workflow.id, input.revision, content)
     const result = {
-      schemaVersion: 1 as const,
+      schemaVersion: productionPlan ? 2 : 1,
       workflowID: input.workflow.id,
+      ...(productionPlan ? { stageID: input.stage.id } : {}),
       revision: input.revision,
       implementationSha256,
       verdict: pass ? ("pass" as const) : ("fail" as const),
@@ -101,7 +114,14 @@ export function resolve(input: ResolverInput): ResolverOutput {
         uri: `workflow://preview/${input.workflow.id}/r${input.revision}/${implementationSha256}`,
       },
     }
-    return { artifacts: [WorkflowTestArtifact.commit(input.workflow.id, input.location, result), log] }
+    return {
+      artifacts: [
+        productionPlan
+          ? WorkflowTestArtifact.commitExact(input.workflow.id, input.stage.id, input.location, result)
+          : WorkflowTestArtifact.commit(input.workflow.id, input.location, result),
+        log,
+      ],
+    }
   }
   if (semantic.outcome.role === "visual_review") {
     const proposal = Schema.decodeUnknownSync(WorkflowRoleContract.VisualPayload)(semantic.payload)
@@ -114,22 +134,63 @@ export function resolve(input: ResolverInput): ResolverOutput {
         "base64",
       ),
     )
-    const images = viewports.flatMap((viewport) => [
-      WorkflowVisualReviewArtifact.capturedImage({
-        workflowID: input.workflow.id,
-        kind: "reference",
-        viewport: viewport.name,
-        revision: 0,
-        bytes: png,
+    const referenceCommit = latestCommit(input.priorArtifacts, WorkflowDesignArtifact.REFERENCE_APP_KIND)
+    const manifestCommit = latestCommit(input.priorArtifacts, WorkflowImplementationArtifact.KIND)
+    const referenceIdentity =
+      productionPlan && referenceCommit
+        ? WorkflowVisualHost.referenceIdentity(
+            input.workflow.id,
+            WorkflowDesignArtifact.decodeReferenceApp(referenceCommit, input.workflow.id),
+          )
+        : undefined
+    const manifest =
+      productionPlan && manifestCommit
+        ? WorkflowImplementationArtifact.decodeExact(manifestCommit, input.workflow.id, input.location)
+        : undefined
+    const images = viewports.flatMap((viewport) =>
+      (["reference", "implementation"] as const).map((kind) => {
+        const bytes = productionPlan ? fixturePng(viewport.width, viewport.height) : png
+        const revision = kind === "reference" ? 0 : input.revision
+        const coordinates =
+          productionPlan && referenceIdentity && manifest
+            ? WorkflowVisualEvidence.validateEvidenceCoordinates({
+                schemaVersion: 1,
+                workflowID: input.workflow.id,
+                stageID: input.stage.id,
+                kind,
+                revision,
+                viewport,
+                configSha256:
+                  kind === "reference" ? referenceIdentity.configSha256 : productionPlan.preview.configSha256,
+                sourceSha256:
+                  kind === "reference" ? referenceIdentity.sourceSha256 : WorkflowImplementationArtifact.hash(manifest),
+                readySelectorSha256:
+                  kind === "reference"
+                    ? referenceIdentity.readySelectorSha256
+                    : Hash.sha256(spec!.referenceApp.readySelector),
+              })
+            : undefined
+        return WorkflowVisualReviewArtifact.capturedImage({
+          workflowID: input.workflow.id,
+          kind,
+          viewport: viewport.name,
+          revision,
+          bytes,
+          ...(coordinates
+            ? {
+                evidenceReceipt: {
+                  evidenceID: WorkflowVisualEvidence.evidenceID(coordinates),
+                  coordinates,
+                  pngSha256: Hash.sha256(Buffer.from(bytes)),
+                  width: viewport.width,
+                  height: viewport.height,
+                  evidenceBytes: bytes.byteLength,
+                },
+              }
+            : {}),
+        })
       }),
-      WorkflowVisualReviewArtifact.capturedImage({
-        workflowID: input.workflow.id,
-        kind: "implementation",
-        viewport: viewport.name,
-        revision: input.revision,
-        bytes: png,
-      }),
-    ])
+    )
     const [firstEvidence, ...restEvidence] = images.map(({ bytes: _, evidenceReceipt: __, ...image }) => image)
     if (!firstEvidence) throw new Error("Deterministic visual review requires evidence")
     const evidence = [firstEvidence, ...restEvidence] as const
@@ -190,4 +251,38 @@ export function resolve(input: ResolverInput): ResolverOutput {
 
 function latestCommit(artifacts: readonly DecodedPriorArtifact[], kind: string) {
   return artifacts.filter((artifact) => artifact.kind === kind).at(-1)?.commit
+}
+
+/** Deterministic transparent fixture, explicitly not a browser capture. */
+function fixturePng(width: number, height: number): Uint8Array {
+  if (
+    width > WorkflowVisualEvidence.MAX_VIEWPORT_DIMENSION ||
+    height > WorkflowVisualEvidence.MAX_VIEWPORT_DIMENSION ||
+    width * height > WorkflowVisualEvidence.MAX_VIEWPORT_PIXELS
+  )
+    throw new TypeError("Offline fixture viewport exceeds host bounds")
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header[8] = 8
+  header[9] = 6
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(Buffer.alloc((width * 4 + 1) * height))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ])
+}
+function pngChunk(name: string, body: Buffer) {
+  const chunk = Buffer.alloc(body.length + 12)
+  chunk.writeUInt32BE(body.length, 0)
+  chunk.write(name, 4, "ascii")
+  body.copy(chunk, 8)
+  let crc = 0xffffffff
+  for (const byte of chunk.subarray(4, -4)) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1
+  }
+  chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, chunk.length - 4)
+  return chunk
 }

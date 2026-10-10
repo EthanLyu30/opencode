@@ -3,7 +3,7 @@ import path from "node:path"
 import { canonicalJson } from "../campaign/canonical"
 import { sha256Text } from "../hash"
 import { assertReferenceFiles, assertRunRoots, buildLaunchEnvironment } from "./environment"
-import type { ArmInput, ArmRoute, WorkflowArmLaunch } from "./types"
+import type { ArmInput, ArmRoute, ArmBudget, WorkflowArmLaunch } from "./types"
 import { assertBinaryForArm } from "./upstream"
 
 const sealedRoutes = [
@@ -18,6 +18,22 @@ const sealedRoutes = [
 
 export function workflowRoutes(): readonly ArmRoute[] {
   return sealedRoutes.map((route) => Object.freeze({ ...route }))
+}
+
+/** The one-revision graph has nine stages; maxRetries is not a global three-stage cap. */
+export function workflowRequestLimits(budget: ArmBudget) {
+  const stageAttempts = 9 * (budget.maxRetries + 1)
+  const maxTurns = budget.maxToolCalls + stageAttempts
+  return {
+    budget: {
+      maxTokens: budget.aggregateInputTokens + budget.aggregateOutputTokens,
+      maxTurns,
+      maxToolCalls: budget.maxToolCalls,
+      maxAttempts: stageAttempts,
+      maxDurationMs: budget.maxDurationMs,
+    },
+    visual: { maxRevisions: 1, maxTokens: budget.aggregateOutputTokens, maxTurns, maxToolCalls: budget.maxToolCalls },
+  }
 }
 
 export async function prepareWorkflowArm(input: ArmInput): Promise<WorkflowArmLaunch> {
@@ -45,9 +61,20 @@ export async function prepareWorkflowArm(input: ArmInput): Promise<WorkflowArmLa
     OPENCODE_BENCHMARK_CAMPAIGN_ID: input.campaignID,
     OPENCODE_BENCHMARK_RUN_ID: input.runID,
   })
+  const limits = workflowRequestLimits(input.budget)
   return Object.freeze({
     executable: binary.executable,
-    args: Object.freeze(["workflow", "run", input.prompt, "--format", "json"]),
+    args: Object.freeze([
+      "workflow",
+      "run",
+      input.prompt,
+      "--format",
+      "json",
+      "--budget",
+      canonicalJson(limits.budget),
+      "--visual-budget",
+      canonicalJson(limits.visual),
+    ]),
     cwd: roots.repo,
     environment,
     transportFile,

@@ -3,7 +3,7 @@ import path from "node:path"
 import { Database } from "bun:sqlite"
 import { materializeTask } from "../corpus/materialize"
 import { validateTaskBundle } from "../corpus/validate"
-import { prepareWorkflowArm } from "../arms/workflow"
+import { prepareWorkflowArm, workflowRequestLimits } from "../arms/workflow"
 import { startBroker } from "../broker/server"
 import { BrokerLedger } from "../broker/ledger"
 import { compilePriceBook } from "../broker/pricing"
@@ -76,8 +76,7 @@ export async function runWorkflowRecovery(layout: Task24Layout, campaign: Sealed
     }
     const request = {
       prompt: bundle.manifest.prompt,
-      budget: { maxTokens: 20_000, maxTurns: 20, maxToolCalls: 40, maxAttempts: 3, maxDurationMs: 1_800_000 },
-      visual: { maxRevisions: 1, maxTokens: 12_000, maxTurns: 12, maxToolCalls: 24 },
+      ...workflowRequestLimits(campaign.preregistration.budget),
       delivery: "background",
     }
     const logs: string[] = []

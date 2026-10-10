@@ -21,7 +21,20 @@ describe("Task24 workflow arm", () => {
     await fs.writeFile(path.join(runRoot, "repo", "assets", "reference.png"), "fixture")
     const input = armInput("A", runRoot, process.execPath)
     const launch = await prepareWorkflowArm(input)
-    expect(launch.args).toEqual(["workflow", "run", input.prompt, "--format", "json"])
+    expect(launch.args.slice(0, 5)).toEqual(["workflow", "run", input.prompt, "--format", "json"])
+    expect(launch.args[5]).toBe("--budget")
+    expect(JSON.parse(launch.args[6])).toMatchObject({
+      maxTokens: input.budget.aggregateInputTokens + input.budget.aggregateOutputTokens,
+      maxAttempts: 9 * (input.budget.maxRetries + 1),
+      maxToolCalls: input.budget.maxToolCalls,
+      maxDurationMs: input.budget.maxDurationMs,
+    })
+    expect(launch.args[7]).toBe("--visual-budget")
+    expect(JSON.parse(launch.args[8])).toMatchObject({
+      maxRevisions: 1,
+      maxTokens: input.budget.aggregateOutputTokens,
+      maxToolCalls: input.budget.maxToolCalls,
+    })
     expect(launch.environment.MOONSHOT_API_KEY).toBe(input.brokerGrant)
     expect(launch.environment.DEEPSEEK_API_KEY).toBe(input.brokerGrant)
     expect(launch.environment.OPENCODE_BENCHMARK_TRANSPORT_FILE).toBe(launch.transportFile)

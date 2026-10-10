@@ -2,11 +2,19 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import path from "node:path"
 import { cliProcessIt } from "../lib/cli-process"
-import { observeWorkflow } from "../../src/cli/cmd/workflow"
+import { observeWorkflow, workflowRunLimits } from "../../src/cli/cmd/workflow"
 
 const preload = path.join(import.meta.dir, "fixtures", "workflow-server-preload.ts")
 
 describe("workflow observer", () => {
+  test("validates explicit CLI workflow limits without changing existing defaults", () => {
+    expect(workflowRunLimits().budget.maxAttempts).toBe(3)
+    const budget = { maxTokens: 240000, maxTurns: 156, maxToolCalls: 120, maxAttempts: 36, maxDurationMs: 3600000 }
+    const visual = { maxRevisions: 1, maxTokens: 40000, maxTurns: 156, maxToolCalls: 120 }
+    expect(workflowRunLimits(JSON.stringify(budget), JSON.stringify(visual))).toEqual({ budget, visual })
+    expect(() => workflowRunLimits("not-json")).toThrow()
+    expect(() => workflowRunLimits(JSON.stringify({ maxAttempts: -1 }))).toThrow()
+  })
   test("uses exclusive cursors and repairs duplicate, gap, paged history, and reconnect delivery once", async () => {
     const eventCalls: Array<{ workflowID: string; after?: number }> = []
     const historyCalls: Array<{ workflowID: string; after?: number; limit?: number }> = []

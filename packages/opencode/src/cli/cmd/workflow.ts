@@ -1,5 +1,6 @@
 import { ClientError, isWorkflowConflictError, OpenCode } from "@opencode-ai/client"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
+import { WorkflowVisualBuild } from "@opencode-ai/schema/workflow-visual-build"
 import type { Argv } from "yargs"
 import { Effect, Schema } from "effect"
 import { writeSync } from "node:fs"
@@ -22,6 +23,16 @@ const DEFAULT_VISUAL = Object.freeze({
 const HISTORY_PAGE_SIZE = 100
 const RECONNECT_DELAYS = [50, 100, 250, 500, 1_000] as const
 const ADMISSION_DELAYS = [50, 100] as const
+
+export function workflowRunLimits(budget?: string, visual?: string) {
+  const request = Schema.decodeUnknownSync(WorkflowVisualBuild.CreateInput)({
+    prompt: "CLI limits validation",
+    budget: budget === undefined ? DEFAULT_BUDGET : JSON.parse(budget),
+    visual: visual === undefined ? DEFAULT_VISUAL : JSON.parse(visual),
+    delivery: "background",
+  })
+  return { budget: request.budget, visual: request.visual }
+}
 
 const roles = {
   design: "Kimi K3",
@@ -186,7 +197,9 @@ export const WorkflowRunCommand = effectCmd({
         type: "string",
         choices: ["default", "json"] as const,
         default: "default" as const,
-      }),
+      })
+      .option("budget", { describe: "workflow budget as validated JSON", type: "string" })
+      .option("visual-budget", { describe: "visual workflow budget as validated JSON", type: "string" }),
   handler: Effect.fn("Cli.workflow.run")(function* (args) {
     yield* Effect.promise(async () => {
       const prompt = typeof args.prompt === "string" ? args.prompt.trim() : ""
@@ -279,8 +292,7 @@ export const WorkflowRunCommand = effectCmd({
         client = await localClient()
         const admitted = await admit(client, {
           prompt,
-          budget: DEFAULT_BUDGET,
-          visual: DEFAULT_VISUAL,
+          ...workflowRunLimits(args.budget, args["visual-budget"]),
           delivery: "background",
           "idempotency-key": idempotencyKey,
         })
