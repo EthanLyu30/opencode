@@ -73,7 +73,7 @@ export interface OfflineEvaluationResult {
 
 export async function evaluateOfflineWorkspace(input: {
   readonly layout: Task24Layout
-  readonly campaign: SealedCampaign
+  readonly campaign: Pick<SealedCampaign, "createdAt" | "evaluator">
   readonly bundle: ValidatedBundle
   readonly runID: string
   readonly armID: "A" | "B" | "C" | "D" | "E"
@@ -107,13 +107,16 @@ export async function evaluateOfflineWorkspace(input: {
   const functionalPassed = functionalEvaluationResult.passed
   const functional = scoreFunctionalAssertions({
     assertions: [{ id: "sealed-task-evaluator", mandatory: true, passed: functionalPassed, weight: 1 }],
-    evidence: [treeEvidence, functionalEvaluationResult.evidence],
+    evidence: uniqueEvidence([treeEvidence, functionalEvaluationResult.evidence]),
   })
   const hasExternalReference = await containsExternalNetworkReference(input.roots.repo)
-  const requirements = await requirementEvaluation(input, functionalPassed, visual, hasExternalReference, [
-    treeEvidence,
-    functionalEvaluationResult.evidence,
-  ])
+  const requirements = await requirementEvaluation(
+    input,
+    functionalPassed,
+    visual,
+    hasExternalReference,
+    uniqueEvidence([treeEvidence, functionalEvaluationResult.evidence]),
+  )
   const quality = scoreQuality({
     checks: [
       // The sealed corpus declares no standalone typecheck/lint commands. Fail closed instead of relabeling
@@ -641,7 +644,9 @@ async function boundedProcess(
 export async function offlineEvaluatorSha256(): Promise<string> {
   const sourceRoot = path.resolve(import.meta.dir, "..")
   const allSources = await Array.fromAsync(new Bun.Glob("**/*.ts").scan({ cwd: sourceRoot, onlyFiles: true }))
-  const closedSources = [...new Set([...evaluatorSourceFiles, ...allSources.map((file) => file.split(path.sep).join("/"))])].toSorted((left, right) => left < right ? -1 : left > right ? 1 : 0)
+  const closedSources = [
+    ...new Set([...evaluatorSourceFiles, ...allSources.map((file) => file.split(path.sep).join("/"))]),
+  ].toSorted((left, right) => (left < right ? -1 : left > right ? 1 : 0))
   const manifest = await Promise.all(
     closedSources.map(async (relative) => ({ relative, sha256: await sha256File(path.join(sourceRoot, relative)) })),
   )
@@ -658,16 +663,17 @@ async function writeImmutable(file: string, body: string | Uint8Array): Promise<
   await publishImmutable(file, body)
 }
 
-async function runSandboxedFunctionalTest(
-  input: Parameters<typeof evaluateOfflineWorkspace>[0],
-  sandbox: string,
-) {
+async function runSandboxedFunctionalTest(input: Parameters<typeof evaluateOfflineWorkspace>[0], sandbox: string) {
   const scenario = functionalScenario(input.bundle.manifest.id)
   const execution = await runSandboxedVector({ workspaceRoot: input.roots.repo, sandbox, request: scenario.request })
   const outputLine = execution.stdout.split(/\r?\n/).filter(Boolean).at(-1)
   let scenarioPassed = false
   if (outputLine) {
-    try { scenarioPassed = scenario.validate(JSON.parse(outputLine)) } catch { scenarioPassed = false }
+    try {
+      scenarioPassed = scenario.validate(JSON.parse(outputLine))
+    } catch {
+      scenarioPassed = false
+    }
   }
   return Object.freeze({ ...execution, scenarioPassed })
 }
@@ -680,9 +686,13 @@ export async function runSandboxedVector(input: {
 }) {
   const layout = Task24Root.ensure()
   const sandbox = input.sandbox
-  if (!(await workspaceDirectoryExists(input.workspaceRoot)) || !(await workspaceDirectoryExists(sandbox)) ||
+  if (
+    !(await workspaceDirectoryExists(input.workspaceRoot)) ||
+    !(await workspaceDirectoryExists(sandbox)) ||
     !path.resolve(sandbox).startsWith(path.resolve(layout.tmp) + path.sep) ||
-    (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 100 || input.timeoutMs > 30_000))) {
+    (input.timeoutMs !== undefined &&
+      (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 100 || input.timeoutMs > 30_000))
+  ) {
     throw new TypeError("TASK24_VECTOR_SANDBOX_INPUT_INVALID")
   }
   const manifest = await readRecord(sandboxManifest)
@@ -702,13 +712,13 @@ export async function runSandboxedVector(input: {
   await fs.mkdir(dockerConfig)
   const requestJson = canonicalJson(input.request)
   const driver = [
-    'const request=JSON.parse(await Bun.stdin.text())',
-    'const module=await import(`/starter/${request.module}`)',
-    'const values={...request.fixtures}',
+    "const request=JSON.parse(await Bun.stdin.text())",
+    "const module=await import(`/starter/${request.module}`)",
+    "const values={...request.fixtures}",
     'const resolve=(value)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).length===1&&typeof value.$ref==="string"?value.$ref.split(".").reduce((current,key)=>current?.[key],values):Array.isArray(value)?value.map(resolve):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).map(([key,item])=>[key,resolve(item)])):value',
-    'const results=[]',
+    "const results=[]",
     'for(const operation of request.operations){try{let value;if(operation.type==="call")value=await module[operation.name](...resolve(operation.args??[]));else if(operation.type==="method")value=await values[operation.target][operation.name](...resolve(operation.args??[]));else if(operation.type==="get")value=operation.path.reduce((current,key)=>current?.[key],values[operation.target]);else throw new Error("operation");if(operation.store)values[operation.store]=value;results.push({ok:true,value})}catch{results.push({ok:false})}}',
-    'console.log(JSON.stringify(results))',
+    "console.log(JSON.stringify(results))",
   ].join(";")
   const mount = (source: string, target: string) => `type=bind,src=${source},dst=${target},readonly`
   const containerName = `task24-vector-${crypto.randomUUID()}`
@@ -717,64 +727,76 @@ export async function runSandboxedVector(input: {
   let failed = false
   try {
     execution = await boundedProcess(
-    [
-      evaluatorDocker,
-      "run",
-      "--interactive",
-      "--name",
-      containerName,
-      "--rm",
-      "--pull",
-      "never",
-      "--network",
-      "none",
-      "--read-only",
-      "--cap-drop",
-      "ALL",
-      "--security-opt",
-      "no-new-privileges=true",
-      "--user",
-      "65532:65532",
-      "--pids-limit",
-      "64",
-      "--memory",
-      "512m",
-      "--cpus",
-      "1",
-      "--tmpfs",
-      "/tmp:rw,noexec,nosuid,size=64m",
-      "--env",
-      "HOME=/tmp",
-      "--mount",
-      mount(input.workspaceRoot, "/starter"),
-      "--workdir",
-      "/tmp",
-      "--entrypoint",
-      "/usr/local/bin/bun",
-      manifest.image,
-      "-e",
-      driver,
-    ],
-    sandbox,
-    dockerTemp,
-    { DOCKER_CONFIG: dockerConfig },
-    requestJson,
-    input.timeoutMs,
-  )
-  } catch (cause) { failed = true; failure = cause }
+      [
+        evaluatorDocker,
+        "run",
+        "--interactive",
+        "--name",
+        containerName,
+        "--rm",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges=true",
+        "--user",
+        "65532:65532",
+        "--pids-limit",
+        "64",
+        "--memory",
+        "512m",
+        "--cpus",
+        "1",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "--env",
+        "HOME=/tmp",
+        "--mount",
+        mount(input.workspaceRoot, "/starter"),
+        "--workdir",
+        "/tmp",
+        "--entrypoint",
+        "/usr/local/bin/bun",
+        manifest.image,
+        "-e",
+        driver,
+      ],
+      sandbox,
+      dockerTemp,
+      { DOCKER_CONFIG: dockerConfig },
+      requestJson,
+      input.timeoutMs,
+    )
+  } catch (cause) {
+    failed = true
+    failure = cause
+  }
   try {
-    const removed = await boundedProcess([evaluatorDocker, "rm", "--force", containerName], sandbox,
-      path.join(sandbox, "docker-cleanup-temp"), { DOCKER_CONFIG: dockerConfig })
+    const removed = await boundedProcess(
+      [evaluatorDocker, "rm", "--force", containerName],
+      sandbox,
+      path.join(sandbox, "docker-cleanup-temp"),
+      { DOCKER_CONFIG: dockerConfig },
+    )
     if (removed.timedOut || (removed.exitCode !== 0 && !/No such container/i.test(removed.stderr))) {
       throw new TypeError("TASK24_VECTOR_CONTAINER_CLEANUP_FAILED")
     }
-    const inspected = await boundedProcess([evaluatorDocker, "inspect", "--type", "container", containerName], sandbox,
-      path.join(sandbox, "docker-inspect-temp"), { DOCKER_CONFIG: dockerConfig })
+    const inspected = await boundedProcess(
+      [evaluatorDocker, "inspect", "--type", "container", containerName],
+      sandbox,
+      path.join(sandbox, "docker-inspect-temp"),
+      { DOCKER_CONFIG: dockerConfig },
+    )
     if (inspected.timedOut || inspected.exitCode === 0 || !/No such (?:object|container)/i.test(inspected.stderr)) {
       throw new TypeError("TASK24_VECTOR_CONTAINER_SURVIVED")
     }
+  } catch (cause) {
+    throw failed ? new AggregateError([failure, cause], "TASK24_VECTOR_EXECUTION_AND_CLEANUP_FAILED") : cause
   }
-  catch (cause) { throw failed ? new AggregateError([failure, cause], "TASK24_VECTOR_EXECUTION_AND_CLEANUP_FAILED") : cause }
   if (failed) throw failure
   if (!execution) throw new TypeError("TASK24_VECTOR_EXECUTION_MISSING")
   return Object.freeze({
@@ -903,7 +925,12 @@ function functionalScenario(taskID: string): Readonly<{
         {
           type: "call",
           name: "reduceSession",
-          args: [[{ id: "a", sequence: 1, value: "A" }, { id: "a", sequence: 2, value: "X" }]],
+          args: [
+            [
+              { id: "a", sequence: 1, value: "A" },
+              { id: "a", sequence: 2, value: "X" },
+            ],
+          ],
         },
       ],
       (items) =>
