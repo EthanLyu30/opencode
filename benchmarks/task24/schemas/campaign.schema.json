@@ -68,6 +68,7 @@
       "required": [
         "primaryTaskCount",
         "guardrailTaskCount",
+        "pilotTaskIDs",
         "primaryRepeats",
         "upstreamRepeats",
         "upstreamSecondPassThresholdPoints",
@@ -83,6 +84,13 @@
       "properties": {
         "primaryTaskCount": { "const": 12 },
         "guardrailTaskCount": { "const": 4 },
+        "pilotTaskIDs": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" }
+        },
         "primaryRepeats": { "const": 2 },
         "upstreamRepeats": { "const": 1 },
         "upstreamSecondPassThresholdPoints": { "const": 5 },

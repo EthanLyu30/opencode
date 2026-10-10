@@ -5,18 +5,25 @@ import { verifyCampaign } from "../campaign/seal"
 import { sha256Text } from "../hash"
 import type { Task24Layout } from "../root"
 import type { SealedCampaign } from "../schema"
+import { preflightOfflineCampaign, publishOfflineReports, runOfflineCampaign } from "../offline/campaign"
 import { decodeStageApproval, requireStageApproval, type CampaignStage } from "./budget"
-import { buildBalancedOrder } from "./order"
+import { planCampaignRuns } from "./plan"
 import { RunStore } from "./store"
 
 export interface RuntimeCommandService {
+  readonly preflight: (layout: Task24Layout, stage: CampaignStage) => Promise<unknown>
   readonly status: (layout: Task24Layout) => Promise<unknown>
   readonly run: (layout: Task24Layout, stage: CampaignStage) => Promise<unknown>
+  readonly report: (layout: Task24Layout, stage: CampaignStage) => Promise<unknown>
   readonly resume: (layout: Task24Layout) => Promise<unknown>
   readonly cancel: (layout: Task24Layout, runID: string) => Promise<unknown>
 }
 
 const runtimeCommands: RuntimeCommandService = {
+  async preflight(layout, stage) {
+    if (stage !== "offline") throw new TypeError("TASK24_PAID_PREFLIGHT_REQUIRES_APPROVAL_ENVELOPE")
+    return preflightOfflineCampaign(layout)
+  },
   async status(layout) {
     const campaign = await loadCampaign(layout)
     const stages: Record<string, Record<string, number>> = {}
@@ -41,25 +48,24 @@ const runtimeCommands: RuntimeCommandService = {
     }
   },
   async run(layout, stage) {
+    if (stage === "offline") return runOfflineCampaign(layout)
     const campaign = await loadCampaign(layout)
     const campaignRoot = path.join(layout.runs, campaign.id)
-    if (stage !== "offline") {
-      const approval = decodeStageApproval(
-        JSON.parse(await fs.readFile(path.join(campaignRoot, `${stage}.approval.json`), "utf8")),
-      )
-      const expected = {
-        campaignID: campaign.id,
-        campaignSha256: campaign.sha256,
-        stage,
-        stageSha256: sha256Text(
-          canonicalJson({ schemaVersion: 1, campaignID: campaign.id, campaignSha256: campaign.sha256, stage }),
-        ),
-        expiresAt: approval.expiresAt,
-        ceilings: approval.ceilings,
-      }
-      requireStageApproval(stage, approval, expected, process.env.TASK24_APPROVAL_SECRET, Date.now())
+    const approval = decodeStageApproval(
+      JSON.parse(await fs.readFile(path.join(campaignRoot, `${stage}.approval.json`), "utf8")),
+    )
+    const expected = {
+      campaignID: campaign.id,
+      campaignSha256: campaign.sha256,
+      stage,
+      stageSha256: sha256Text(
+        canonicalJson({ schemaVersion: 1, campaignID: campaign.id, campaignSha256: campaign.sha256, stage }),
+      ),
+      expiresAt: approval.expiresAt,
+      ceilings: approval.ceilings,
     }
-    const runs = campaignRuns(campaign, stage)
+    requireStageApproval(stage, approval, expected, process.env.TASK24_APPROVAL_SECRET, Date.now())
+    const runs = planCampaignRuns(campaign, stage)
     await fs.mkdir(path.join(campaignRoot, "scheduler"), { recursive: true })
     const store = RunStore.open(databasePath(layout, campaign.id, stage))
     try {
@@ -80,6 +86,10 @@ const runtimeCommands: RuntimeCommandService = {
     } finally {
       store.close()
     }
+  },
+  async report(layout, stage) {
+    if (stage !== "offline") throw new TypeError("TASK24_PAID_REPORT_REQUIRES_COMPLETED_STAGE")
+    return publishOfflineReports(layout)
   },
   async resume(layout) {
     const campaign = await loadCampaign(layout)
@@ -121,26 +131,6 @@ const runtimeCommands: RuntimeCommandService = {
 }
 
 export const RuntimeCommands: RuntimeCommandService = Object.freeze(runtimeCommands)
-
-function campaignRuns(campaign: SealedCampaign, stage: CampaignStage) {
-  const maximumRepeats = Math.max(campaign.preregistration.primaryRepeats, campaign.preregistration.upstreamRepeats)
-  const ordered = buildBalancedOrder({
-    seed: campaign.preregistration.seed,
-    tasks: campaign.tasks.map((task) => task.id),
-    repetitions: maximumRepeats,
-  }).filter((entry) =>
-    entry.armID === "D" || entry.armID === "E"
-      ? entry.repetition < campaign.preregistration.upstreamRepeats
-      : entry.repetition < campaign.preregistration.primaryRepeats,
-  )
-  return ordered.map((entry, orderIndex) => ({
-    runID: `run-${sha256Text(`${campaign.id}/${stage}/${entry.taskID}/${entry.armID}/${entry.repetition}`).slice(0, 24)}`,
-    taskID: entry.taskID,
-    armID: entry.armID,
-    repetition: entry.repetition,
-    orderIndex,
-  }))
-}
 
 async function loadCampaign(layout: Task24Layout): Promise<SealedCampaign> {
   const pointer: unknown = JSON.parse(await fs.readFile(path.join(layout.runs, "current-campaign.json"), "utf8"))

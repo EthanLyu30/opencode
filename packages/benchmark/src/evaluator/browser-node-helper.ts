@@ -19,6 +19,11 @@ declare global {
     axe: {
       run: (context: Document, options: object) => Promise<Record<string, unknown>>
     }
+    __task24Activation: {
+      enter: number
+      space: number
+      key: "" | "enter" | "space"
+    }
   }
 }
 
@@ -96,6 +101,7 @@ try {
     }),
     request.timeoutMs,
     abort.signal,
+    "route installation",
   )
   if (request.operation === "report-pdf") {
     const pdf = await runPdf(context, request)
@@ -134,6 +140,9 @@ try {
         dom: evidence.dom,
         consoleErrors: evidence.consoleErrors,
         pageErrors: evidence.pageErrors,
+        blockedRequests: evidence.blockedRequests,
+        keyboard: evidence.keyboard,
+        stateProbe: evidence.stateProbe,
         accessibility: evidence.accessibility,
         axe: evidence.axe,
       },
@@ -176,12 +185,18 @@ async function runCapture(current: BrowserContext, request: BrowserCaptureReques
   const consoleErrors: string[] = []
   const pageErrors: string[] = []
   let policyViolation: string | undefined
+  let blockedRequests = 0
   await bounded(
     current.route("**/*", async (route) => {
       const url = route.request().url()
       if (!isAdmittedPreviewRequest(url, request.previewURL)) {
-        if (route.request().resourceType() === "document") policyViolation = "navigation escaped the preview origin"
-        await route.abort("blockedbyclient")
+        blockedRequests++
+        if (route.request().resourceType() === "document") {
+          policyViolation = "navigation escaped the preview origin"
+          await route.abort("blockedbyclient")
+        } else {
+          await route.fulfill({ status: 451, contentType: "text/plain", body: "blocked by Task24 policy" })
+        }
         return
       }
       const response = await route.fetch({ maxRedirects: 0, timeout: request.timeoutMs })
@@ -203,6 +218,7 @@ async function runCapture(current: BrowserContext, request: BrowserCaptureReques
     }),
     request.timeoutMs,
     abort.signal,
+    "websocket route installation",
   )
   await bounded(
     current.routeWebSocket("**/*", async (socket) => {
@@ -212,10 +228,12 @@ async function runCapture(current: BrowserContext, request: BrowserCaptureReques
         return
       }
       policyViolation = "websocket escaped the preview origin"
+      blockedRequests++
       await socket.close({ code: 1008, reason: "origin not admitted" })
     }),
     request.timeoutMs,
     abort.signal,
+    "preview navigation",
   )
   const pages = current.pages()
   const page = pages[0] ?? (await bounded(current.newPage(), request.timeoutMs, abort.signal))
@@ -246,22 +264,26 @@ async function runCapture(current: BrowserContext, request: BrowserCaptureReques
 
   disposition = "uncertain"
   await bounded(
-    page.goto(request.previewURL, { waitUntil: "domcontentloaded", timeout: request.timeoutMs }),
+    page.goto(request.previewURL, { waitUntil: "load", timeout: request.timeoutMs }),
     request.timeoutMs,
     abort.signal,
+    "ready selector",
   )
   await bounded(
     page.waitForSelector(request.wait.selector, { state: "visible", timeout: request.timeoutMs }),
     request.timeoutMs,
     abort.signal,
+    "animation suppression",
   )
   await bounded(
-    page.addStyleTag({
-      content:
-        "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}",
+    page.evaluate(() => {
+      const style = document.createElement("style")
+      style.textContent = "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}"
+      document.head.append(style)
     }),
     request.timeoutMs,
     abort.signal,
+    "font readiness",
   )
   await bounded(
     page.evaluate(() => document.fonts.ready),
@@ -288,6 +310,8 @@ async function runCapture(current: BrowserContext, request: BrowserCaptureReques
       abort.signal,
     ),
   ])
+  const keyboard = await probeKeyboard(page, request.timeoutMs)
+  const stateProbe = await probeState(page, request.timeoutMs)
   if (policyViolation) throw new HelperFailure("TASK24_BROWSER_POLICY_VIOLATION", policyViolation)
   return {
     screenshot: Uint8Array.from(screenshot),
@@ -296,7 +320,129 @@ async function runCapture(current: BrowserContext, request: BrowserCaptureReques
     axe: axeResult,
     consoleErrors,
     pageErrors,
+    blockedRequests,
+    keyboard,
+    stateProbe,
   }
+}
+
+async function probeKeyboard(page: Page, timeoutMs: number) {
+  return bounded(
+    (async () => {
+      const semantic = () => page.evaluate(() => JSON.stringify({
+        text: document.body.innerText,
+        path: location.pathname + location.hash,
+        state: [...document.querySelectorAll('input,select,details,[aria-expanded],[aria-pressed]')].map((node) => ({
+          checked: node instanceof HTMLInputElement ? node.checked : undefined,
+          value: node instanceof HTMLInputElement || node instanceof HTMLSelectElement ? node.value : undefined,
+          open: node instanceof HTMLDetailsElement ? node.open : undefined,
+          expanded: node.getAttribute("aria-expanded"), pressed: node.getAttribute("aria-pressed"),
+        })),
+      }))
+      const required = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('button,summary,[role="button"],input[type="button"],input[type="submit"],input[type="checkbox"],input[type="radio"]')].filter((element) => {
+        const box = element.getBoundingClientRect()
+        return !element.matches(':disabled,[aria-disabled="true"]') && getComputedStyle(element).visibility !== "hidden" && box.width > 0 && box.height > 0
+      }).length)
+      const focusPath: string[] = []
+      let focusVisible = false
+      const controls: Array<{ descriptor: string; enter: boolean; space: boolean }> = []
+      const visited = new Set<string>()
+      for (let index = 0; index < 48; index++) {
+        await page.keyboard.press("Tab")
+        const focused = await page.evaluate(() => {
+          const element = document.activeElement
+          if (!(element instanceof HTMLElement) || element === document.body) return null
+          const tag = element.tagName.toLowerCase()
+          const role = element.getAttribute("role") ?? ""
+          const type = element.getAttribute("type") ?? ""
+          return {
+            descriptor: `${[...document.querySelectorAll('*')].indexOf(element)}:${tag}:${role}:${type}`.slice(0, 128),
+            enterRequired: type !== "checkbox" && type !== "radio",
+            focusVisible: element.matches(":focus-visible"),
+            activatable:
+              tag === "button" ||
+              tag === "summary" ||
+              role === "button" ||
+              (tag === "input" && (type === "button" || type === "submit" || type === "checkbox" || type === "radio")),
+          }
+        })
+        if (!focused) continue
+        if (visited.has(focused.descriptor)) break
+        visited.add(focused.descriptor)
+        focusPath.push(focused.descriptor)
+        focusVisible ||= focused.focusVisible
+        if (focused.activatable) {
+          const before = await semantic()
+          await page.keyboard.press("Enter")
+          await twoFrames(page, timeoutMs)
+          const after = await semantic()
+          await page.keyboard.press("Space")
+          await twoFrames(page, timeoutMs)
+          const afterSpace = await semantic()
+          controls.push({ descriptor: focused.descriptor, enter: !focused.enterRequired || after !== before,
+            space: afterSpace !== after })
+          if (controls.length === required) break
+        }
+      }
+      const covered = required > 0 && controls.length === required
+      return { tabFocusMoved: focusPath.length > 0, focusVisible,
+        enterActivated: covered && controls.every((control) => control.enter),
+        spaceActivated: covered && controls.every((control) => control.space), focusPath, controls, requiredControls: required }
+    })(),
+    timeoutMs,
+    abort.signal,
+  )
+}
+
+async function probeState(page: Page, timeoutMs: number) {
+  return bounded(
+    (async () => {
+      const find = () =>
+        page.evaluate(() => {
+          const candidates = [...document.querySelectorAll('[role="alert"],[role="status"],[data-task24-state]')]
+          const visible = candidates.find((candidate) => {
+            if (!(candidate instanceof HTMLElement)) return false
+            const style = getComputedStyle(candidate)
+            const box = candidate.getBoundingClientRect()
+            return style.display !== "none" && style.visibility !== "hidden" && box.width > 0 && box.height > 0
+          })
+          if (!(visible instanceof HTMLElement)) return null
+          return {
+            role: visible.getAttribute("role"),
+            text: (visible.innerText || visible.textContent || "").trim().slice(0, 512),
+          }
+        })
+      const before = await find()
+      let interactionAttempted = false
+      {
+        interactionAttempted = await page.evaluate(() => {
+          const input = [...document.querySelectorAll<HTMLInputElement>("input")].find(
+            (candidate) => !candidate.disabled && candidate.type !== "hidden",
+          )
+          if (!input) return false
+          input.focus()
+          input.value = "__task24_no_results__"
+          input.dispatchEvent(new Event("input", { bubbles: true }))
+          input.dispatchEvent(new Event("change", { bubbles: true }))
+          const button =
+            document.querySelector<HTMLElement>('[data-task24-interaction="primary"]') ??
+            document.querySelector<HTMLElement>('button[type="submit"],button')
+          button?.click()
+          return true
+        })
+        await twoFrames(page, timeoutMs)
+      }
+      const state = await find()
+      return {
+        interactionAttempted,
+        visible: interactionAttempted && state !== null && JSON.stringify(state) !== JSON.stringify(before) && /error|failed|wasn.t completed|empty|no (?:data|results|items)|invalid/i.test(state.text),
+        role: state?.role ?? null,
+        text: state?.text ?? null,
+      }
+    })(),
+    timeoutMs,
+    abort.signal,
+  )
 }
 
 async function runPdf(current: BrowserContext, request: BrowserPdfRequest): Promise<Uint8Array> {
@@ -305,8 +451,12 @@ async function runPdf(current: BrowserContext, request: BrowserPdfRequest): Prom
     current.route("**/*", async (route) => {
       const url = route.request().url()
       if (!isAdmittedPreviewRequest(url, request.reportURL)) {
-        if (route.request().resourceType() === "document") policyViolation = "navigation escaped the report origin"
-        await route.abort("blockedbyclient")
+        if (route.request().resourceType() === "document") {
+          policyViolation = "navigation escaped the report origin"
+          await route.abort("blockedbyclient")
+        } else {
+          await route.fulfill({ status: 451, contentType: "text/plain", body: "blocked by Task24 policy" })
+        }
         return
       }
       const response = await route.fetch({ maxRedirects: 0, timeout: request.timeoutMs })
@@ -351,14 +501,15 @@ async function runPdf(current: BrowserContext, request: BrowserPdfRequest): Prom
   })
   disposition = "uncertain"
   await bounded(
-    page.goto(request.reportURL, { waitUntil: "domcontentloaded", timeout: request.timeoutMs }),
+    page.goto(request.reportURL, { waitUntil: "load", timeout: request.timeoutMs }),
     request.timeoutMs,
     abort.signal,
   )
   await bounded(
-    page.addStyleTag({
-      content:
-        "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}",
+    page.evaluate(() => {
+      const style = document.createElement("style")
+      style.textContent = "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}"
+      document.head.append(style)
     }),
     request.timeoutMs,
     abort.signal,
@@ -487,7 +638,7 @@ async function twoFrames(page: Page, timeoutMs: number) {
   )
 }
 
-function bounded<A>(work: PromiseLike<A>, timeoutMs: number, signal: AbortSignal): Promise<A> {
+function bounded<A>(work: PromiseLike<A>, timeoutMs: number, signal: AbortSignal, label = "operation"): Promise<A> {
   if (signal.aborted) return Promise.reject(signal.reason)
   return new Promise((resolve, reject) => {
     const finish = (callback: () => void) => {
@@ -497,7 +648,7 @@ function bounded<A>(work: PromiseLike<A>, timeoutMs: number, signal: AbortSignal
     }
     const onAbort = () => finish(() => reject(signal.reason))
     const timer = setTimeout(
-      () => finish(() => reject(new HelperFailure("TASK24_BROWSER_TIMEOUT", "operation timed out"))),
+      () => finish(() => reject(new HelperFailure("TASK24_BROWSER_TIMEOUT", `${label} timed out`))),
       timeoutMs,
     )
     signal.addEventListener("abort", onAbort, { once: true })

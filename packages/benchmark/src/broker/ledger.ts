@@ -65,7 +65,7 @@ export interface LedgerRecord {
   readonly recordSha256: string
 }
 
-interface ReservationRow {
+export interface ReservationRow {
   readonly request_id: string
   readonly campaign_id: string
   readonly run_id: string
@@ -102,6 +102,8 @@ export interface Service {
   readonly reserve: (input: ReservationInput) => void
   readonly settle: (input: SettlementInput) => LedgerRecord
   readonly records: () => readonly LedgerRecord[]
+  readonly reservations: () => readonly ReservationRow[]
+  readonly disposition: () => "none" | "settled" | "unknown"
   readonly registerGrant: (authority: GrantAuthority) => void
   readonly authorizeGrant: (input: {
     readonly grant: string
@@ -323,10 +325,43 @@ function service(database: Database, prices: PriceBook): Service {
     },
     records() {
       active()
-      return database
+      const rows = database
         .query<LedgerRow, []>("SELECT record_json, previous_sha256, record_sha256 FROM broker_ledger ORDER BY sequence")
         .all()
-        .map(decodeRecord)
+      let previous = zeroHash
+      return rows.map((row, index) => {
+        const record = decodeRecord(row)
+        const parsed: unknown = JSON.parse(row.record_json)
+        if (
+          !isObject(parsed) ||
+          canonicalJson(parsed) !== row.record_json ||
+          record.sequence !== index + 1 ||
+          row.previous_sha256 !== previous ||
+          row.record_sha256 !== sha256(`${previous}\n${row.record_json}`)
+        ) {
+          throw new TypeError("BROKER_LEDGER_CHAIN_INVALID")
+        }
+        previous = row.record_sha256
+        return record
+      })
+    },
+    reservations() {
+      active()
+      return Object.freeze(database.query<ReservationRow, []>(
+        "SELECT * FROM broker_reservation ORDER BY request_id",
+      ).all().map((row) => Object.freeze(row)))
+    },
+    disposition() {
+      active()
+      const reservations = database
+        .query<{ readonly total: number; readonly active: number }, []>(
+          `SELECT COUNT(*) AS total,
+                  COALESCE(SUM(CASE WHEN state = 'active' THEN 1 ELSE 0 END), 0) AS active
+           FROM broker_reservation`,
+        )
+        .get()
+      if (!reservations || reservations.total === 0) return "none"
+      return reservations.active === 0 ? "settled" : "unknown"
     },
     registerGrant(authority) {
       active()

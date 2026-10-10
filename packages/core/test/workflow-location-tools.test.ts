@@ -357,6 +357,7 @@ describe("Workflow Location tools", () => {
               runID: "task24-model-run",
               brokerOrigin: "http://127.0.0.1:43191",
               providerPaths: { kimi: "/v1/kimi", deepseek: "/v1/deepseek" },
+              evidenceMode: "production",
               expiresAt: now + 60_000,
               grant: "expected-task24-model-grant-that-is-long-enough",
             },

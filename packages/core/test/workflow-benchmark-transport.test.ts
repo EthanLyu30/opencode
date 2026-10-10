@@ -16,6 +16,7 @@ const profile = (overrides: Readonly<Record<string, unknown>> = {}) => ({
   runID: "task24-run-001",
   brokerOrigin: "http://127.0.0.1:43191",
   providerPaths: { kimi: "/v1/kimi", deepseek: "/v1/deepseek" },
+  evidenceMode: "production",
   expiresAt: now + 60_000,
   grant,
   ...overrides,
@@ -31,6 +32,17 @@ const binding = () =>
   })
 
 describe("WorkflowBenchmarkTransport", () => {
+  test("arms recovery checkpoints only for internal offline authority and D-owned marker paths", () => {
+    const frozen = WorkflowBenchmarkTransport.freezeProfile({ authority: "server", profile: profile({ evidenceMode: "deterministic_offline", runID: "workflow-recovery-" + "a".repeat(32) }),
+      expectedCampaignID: "task24-campaign-001", expectedRunID: "workflow-recovery-" + "a".repeat(32), now })
+    const environment = { TASK24_INTERNAL_CRASH_TEST: "task24-owned-v1", TASK24_INTERNAL_WORKFLOW_CRASH_AT: "workflow-recovery-reentry",
+      TASK24_INTERNAL_WORKFLOW_CRASH_MARKER: "D:\\OpenCode-Benchmark\\Task24\\tmp\\workflow-recovery-" + "a".repeat(32) + "\\checkpoint.json" }
+    expect(Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(frozen, environment)).toMatchObject({ point: "workflow-recovery-reentry" })
+    expect(Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(binding(), environment)).toBeUndefined()
+    expect(Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(frozen, {})).toBeUndefined()
+    expect(() => Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(frozen, { ...environment, TASK24_INTERNAL_WORKFLOW_CRASH_MARKER: "C:\\escape.json" })).toThrow()
+  })
+
   test("freezes a nonsecret, self-authenticating loopback binding", () => {
     const result = binding()
 
@@ -40,6 +52,7 @@ describe("WorkflowBenchmarkTransport", () => {
       runID: "task24-run-001",
       brokerOrigin: "http://127.0.0.1:43191",
       providerPaths: { kimi: "/v1/kimi", deepseek: "/v1/deepseek" },
+      evidenceMode: "production",
       expiresAt: now + 60_000,
     })
     expect(result.grantSha256).toMatch(/^[a-f0-9]{64}$/)
@@ -47,6 +60,27 @@ describe("WorkflowBenchmarkTransport", () => {
     expect(JSON.stringify(result)).not.toContain(grant)
     expect(Object.isFrozen(result)).toBe(true)
     expect(Object.isFrozen(result.providerPaths)).toBe(true)
+  })
+
+  test("binds deterministic evidence only when the trusted profile explicitly requests offline mode", () => {
+    const result = WorkflowBenchmarkTransport.freezeProfile({
+      authority: "server",
+      profile: profile({ evidenceMode: "deterministic_offline" }),
+      expectedCampaignID: "task24-campaign-001",
+      expectedRunID: "task24-run-001",
+      now,
+    })
+
+    expect(result.evidenceMode).toBe("deterministic_offline")
+    expect(() =>
+      WorkflowBenchmarkTransport.freezeProfile({
+        authority: "server",
+        profile: profile({ evidenceMode: "test" }),
+        expectedCampaignID: "task24-campaign-001",
+        expectedRunID: "task24-run-001",
+        now,
+      }),
+    ).toThrow()
   })
 
   test.each([

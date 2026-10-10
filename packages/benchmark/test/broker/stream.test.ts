@@ -51,7 +51,7 @@ describe("Task24 provider stream observer", () => {
     expect((await observe(await fixture("failed.sse"), "responses")).observation.resultClass).toBe("failed")
 
     const missing = await observe("data: {}\n\ndata: [DONE]\n\n", "chat_completions")
-    expect(missing.observation.resultClass).toBe("completed")
+    expect(missing.observation.resultClass).toBe("malformed")
     expect(missing.observation.usage).toBeUndefined()
 
     const duplicate = await observe(

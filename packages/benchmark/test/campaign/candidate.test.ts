@@ -124,6 +124,7 @@ function candidateFixture() {
     createdAt: "2026-09-12T12:00:00.000Z",
     preregistration: {
       ...structuredClone(template.preregistration),
+      pilotTaskIDs: ["primary-1", "primary-5", "primary-9"],
       maxConcurrency: 1,
       seed: "task24-sealed-order-v1",
       budget: {

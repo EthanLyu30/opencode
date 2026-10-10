@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { materializeTask, treeHash } from "../../src/corpus/materialize"
+import { canonicalJson } from "../../src/campaign/canonical"
+import { sha256Text } from "../../src/hash"
 import { taskFixture } from "./fixture"
 
 const cleanup: string[] = []
@@ -72,5 +74,19 @@ describe("Task24 workspace materialization", () => {
         runID: "run-a",
       }),
     ).rejects.toThrow(/forged/i)
+  })
+
+  test("hashes a file before a same-prefix directory in global lexical order", async () => {
+    const fixture = await taskFixture("prefix-order")
+    disposals.push(() => fixture.dispose())
+    const root = path.join(fixture.root, "prefix-tree")
+    await fs.mkdir(path.join(root, "auto"), { recursive: true })
+    await fs.writeFile(path.join(root, "auto.js"), "file")
+    await fs.writeFile(path.join(root, "auto", "index.js"), "nested")
+    const expected = [
+      { path: "auto.js", sha256: sha256Text("file"), size: 4 },
+      { path: "auto/index.js", sha256: sha256Text("nested"), size: 6 },
+    ]
+    expect(await treeHash(root)).toBe(sha256Text(canonicalJson(expected)))
   })
 })

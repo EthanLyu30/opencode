@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import type { BrokerProtocol } from "./grant"
 import type { ProviderUsage } from "./pricing"
 import type { ResultClass } from "./ledger"
+import { task24CrashCheckpoint } from "../run/crash-hook"
 
 export interface StreamObservation {
   readonly resultClass: ResultClass
@@ -82,6 +83,7 @@ export function observeProviderStream(input: {
     finished = true
     inspect(decoder.decode(), true)
     const complete = terminalCount === 1
+    if (complete && input.successful && usage === undefined && terminalType !== "response.failed") malformed = true
     let resultClass: ResultClass
     if (cancelled) resultClass = "cancelled"
     else if (!input.successful) resultClass = "upstream_error"
@@ -112,6 +114,7 @@ export function observeProviderStream(input: {
         hash.update(next.value)
         inspect(decoder.decode(next.value, { stream: true }))
         controller.enqueue(next.value)
+        if (terminalCount === 0) await task24CrashCheckpoint("mid_stream")
       } catch (cause) {
         await finalize()
         controller.error(cause)

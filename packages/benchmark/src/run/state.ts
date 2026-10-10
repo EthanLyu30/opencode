@@ -15,14 +15,14 @@ export type RunState =
 
 const transitions: Readonly<Record<RunState, readonly RunState[]>> = {
   planned: ["materializing"],
-  materializing: ["ready"],
-  ready: ["reserved", "rejected_budget"],
-  reserved: ["running"],
+  materializing: ["ready", "interrupted"],
+  ready: ["reserved", "rejected_budget", "interrupted"],
+  reserved: ["running", "interrupted"],
   running: ["evaluating", "canceling", "interrupted"],
   evaluating: ["completed", "interrupted"],
   canceling: ["canceled"],
   interrupted: ["resumable", "failed"],
-  resumable: ["reserved", "evaluating"],
+  resumable: ["materializing"],
   completed: [],
   rejected_budget: [],
   canceled: [],

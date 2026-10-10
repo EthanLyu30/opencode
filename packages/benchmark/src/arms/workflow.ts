@@ -33,6 +33,7 @@ export async function prepareWorkflowArm(input: ArmInput): Promise<WorkflowArmLa
     runID: input.runID,
     brokerOrigin: input.brokerOrigin,
     providerPaths: { kimi: "/v1/kimi", deepseek: "/v1/deepseek" },
+    evidenceMode: input.deterministicOfflineEvidence ? "deterministic_offline" : "production",
     expiresAt: input.grantExpiresAt,
     grant: input.brokerGrant,
   }

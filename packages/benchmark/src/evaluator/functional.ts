@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { evidenceReferenceForBytes, validateEvidenceReferences, type EvidenceReference } from "./evidence"
+import { treeHash } from "../corpus/materialize"
 
 const MAX_OUTPUT_BYTES = 1024 * 1024
 
@@ -80,29 +81,41 @@ export async function runFunctionalEvaluation(input: {
   if (!/^[a-f0-9]{64}$/.test(input.commandSha256) || sha256(commandBytes) !== input.commandSha256) {
     throw new TypeError("TASK24_FUNCTIONAL_COMMAND_IDENTITY_INVALID")
   }
-  const result = await (input.runner ?? productionFunctionalRunner)({
-    executable: input.executable,
-    argv: Object.freeze([command]),
-    cwd: workspaceRoot,
-    env: Object.freeze({
-      BUN_INSTALL_CACHE_DIR: tempRoot,
-      HOME: tempRoot,
-      LANG: "en_US.UTF-8",
-      NO_COLOR: "1",
-      npm_config_cache: tempRoot,
-      TASK24_EVALUATOR: "1",
-      TEMP: tempRoot,
-      TMP: tempRoot,
-      TMPDIR: tempRoot,
-      TZ: "UTC",
-      USERPROFILE: tempRoot,
-      XDG_CACHE_HOME: tempRoot,
-      XDG_CONFIG_HOME: tempRoot,
-      XDG_DATA_HOME: tempRoot,
-      XDG_STATE_HOME: tempRoot,
-    }),
-    timeoutMs: input.timeoutMs,
-  })
+  const beforeWorkspaceSha256 = await treeHash(workspaceRoot)
+  let result: FunctionalProcessResult
+  try {
+    result = await (input.runner ?? productionFunctionalRunner)({
+      executable: input.executable,
+      argv: Object.freeze([command]),
+      cwd: workspaceRoot,
+      env: Object.freeze({
+        BUN_INSTALL_CACHE_DIR: tempRoot,
+        HOME: tempRoot,
+        LANG: "en_US.UTF-8",
+        NO_COLOR: "1",
+        npm_config_cache: tempRoot,
+        TASK24_EVALUATOR: "1",
+        TEMP: tempRoot,
+        TMP: tempRoot,
+        TMPDIR: tempRoot,
+        TZ: "UTC",
+        USERPROFILE: tempRoot,
+        XDG_CACHE_HOME: tempRoot,
+        XDG_CONFIG_HOME: tempRoot,
+        XDG_DATA_HOME: tempRoot,
+        XDG_STATE_HOME: tempRoot,
+      }),
+      timeoutMs: input.timeoutMs,
+    })
+  } catch (cause) {
+    if ((await treeHash(workspaceRoot)) !== beforeWorkspaceSha256) {
+      throw new TypeError("TASK24_FUNCTIONAL_WORKSPACE_MUTATED", { cause })
+    }
+    throw cause
+  }
+  if ((await treeHash(workspaceRoot)) !== beforeWorkspaceSha256) {
+    throw new TypeError("TASK24_FUNCTIONAL_WORKSPACE_MUTATED")
+  }
   if (result.timedOut) throw new TypeError("TASK24_FUNCTIONAL_TIMEOUT")
   if (result.exitCode !== 0) throw new TypeError("TASK24_FUNCTIONAL_PROCESS_FAILED")
   if (Buffer.byteLength(result.stdout) > MAX_OUTPUT_BYTES || Buffer.byteLength(result.stderr) > MAX_OUTPUT_BYTES) {

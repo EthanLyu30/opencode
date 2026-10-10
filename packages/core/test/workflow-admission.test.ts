@@ -75,6 +75,7 @@ const benchmarkBinding = (port: number) =>
       runID: "task24-admission-run",
       brokerOrigin: `http://127.0.0.1:${port}`,
       providerPaths: { kimi: "/v1/kimi", deepseek: "/v1/deepseek" },
+      evidenceMode: "production",
       expiresAt: benchmarkNow + 60_000,
       grant: `task24-admission-grant-${port}-that-is-long-enough`,
     },

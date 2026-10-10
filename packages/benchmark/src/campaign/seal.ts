@@ -117,6 +117,7 @@ function validateCampaign(input: CampaignInput): void {
   }
 
   const preregistration = input.preregistration
+  const pilot = preregistration.pilotTaskIDs.map((id) => input.tasks.find((task) => task.id === id))
   if (
     preregistration.primaryTaskCount !== 12 ||
     preregistration.guardrailTaskCount !== 4 ||
@@ -128,7 +129,15 @@ function validateCampaign(input: CampaignInput): void {
     preregistration.visualQualifiedThreshold !== 75 ||
     preregistration.viewportFloor !== 65 ||
     preregistration.costRatioLimit !== 2 ||
-    preregistration.maxConcurrency !== 1
+    preregistration.maxConcurrency !== 1 ||
+    preregistration.pilotTaskIDs.length !== 3 ||
+    new Set(preregistration.pilotTaskIDs).size !== 3 ||
+    pilot.some((task) => task === undefined || task.kind !== "primary") ||
+    new Set(pilot.map((task) => task?.stratum)).size !== 3 ||
+    !["private", "design2code", "swebench-multimodal"].every((stratum) =>
+      pilot.some((task) => task?.stratum === stratum),
+    ) ||
+    new Set(pilot.map((task) => task?.family)).size !== 3
   ) {
     throw new CampaignSealError("CAMPAIGN_PREREGISTRATION_INVALID")
   }

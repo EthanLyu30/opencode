@@ -4,6 +4,7 @@ import { conservativeInputTokens, authorizeRequest, BrokerRequestError } from ".
 import { BrokerLedger, type Service as LedgerService } from "./ledger"
 import { grantSha256, mintGrant } from "./grant"
 import { observeProviderStream } from "./stream"
+import { task24CrashCheckpoint } from "../run/crash-hook"
 
 type ProviderKeys = Readonly<{ kimi: string; deepseek: string }>
 
@@ -120,6 +121,7 @@ async function handle(request: Request, options: StartBrokerOptions, ledger: Led
       priceSha256: price.sha256,
       at: reservedAt,
     })
+    await task24CrashCheckpoint("after_reservation")
     let upstream: Response
     try {
       upstream = await options.upstream(

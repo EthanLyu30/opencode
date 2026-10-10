@@ -1,4 +1,5 @@
 import { Database } from "@opencode-ai/core/database/database"
+import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -35,6 +36,12 @@ import { WorkflowCommandSandboxServer } from "./workflow/command-sandbox"
 import { WorkflowRuntimeRecovery } from "./workflow/runtime-recovery"
 import { WorkflowProductionEvidenceServer } from "./workflow/production-evidence"
 import { ProductionHostRuntime } from "./workflow/production-host-runtime"
+
+const deterministicBenchmarkRoleEvidence = makeGlobalNode({
+  service: WorkflowRoleExecution.Service,
+  layer: WorkflowRoleExecution.deterministicLayer,
+  deps: [],
+})
 
 const applicationServices = LayerNode.group([
   Database.node,
@@ -153,10 +160,14 @@ export function workflowReplacements(
   } = {},
 ) {
   const production = WorkflowProductionEvidenceServer.compositionNodes()
+  const benchmark = ProductionHostRuntime.loadBenchmarkTransport(process.env)
+  const roleEvidence =
+    input.roleEvidence ??
+    (benchmark?.evidenceMode === "deterministic_offline" ? deterministicBenchmarkRoleEvidence : production.roleEvidence)
   return [
     [WorkflowVisualHost.node, input.visualHost ?? production.visualHost],
     [WorkflowCommandSandbox.node, input.commandSandbox ?? WorkflowCommandSandboxServer.node],
-    [WorkflowRoleExecution.node, input.roleEvidence ?? production.roleEvidence],
+    [WorkflowRoleExecution.node, roleEvidence],
   ] as const
 }
 

@@ -10,6 +10,7 @@ import { HostRootPolicy } from "./host-root-policy"
 import { ProductionHostRoots } from "./production-host-roots"
 
 const BENCHMARK_RUNS_ROOT = "D:\\OpenCode-Benchmark\\Task24\\runs"
+const BENCHMARK_WORKSPACES_ROOT = "D:\\OpenCode-Benchmark\\Task24\\workspaces"
 const MAX_TRANSPORT_FILE_BYTES = 16 * 1024
 const benchmarkEnvironmentNames = [
   "OPENCODE_BENCHMARK_TRANSPORT_FILE",
@@ -54,9 +55,10 @@ export function loadBenchmarkTransport(
   const campaignID = required(environment, "OPENCODE_BENCHMARK_CAMPAIGN_ID")
   const runID = required(environment, "OPENCODE_BENCHMARK_RUN_ID")
   const runsRoot = canonicalDirectory(BENCHMARK_RUNS_ROOT, "Task24 benchmark runs root")
+  const workspacesRoot = canonicalDirectory(BENCHMARK_WORKSPACES_ROOT, "Task24 benchmark workspaces root")
   const runDataRoot = canonicalDirectory(rootInput, "Benchmark run data root")
-  if (!strictDescendant(runsRoot, runDataRoot))
-    throw new TypeError("Benchmark run data root must be inside the Task24 runs root")
+  if (![runsRoot, workspacesRoot].some((root) => strictDescendant(root, runDataRoot)))
+    throw new TypeError("Benchmark run data root must be inside a Task24 controlled runtime root")
 
   const file = canonicalFile(fileInput, "Benchmark transport file")
   if (!strictDescendant(runDataRoot, file))

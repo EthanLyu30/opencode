@@ -745,6 +745,10 @@ Task24.10 evidence before commit: 16/16 bundles passed manifest/hash/path valida
 
 ### Task 24.11: Complete Task24A Offline End-to-End Verification, Deployment, and Seal
 
+Execution evidence (2026-10-10): deterministic fake provider/role paths, D-only wrapper, retained evidence validation and real-process recovery implementation are present. Pre-commit gate: benchmark 230 pass / 1 exact-recovery integration pending; Chromium PDF/capture and Docker malicious-vector/timeout tests pass; Core admission/transport/location 43 pass, Core execution/recovery/crash 44 pass, Server transport 6 pass; package typechecks pass and new benchmark/transport source lint has no warnings/errors. Fresh-context review identified eight Important issues; covering tests and fixes are in this implementation, with exact deployed-binary acceptance still required. No Task24A completion/seal claimed yet.
+
+Execution ruling: the deploy script requires clean reviewed source, so exact-binary acceptance in Step 6 runs after Steps 8–9. If it fails, commit/push the covered correction, rebuild/redeploy, and rerun before Step 11. Older content-addressed browser runtimes could not be removed because environment cleanup policy rejected deletion; runtime identity is selected by the verified fairness fingerprint, never by directory count.
+
 **Files:**
 
 - Create: `packages/benchmark/test/e2e/offline-campaign.test.ts`
@@ -756,7 +760,7 @@ Task24.10 evidence before commit: 16/16 bundles passed manifest/hash/path valida
 
 **Produces:** a zero-credit proof that all five arms, broker, scheduler, evaluation, statistics, reports, and recovery work together, plus a newly deployed and hashed modified binary and a final campaign seal created before any live provider call.
 
-- [ ] **Step 1: Add a deterministic fake-provider scenario.**
+- [x] **Step 1: Add a deterministic fake-provider scenario.**
 
 The fake Kimi and DeepSeek endpoints emit recorded Chat/Responses SSE, tool calls, terminal usage, incomplete/failed events, and controlled code edits. The fake scenario must exercise all workflow roles and both direct protocols.
 
@@ -772,7 +776,7 @@ Inject process death during materialization, after reservation, mid-stream, afte
 
 Attempt remote endpoint injection, public transport override, workspace traversal, symlink/reparse escape, hidden-gold access, external network, evaluator mutation, grant replay, log injection, oversized output, and fake usage. Assert typed rejection/disqualification and scan all durable text for canaries.
 
-- [ ] **Step 5: Add the D-only wrapper.**
+- [x] **Step 5: Add the D-only wrapper.**
 
 `scripts/task24.ps1` sets task-specific `TEMP`, `TMP`, Bun cache, config, data, Playwright browser, and npm cache directories under the Task24 root; validates the Bun/Node/binary hashes; then invokes the package CLI without printing secrets.
 

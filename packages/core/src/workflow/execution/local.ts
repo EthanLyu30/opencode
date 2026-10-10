@@ -38,6 +38,7 @@ import { WorkflowRoleExecution } from "./role"
 import { WorkflowVisualHost } from "../visual-host"
 import { WorkflowVisualReviewArtifact } from "../artifacts/visual-review"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
+import { WorkflowBenchmarkTransport } from "../benchmark-transport"
 
 class CancelRequested extends Data.TaggedError("CancelRequested")<{
   readonly workflowID: Workflow.ID
@@ -1077,6 +1078,21 @@ export const layerWith = (options: Options) =>
         () =>
           Effect.gen(function* () {
             if (!hasCapacity()) return
+            // The private benchmark seam pauses only between fully settled stages;
+            // the ordinary scheduler, leases, checkpointing and recovery remain unchanged.
+            if (process.env.TASK24_INTERNAL_WORKFLOW_CRASH_AT && process.env.TASK24_INTERNAL_CRASH_TEST === "task24-owned-v1") {
+              const runs = yield* store.list({ limit: 100 })
+              for (const run of runs) {
+                const binding = WorkflowBenchmarkTransport.fromWorkflow(run)
+                if (!binding || !WorkflowBenchmarkTransport.recoveryProbe(binding)) continue
+                const detail = yield* store.get(run.id)
+                const design = detail?.stages.find((stage) => stage.type === "design" && stage.status === "succeeded")
+                if (detail?.run.status === "running" && design && detail.stages.some((stage) => stage.status === "pending") &&
+                  !detail.stages.some((stage) => stage.status === "running" || stage.status === "leased")) {
+                  yield* Effect.promise(() => WorkflowBenchmarkTransport.pauseRecoveryCheckpoint(binding, run.id, design.id))
+                }
+              }
+            }
             const now = DateTime.toEpochMillis(yield* DateTime.now)
             const claimed = yield* store.claim({
               owner: options.ownerID,

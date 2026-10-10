@@ -9,7 +9,7 @@ const primary = Array.from({ length: 12 }, (_, index) => ({
   id: `primary-${index + 1}`,
   kind: "primary" as const,
   stratum: (["private", "design2code", "swebench-multimodal"] as const)[Math.floor(index / 4)]!,
-  family: index % 2 === 0 ? "greenfield" : "repair",
+  family: ["private-family", "design-family", "swe-family"][Math.floor(index / 4)]!,
   bundleSha256: sha(((index + 1) % 10).toString()),
   goldSha256: sha(((index + 2) % 10).toString()),
 }))
@@ -46,6 +46,7 @@ const fixture = () => ({
   preregistration: {
     primaryTaskCount: 12,
     guardrailTaskCount: 4,
+    pilotTaskIDs: ["primary-1", "primary-5", "primary-9"],
     primaryRepeats: 2,
     upstreamRepeats: 1,
     upstreamSecondPassThresholdPoints: 5,

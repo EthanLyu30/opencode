@@ -5,6 +5,8 @@ import { Context, Data, Layer, Schema } from "effect"
 import { makeGlobalNode } from "../effect/app-node"
 import { WorkflowBusinessArtifact } from "./artifacts/business"
 import { WorkflowSecretGuard } from "./secret-guard"
+import fs from "node:fs"
+import path from "node:path"
 
 export const KIND = "workflow.benchmark-transport.v1"
 export const RESERVED_INPUT_KEY = KIND
@@ -21,12 +23,16 @@ const ProviderPaths = Schema.Struct({
   deepseek: Schema.Literal("/v1/deepseek"),
 }).annotate({ identifier: "WorkflowBenchmarkTransport.ProviderPaths", ...exact })
 
+export const EvidenceMode = Schema.Literals(["production", "deterministic_offline"])
+export type EvidenceMode = typeof EvidenceMode.Type
+
 const ProfileEnvelope = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   campaignID: Identity,
   runID: Identity,
   brokerOrigin: Schema.String,
   providerPaths: ProviderPaths,
+  evidenceMode: EvidenceMode,
   expiresAt: Schema.Int.check(Schema.isGreaterThan(0)),
   grant: Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(4_096)),
 }).annotate({ identifier: "WorkflowBenchmarkTransport.Profile", ...exact })
@@ -37,6 +43,7 @@ const BindingEnvelope = Schema.Struct({
   runID: Identity,
   brokerOrigin: Schema.String,
   providerPaths: ProviderPaths,
+  evidenceMode: EvidenceMode,
   expiresAt: Schema.Int.check(Schema.isGreaterThan(0)),
   grantSha256: Sha256,
   bindingSha256: Sha256,
@@ -48,6 +55,7 @@ export interface Binding {
   readonly runID: string
   readonly brokerOrigin: string
   readonly providerPaths: Readonly<{ readonly kimi: "/v1/kimi"; readonly deepseek: "/v1/deepseek" }>
+  readonly evidenceMode: EvidenceMode
   readonly expiresAt: number
   readonly grantSha256: string
   readonly bindingSha256: string
@@ -76,6 +84,36 @@ export const layerWith = (binding?: Binding) =>
 
 export const node = makeGlobalNode({ service: Service, layer: layerWith(), deps: [] })
 
+/** Private offline process-death seam. No effect for normal production bindings. */
+export function recoveryProbe(binding: Binding, environment: Readonly<Record<string, string | undefined>> = process.env) {
+  if (binding.evidenceMode !== "deterministic_offline" || !/^workflow-recovery-[a-f0-9]{32}$/.test(binding.runID) ||
+    environment.TASK24_INTERNAL_CRASH_TEST !== "task24-owned-v1") return undefined
+  const point = environment.TASK24_INTERNAL_WORKFLOW_CRASH_AT
+  if (point !== "workflow-stage-settled" && point !== "workflow-recovery-reentry") return undefined
+  const marker = environment.TASK24_INTERNAL_WORKFLOW_CRASH_MARKER
+  const parent = path.win32.join("D:\\OpenCode-Benchmark\\Task24\\tmp", binding.runID)
+  if (!marker || path.win32.dirname(marker) !== parent || path.win32.basename(marker) !== "checkpoint.json" || path.win32.normalize(marker) !== marker) {
+    throw new TypeError("TASK24_WORKFLOW_RECOVERY_MARKER_UNSAFE")
+  }
+  return { point, marker }
+}
+
+export async function pauseRecoveryCheckpoint(binding: Binding, workflowID: string, stageID: string) {
+  const probe = recoveryProbe(binding)
+  if (!probe) return
+  const parent = path.dirname(probe.marker)
+  const stat = fs.lstatSync(parent)
+  if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync.native(parent) !== parent) {
+    throw new TypeError("TASK24_WORKFLOW_RECOVERY_MARKER_UNSAFE")
+  }
+  const file = fs.openSync(probe.marker, "wx")
+  try {
+    fs.writeFileSync(file, JSON.stringify({ point: probe.point, pid: process.pid, workflowID, stageID }) + "\n")
+    fs.fsyncSync(file)
+  } finally { fs.closeSync(file) }
+  await new Promise<never>(() => {})
+}
+
 export function freezeProfile(input: {
   readonly authority: "server"
   readonly profile: unknown
@@ -101,6 +139,7 @@ export function freezeProfile(input: {
     runID: profile.runID,
     brokerOrigin: profile.brokerOrigin,
     providerPaths,
+    evidenceMode: profile.evidenceMode,
     expiresAt: profile.expiresAt,
     grantSha256: sha256(profile.grant),
   })
@@ -162,6 +201,7 @@ function validateBinding(input: unknown, now?: number): Binding {
       runID: decoded.runID,
       brokerOrigin: decoded.brokerOrigin,
       providerPaths,
+      evidenceMode: decoded.evidenceMode,
       expiresAt: decoded.expiresAt,
       grantSha256: decoded.grantSha256,
     })

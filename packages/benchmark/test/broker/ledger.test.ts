@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { BrokerLedger } from "../../src/broker/ledger"
@@ -40,6 +41,9 @@ describe("Task24 broker ledger", () => {
       priceSha256: prices.forRequest("deepseek", "deepseek-v4-pro", "2026-09-14T01:30:00.000Z").sha256,
       at: "2026-09-14T01:30:00.000Z",
     })
+    expect(first.disposition()).toBe("unknown")
+    expect(Reflect.get(first, "reservations")()).toMatchObject([{ request_id: "request-1", state: "active" }])
+    expect(first.records()).toHaveLength(0)
     first.close()
 
     const second = BrokerLedger.open({ database, prices, ceilings: { CNY: 10_000n, USD: 10_000n } })
@@ -54,6 +58,8 @@ describe("Task24 broker ledger", () => {
     })
     expect(second.settle({ ...record, requestID: "request-1" })).toEqual(record)
     const rows = second.records()
+    expect(second.disposition()).toBe("settled")
+    expect(Reflect.get(second, "reservations")()).toMatchObject([{ request_id: "request-1", state: "settled" }])
     expect(rows).toHaveLength(1)
     expect(rows[0]?.previousSha256).toBe("0".repeat(64))
     expect(rows[0]?.recordSha256).toMatch(/^[a-f0-9]{64}$/)
@@ -73,6 +79,7 @@ describe("Task24 broker ledger", () => {
       prices,
       ceilings: { CNY: 1_000n, USD: 1_000n },
     })
+    expect(ledger.disposition()).toBe("none")
     expect(() =>
       ledger.reserve({
         requestID: "wrong-price",
@@ -91,5 +98,48 @@ describe("Task24 broker ledger", () => {
       }),
     ).toThrow(/price/i)
     ledger.close()
+  })
+
+  test("rejects a ledger whose persisted hash chain was tampered", async () => {
+    const directory = path.join(Task24Root.ensure().tmp, `broker-ledger-${crypto.randomUUID()}`)
+    cleanup.push(directory)
+    await fs.mkdir(directory)
+    const database = path.join(directory, "ledger.sqlite")
+    const ledger = BrokerLedger.open({ database, prices, ceilings: { CNY: 10_000n, USD: 10_000n } })
+    ledger.reserve({
+      requestID: "tamper-1",
+      campaignID: "campaign-a",
+      runID: "run-a",
+      provider: "deepseek",
+      model: "deepseek-v4-pro",
+      protocol: "responses",
+      route: "/v1/deepseek/responses",
+      requestBytes: 1,
+      requestSha256: "a".repeat(64),
+      inputTokenBound: 10,
+      maximumOutputTokens: 10,
+      priceSha256: prices.forRequest("deepseek", "deepseek-v4-pro", "2026-09-14T01:30:00.000Z").sha256,
+      at: "2026-09-14T01:30:00.000Z",
+    })
+    ledger.settle({
+      requestID: "tamper-1",
+      resultClass: "completed",
+      responseBytes: 1,
+      responseSha256: "b".repeat(64),
+      usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningTokens: 0 },
+    })
+    ledger.close()
+
+    const raw = new Database(database, { strict: true })
+    try {
+      raw.run("DROP TRIGGER broker_ledger_no_update")
+      raw.query("UPDATE broker_ledger SET previous_sha256 = ? WHERE request_id = ?").run("f".repeat(64), "tamper-1")
+    } finally {
+      raw.close()
+    }
+
+    const reopened = BrokerLedger.open({ database, prices, ceilings: { CNY: 10_000n, USD: 10_000n } })
+    expect(() => reopened.records()).toThrow("BROKER_LEDGER_CHAIN_INVALID")
+    reopened.close()
   })
 })

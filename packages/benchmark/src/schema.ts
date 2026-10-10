@@ -66,6 +66,7 @@ export const Budget = Schema.Struct({
 export const Preregistration = Schema.Struct({
   primaryTaskCount: PositiveInt,
   guardrailTaskCount: PositiveInt,
+  pilotTaskIDs: Schema.Array(TaskID),
   primaryRepeats: PositiveInt,
   upstreamRepeats: PositiveInt,
   upstreamSecondPassThresholdPoints: PositiveFinite,

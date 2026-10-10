@@ -5,6 +5,7 @@
   "preregistration": {
     "primaryTaskCount": 12,
     "guardrailTaskCount": 4,
+    "pilotTaskIDs": ["private-task-id", "design2code-task-id", "swebench-task-id"],
     "primaryRepeats": 2,
     "upstreamRepeats": 1,
     "upstreamSecondPassThresholdPoints": 5,

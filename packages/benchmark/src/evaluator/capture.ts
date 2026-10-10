@@ -21,6 +21,20 @@ export interface CaptureEvidence {
   readonly dom: readonly unknown[]
   readonly consoleErrors: readonly string[]
   readonly pageErrors: readonly string[]
+  readonly blockedRequests?: number
+  readonly keyboard?: Readonly<{
+    readonly tabFocusMoved: boolean
+    readonly focusVisible: boolean
+    readonly enterActivated: boolean
+    readonly spaceActivated: boolean
+    readonly focusPath: readonly string[]
+  }>
+  readonly stateProbe?: Readonly<{
+    readonly interactionAttempted: boolean
+    readonly visible: boolean
+    readonly role: string | null
+    readonly text: string | null
+  }>
   readonly accessibility: unknown
   readonly axe: unknown
 }

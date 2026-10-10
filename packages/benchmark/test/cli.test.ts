@@ -38,6 +38,8 @@ function harness(initial: Record<string, unknown> = {}) {
     validateCandidate: async () => {
       throw new Error("UNEXPECTED_CANDIDATE_VALIDATION")
     },
+    verifyBinaryLocks: async () => undefined,
+    verifyAcceptance: async () => undefined,
     output: (value) => output.push(value),
   }
   return { dependencies, files, output }
@@ -71,6 +73,40 @@ describe("task24 CLI", () => {
     await runCli(["campaign", "verify", "--root", layout.root], state.dependencies)
 
     expect(state.output).toEqual([{ command: "campaign.verify", id: "fixture", sha256: sha, ok: true }])
+  })
+
+  test("refuses to publish a seal before final binary locks verify", async () => {
+    const candidate = `${layout.runs}\\preregistration.candidate.json`
+    const state = harness({ [candidate]: { id: "fixture" } })
+    const dependencies: CliDependencies = {
+      ...state.dependencies,
+      verifyBinaryLocks: async () => {
+        throw new TypeError("CAMPAIGN_BINARY_LOCK_PROVISIONAL")
+      },
+    }
+
+    await expect(runCli(["campaign", "seal", "--root", layout.root], dependencies)).rejects.toThrow(
+      "CAMPAIGN_BINARY_LOCK_PROVISIONAL",
+    )
+    expect(state.files.has(`${layout.runs}\\fixture\\campaign.sealed.json`)).toBe(false)
+    expect(state.files.has(`${layout.runs}\\current-campaign.json`)).toBe(false)
+  })
+
+  test("refuses to publish a seal before matching offline acceptance verifies", async () => {
+    const candidate = `${layout.runs}\\preregistration.candidate.json`
+    const state = harness({ [candidate]: { id: "fixture" } })
+    const dependencies: CliDependencies = {
+      ...state.dependencies,
+      verifyAcceptance: async () => {
+        throw new TypeError("TASK24_OFFLINE_ACCEPTANCE_RUN_POINTER_INVALID")
+      },
+    }
+
+    await expect(runCli(["campaign", "seal", "--root", layout.root], dependencies)).rejects.toThrow(
+      "TASK24_OFFLINE_ACCEPTANCE_RUN_POINTER_INVALID",
+    )
+    expect(state.files.has(`${layout.runs}\\fixture\\campaign.sealed.json`)).toBe(false)
+    expect(state.files.has(`${layout.runs}\\current-campaign.json`)).toBe(false)
   })
 
   test("validates a candidate without creating the final campaign seal", async () => {
@@ -118,18 +154,22 @@ describe("task24 CLI", () => {
     const dependencies: CliDependencies = {
       ...state.dependencies,
       runtime: {
+        preflight: async (_layout, stage) => (calls.push(`preflight:${stage}`), { command: "preflight", stage }),
         status: async () => (calls.push("status"), { command: "status" }),
         run: async (_layout, stage) => (calls.push(`run:${stage}`), { command: "run", stage }),
+        report: async (_layout, stage) => (calls.push(`report:${stage}`), { command: "report", stage }),
         resume: async () => (calls.push("resume"), { command: "resume" }),
         cancel: async (_layout, runID) => (calls.push(`cancel:${runID}`), { command: "cancel", runID }),
       },
     }
+    await runCli(["preflight", "--offline"], dependencies)
     await runCli(["status"], dependencies)
     await runCli(["run", "--stage", "offline"], dependencies)
+    await runCli(["report", "--stage", "offline"], dependencies)
     await runCli(["resume"], dependencies)
     await runCli(["cancel", "run-a"], dependencies)
-    expect(calls).toEqual(["status", "run:offline", "resume", "cancel:run-a"])
-    expect(state.output).toHaveLength(4)
+    expect(calls).toEqual(["preflight:offline", "status", "run:offline", "report:offline", "resume", "cancel:run-a"])
+    expect(state.output).toHaveLength(6)
     await expect(runCli(["run", "--stage", "pilot-ish"], dependencies)).rejects.toThrow("TASK24_COMMAND_INVALID")
   })
 })

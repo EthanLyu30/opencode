@@ -50,6 +50,8 @@ export interface ArmInput {
   readonly brokerOrigin: string
   readonly brokerGrant: string
   readonly grantExpiresAt: number
+  /** Enables Task24's sealed fake-provider evidence resolver. Never set for paid stages. */
+  readonly deterministicOfflineEvidence?: boolean
   readonly budget: ArmBudget
 }
 

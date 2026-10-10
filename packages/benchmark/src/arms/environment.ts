@@ -47,7 +47,12 @@ export function buildLaunchEnvironment(input: {
     OPENCODE_DISABLE_AUTOUPDATE: "1",
     OPENCODE_DISABLE_MODELS_FETCH: "1",
     OPENCODE_DISABLE_PRUNE: "1",
-    OPENCODE_PERMISSION: JSON.stringify({ external_directory: "deny" }),
+    OPENCODE_PERMISSION: JSON.stringify({
+      bash: "deny",
+      external_directory: "deny",
+      webfetch: "deny",
+      websearch: "deny",
+    }),
   })
   if (input.configFile) environment.OPENCODE_CONFIG = input.configFile
   if (input.mode === "workflow") {

@@ -4,6 +4,7 @@ import path from "node:path"
 import { canonicalJson } from "../campaign/canonical"
 import { sha256Bytes, sha256Text } from "../hash"
 import { Task24Root, type Task24Layout } from "../root"
+import { task24CrashCheckpoint } from "../run/crash-hook"
 import { validateTaskBundle } from "./validate"
 
 const identityPattern = /^[a-z0-9][a-z0-9._-]{0,127}$/
@@ -78,6 +79,7 @@ export async function materializeTask(input: {
       encoding: "utf8",
       flag: "wx",
     })
+    await task24CrashCheckpoint("during_materialization")
     await setWritable(staging)
     await assertFresh(destination)
     await rename(staging, destination)
@@ -122,7 +124,7 @@ export async function treeHash(root: string): Promise<string> {
     }
   }
   await walk(resolved, "")
-  return sha256Text(canonicalJson(files))
+  return sha256Text(canonicalJson(files.toSorted((left, right) => compareText(left.path, right.path))))
 }
 
 async function copyDeclared(

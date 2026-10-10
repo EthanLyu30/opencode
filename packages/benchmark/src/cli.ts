@@ -6,9 +6,11 @@ import { canonicalJson } from "./campaign/canonical"
 import { validateCandidateAtLayout } from "./campaign/candidate"
 import { sealCampaign, verifyCampaign, type CampaignVerification } from "./campaign/seal"
 import { CampaignID, Sha256, type SealedCampaign } from "./schema"
+import { sha256File } from "./hash"
 import { Task24Root, type Task24Layout } from "./root"
 import { RuntimeCommands, type RuntimeCommandService } from "./run/commands"
 import type { CampaignStage } from "./run/budget"
+import { verifyOfflineAcceptanceForSeal } from "./offline/campaign"
 
 const CurrentCampaign = Schema.Struct({
   schemaVersion: Schema.Literal(1),
@@ -29,6 +31,8 @@ export interface CliDependencies {
   readonly output: (value: unknown) => void
   readonly runtime?: RuntimeCommandService
   readonly validateCandidate: (layout: Task24Layout) => Promise<CandidateValidationSummary>
+  readonly verifyBinaryLocks: (layout: Task24Layout, campaign: SealedCampaign) => Promise<void>
+  readonly verifyAcceptance: (layout: Task24Layout, campaign: SealedCampaign) => Promise<void>
 }
 
 export interface CandidateValidationSummary {
@@ -95,6 +99,8 @@ const defaults: CliDependencies = {
   seal: sealCampaign,
   verify: verifyCampaign,
   validateCandidate: validateCandidateAtLayout,
+  verifyBinaryLocks: assertFinalBinaryLocks,
+  verifyAcceptance: verifyOfflineAcceptanceForSeal,
   output: (value) => process.stdout.write(canonicalJson(value) + "\n"),
 }
 
@@ -108,13 +114,17 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
     const layout = dependencies.root(parsed.root)
     const runtime = dependencies.runtime ?? RuntimeCommands
     const value =
-      parsed.command === "status"
-        ? await runtime.status(layout)
-        : parsed.command === "run"
-          ? await runtime.run(layout, parsed.stage)
-          : parsed.command === "resume"
-            ? await runtime.resume(layout)
-            : await runtime.cancel(layout, parsed.runID)
+      parsed.command === "preflight"
+        ? await runtime.preflight(layout, parsed.stage)
+        : parsed.command === "status"
+          ? await runtime.status(layout)
+          : parsed.command === "run"
+            ? await runtime.run(layout, parsed.stage)
+            : parsed.command === "report"
+              ? await runtime.report(layout, parsed.stage)
+              : parsed.command === "resume"
+                ? await runtime.resume(layout)
+                : await runtime.cancel(layout, parsed.runID)
     dependencies.output(value)
     return
   }
@@ -130,6 +140,8 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
   if (argv[1] === "seal") {
     const candidate = await dependencies.readJson(win32.join(layout.runs, "preregistration.candidate.json"))
     const sealed = dependencies.seal(candidate)
+    await dependencies.verifyBinaryLocks(layout, sealed)
+    await dependencies.verifyAcceptance(layout, sealed)
     await dependencies.writeImmutableJson(campaignPath(layout, sealed.id), sealed)
     const pointer: CurrentCampaign = { schemaVersion: 1, id: sealed.id, sha256: sealed.sha256 }
     await dependencies.writeCurrentJson(pointerPath, pointer)
@@ -144,12 +156,32 @@ export async function runCli(argv: readonly string[], dependencies: CliDependenc
   if (result.campaign.id !== pointer.id || result.campaign.sha256 !== pointer.sha256) {
     throw new Error("CAMPAIGN_POINTER_MISMATCH")
   }
+  await dependencies.verifyBinaryLocks(layout, result.campaign)
+  await dependencies.verifyAcceptance(layout, result.campaign)
   dependencies.output({ command: "campaign.verify", id: pointer.id, sha256: pointer.sha256, ok: true })
 }
 
+async function assertFinalBinaryLocks(layout: Task24Layout, campaign: SealedCampaign): Promise<void> {
+  const binaries = [
+    [campaign.binaries.modified, "D:\\OpenCode-Local\\bin\\opencode-local.exe"],
+    [campaign.binaries.upstream, win32.join(layout.toolchain, "upstream", "opencode.exe")],
+  ] as const
+  for (const [lock, executable] of binaries) {
+    if (lock.version.includes("candidate")) throw new TypeError("CAMPAIGN_BINARY_LOCK_PROVISIONAL")
+    try {
+      if ((await sha256File(executable)) !== lock.sha256) throw new TypeError("CAMPAIGN_BINARY_LOCK_MISMATCH")
+    } catch (cause) {
+      if (cause instanceof Error && cause.message === "CAMPAIGN_BINARY_LOCK_MISMATCH") throw cause
+      throw new TypeError("CAMPAIGN_BINARY_LOCK_MISSING", { cause })
+    }
+  }
+}
+
 type RuntimeArguments =
+  | { readonly command: "preflight"; readonly root: string; readonly stage: CampaignStage }
   | { readonly command: "status"; readonly root: string }
   | { readonly command: "run"; readonly root: string; readonly stage: CampaignStage }
+  | { readonly command: "report"; readonly root: string; readonly stage: CampaignStage }
   | { readonly command: "resume"; readonly root: string }
   | { readonly command: "cancel"; readonly root: string; readonly runID: string }
 
@@ -169,6 +201,13 @@ function runtimeArgs(input: readonly string[]): RuntimeArguments {
   if (argv.length === 3 && argv[0] === "run" && argv[1] === "--stage") {
     const stage = argv[2]
     if (stage === "offline" || stage === "pilot" || stage === "campaign") return { command: "run", stage, root }
+  }
+  if (argv.length === 2 && argv[0] === "preflight" && argv[1] === "--offline") {
+    return { command: "preflight", stage: "offline", root }
+  }
+  if (argv.length === 3 && argv[0] === "report" && argv[1] === "--stage") {
+    const stage = argv[2]
+    if (stage === "offline" || stage === "pilot" || stage === "campaign") return { command: "report", stage, root }
   }
   return invalidCommand()
 }

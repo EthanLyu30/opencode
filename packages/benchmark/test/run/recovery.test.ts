@@ -9,8 +9,12 @@ afterEach(async () => {
 })
 
 describe("Task24 crash recovery", () => {
-  test.each(["running", "evaluating"] as const)("recovers an expired %s lease without redispatch", async (state) => {
-    const fixture = await storeFixture(`recovery-${state}`)
+  test.each([
+    ["materializing", "resumable"],
+    ["ready", "resumable"],
+    ["reserved", "failed"],
+  ] as const)("recovers a no-provider %s crash as %s", async (state, expected) => {
+    const fixture = await storeFixture(`recovery-none-${state}`)
     cleanup.push(() => fixture.dispose())
     fixture.store.planCampaign({
       campaignID: "campaign-a",
@@ -19,16 +23,9 @@ describe("Task24 crash recovery", () => {
       maxConcurrency: 1,
       runs: plannedRuns.slice(0, 1),
     })
-    const path = [
-      "materializing",
-      "ready",
-      "reserved",
-      "running",
-      ...(state === "evaluating" ? ["evaluating"] : []),
-    ] as const
-    for (const next of path) {
+    for (const next of ["materializing", "ready", "reserved"] as const) {
       fixture.store.transition("run-a", next, new Date().toISOString())
-      if (next === "running") fixture.store.beginAttempt("run-a", "attempt-old", 100)
+      if (next === state) break
     }
     fixture.store.acquireLease("run-a", "dead-owner", 100, 50)
 
@@ -37,17 +34,63 @@ describe("Task24 crash recovery", () => {
       now: 151,
       inspect: async () => ({
         processAlive: false,
-        providerDisposition: "settled",
-        workflowDisposition: "recoverable",
+        providerDisposition: "none",
+        workflowDisposition: "not_applicable",
         workspaceIntact: true,
         evaluationComplete: false,
       }),
     })
-    expect(result).toEqual([{ runID: "run-a", outcome: "resumable" }])
-    expect(fixture.store.getRun("run-a")?.state).toBe("resumable")
-    expect(() => fixture.store.beginAttempt("run-a", "attempt-resumed", 152)).not.toThrow()
+
+    expect(result).toEqual([{ runID: "run-a", outcome: expected }])
+    expect(fixture.store.getRun("run-a")?.state).toBe(expected)
+    expect(fixture.store.claimNextRun("campaign-a", "replacement", 152, 50)?.runID).toBe(
+      expected === "resumable" ? "run-a" : undefined,
+    )
     fixture.store.close()
   })
+
+  test.each(["running", "evaluating"] as const)(
+    "fails closed for an expired %s lease after provider settlement",
+    async (state) => {
+      const fixture = await storeFixture(`recovery-${state}`)
+      cleanup.push(() => fixture.dispose())
+      fixture.store.planCampaign({
+        campaignID: "campaign-a",
+        campaignSha256: "a".repeat(64),
+        stage: "offline",
+        maxConcurrency: 1,
+        runs: plannedRuns.slice(0, 1),
+      })
+      const path = [
+        "materializing",
+        "ready",
+        "reserved",
+        "running",
+        ...(state === "evaluating" ? ["evaluating"] : []),
+      ] as const
+      for (const next of path) {
+        fixture.store.transition("run-a", next, new Date().toISOString())
+        if (next === "running") fixture.store.beginAttempt("run-a", "attempt-old", 100)
+      }
+      fixture.store.acquireLease("run-a", "dead-owner", 100, 50)
+
+      const result = await recoverExpiredRuns({
+        store: fixture.store,
+        now: 151,
+        inspect: async () => ({
+          processAlive: false,
+          providerDisposition: "settled",
+          workflowDisposition: "recoverable",
+          workspaceIntact: true,
+          evaluationComplete: false,
+        }),
+      })
+      expect(result).toEqual([{ runID: "run-a", outcome: "adjudication_required" }])
+      expect(fixture.store.getRun("run-a")?.state).toBe("failed")
+      expect(fixture.store.claimNextRun("campaign-a", "replacement", 152, 50)).toBeUndefined()
+      fixture.store.close()
+    },
+  )
 
   test("requires adjudication for an unknown paid-call disposition", async () => {
     const fixture = await storeFixture("unknown-paid")

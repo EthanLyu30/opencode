@@ -17,8 +17,7 @@ describe("Task24 run state machine", () => {
       ["evaluating", "interrupted"],
       ["interrupted", "resumable"],
       ["interrupted", "failed"],
-      ["resumable", "reserved"],
-      ["resumable", "evaluating"],
+      ["resumable", "materializing"],
     ] as const) {
       expect(assertTransition(from, to)).toBe(to)
     }

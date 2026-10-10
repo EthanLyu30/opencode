@@ -4,6 +4,8 @@ import path from "node:path"
 import { ProductionHostRuntime } from "../src/workflow/production-host-runtime"
 
 const root = "D:\\OpenCode-Benchmark\\Task24\\runs\\transport-loader-tests"
+const workspaceRoot = "D:\\OpenCode-Benchmark\\Task24\\workspaces\\transport-loader-tests"
+const untrustedRoot = "D:\\OpenCode-Benchmark\\Task24\\tmp\\transport-loader-tests"
 const campaignID = "task24-campaign-001"
 const runID = "task24-run-001"
 const grant = "task24-broker-grant-that-is-long-and-random-000001"
@@ -14,6 +16,7 @@ const profile = (overrides: Readonly<Record<string, unknown>> = {}) => ({
   runID,
   brokerOrigin: "http://127.0.0.1:43191",
   providerPaths: { kimi: "/v1/kimi", deepseek: "/v1/deepseek" },
+  evidenceMode: "production",
   expiresAt: Date.now() + 60_000,
   grant,
   ...overrides,
@@ -26,8 +29,8 @@ const environment = (file: string, runDataRoot = root) => ({
   OPENCODE_BENCHMARK_RUN_ID: runID,
 })
 
-const writeProfile = async (name: string, value = profile()) => {
-  const directory = path.join(root, name)
+const writeProfile = async (name: string, value = profile(), parent = root) => {
+  const directory = path.join(parent, name)
   await fs.mkdir(directory, { recursive: true })
   const file = path.join(directory, "transport.json")
   await Bun.write(file, JSON.stringify(value))
@@ -39,6 +42,8 @@ afterAll(async () => {
     throw new TypeError("Unexpected Task24 transport test root")
   }
   await fs.rm(root, { recursive: true, force: true })
+  await fs.rm(workspaceRoot, { recursive: true, force: true })
+  await fs.rm(untrustedRoot, { recursive: true, force: true })
 })
 
 describe("ProductionHostRuntime benchmark transport", () => {
@@ -55,8 +60,17 @@ describe("ProductionHostRuntime benchmark transport", () => {
       runID,
       brokerOrigin: "http://127.0.0.1:43191",
       providerPaths: { kimi: "/v1/kimi", deepseek: "/v1/deepseek" },
+      evidenceMode: "production",
     })
     expect(JSON.stringify(binding)).not.toContain(grant)
+  })
+
+  test("loads the workflow arm profile from its isolated Task24 workspace data root", async () => {
+    const fixture = await writeProfile("workflow-arm", profile(), workspaceRoot)
+    const binding = ProductionHostRuntime.loadBenchmarkTransport(environment(fixture.file, fixture.directory))
+
+    expect(binding?.campaignID).toBe(campaignID)
+    expect(binding?.runID).toBe(runID)
   })
 
   test("fails closed for partial configuration or a file outside the run root", async () => {
@@ -68,6 +82,11 @@ describe("ProductionHostRuntime benchmark transport", () => {
       ProductionHostRuntime.loadBenchmarkTransport({ OPENCODE_BENCHMARK_TRANSPORT_FILE: fixture.file }),
     ).toThrow()
     expect(() => ProductionHostRuntime.loadBenchmarkTransport(environment(fixture.file, other))).toThrow(/inside/i)
+
+    const untrusted = await writeProfile("untrusted", profile(), untrustedRoot)
+    expect(() =>
+      ProductionHostRuntime.loadBenchmarkTransport(environment(untrusted.file, untrusted.directory)),
+    ).toThrow(/runtime root/i)
   })
 
   test("rejects an expired profile and a wrong campaign identity", async () => {

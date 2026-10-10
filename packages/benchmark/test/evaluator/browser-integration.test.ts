@@ -14,6 +14,31 @@ afterAll(async () => {
 })
 
 describe("Task24 browser integration", () => {
+  integration("rejects inert controls and static empty labels; every keyboard control needs an observable effect", async () => {
+    if (!releasePath) throw new TypeError("TASK24_BROWSER_RELEASE is required")
+    const layout = Task24Root.ensure()
+    const output = path.join(layout.runs, `browser-ui-${crypto.randomUUID()}`)
+    const temp = path.join(layout.tmp, `browser-ui-${crypto.randomUUID()}`)
+    await fs.mkdir(output)
+    await fs.mkdir(temp)
+    cleanup.push(output, temp)
+    let variant = "inert"
+    const previewID = "f".repeat(64)
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(`<!doctype html><html lang="en"><body><main id="app"><label>Search<input></label><button id="first">Search</button><button id="second">Refresh</button><p role="status">No results</p></main><script>let n=0;const run=()=>document.querySelector('p').textContent='No results '+(++n);${variant !== "inert" ? "document.querySelector('#first').onclick=run;" : ""}${variant === "active" ? "document.querySelector('#second').onclick=run;" : ""}</script></body></html>`, { headers: { "content-type": "text/html" } }) })
+    try {
+      const runtime = makeBrowserRuntime({ release: loadBrowserRelease(releasePath), outputRoot: output, tempRoot: temp })
+      for (const current of ["inert", "partial", "active"]) {
+        variant = current
+        const capture = await runtime.capture({ runID: `ui-${current}`, previewID,
+          previewURL: `http://127.0.0.1:${server.port}/${previewID}/`, viewportID: "mobile", readySelector: "#app",
+          interactionScriptID: "none", timeoutMs: 30_000, signal: new AbortController().signal })
+        const evidence = JSON.parse(await fs.readFile(capture.evidence, "utf8"))
+        expect(evidence.keyboard.enterActivated && evidence.keyboard.spaceActivated).toBe(current === "active")
+        expect(evidence.stateProbe.visible).toBe(current !== "inert")
+      }
+    } finally { server.stop(true) }
+  }, 120_000)
+
   integration(
     "captures identical pixels, DOM/styles, Axe, and accessibility summaries three times at every viewport",
     async () => {
@@ -159,6 +184,50 @@ describe("Task24 browser integration", () => {
       }
     },
     30_000,
+  )
+
+  integration(
+    "blocks external subresources before any network hit and records the denial",
+    async () => {
+      if (!releasePath) throw new TypeError("TASK24_BROWSER_RELEASE is required")
+      const layout = Task24Root.ensure()
+      const output = path.join(layout.runs, `browser-network-${crypto.randomUUID()}`)
+      const temp = path.join(layout.tmp, `browser-network-${crypto.randomUUID()}`)
+      await fs.mkdir(output)
+      await fs.mkdir(temp)
+      cleanup.push(output, temp)
+      let hits = 0
+      const canary = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => (hits++, new Response("blocked")) })
+      const previewID = "e".repeat(64)
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: () =>
+          new Response(
+            `<!doctype html><html><body><main id="app">ready<button data-task24-interaction="primary">probe</button></main><script>document.querySelector('button').addEventListener('click',()=>{const image=new Image();image.src='http:'+'//127.0.0.1:${canary.port}/canary';document.body.append(image)})</script></body></html>`,
+            { headers: { "content-type": "text/html; charset=utf-8" } },
+          ),
+      })
+      try {
+        const runtime = makeBrowserRuntime({ release: loadBrowserRelease(releasePath), outputRoot: output, tempRoot: temp })
+        const published = await runtime.capture({
+          runID: "network-fixture",
+          previewID,
+          previewURL: `http://127.0.0.1:${server.port}/${previewID}/`,
+          viewportID: "mobile",
+          readySelector: "#app",
+          interactionScriptID: "primary-click",
+          timeoutMs: 30_000,
+          signal: new AbortController().signal,
+        })
+        expect(hits).toBe(0)
+        expect(JSON.parse(await fs.readFile(published.evidence, "utf8")).blockedRequests).toBeGreaterThanOrEqual(1)
+      } finally {
+        server.stop(true)
+        canary.stop(true)
+      }
+    },
+    60_000,
   )
 })
 

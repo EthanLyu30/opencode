@@ -5,6 +5,7 @@ import { canonicalJson } from "../campaign/canonical"
 import { verifyPublishedPdfReport, type PublishedPdfReport } from "../report/pdf"
 import { decodeBrowserPdfResponseLine, type BrowserPdfRequest } from "../report/pdf-protocol"
 import { Task24Root } from "../root"
+import { task24CrashCheckpoint } from "../run/crash-hook"
 import {
   BROWSER_PROTOCOL_VERSION,
   captureRelativePath,
@@ -458,6 +459,7 @@ export function makeBrowserProcessRunner(spawn: Spawn): BrowserProcessRunner {
       try {
         stdin.write(invocation.stdin)
         await Promise.resolve(stdin.flush?.())
+        await task24CrashCheckpoint("during_capture")
         const [exit, out, error] = await Promise.all([
           child.exited,
           readStream(stdout, maxOutputBytes),

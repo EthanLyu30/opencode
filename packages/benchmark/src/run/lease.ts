@@ -24,7 +24,15 @@ export async function recoverExpiredRuns(input: {
   const results: Array<{ readonly runID: string; readonly outcome: RecoveryOutcome }> = []
   for (const lease of input.store.expiredLeases(input.now)) {
     const run = input.store.getRun(lease.runID)
-    if (!run || (run.state !== "running" && run.state !== "evaluating" && run.state !== "canceling")) {
+    if (
+      !run ||
+      (run.state !== "materializing" &&
+        run.state !== "ready" &&
+        run.state !== "reserved" &&
+        run.state !== "running" &&
+        run.state !== "evaluating" &&
+        run.state !== "canceling")
+    ) {
       input.store.releaseLease(lease.runID, lease.ownerID)
       continue
     }
@@ -49,7 +57,7 @@ export async function recoverExpiredRuns(input: {
       results.push({ runID: run.runID, outcome: "canceled" })
       continue
     }
-    input.store.interruptActiveAttempt(run.runID, input.now)
+    if (run.state === "running" || run.state === "evaluating") input.store.interruptActiveAttempt(run.runID, input.now)
     const reason = unknownDisposition(inspection)
     if (reason) {
       input.store.transition(run.runID, "interrupted", new Date(input.now).toISOString())
@@ -65,8 +73,16 @@ export async function recoverExpiredRuns(input: {
       results.push({ runID: run.runID, outcome: "completed" })
       continue
     }
+    if (inspection.providerDisposition === "settled") {
+      input.store.transition(run.runID, "interrupted", new Date(input.now).toISOString())
+      input.store.addAdjudication(run.runID, "provider_already_settled", input.now)
+      input.store.transition(run.runID, "failed", new Date(input.now).toISOString())
+      input.store.releaseLease(run.runID, lease.ownerID)
+      results.push({ runID: run.runID, outcome: "adjudication_required" })
+      continue
+    }
     input.store.transition(run.runID, "interrupted", new Date(input.now).toISOString())
-    if (inspection.workspaceIntact) {
+    if (run.state === "materializing" || run.state === "ready") {
       input.store.transition(run.runID, "resumable", new Date(input.now).toISOString())
       input.store.releaseLease(run.runID, lease.ownerID)
       results.push({ runID: run.runID, outcome: "resumable" })
