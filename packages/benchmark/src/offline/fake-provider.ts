@@ -44,8 +44,9 @@ export function createFakeProvider(options: FakeProviderOptions = {}): FakeProvi
       }
       const callIndex = observed.length
       const terminal = options.terminals?.[callIndex] ?? fakeTerminal(body.task24_fake_terminal)
-      const workflow = workflowContext(body)
-      const toolResultDisposition = deniedToolResult(body) || containsTypedToolResult(body) ? "permission_denied" : undefined
+      const workflow = workflowContext(body) ?? deliveryContext(body, observed)
+      const toolResultDisposition =
+        deniedToolResult(body) || containsTypedToolResult(body) ? "permission_denied" : undefined
       const provider = request.url.includes("moonshot") ? "kimi" : "deepseek"
       const protocol = provider === "kimi" ? "chat_completions" : "responses"
       const model = body.model
@@ -85,16 +86,19 @@ export function createFakeProvider(options: FakeProviderOptions = {}): FakeProvi
                 : responsesStream(terminal, content)
       const frames = bodyText.split(/(?<=\n\n)/)
       let frameIndex = 0
-      return new Response(new ReadableStream<Uint8Array>({
-        pull(controller) {
-          const frame = frames[frameIndex++]
-          if (frame === undefined) controller.close()
-          else controller.enqueue(new TextEncoder().encode(frame))
-        },
-      }), {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            const frame = frames[frameIndex++]
+            if (frame === undefined) controller.close()
+            else controller.enqueue(new TextEncoder().encode(frame))
+          },
+        }),
+        {
           status: 200,
           headers: { "content-type": "text/event-stream" },
-        })
+        },
+      )
     },
     calls: () => Object.freeze(observed.map((call) => Object.freeze({ ...call }))),
   })
@@ -118,7 +122,8 @@ function deniedToolResult(value: unknown): boolean {
 function containsTypedToolResult(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(containsTypedToolResult)
   if (!record(value)) return false
-  if (value.type === "function_call_output" || value.type === "custom_tool_call_output" || value.role === "tool") return true
+  if (value.type === "function_call_output" || value.type === "custom_tool_call_output" || value.role === "tool")
+    return true
   return Object.values(value).some(containsTypedToolResult)
 }
 
@@ -458,6 +463,21 @@ function workflowContext(value: unknown): { readonly role: WorkflowRole; readonl
     }
   }
   return undefined
+}
+
+// Delivery uses the admitted Response's context instead of the default stage
+// envelope. The fake instance is per-run; its prior visual verdict binds revision.
+function deliveryContext(value: unknown, calls: readonly FakeProviderCall[]) {
+  const prior = calls.at(-1)
+  if (
+    prior?.workflowRole !== "visual_review" ||
+    prior.workflowRevision === undefined ||
+    ![...strings(value)].some((text) =>
+      text.includes("Return only the strict delivery envelope with a bounded summary"),
+    )
+  )
+    return undefined
+  return { role: "deliver" as const, revision: prior.workflowRevision }
 }
 
 function* strings(value: unknown): Generator<string> {
