@@ -39,6 +39,7 @@ export async function prepareDirectArm(input: ArmInput): Promise<DirectArmLaunch
     "json",
     "--auto",
     ...input.referenceFiles.flatMap((file) => ["--file", file]),
+    "--",
     input.prompt,
   ]
   return Object.freeze({

@@ -46,6 +46,8 @@ describe("Task24 direct arms", () => {
       expect(launch.args).toContain("--auto")
       expect(launch.args).toContain("--file")
       expect(launch.args.at(-1)).toContain("CANARY_TASK_PROMPT")
+      // The production CLI's variadic --file must not consume the positional prompt.
+      expect(launch.args.slice(-2)).toEqual(["--", "Build the page from assets/reference.png. CANARY_TASK_PROMPT"])
       expect(launch.environment.TASK24_BROKER_GRANT).toBe("TASK24_BROKER_GRANT_abcdefghijklmnopqrstuvwxyz")
       expect(launch.environment.DEEPSEEK_API_KEY).toBeUndefined()
       expect(launch.environment.MOONSHOT_API_KEY).toBeUndefined()
