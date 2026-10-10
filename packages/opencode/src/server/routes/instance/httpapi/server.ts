@@ -121,6 +121,8 @@ import { errorLayer } from "./middleware/error"
 import { fenceLayer } from "./middleware/fence"
 import { schemaErrorLayer } from "./middleware/schema-error"
 import { workflowReplacements } from "@opencode-ai/server/routes"
+import { WorkflowBenchmarkTransport } from "@opencode-ai/core/workflow/benchmark-transport"
+import { ProductionHostRuntime } from "@opencode-ai/server/workflow/production-host-runtime"
 
 export const context = Context.makeUnsafe<unknown>(new Map())
 
@@ -320,6 +322,7 @@ export function createRoutes(
       AppNodeBuilderV1.build(app, [
         [LocationServiceMap.node, locationServiceMapV2],
         [SessionExecution.node, SessionExecutionLocal.node],
+        [WorkflowBenchmarkTransport.node, ProductionHostRuntime.benchmarkTransportNode],
         [WorkflowExecution.node, composition.workflowExecution ?? WorkflowExecutionLocal.node],
         ...workflowReplacements(),
       ]),

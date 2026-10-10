@@ -85,14 +85,26 @@ export const layerWith = (binding?: Binding) =>
 export const node = makeGlobalNode({ service: Service, layer: layerWith(), deps: [] })
 
 /** Private offline process-death seam. No effect for normal production bindings. */
-export function recoveryProbe(binding: Binding, environment: Readonly<Record<string, string | undefined>> = process.env) {
-  if (binding.evidenceMode !== "deterministic_offline" || !/^workflow-recovery-[a-f0-9]{32}$/.test(binding.runID) ||
-    environment.TASK24_INTERNAL_CRASH_TEST !== "task24-owned-v1") return undefined
+export function recoveryProbe(
+  binding: Binding,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  if (
+    binding.evidenceMode !== "deterministic_offline" ||
+    !/^workflow-recovery-[a-f0-9]{32}$/.test(binding.runID) ||
+    environment.TASK24_INTERNAL_CRASH_TEST !== "task24-owned-v1"
+  )
+    return undefined
   const point = environment.TASK24_INTERNAL_WORKFLOW_CRASH_AT
   if (point !== "workflow-stage-settled" && point !== "workflow-recovery-reentry") return undefined
   const marker = environment.TASK24_INTERNAL_WORKFLOW_CRASH_MARKER
   const parent = path.win32.join("D:\\OpenCode-Benchmark\\Task24\\tmp", binding.runID)
-  if (!marker || path.win32.dirname(marker) !== parent || path.win32.basename(marker) !== "checkpoint.json" || path.win32.normalize(marker) !== marker) {
+  if (
+    !marker ||
+    path.win32.dirname(marker) !== parent ||
+    path.win32.basename(marker) !== "checkpoint.json" ||
+    path.win32.normalize(marker) !== marker
+  ) {
     throw new TypeError("TASK24_WORKFLOW_RECOVERY_MARKER_UNSAFE")
   }
   return { point, marker }
@@ -110,7 +122,9 @@ export async function pauseRecoveryCheckpoint(binding: Binding, workflowID: stri
   try {
     fs.writeFileSync(file, JSON.stringify({ point: probe.point, pid: process.pid, workflowID, stageID }) + "\n")
     fs.fsyncSync(file)
-  } finally { fs.closeSync(file) }
+  } finally {
+    fs.closeSync(file)
+  }
   await new Promise<never>(() => {})
 }
 
@@ -179,6 +193,20 @@ export function verifyGrant(binding: Binding, grant: string | undefined, now = D
   if (grant === undefined) throw invalid("missing_grant", "Persisted benchmark transport grant is missing")
   if (sha256(grant) !== trusted.grantSha256)
     throw invalid("grant_mismatch", "Persisted benchmark transport grant does not match its workflow binding")
+}
+
+/** A trusted broker binding can use an ephemeral grant; ordinary provider auth cannot. */
+export function runtimeGrant(
+  binding: Binding,
+  providerID: string,
+  stored: string | undefined,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const name = providerID === "kimi" ? "MOONSHOT_API_KEY" : providerID === "deepseek" ? "DEEPSEEK_API_KEY" : undefined
+  if (!name) throw invalid("invalid_binding", "Benchmark provider is not supported")
+  const grant = stored ?? environment[name]
+  verifyGrant(binding, grant)
+  return grant
 }
 
 function decodeProfile(input: unknown): typeof ProfileEnvelope.Type {

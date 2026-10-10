@@ -32,15 +32,56 @@ const binding = () =>
   })
 
 describe("WorkflowBenchmarkTransport", () => {
+  test("resolves only hash-bound ephemeral broker grants, without storing provider credentials", () => {
+    const transport = binding()
+    expect(WorkflowBenchmarkTransport.runtimeGrant(transport, "kimi", undefined, { MOONSHOT_API_KEY: grant })).toBe(
+      grant,
+    )
+    expect(WorkflowBenchmarkTransport.runtimeGrant(transport, "deepseek", undefined, { DEEPSEEK_API_KEY: grant })).toBe(
+      grant,
+    )
+    expect(() =>
+      WorkflowBenchmarkTransport.runtimeGrant(transport, "kimi", undefined, { DEEPSEEK_API_KEY: grant }),
+    ).toThrow()
+    expect(() =>
+      WorkflowBenchmarkTransport.runtimeGrant(transport, "kimi", undefined, {
+        MOONSHOT_API_KEY: "wrong-ephemeral-grant-value-000000001",
+      }),
+    ).toThrow()
+    expect(() =>
+      WorkflowBenchmarkTransport.runtimeGrant(transport, "other", undefined, { MOONSHOT_API_KEY: grant }),
+    ).toThrow()
+    expect(() =>
+      WorkflowBenchmarkTransport.runtimeGrant(transport, "kimi", "wrong-saved-grant-value-000000000001", {
+        MOONSHOT_API_KEY: grant,
+      }),
+    ).toThrow()
+  })
   test("arms recovery checkpoints only for internal offline authority and D-owned marker paths", () => {
-    const frozen = WorkflowBenchmarkTransport.freezeProfile({ authority: "server", profile: profile({ evidenceMode: "deterministic_offline", runID: "workflow-recovery-" + "a".repeat(32) }),
-      expectedCampaignID: "task24-campaign-001", expectedRunID: "workflow-recovery-" + "a".repeat(32), now })
-    const environment = { TASK24_INTERNAL_CRASH_TEST: "task24-owned-v1", TASK24_INTERNAL_WORKFLOW_CRASH_AT: "workflow-recovery-reentry",
-      TASK24_INTERNAL_WORKFLOW_CRASH_MARKER: "D:\\OpenCode-Benchmark\\Task24\\tmp\\workflow-recovery-" + "a".repeat(32) + "\\checkpoint.json" }
-    expect(Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(frozen, environment)).toMatchObject({ point: "workflow-recovery-reentry" })
+    const frozen = WorkflowBenchmarkTransport.freezeProfile({
+      authority: "server",
+      profile: profile({ evidenceMode: "deterministic_offline", runID: "workflow-recovery-" + "a".repeat(32) }),
+      expectedCampaignID: "task24-campaign-001",
+      expectedRunID: "workflow-recovery-" + "a".repeat(32),
+      now,
+    })
+    const environment = {
+      TASK24_INTERNAL_CRASH_TEST: "task24-owned-v1",
+      TASK24_INTERNAL_WORKFLOW_CRASH_AT: "workflow-recovery-reentry",
+      TASK24_INTERNAL_WORKFLOW_CRASH_MARKER:
+        "D:\\OpenCode-Benchmark\\Task24\\tmp\\workflow-recovery-" + "a".repeat(32) + "\\checkpoint.json",
+    }
+    expect(Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(frozen, environment)).toMatchObject({
+      point: "workflow-recovery-reentry",
+    })
     expect(Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(binding(), environment)).toBeUndefined()
     expect(Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(frozen, {})).toBeUndefined()
-    expect(() => Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(frozen, { ...environment, TASK24_INTERNAL_WORKFLOW_CRASH_MARKER: "C:\\escape.json" })).toThrow()
+    expect(() =>
+      Reflect.get(WorkflowBenchmarkTransport, "recoveryProbe")(frozen, {
+        ...environment,
+        TASK24_INTERNAL_WORKFLOW_CRASH_MARKER: "C:\\escape.json",
+      }),
+    ).toThrow()
   })
 
   test("freezes a nonsecret, self-authenticating loopback binding", () => {

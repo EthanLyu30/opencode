@@ -1143,10 +1143,10 @@ function credentialedModel(credentials: Credential.Interface, route: WorkflowRou
   return credentials.list(Integration.ID.make(route.providerID)).pipe(
     Effect.flatMap((saved) => {
       const value = saved.at(-1)?.value
-      const secret = value?.type === "key" ? value.key : value?.type === "oauth" ? value.access : undefined
+      let secret = value?.type === "key" ? value.key : value?.type === "oauth" ? value.access : undefined
       if (route.benchmarkTransport !== undefined) {
         try {
-          WorkflowBenchmarkTransport.verifyGrant(route.benchmarkTransport, secret)
+          secret = WorkflowBenchmarkTransport.runtimeGrant(route.benchmarkTransport, route.providerID, secret)
         } catch (cause) {
           const code =
             cause instanceof WorkflowBenchmarkTransport.Invalid
