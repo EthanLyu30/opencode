@@ -43,7 +43,7 @@ export namespace ModelContract {
       new Set(value.effortLevels).size !== value.effortLevels.length ||
       value.capabilities.some((capability) => !profile.capabilities.includes(capability)) ||
       value.effortLevels.some((effort) => !profile.effortLevels.includes(effort)) ||
-      (value.providerID === "kimi" && /^kimi[-_.]?k?2(?:[._-]|$)/i.test(value.modelID))
+      (value.providerID === "kimi" && /^(?:kimi[-_:])?k?2(?:[._:-]|$)/i.test(value.modelID))
     )
       throw invalid()
     const binding: Binding = Object.freeze({

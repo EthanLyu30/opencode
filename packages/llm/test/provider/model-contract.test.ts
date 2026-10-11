@@ -69,7 +69,7 @@ describe("factory-owned per-instance model contract", () => {
       expect(() => ModelContract.bind({ ...bindingInput("deepseek"), ...patch })).toThrow()
     })
   }
-  for (const modelID of ["kimi-k2.6", "kimi-k2.7", "kimi-k2.7-code"]) {
+  for (const modelID of ["kimi-k2.6", "kimi-k2.7", "kimi-k2.7-code", "k2.7", "2.6", "kimi_k2.7"]) {
     test(`cannot revive the prohibited model ${modelID}`, () => {
       expect(() => ModelContract.bind({ ...bindingInput("kimi"), modelID })).toThrow()
     })
