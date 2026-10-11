@@ -3,6 +3,7 @@ param(
   [string]$SourceRoot,
   [Parameter(Mandatory = $true)][string]$DeploymentRoot,
   [string]$Version,
+  [string]$BuildOutputRoot,
   [switch]$Rollback,
   [switch]$PrepareHostOnly
 )
@@ -39,6 +40,22 @@ function Test-PathContained {
   $parentWithSeparator = $Parent.TrimEnd("\") + "\"
   if ($Child.Equals($Parent, [StringComparison]::OrdinalIgnoreCase)) { return -not $Strict }
   return $Child.StartsWith($parentWithSeparator, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Resolve-SourceCandidate {
+  param([Parameter(Mandatory = $true)][string]$Source, [string]$OutputRoot)
+  $binary = Join-Path $Source $sourceBinaryRelative
+  if ($OutputRoot) {
+    $output = Resolve-CanonicalDDirectory -Value $OutputRoot -Name "BuildOutputRoot"
+    $legacy = Join-Path $Source "packages\opencode\dist"
+    if (-not (Test-PathContained -Parent $Source -Child $output -Strict) -or (Test-PathContained -Parent $legacy -Child $output)) {
+      throw "BuildOutputRoot must be a separate directory inside SourceRoot"
+    }
+    $binary = Join-Path $output "opencode-windows-x64\bin\opencode.exe"
+  }
+  $candidate = Resolve-CanonicalDFile -Value $binary -Name "Source binary"
+  if (-not (Test-PathContained -Parent $Source -Child $candidate -Strict)) { throw "Source binary escaped SourceRoot" }
+  return $candidate
 }
 
 function Assert-SafeLiteral {
@@ -1171,6 +1188,9 @@ function New-DeploymentTransaction {
 if ($PrepareHostOnly -and $Rollback) {
   throw "PrepareHostOnly and Rollback cannot be combined"
 }
+if ($BuildOutputRoot -and ($PrepareHostOnly -or $Rollback)) {
+  throw "BuildOutputRoot cannot be combined with preparation or rollback"
+}
 $prospectiveDeployment = Resolve-ProspectiveCanonicalDDirectory -Value $DeploymentRoot -Name "DeploymentRoot"
 if ($PrepareHostOnly) {
   $deployment = Resolve-OrCreateCanonicalDDirectory -Value $prospectiveDeployment -Name "DeploymentRoot"
@@ -1317,10 +1337,7 @@ if (
 if ($Rollback) {
   $preflightCandidate = Resolve-CanonicalDFile -Value $backup -Name "Rollback candidate"
 } else {
-  $preflightCandidate = Resolve-CanonicalDFile -Value (Join-Path $source $sourceBinaryRelative) -Name "Source binary"
-  if (-not (Test-PathContained -Parent $source -Child $preflightCandidate -Strict)) {
-    throw "Source binary escaped SourceRoot"
-  }
+  $preflightCandidate = Resolve-SourceCandidate -Source $source -OutputRoot $BuildOutputRoot
 }
 $preflightCandidateState = Get-ManagedFileState -Path $preflightCandidate -Name "Candidate executable" -Executable
 if (-not $preflightCandidateState.Present -or $preflightCandidateState.Version -cne $Version) {
@@ -1412,7 +1429,7 @@ if ($Rollback) {
   $candidate = $backup
   $action = "rollback"
 } else {
-  $candidate = Resolve-CanonicalDFile -Value (Join-Path $source $sourceBinaryRelative) -Name "Source binary"
+  $candidate = Resolve-SourceCandidate -Source $source -OutputRoot $BuildOutputRoot
   if (-not (Test-PathContained -Parent $source -Child $candidate -Strict)) { throw "Source binary escaped SourceRoot" }
   $action = "deploy"
 }

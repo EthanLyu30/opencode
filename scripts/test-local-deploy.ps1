@@ -88,6 +88,7 @@ function Invoke-Deploy {
     [Parameter(Mandatory = $true)][string]$Version,
     [switch]$Rollback,
     [switch]$PrepareHostOnly,
+    [string]$BuildOutputRoot,
     [string]$CrashAfter
   )
   $arguments = @(
@@ -107,6 +108,7 @@ function Invoke-Deploy {
   )
   if ($Rollback) { $arguments += "-Rollback" }
   if ($PrepareHostOnly) { $arguments += "-PrepareHostOnly" }
+  if ($BuildOutputRoot) { $arguments += @("-BuildOutputRoot", $BuildOutputRoot) }
   $previousPreference = $ErrorActionPreference
   $previousCrashPoint = [Environment]::GetEnvironmentVariable("OPENCODE_DEPLOY_TEST_CRASH_AFTER", "Process")
   try {
@@ -438,6 +440,28 @@ try {
   Assert-Equal $LASTEXITCODE 0 "Could not commit fixture source"
   $fixtureCommit = ((& git -C $sourceRoot rev-parse HEAD) | Select-Object -First 1).Trim()
   Assert-True ($fixtureCommit -match '^(?:[a-f0-9]{40}|[a-f0-9]{64})$') "Fixture source commit is malformed: $fixtureCommit"
+
+  $freshSource = New-FixtureSource -Root (Join-Path $caseRoot "fresh-output-source") -Executable $oldFixture
+  $freshDeployment = New-LegacyDeployment -Root (Join-Path $caseRoot "fresh-output-deployment") -Executable $oldFixture -EnginePath $enginePath -SourceRoot $freshSource.Root
+  $freshOutput = Join-Path $freshSource.Root "fresh-build"
+  $freshBinary = Join-Path $freshOutput "opencode-windows-x64\bin\opencode.exe"
+  New-Item -ItemType Directory -Path (Split-Path -Parent $freshBinary) -Force | Out-Null
+  Copy-Item -LiteralPath $newFixture -Destination $freshBinary
+  $freshResult = Invoke-Deploy -SourceRoot $freshSource.Root -DeploymentRoot $freshDeployment.Root -Version $newVersion -BuildOutputRoot $freshOutput
+  Assert-Equal $freshResult.ExitCode 0 "Fresh output deployment failed: $($freshResult.Output)"
+  Assert-Equal (Get-FileHash -LiteralPath $freshDeployment.Target -Algorithm SHA256).Hash $newHash "Fresh output did not supply the deployed bytes"
+  Assert-Equal (Get-FileHash -LiteralPath $freshSource.Binary -Algorithm SHA256).Hash $freshSource.Hash "Fresh output deployment changed legacy dist"
+  foreach ($invalidBuildRoot in @("C:\forbidden-build", $caseRoot, $freshSource.Root, (Join-Path $freshSource.Root "packages\opencode\dist"), (Join-Path $freshSource.Root "missing-build"))) {
+    $invalidBuild = Invoke-Deploy -SourceRoot $freshSource.Root -DeploymentRoot $freshDeployment.Root -Version $newVersion -BuildOutputRoot $invalidBuildRoot
+    Assert-True ($invalidBuild.ExitCode -ne 0) "Deployment accepted unsafe BuildOutputRoot: $invalidBuildRoot"
+    Assert-Equal (Get-FileHash -LiteralPath $freshDeployment.Target -Algorithm SHA256).Hash $newHash "Rejected build root changed deployment"
+  }
+  $linkedBuild = Join-Path $freshSource.Root "linked-build"
+  New-Item -ItemType Junction -Path $linkedBuild -Target $freshOutput | Out-Null
+  $linkedResult = Invoke-Deploy -SourceRoot $freshSource.Root -DeploymentRoot $freshDeployment.Root -Version $newVersion -BuildOutputRoot $linkedBuild
+  Assert-True ($linkedResult.ExitCode -ne 0) "Deployment accepted linked BuildOutputRoot"
+  $rollbackBuild = Invoke-Deploy -SourceRoot $freshSource.Root -DeploymentRoot $freshDeployment.Root -Version $oldVersion -BuildOutputRoot $freshOutput -Rollback
+  Assert-True ($rollbackBuild.ExitCode -ne 0) "Rollback accepted a build output override"
 
   $overlapSource = New-FixtureSource -Root (Join-Path $caseRoot "overlap-source") -Executable $newFixture
   $overlapAclBefore = (Get-Acl -LiteralPath $overlapSource.Root).Sddl
