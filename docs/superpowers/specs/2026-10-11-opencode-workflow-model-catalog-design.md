@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-11
 
-**Status:** Draft for written-spec review. The user adopted the production-host extension route and requested automatic discovery of new Kimi/DeepSeek choices and retirement of old models. Implementation and deployment of this specification have not started.
+**Status:** Approved for implementation planning on 2026-10-11. The user adopted the production-host extension route and explicitly confirmed “自动发现、确认启用” after the written-spec handoff. Implementation and deployment of this specification have not started.
 
 ## Intent and place in the readiness work
 
