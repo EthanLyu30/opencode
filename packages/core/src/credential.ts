@@ -1,6 +1,6 @@
 export * as Credential from "./credential"
 
-import { asc, eq } from "drizzle-orm"
+import { asc, eq, sql } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { Credential } from "@opencode-ai/schema/credential"
 import { Integration } from "@opencode-ai/schema/integration"
@@ -123,7 +123,12 @@ const layer = Layer.effect(
         if (!updates.label && !updates.value) return
         yield* db
           .update(CredentialTable)
-          .set({ label: updates.label, value: updates.value })
+          .set({
+            label: updates.label,
+            value: updates.value,
+            // Credential revisions must change even within one wall-clock millisecond.
+            time_updated: sql<number>`max(${Date.now()}, ${CredentialTable.time_updated} + 1)`,
+          })
           .where(eq(CredentialTable.id, id))
           .run()
           .pipe(Effect.orDie)
