@@ -745,13 +745,60 @@ Task24.10 evidence before commit: 16/16 bundles passed manifest/hash/path valida
 
 ### Task 24.11: Complete Task24A Offline End-to-End Verification, Deployment, and Seal
 
-Execution evidence (2026-10-10): deterministic fake provider/role paths, D-only wrapper, retained evidence validation and real-process recovery implementation are present. Pre-commit gate: benchmark 230 pass / 1 exact-recovery integration pending; Chromium PDF/capture and Docker malicious-vector/timeout tests pass; Core admission/transport/location 43 pass, Core execution/recovery/crash 44 pass, Server transport 6 pass; package typechecks pass and new benchmark/transport source lint has no warnings/errors. Fresh-context review identified eight Important issues; covering tests and fixes are in this implementation, with exact deployed-binary acceptance still required. No Task24A completion/seal claimed yet.
+Final execution evidence (2026-10-11): Task24A offline acceptance is complete, not live model-effect measurement or paid readiness. Final benchmark gate: 242 pass / 1 skip / 0 fail / 793 assertions across 58 files; the skipped exact-recovery test is independently covered by the full eight-case real-process campaign below. Chromium capture/PDF, Docker malicious-vector/timeout, and actual executable security integration are enabled. Core admission/transport/location 43 pass, Core execution/recovery/crash 44 pass, Server transport 6 pass; package typechecks, focused lint, final 17-test CLI gate, no-contract production smoke, and deployment smoke pass. All eight Important fresh-review findings have covering fixes/tests. Subsequent benchmark-only changes leave Core/CLI/Server runtime source identical to the frozen r4 build source.
 
 Execution ruling: the deploy script requires clean reviewed source, so exact-binary acceptance in Step 6 runs after Steps 8–9. If it fails, commit/push the covered correction, rebuild/redeploy, and rerun before Step 11. Older content-addressed browser runtimes could not be removed because environment cleanup policy rejected deletion; runtime identity is selected by the verified fairness fingerprint, never by directory count.
 
 Offline amendment (2026-10-11, before paid execution): exact-binary acceptance first exposed the nonvisual guardrail limitation, then stopped after 96 cells at `swe-chartjs__chart.js-10157` with the same typed, zero-dispatch admission rejection. Inventory confirms that all four frozen SWE library projects also lack a preview recognized by the current `visual-build` host. Keep all sixteen A repetitions for these eight exact task IDs as explicit `preview_configuration_required` capability failures; do not exclude them, add dummy HTML, or expand the production host during this benchmark. Only matching task kind/ID, exact typed admission rejection, exit 1, zero forwarded requests, unchanged workspace, and a retained failed evaluation are accepted. Other nonzero exits remain harness failures and stop acceptance. Full offline totals remain 16 tasks / 128 evaluated binary runs: 112 successful process exits, 16 capability rejections, and 320 fake-provider requests (144 Chat / 176 Responses). This tests the existing workflow boundary, not general nonvisual/library coding support. Task2–9 persistence/scheduler algorithms remain unchanged.
 
 Paid-readiness amendment: Task24A can seal zero-credit execution/recovery evidence with these explicit failures, but that seal is not a declaration that the three-family pilot is ready. The static-page offline evaluator also cannot render these SWE library projects; absent visual/build evidence fails qualification. Before Task24B, implement and reverify an appropriate library/nonvisual workflow entry and reproducible library-specific preview/evaluation adapters (all arms use identical public media and sealed evaluators), then freeze a new campaign and rerun Task24A. Paid pilot execution itself still requires implementation; `run --stage pilot` currently validates approval and plans rows only. Do not make paid requests or claim model-effect results from this offline gate.
+
+Execution rulings, in chronological order (verification status remains governed by the checklist below):
+
+| #   | Final implementation ruling                                                                                                                                                                                                                                                                  | Cost if wrong / required guard                                                                                                                                                     |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Work directly in the user-authorized `dev` checkout and push `fork/dev`; no new worktree or PR.                                                                                                                                                                                              | Unrelated user edits could be lost; stage only scoped changes and never force-push/reset.                                                                                          |
+| 2   | Run source gates, commit, build/deploy clean runtime source, then test the exact binaries. Benchmark-only corrections do not relabel or rebuild the frozen production executable.                                                                                                            | A runtime correction requires another build and full acceptance; always retain the true binary source commit/hash.                                                                 |
+| 3   | Address all eight Important review findings: individual-log scanning, real-directory checks, active/settled reservations, actual service recovery, transitive evidence verification, stdin-isolated hidden vectors, semantic UI controls on every viewport, and timed-out container removal. | A superficially green harness could admit leaks, orphan processes, inert UI, or unbound evidence; retain covering tests and real execution gates.                                  |
+| 4   | Select the browser by the verified fairness fingerprint, not installed-directory count. Preserve two old browser roots whose deletion was policy-blocked.                                                                                                                                    | Substituted runtimes could bias measurements; enforce the exact manifest/hash and do not bypass cleanup restrictions.                                                              |
+| 5   | Use a gated private process-death seam and trusted legacy-HTTP transport binding with ephemeral broker grants.                                                                                                                                                                               | Mis-gating could affect ordinary runs or expose credentials; require no-contract production smoke and real worker-generation recovery. Task2–9 scheduler algorithms are unchanged. |
+| 6   | Translate the sealed retry budget into 36 global stage attempts and preserve broker-wide ceilings.                                                                                                                                                                                           | Incorrect mapping could unfairly terminate or overspend the workflow arm; validate arguments/snapshots, leaving ordinary CLI defaults unchanged.                                   |
+| 7   | Modernize only the explicitly bound offline role fixture to v2 artifacts/revision ownership and transparent viewport receipts.                                                                                                                                                               | Synthetic receipts could be mistaken for visual quality; score only external real-browser captures and label fake-provider scope.                                                  |
+| 8   | Separate the direct prompt from variadic file arguments with `--`, select the actually advertised fake tool, and use an identical body-free fixed title in B–E.                                                                                                                              | Argument/tool errors or incidental title calls could bias controls; keep model/effort/ceilings identical and validate exact binaries.                                              |
+| 9   | Deduplicate shared fallback evidence within scoring groups without relaxing generic evidence validation.                                                                                                                                                                                     | Missing or duplicate references could corrupt scoring; require retained, rehashed evidence and fail closed on absent visual inputs.                                                |
+| 10  | Fix only the CLI observer's zero-based durable cursor.                                                                                                                                                                                                                                       | Lost creation events or duplicate progress could alter routing; cover initial/reconnect/gap/subprocess SSE, not Task2–9 event-store changes.                                       |
+| 11  | Retain all sixteen capability failures for the eight exact frozen nonvisual/library task IDs. No dummy HTML, task exclusions, or broad acceptance of exit 1.                                                                                                                                 | A broad exception would hide harness faults or bias effects; require typed rejection, matching kind/ID, zero dispatch and unchanged workspace.                                     |
+| 12  | Keep A4 table widths bounded, wrap IDs/codes, split first-pass columns without dropping metrics, and disclose offline scope before results.                                                                                                                                                  | Clipping or delayed caveats could mislead; run HTML contracts and real full-report visual QA.                                                                                      |
+| 13  | Include native incomplete/failed metadata in fake Responses and accept only a final CLI `stop` as successful direct completion.                                                                                                                                                              | Truncated/error output could falsely count as success; cover the actual SDK's `length` mapping and real-binary terminal rejection.                                                 |
+| 14  | Bind empty logs with exact case/path/empty-SHA receipts, keeping general evidence strictly nonempty.                                                                                                                                                                                         | Missing or forged logs could pass; close all eight log slots and three nonempty ledger slots, rejecting extras/duplicates/mismatches.                                              |
+| 15  | Keep printed table rows on one page. The first real 128-row PDF exposed nine fragmented run IDs; the corrected Chromium rerender has zero.                                                                                                                                                   | Row values could be misassociated; preserve the CSS regression, per-page ID checks, all-page QA, and a new source freeze/full run after this print-only change.                    |
+| 16  | Execute runtime/build/PDF/security gates that the fresh reviewer explicitly did not judge; do not infer those results from the review.                                                                                                                                                       | Unverified completion would be a false acceptance; final seal/replay/hash evidence must independently close every gate.                                                            |
+
+Pagination acceptance note (2026-10-11): campaign `34a01bc0…` completed the 128-run matrix, all eight real crash cases and 16 security checks, but its 47-page report failed visual pagination QA before sealing. Print-only correction `cd95cbb9e` is pushed. The actual-model PDF regression moved from nine split run IDs to zero. The newly frozen final campaign below was rerun from fresh isolated workspaces, rather than relabeling the earlier evidence.
+
+Final sealed evidence:
+
+| Identity / gate                       | Verified value                                                                                                                                                                                             |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Campaign / immutable seal             | `a401b41d069861db50e112461a2d44034c7e83aac2f4e1f8eaf5266634d9b6b9`; `campaign validate`, `seal`, and `verify` exit 0                                                                                       |
+| Evaluator graph                       | `6ca3f7f55086feaee9de1bbb3da5c3eabe1ddfb4b6f576e83d0a6bc03b92d42e`                                                                                                                                         |
+| Frozen source lock / fairness         | `7c1e4e818f1bb76a5fd93571525687c7fdb0b51bf4cb06ac1bf33bec7a82496a` / `728c2323be1d099301ccd5131ca54d85799a471327480c59118fc0a42b283926`                                                                    |
+| Matrix                                | 16 tasks, 128 independent exact-binary processes/workspaces; A/B/C 32 each, D/E 16 each; 112 successful exits plus 16 retained typed capability failures                                                   |
+| Provider paths / captures             | 320 fake requests: 144 Chat Completions, 176 Responses; 192 real-browser viewport captures; zero paid provider calls                                                                                       |
+| Real process death / restart / replay | Eight cases; zero duplicate dispatches or conflicting results. Reservation/mid-stream uncertainty correctly requires adjudication, rather than silent redispatch                                           |
+| Security                              | 16 typed rejections/disqualifications; actual modified/upstream binaries and evaluator sandbox exercised; zero leaks                                                                                       |
+| Modified deployed binary              | `0.0.0-dev-20261011-task24a-r4`; source `5bb8aef4395b8469472fbd90ec56e0b56fca20f4`; SHA-256 `5bdaad768bc175ac897751595731d7d074b96b9e0c3adb8ac83226787729ab0b`; `D:\OpenCode-Local\bin\opencode-local.exe` |
+| Official pinned binary                | `1.18.30` (pinned, not a claim about today's latest); source `3104c1428ec91f809e5ab86631300de41eb6952e`; SHA-256 `2bbb7b17b708dda0d5c56b6c64f913649a28b84ccf3f11edb9a6f2dc6aa39c3d`                        |
+| JSON / model SHA-256                  | `030420671d2cd7f107921fdbc00bab7cade1e320ed5d9ffd94448421e078efc1`                                                                                                                                         |
+| CSV SHA-256                           | `eb4ce27a3b2e7a073e6ce2e0c883ac94541baa7aaecb92f3457fdc5bf6c3136e`                                                                                                                                         |
+| HTML SHA-256                          | `6c17e799489d973971ee29a7e968f9227b833c6c4d2de8f2c31db0b579cd0178`                                                                                                                                         |
+| PDF SHA-256 / reproducibility         | `07b708f612d232b368152291da4ff0dc402fb63ba0eea712c5411e2430eef5c5`; two identical Chromium renders and unchanged report replay                                                                             |
+| Final PDF QA                          | All 47 pages rendered and visually inspected (24 two-page QA pairs); 128 run IDs have zero incomplete per-page occurrences; no clipped columns or split rows                                               |
+| Idempotence                           | Repeated `run --stage offline` and `report --stage offline` exit 0 with identical run-summary/PDF hashes and original 320-call ledger retained                                                             |
+
+Durable runs and transitive evidence: `D:\OpenCode-Benchmark\Task24\runs\offline\a401b41d069861db50e112461a2d44034c7e83aac2f4e1f8eaf5266634d9b6b9`. All four final reports: `D:\OpenCode-Benchmark\Task24\reports\offline\a401b41d069861db50e112461a2d44034c7e83aac2f4e1f8eaf5266634d9b6b9`; PDF is under `browser\offline-a401b41d069861db50e11246\report.pdf`.
+
+Paid-gate handoff: proposed pilot remains `private-analytics-dashboard`, `d2c-g29-spelling-bee`, and `swe-chartjs__chart.js-10157` (24 cells, concurrency 1). Historical frozen worst-case proposal is Kimi CNY 120 and DeepSeek USD 6.336, excluding minimal paid preflight; it is neither a current-price quote nor authorization. Task24.12–14 remain pending. First complete the nonvisual/library entry, shared reproducible preview/evaluation adapters, and actual live pilot execution loop; refreeze and rerun Task24A, revalidate prices, and obtain separate native-currency approval before any paid request.
 
 **Files:**
 
@@ -768,15 +815,15 @@ Paid-readiness amendment: Task24A can seal zero-credit execution/recovery eviden
 
 The fake Kimi and DeepSeek endpoints emit recorded Chat/Responses SSE, tool calls, terminal usage, incomplete/failed events, and controlled code edits. The fake scenario must exercise all workflow roles and both direct protocols.
 
-- [ ] **Step 2: Run a full fake five-arm campaign.**
+- [x] **Step 2: Run a full fake five-arm campaign.**
 
 Materialize independent workspaces, dispatch A–E, collect artifacts, serve previews, capture viewports, evaluate, bootstrap, and render all four formats. Assert exact run counts, protocol paths, ledger totals, workspace isolation, and report values.
 
-- [ ] **Step 3: Run the crash/recovery matrix.**
+- [x] **Step 3: Run the crash/recovery matrix.**
 
 Inject process death during materialization, after reservation, mid-stream, after terminal usage, during workflow recovery, during capture, during evaluation publication, and during report write. Each restart must converge without a duplicate paid-equivalent dispatch or conflicting result.
 
-- [ ] **Step 4: Run security and redaction acceptance.**
+- [x] **Step 4: Run security and redaction acceptance.**
 
 Attempt remote endpoint injection, public transport override, workspace traversal, symlink/reparse escape, hidden-gold access, external network, evaluator mutation, grant replay, log injection, oversized output, and fake usage. Assert typed rejection/disqualification and scan all durable text for canaries.
 
@@ -784,7 +831,7 @@ Attempt remote endpoint injection, public transport override, workspace traversa
 
 `scripts/task24.ps1` sets task-specific `TEMP`, `TMP`, Bun cache, config, data, Playwright browser, and npm cache directories under the Task24 root; validates the Bun/Node/binary hashes; then invokes the package CLI without printing secrets.
 
-- [ ] **Step 6: Run the pre-commit Task24A gate.**
+- [x] **Step 6: Run the pre-commit Task24A gate.**
 
 ```powershell
 Push-Location 'D:\OpenCode-Audit\packages\benchmark'
@@ -798,11 +845,11 @@ Pop-Location
 
 Expected: zero outbound provider requests, all tests/typecheck exit 0, the recovery matrix passes, and deterministic offline JSON/CSV/HTML/PDF reports are written under `D:\OpenCode-Benchmark\Task24\reports\offline`.
 
-- [ ] **Step 7: Request code review and verify repository state.**
+- [x] **Step 7: Request code review and verify repository state.**
 
 Use `superpowers:requesting-code-review`, address concrete findings, rerun focused checks, then use `superpowers:verification-before-completion`. Confirm no key-shaped strings or Task24 local data are tracked.
 
-- [ ] **Step 8: Commit and push the reviewed Task24A implementation.**
+- [x] **Step 8: Commit and push the reviewed Task24A implementation.**
 
 ```powershell
 git add packages/benchmark scripts/task24.ps1 docs/superpowers/plans/2026-09-12-opencode-workflow-effect-benchmark.md
@@ -810,7 +857,7 @@ git commit -m "test(benchmark): verify task24 offline"
 git push fork dev
 ```
 
-- [ ] **Step 9: Build, atomically deploy, and freeze the two measured binaries.**
+- [x] **Step 9: Build, atomically deploy, and freeze the two measured binaries.**
 
 Build the modified executable from the clean pushed `dev` commit with the pinned Bun, run `scripts/test-local-deploy.ps1`, then atomically update `D:\OpenCode-Local` through the existing deployment script while retaining the prior binary/hash as rollback:
 
@@ -828,11 +875,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 'D:\OpenCode-Audit\scripts\d
 
 Build the locked official upstream source without patches into `D:\OpenCode-Benchmark\Task24\toolchain\upstream`; hash both executables and record version/source commit/build inputs. Smoke the deployed modified launcher with benchmark transport absent to prove ordinary production behavior remains unchanged.
 
-- [ ] **Step 10: Rerun offline acceptance against the exact frozen binaries.**
+- [x] **Step 10: Rerun offline acceptance against the exact frozen binaries.**
 
 Run the fake five-arm campaign through the deployed modified binary and frozen upstream binary. Re-run seal candidate validation, ledger reconciliation, redaction scan, evaluator reproducibility, and report reproducibility. If this uncovers a defect, fix it in a new reviewed commit, push, rebuild/redeploy, and repeat before sealing.
 
-- [ ] **Step 11: Create the final immutable seal and stop at the paid gate.**
+- [x] **Step 11: Create the final immutable seal and stop at the paid gate.**
 
 ```powershell
 & 'D:\OpenCode-Audit\scripts\task24.ps1' campaign seal
@@ -846,7 +893,7 @@ Verify `dev` matches `fork/dev` and the repository is clean. Report the exact Ta
 
 ### Task 24.12: Run Task24B Three-Task Paid Pilot
 
-**Prerequisite:** the user explicitly approves separate maximum amounts in Kimi CNY and DeepSeek USD after reviewing Task24A. Approval is scoped only to the sealed Task24B pilot.
+**Prerequisites:** first implement and verify the library/nonvisual production entry, reproducible library-specific evaluation adapters, and the actual live pilot execution loop (not merely row planning); freeze a new campaign and rerun Task24A. Then obtain explicit approval for separate maximum amounts in Kimi CNY and DeepSeek USD using revalidated current prices. Approval is scoped only to that new sealed Task24B pilot. The current offline-only seal is not paid readiness and does not authorize these requests.
 
 **Local outputs:** `D:\OpenCode-Benchmark\Task24\runs\<campaign>\pilot`, `D:\OpenCode-Benchmark\Task24\reports\pilot`.
 
