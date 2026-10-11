@@ -78,6 +78,19 @@ export function fixtureDiscovery(
     object: "list",
     data: entries
       .filter((entry) => entry.providerID === providerID)
-      .map((entry) => ({ id: entry.modelID, object: "model", owned_by: providerID })),
+      .map((entry) =>
+        providerID === "kimi"
+          ? {
+              id: entry.modelID,
+              object: "model",
+              owned_by: "moonshot",
+              created: 123,
+              context_length: entry.contextWindow ?? 65536,
+              supports_image_in: true,
+              supports_video_in: false,
+              supports_reasoning: true,
+            }
+          : { id: entry.modelID, object: "model", owned_by: providerID },
+      ),
   }
 }
