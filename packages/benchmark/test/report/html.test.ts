@@ -8,6 +8,7 @@ describe("Task24 self-contained technical report", () => {
     const html = reportHtml(decodeReportModel(fixture))
     expect(html).toContain("<h1>Task24 workflow-effect benchmark</h1>")
     expect(html.indexOf("Technical summary")).toBeLessThan(html.indexOf("Key findings"))
+    expect(html.indexOf(fixture.limitations[0])).toBeLessThan(html.indexOf("Technical summary"))
     expect(html).toContain('<svg role="img"')
     expect(html).toContain("<title>Qualified-success rate by arm</title>")
     expect(html).toContain("Scope and metric definitions")
