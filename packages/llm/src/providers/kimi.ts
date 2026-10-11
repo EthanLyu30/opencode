@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer"
 import { Effect, Schema } from "effect"
 import { requireModelCapability } from "../capabilities"
+import { ModelContract } from "../model-contract"
 import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat"
 import * as OpenAIChat from "../protocols/openai-chat"
 import * as ProviderShared from "../protocols/shared"
@@ -37,6 +38,7 @@ export type ModelOptions = Omit<RouteDefaultsInput, "providerOptions"> &
   ProviderAuthOption<"optional"> & {
     readonly baseURL?: string
     readonly providerOptions?: KimiProviderOptionsInput
+    readonly modelContract?: ModelContract.Binding
   }
 
 const KimiResponseFormat = Schema.Struct({
@@ -78,8 +80,17 @@ const kimiEffort = (request: LLMRequest) => request.providerOptions?.kimi?.reaso
 const isKimiReasoningEffort = (value: unknown): value is KimiReasoningEffort =>
   value === "low" || value === "high" || value === "max"
 
-const validateRequest = Effect.fn("KimiK3.validateRequest")(function* (request: LLMRequest) {
-  if (String(request.model.id) !== "kimi-k3") return yield* invalid("Kimi Chat supports exactly the kimi-k3 model")
+const validateRequest = Effect.fn("KimiK3.validateRequest")(function* (
+  request: LLMRequest,
+  binding?: ModelContract.Binding,
+) {
+  if (binding)
+    yield* Effect.try({
+      try: () => ModelContract.validateRequest(binding, request),
+      catch: () => invalid("Invalid verified model contract"),
+    })
+  if (!binding && String(request.model.id) !== "kimi-k3")
+    return yield* invalid("Kimi Chat supports exactly the kimi-k3 model")
 
   const openAIOptions = definedKeys(request.providerOptions?.openai)
   if (openAIOptions.length > 0)
@@ -168,8 +179,8 @@ const restoreMoonshotReferences = (
     }
   })
 
-const fromRequest = Effect.fn("KimiK3.fromRequest")(function* (request: LLMRequest) {
-  const reasoningEffort = yield* validateRequest(request)
+const fromRequest = Effect.fn("KimiK3.fromRequest")(function* (request: LLMRequest, binding?: ModelContract.Binding) {
+  const reasoningEffort = yield* validateRequest(request, binding)
   const masked = yield* maskMoonshotReferences(request)
   const generation = masked.request.generation
   const projected = LLMRequest.update(masked.request, {
@@ -222,8 +233,15 @@ const route = OpenAICompatibleChat.makeProjectedRoute({ schema: KimiChatBody, fr
 export const routes = [route]
 
 export const configure = (input: ModelOptions = {}) => {
-  const { apiKey: _, auth: _auth, baseURL, providerOptions, ...defaults } = input
-  const configuredRoute = route.with({
+  const { apiKey: _, auth: _auth, baseURL, providerOptions, modelContract, ...defaults } = input
+  if (modelContract) ModelContract.require(modelContract, "kimi", modelContract.modelID, "openai-chat")
+  const instanceRoute = modelContract
+    ? OpenAICompatibleChat.makeProjectedRoute({
+        schema: KimiChatBody,
+        from: (request) => fromRequest(request, modelContract),
+      })
+    : route
+  const configuredRoute = instanceRoute.with({
     ...defaults,
     providerOptions: mergeProviderOptions({ kimi: { reasoningEffort: "max" } }, providerOptions),
     provider: id,
@@ -231,7 +249,7 @@ export const configure = (input: ModelOptions = {}) => {
     auth: AuthOptions.bearer(input, "MOONSHOT_API_KEY"),
   })
   const model = (modelID: string | ModelID) => {
-    const profile = requireModelCapability({ provider: id, model: modelID, required: "chat" })
+    const profile = requireModelCapability({ provider: id, model: modelID, required: "chat", modelContract })
     return configuredRoute.model({ id: profile.model })
   }
 

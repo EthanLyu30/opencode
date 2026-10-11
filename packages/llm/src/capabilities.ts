@@ -1,5 +1,6 @@
 import { Data } from "effect"
 import { ModelID, ProviderID } from "./schema"
+import { ModelContract } from "./model-contract"
 
 export type ProviderCapability =
   | "chat"
@@ -23,6 +24,7 @@ export interface ModelCapabilityInput {
   readonly provider: string | ProviderID
   readonly model: string | ModelID
   readonly required: ProviderCapability
+  readonly modelContract?: ModelContract.Binding
 }
 
 export class UnsupportedModelCapability extends Data.TaggedError("UnsupportedModelCapability")<{
@@ -102,16 +104,26 @@ const materialize = (definition: CapabilityDefinition): ModelCapabilityProfile =
 export const getModelCapabilityProfile = (
   provider: string | ProviderID,
   model: string | ModelID,
+  modelContract?: ModelContract.Binding,
 ): ModelCapabilityProfile | undefined => {
+  if (modelContract !== undefined) {
+    const profile = ModelContract.require(modelContract, String(provider), String(model))
+    return materialize({
+      provider: String(provider),
+      model: String(model),
+      protocol: profile.protocol,
+      capabilities: modelContract.capabilities as readonly ProviderCapability[],
+    })
+  }
   const definition = byModel.get(key(provider, model))
   return definition === undefined ? undefined : materialize(definition)
 }
 
 export const supportsModelCapability = (input: ModelCapabilityInput) =>
-  getModelCapabilityProfile(input.provider, input.model)?.capabilities.has(input.required) ?? false
+  getModelCapabilityProfile(input.provider, input.model, input.modelContract)?.capabilities.has(input.required) ?? false
 
 export const requireModelCapability = (input: ModelCapabilityInput): ModelCapabilityProfile => {
-  const profile = getModelCapabilityProfile(input.provider, input.model)
+  const profile = getModelCapabilityProfile(input.provider, input.model, input.modelContract)
   if (profile?.capabilities.has(input.required)) return profile
 
   throw new UnsupportedModelCapability({

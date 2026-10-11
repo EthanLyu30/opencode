@@ -1,5 +1,6 @@
 import { Effect, Schema } from "effect"
 import { requireModelCapability } from "../capabilities"
+import { ModelContract } from "../model-contract"
 import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat"
 import * as OpenAIResponses from "../protocols/openai-responses"
 import { AuthOptions, type ProviderAuthOption } from "../route/auth-options"
@@ -36,6 +37,7 @@ export type ModelOptions = Omit<RouteDefaultsInput, "providerOptions"> &
   ProviderAuthOption<"optional"> & {
     readonly baseURL?: string
     readonly providerOptions?: DeepSeekProviderOptionsInput
+    readonly modelContract?: ModelContract.Binding
   }
 
 const invalid = ProviderShared.invalidRequest
@@ -217,7 +219,15 @@ const validateRequest = Effect.fn("DeepSeekResponses.validateRequest")(function*
     return yield* invalid("DeepSeek Responses HTTP user must be a string")
 })
 
-const fromResponsesRequest = Effect.fn("DeepSeekResponses.fromRequest")(function* (request: LLMRequest) {
+const fromResponsesRequest = Effect.fn("DeepSeekResponses.fromRequest")(function* (
+  request: LLMRequest,
+  binding?: ModelContract.Binding,
+) {
+  if (binding)
+    yield* Effect.try({
+      try: () => ModelContract.validateRequest(binding, request),
+      catch: () => invalid("Invalid verified model contract"),
+    })
   yield* validateRequest(request)
   const options = request.providerOptions?.deepseek
   const effort = normalizeReasoningEffort(options?.reasoningEffort)
@@ -306,15 +316,31 @@ const nativeResponsesRoute = Route.make({
 export const routes = [nativeResponsesRoute, OpenAICompatibleChat.route]
 
 const defaults = (input: ModelOptions) => {
-  const { apiKey: _, auth: _auth, baseURL: _baseURL, ...rest } = input
+  const { apiKey: _, auth: _auth, baseURL: _baseURL, modelContract: _modelContract, ...rest } = input
   return rest
 }
 
 const auth = (input: ModelOptions) => AuthOptions.bearer(input, "DEEPSEEK_API_KEY")
 
 export const configure = (input: ModelOptions = {}) => {
+  const binding = input.modelContract
+  if (binding) ModelContract.require(binding, "deepseek", binding.modelID, "openai-responses")
   const routeDefaults = defaults(input)
-  const responsesRoute = nativeResponsesRoute.with({
+  const instanceRoute = binding
+    ? Route.make({
+        id: OpenAIResponses.route.id,
+        provider: id,
+        protocol: Protocol.make({
+          id: OpenAIResponses.protocol.id,
+          body: { schema: DeepSeekResponsesBody, from: (request) => fromResponsesRequest(request, binding) },
+          stream: OpenAIResponses.protocol.stream,
+        }),
+        endpoint: nativeResponsesRoute.endpoint,
+        auth: Auth.none,
+        transport: HttpTransport.sseJson.with<DeepSeekResponsesBody>(),
+      })
+    : nativeResponsesRoute
+  const responsesRoute = instanceRoute.with({
     ...routeDefaults,
     provider: id,
     endpoint: { baseURL: input.baseURL ?? DEFAULT_BASE_URL },
@@ -327,10 +353,16 @@ export const configure = (input: ModelOptions = {}) => {
     auth: auth(input),
   })
   const responses = (modelID: string | ModelID) => {
-    const profile = requireModelCapability({ provider: id, model: modelID, required: "responses" })
+    const profile = requireModelCapability({
+      provider: id,
+      model: modelID,
+      required: "responses",
+      modelContract: binding,
+    })
     return responsesRoute.model({ id: profile.model })
   }
   const chat = (modelID: string | ModelID) => {
+    if (binding) ModelContract.require(binding, "deepseek", String(modelID), "openai-chat")
     const profile = requireModelCapability({ provider: id, model: modelID, required: "chat" })
     return chatRoute.model({ id: profile.model })
   }
