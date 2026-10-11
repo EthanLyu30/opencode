@@ -73,6 +73,26 @@ test("production CLI HTTP routes persist trusted benchmark authority at admissio
       evidenceMode: "deterministic_offline",
     })
     expect(JSON.stringify(body)).not.toContain(grant)
+    await using nonvisual = await tmpdir()
+    const rejected = await app.handler(
+      new Request("http://localhost/api/workflow/visual-build", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-opencode-directory": encodeURIComponent(nonvisual.path),
+          "idempotency-key": "httpapi-nonvisual",
+        },
+        body: JSON.stringify({
+          prompt: "Normalize data",
+          budget: { maxTokens: 20000 },
+          visual: { maxRevisions: 1, maxTokens: 12000, maxTurns: 12, maxToolCalls: 24 },
+          delivery: "background",
+        }),
+      }),
+      Context.makeUnsafe<unknown>(new Map()),
+    )
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toMatchObject({ _tag: "InvalidRequestError", kind: "preview_configuration_required" })
   } finally {
     await app.dispose()
     await resetDatabase()

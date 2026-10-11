@@ -49,7 +49,12 @@ export class InvalidIdempotencyKey extends Schema.TaggedErrorClass<InvalidIdempo
 export class InvalidAdmission extends Schema.TaggedErrorClass<InvalidAdmission>()(
   "WorkflowAdmission.InvalidAdmission",
   {
-    reason: Schema.Literals(["receipt_too_large", "benchmark_transport_invalid"]),
+    reason: Schema.Literals([
+      "receipt_too_large",
+      "benchmark_transport_invalid",
+      "preview_configuration_required",
+      "invalid_preview_configuration",
+    ]),
     message: Schema.String.check(Schema.isMaxLength(128)),
   },
 ) {}
@@ -279,8 +284,23 @@ const layer = Layer.effect(
         })
         const claim = `${CLAIM_DOMAIN}:${WorkflowBusinessArtifact.hash({ domain: CLAIM_DOMAIN, key })}`
         const ids = deterministicIDs(claim, request.visual.maxRevisions)
-        const preview = PreviewPlan.freeze({ authority: "admission", location, preview: request.preview })
-        const productionHostPlan = WorkflowProductionHostPlan.freeze({ authority: "admission", location, preview })
+        const productionHostPlan = yield* Effect.try({
+          try: () => {
+            const preview = PreviewPlan.freeze({ authority: "admission", location, preview: request.preview })
+            return WorkflowProductionHostPlan.freeze({ authority: "admission", location, preview })
+          },
+          catch: (error) =>
+            new InvalidAdmission({
+              reason:
+                error instanceof PreviewPlan.PreviewConfigurationRequired
+                  ? "preview_configuration_required"
+                  : "invalid_preview_configuration",
+              message:
+                error instanceof PreviewPlan.PreviewConfigurationRequired
+                  ? "Visual workflow requires a previewable project"
+                  : "Preview configuration is invalid",
+            }),
+        })
         const project = yield* projects.resolve(location.directory)
         const selected = yield* Effect.gen(function* () {
           const agents = yield* AgentV2.Service
@@ -336,7 +356,7 @@ const layer = Layer.effect(
           requestHash: claim,
           request,
           location,
-          previewPlanSha256: preview.configSha256,
+          previewPlanSha256: productionHostPlan.preview.configSha256,
           productionHostPlanSha256: WorkflowBusinessArtifact.hash(productionHostPlan),
           ids: {
             workflowID: ids.workflowID,

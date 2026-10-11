@@ -63,6 +63,12 @@ async function admission(request: Request) {
   }
 
   if (scenario === "transport") throw new Error("raw-error-secret")
+  if (scenario === "preview-required") {
+    return Response.json(
+      { _tag: "InvalidRequestError", kind: "preview_configuration_required", message: "raw-error-secret" },
+      { status: 400 },
+    )
+  }
   if (scenario === "success" && state.admissionAttempts === 1) throw new Error("fixture transport retry")
   if (state.admissionAccepted) return Response.json({ message: "duplicate admission" }, { status: 409 })
   state.admissionAccepted = true

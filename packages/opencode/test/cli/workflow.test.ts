@@ -435,6 +435,26 @@ describe("workflow observer", () => {
 
 describe("workflow CLI process", () => {
   cliProcessIt.live(
+    "reports only the typed preview capability code on rejected admission",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        const result = yield* opencode.spawn(["workflow", "run", "Build the fixture", "--format", "json"], {
+          preload,
+          env: { OPENCODE_TEST_WORKFLOW_SCENARIO: "preview-required" },
+          timeoutMs: 20_000,
+        })
+        expect(result.exitCode).toBe(1)
+        expect(JSON.parse(result.stdout)).toEqual({
+          workflow: null,
+          response: null,
+          artifacts: [],
+          error: { code: "preview_configuration_required" },
+        })
+        expect(result.stdout + result.stderr).not.toContain("raw-error-secret")
+      }),
+    60_000,
+  )
+  cliProcessIt.live(
     "registers workflow help and rejects a missing prompt before admission",
     ({ opencode }) =>
       Effect.gen(function* () {

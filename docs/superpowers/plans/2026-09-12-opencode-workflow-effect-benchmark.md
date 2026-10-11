@@ -749,6 +749,8 @@ Execution evidence (2026-10-10): deterministic fake provider/role paths, D-only 
 
 Execution ruling: the deploy script requires clean reviewed source, so exact-binary acceptance in Step 6 runs after Steps 8–9. If it fails, commit/push the covered correction, rebuild/redeploy, and rerun before Step 11. Older content-addressed browser runtimes could not be removed because environment cleanup policy rejected deletion; runtime identity is selected by the verified fairness fingerprint, never by directory count.
 
+Offline amendment (2026-10-11, before paid execution): the first exact-binary matrix completed 33 cells before encountering `guardrail-data-normalization`. The current `visual-build` production host requires a previewable Location and cannot admit the four nonvisual guardrail projects. Keep all eight A guardrail repetitions as explicit `preview_configuration_required` capability failures; do not exclude them, add dummy HTML, or expand the production host during this benchmark. Only exact typed admission rejection, exit 1, zero forwarded requests, unchanged workspace, and a retained failed evaluation are accepted. Other nonzero exits remain harness failures and stop acceptance. Full offline totals are still 16 tasks / 128 evaluated binary runs, with 120 successful process exits, 8 capability rejections, and 384 fake-provider requests (168 Chat / 216 Responses). This is a test of the existing workflow boundary, not proof that it supports general nonvisual coding. Task2–9 persistence/scheduler algorithms remain unchanged.
+
 **Files:**
 
 - Create: `packages/benchmark/test/e2e/offline-campaign.test.ts`

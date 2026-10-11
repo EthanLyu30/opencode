@@ -29,6 +29,7 @@ import type { SealedCampaign } from "../schema"
 import { aggregateArms } from "../statistics/aggregate"
 import { clusteredBootstrap, type RunObservation } from "../statistics/bootstrap"
 import { createFakeProvider, type FakeProviderCall } from "./fake-provider"
+import { classifyOfflineRejection, expectedOfflineCalls } from "./outcome"
 import { runRecoveryMatrix, verifyRecoveryMatrix, type RecoveryCaseResult } from "./recovery"
 import { runSecurityAcceptance, scanDurableText, type SecurityAcceptanceResult } from "./security"
 import { evaluateOfflineWorkspace, offlineEvaluatorSha256 } from "./evaluator"
@@ -344,15 +345,23 @@ export async function runOfflineCampaign(layout: Task24Layout): Promise<OfflineC
             maximumCaptureBytes: 4 * 1024 * 1024,
             maximumDurationMs: Math.min(campaign.preregistration.budget.maxDurationMs, 600_000),
           })
-          if (processResult.classification !== "exited" || processResult.exitCode !== 0) {
-            throw new TypeError(`TASK24_OFFLINE_BINARY_PROCESS_FAILED:${run.runID}`)
-          }
           const stdout = await fs.readFile(stdoutFile, "utf8")
           const calls = fake.calls()
+          const postRunTreeSha256 = await treeHash(materialized.roots.repo)
+          const rejected = classifyOfflineRejection({
+            armID: run.armID,
+            kind: bundle.manifest.kind,
+            classification: processResult.classification,
+            exitCode: processResult.exitCode,
+            stdout,
+            calls,
+            unchanged: materialized.preRunTreeSha256 === postRunTreeSha256,
+          })
           const execution =
-            run.armID === "A"
+            rejected ??
+            (run.armID === "A"
               ? validateWorkflowBinary(stdout, calls)
-              : await validateDirectBinary(stdout, materialized.roots.repo, calls)
+              : await validateDirectBinary(stdout, materialized.roots.repo, calls))
           await scanDurableText([stdoutFile, stderrFile], [bundle.manifest.prompt, broker.grant, "sk-TASK24_FAKE_"])
           const ledger = broker.ledger.records()
           if (
@@ -361,7 +370,6 @@ export async function runOfflineCampaign(layout: Task24Layout): Promise<OfflineC
           ) {
             throw new TypeError("TASK24_OFFLINE_LEDGER_INCOMPLETE")
           }
-          const postRunTreeSha256 = await treeHash(materialized.roots.repo)
           const family = campaign.tasks.find((task) => task.id === run.taskID)?.family
           if (!family) throw new TypeError("TASK24_OFFLINE_TASK_FAMILY_MISSING")
           const processCheckpoint = {
@@ -436,11 +444,11 @@ export async function runOfflineCampaign(layout: Task24Layout): Promise<OfflineC
             outputTokens: usage.outputTokens,
             toolCalls: execution.toolCalls,
             retries: 0,
-            revisionLoops: run.armID === "A" ? 1 : 0,
+            revisionLoops: rejected ? 0 : run.armID === "A" ? 1 : 0,
             changedFiles: evaluation.changedFiles,
             recoveryCount: 0,
             costCnyMicros: runCostCny(ledger, campaign.exchangeRate.decimalRate).toString(),
-            failureCategory: null,
+            failureCategory: rejected?.failureCategory ?? null,
           })
           const checkpoint: OfflineRunCheckpoint = Object.freeze({
             providerCalls: calls.length,
@@ -566,37 +574,37 @@ export async function publishOfflineReports(layout: Task24Layout): Promise<Offli
   await fs.mkdir(path.join(layout.reports, "offline"), { recursive: true })
   const releaseReportLock = await acquireCampaignLock(path.join(layout.reports, "offline"))
   try {
-  if (await Bun.file(summaryFile).exists()) {
-    const summary = await readReportSummary(summaryFile)
-    await verifyReportSummary(layout, summaryFile, summary)
-    await writePointer(path.join(layout.reports, "offline", offlinePointerName()), {
-      schemaVersion: 1,
-      campaignSha256: summary.campaignSha256,
-      summarySha256: await sha256File(summaryFile),
-    })
-    return summary
-  }
-  if (fsSyncExists(root)) await removeOwnedTree(path.join(layout.reports, "offline"), root)
-  await fs.mkdir(root, { recursive: true })
-  const bodies = { json: reportJson(model), csv: reportCsv(model), html: reportHtml(model) }
-  if (bodies.json !== reportJson(model) || bodies.csv !== reportCsv(model) || bodies.html !== reportHtml(model)) {
-    throw new TypeError("TASK24_OFFLINE_REPORT_NOT_REPRODUCIBLE")
-  }
-  const json = path.join(root, "report.json")
-  const csv = path.join(root, "report.csv")
-  const html = path.join(root, "report.html")
-  await Promise.all([
-    publishImmutable(json, bodies.json),
-    publishImmutable(csv, bodies.csv),
-    publishImmutable(html, bodies.html),
-  ])
-  let pdf: string
-  let reproductionSha256: string
-  const captures = runSummary.browserCaptures
-  const browserRoot = await singleBrowserRelease(layout)
-  const release = loadBrowserRelease(browserRoot)
-  const reportID = `offline-${pointer.campaignSha256.slice(0, 24)}`
-  const server = Bun.serve({
+    if (await Bun.file(summaryFile).exists()) {
+      const summary = await readReportSummary(summaryFile)
+      await verifyReportSummary(layout, summaryFile, summary)
+      await writePointer(path.join(layout.reports, "offline", offlinePointerName()), {
+        schemaVersion: 1,
+        campaignSha256: summary.campaignSha256,
+        summarySha256: await sha256File(summaryFile),
+      })
+      return summary
+    }
+    if (fsSyncExists(root)) await removeOwnedTree(path.join(layout.reports, "offline"), root)
+    await fs.mkdir(root, { recursive: true })
+    const bodies = { json: reportJson(model), csv: reportCsv(model), html: reportHtml(model) }
+    if (bodies.json !== reportJson(model) || bodies.csv !== reportCsv(model) || bodies.html !== reportHtml(model)) {
+      throw new TypeError("TASK24_OFFLINE_REPORT_NOT_REPRODUCIBLE")
+    }
+    const json = path.join(root, "report.json")
+    const csv = path.join(root, "report.csv")
+    const html = path.join(root, "report.html")
+    await Promise.all([
+      publishImmutable(json, bodies.json),
+      publishImmutable(csv, bodies.csv),
+      publishImmutable(html, bodies.html),
+    ])
+    let pdf: string
+    let reproductionSha256: string
+    const captures = runSummary.browserCaptures
+    const browserRoot = await singleBrowserRelease(layout)
+    const release = loadBrowserRelease(browserRoot)
+    const reportID = `offline-${pointer.campaignSha256.slice(0, 24)}`
+    const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       fetch(request) {
@@ -604,8 +612,8 @@ export async function publishOfflineReports(layout: Task24Layout): Promise<Offli
         if (pathname === `/${reportID}/`) return new Response(bodies.html, { headers: { "content-type": "text/html" } })
         return new Response("not found", { status: 404 })
       },
-  })
-  const render = async (outputName: string) => {
+    })
+    const render = async (outputName: string) => {
       const browserOutput = path.join(root, outputName)
       const browserTemp = path.join(layout.tmp, `offline-browser-${crypto.randomUUID()}`)
       await Promise.all([fs.mkdir(browserOutput), fs.mkdir(browserTemp)])
@@ -621,55 +629,55 @@ export async function publishOfflineReports(layout: Task24Layout): Promise<Offli
       } finally {
         await removeOwnedTree(layout.tmp, browserTemp)
       }
-  }
-  const reproductionRoot = path.join(root, "browser-reproduction")
-  try {
-    const first = await render("browser")
-    const second = await render("browser-reproduction")
-    if (first.sha256 !== second.sha256 || first.bytes !== second.bytes) {
-      throw new TypeError("TASK24_OFFLINE_PDF_NOT_REPRODUCIBLE")
     }
-    pdf = first.pdf
-    reproductionSha256 = second.sha256
-  } finally {
-    await server.stop(true)
-    if (fsSyncExists(reproductionRoot)) await removeOwnedTree(root, reproductionRoot)
-  }
-  const hashes = {
-    json: await sha256File(json),
-    csv: await sha256File(csv),
-    html: await sha256File(html),
-    pdf: await sha256File(pdf),
-  }
-  const summary: OfflineReportSummary = Object.freeze({
-    schemaVersion: 1,
-    command: "report",
-    stage: "offline",
-    campaignID: model.campaignID,
-    campaignSha256: pointer.campaignSha256,
-    root,
-    json,
-    csv,
-    html,
-    pdf,
-    reportModelSha256: await sha256File(path.join(resultRoot, "report-model.json")),
-    hashes: Object.freeze(hashes),
-    captures,
-    renderer: "chromium-double-render",
-    reproductionSha256,
-  })
-  await publishImmutable(summaryFile, canonicalJson(summary) + "\n")
-  await writePointer(path.join(layout.reports, "offline", offlinePointerName()), {
-    schemaVersion: 1,
-    campaignSha256: pointer.campaignSha256,
-    summarySha256: await sha256File(summaryFile),
-  })
-  const sealed = await candidate(layout)
-  await scanDurableText(
-    [root],
-    ["TASK24_OFFLINE_FAKE_INPUT", "TASK24_BROKER_GRANT_", ...(await campaignPrompts(layout, sealed))],
-  )
-  return summary
+    const reproductionRoot = path.join(root, "browser-reproduction")
+    try {
+      const first = await render("browser")
+      const second = await render("browser-reproduction")
+      if (first.sha256 !== second.sha256 || first.bytes !== second.bytes) {
+        throw new TypeError("TASK24_OFFLINE_PDF_NOT_REPRODUCIBLE")
+      }
+      pdf = first.pdf
+      reproductionSha256 = second.sha256
+    } finally {
+      await server.stop(true)
+      if (fsSyncExists(reproductionRoot)) await removeOwnedTree(root, reproductionRoot)
+    }
+    const hashes = {
+      json: await sha256File(json),
+      csv: await sha256File(csv),
+      html: await sha256File(html),
+      pdf: await sha256File(pdf),
+    }
+    const summary: OfflineReportSummary = Object.freeze({
+      schemaVersion: 1,
+      command: "report",
+      stage: "offline",
+      campaignID: model.campaignID,
+      campaignSha256: pointer.campaignSha256,
+      root,
+      json,
+      csv,
+      html,
+      pdf,
+      reportModelSha256: await sha256File(path.join(resultRoot, "report-model.json")),
+      hashes: Object.freeze(hashes),
+      captures,
+      renderer: "chromium-double-render",
+      reproductionSha256,
+    })
+    await publishImmutable(summaryFile, canonicalJson(summary) + "\n")
+    await writePointer(path.join(layout.reports, "offline", offlinePointerName()), {
+      schemaVersion: 1,
+      campaignSha256: pointer.campaignSha256,
+      summarySha256: await sha256File(summaryFile),
+    })
+    const sealed = await candidate(layout)
+    await scanDurableText(
+      [root],
+      ["TASK24_OFFLINE_FAKE_INPUT", "TASK24_BROKER_GRANT_", ...(await campaignPrompts(layout, sealed))],
+    )
+    return summary
   } finally {
     await releaseReportLock()
   }
@@ -865,6 +873,18 @@ async function recoverMissingRunEvidence(
   }
   const family = input.campaign.tasks.find((task) => task.id === run.taskID)?.family
   if (!family || processCheckpoint.family !== family) throw new TypeError("TASK24_OFFLINE_TASK_FAMILY_MISSING")
+  const capabilityFailure =
+    run.armID === "A" && input.campaign.tasks.find((task) => task.id === run.taskID)?.kind === "guardrail"
+  if (capabilityFailure)
+    classifyOfflineRejection({
+      armID: run.armID,
+      kind: "guardrail",
+      classification: String(binaryProcess.classification),
+      exitCode: binaryProcess.exitCode === 1 ? 1 : null,
+      stdout: await fs.readFile(path.join(input.evidenceRoot, `${run.runID}.stdout`), "utf8"),
+      calls: processCheckpoint.protocolCalls,
+      unchanged: processCheckpoint.preRunTreeSha256 === processCheckpoint.postRunTreeSha256,
+    })
   const usage = totalUsage(
     ledger.map((item) => {
       if (!item.usage) throw new TypeError("TASK24_OFFLINE_RECOVERY_LEDGER_INCOMPLETE")
@@ -888,8 +908,7 @@ async function recoverMissingRunEvidence(
     qualifiedSuccess: evaluation.score.qualifiedSuccess,
     functionalSuccess: evaluation.score.functional === 45,
     firstPassFunctionalSuccess: evaluation.score.functional === 45,
-    firstPassVisualSuccess:
-      evaluation.score.visualComposite >= input.campaign.preregistration.visualQualifiedThreshold,
+    firstPassVisualSuccess: evaluation.score.visualComposite >= input.campaign.preregistration.visualQualifiedThreshold,
     diagnosticScore: evaluation.score.diagnosticTotal,
     visualComposite: evaluation.score.visualComposite,
     durationMs: binaryProcess.durationMs,
@@ -898,11 +917,11 @@ async function recoverMissingRunEvidence(
     outputTokens: usage.outputTokens,
     toolCalls: binaryProcess.toolCalls,
     retries: 0,
-    revisionLoops: run.armID === "A" ? 1 : 0,
+    revisionLoops: capabilityFailure ? 0 : run.armID === "A" ? 1 : 0,
     changedFiles: evaluation.changedFiles,
     recoveryCount: 1,
     costCnyMicros: runCostCny(ledger, input.campaign.exchangeRate.decimalRate).toString(),
-    failureCategory: null,
+    failureCategory: capabilityFailure ? "preview_configuration_required" : null,
   })
   const protocols = processCheckpoint.protocolCalls.map((item) => {
     if (!record(item) || (item.protocol !== "chat_completions" && item.protocol !== "responses")) {
@@ -1002,10 +1021,12 @@ async function readRunCheckpoint(
   }
   const expectedBinary =
     run.armID === "D" || run.armID === "E" ? campaign.binaries.upstream.sha256 : campaign.binaries.modified.sha256
+  const expectedRejection =
+    run.armID === "A" && campaign.tasks.find((task) => task.id === run.taskID)?.kind === "guardrail"
   if (
     value.binaryProcess.executableSha256 !== expectedBinary ||
     value.binaryProcess.classification !== "exited" ||
-    value.binaryProcess.exitCode !== 0 ||
+    value.binaryProcess.exitCode !== (expectedRejection ? 1 : 0) ||
     typeof value.binaryProcess.stdoutSha256 !== "string" ||
     typeof value.binaryProcess.stderrSha256 !== "string"
   ) {
@@ -1018,11 +1039,17 @@ async function readRunCheckpoint(
   ) {
     throw new TypeError("TASK24_OFFLINE_CHECKPOINT_STREAM_HASH_MISMATCH")
   }
-  const processCheckpointFile = path.join(
-    path.dirname(evidenceRoot),
-    "checkpoints",
-    `${run.runID}.process.json`,
-  )
+  if (expectedRejection)
+    classifyOfflineRejection({
+      armID: run.armID,
+      kind: "guardrail",
+      classification: value.binaryProcess.classification,
+      exitCode: 1,
+      stdout: await fs.readFile(path.join(evidenceRoot, `${run.runID}.stdout`), "utf8"),
+      calls: value.protocolCalls,
+      unchanged: value.preRunTreeSha256 === value.postRunTreeSha256,
+    })
+  const processCheckpointFile = path.join(path.dirname(evidenceRoot), "checkpoints", `${run.runID}.process.json`)
   if (
     typeof value.processCheckpointSha256 !== "string" ||
     (await sha256File(processCheckpointFile)) !== value.processCheckpointSha256
@@ -1059,9 +1086,8 @@ async function readRunCheckpoint(
   ) {
     throw new TypeError("TASK24_OFFLINE_CHECKPOINT_EVALUATION_CONTENT_MISMATCH")
   }
-  const scoreIdentity = record(evaluationValue.score) && record(evaluationValue.score.identity)
-    ? evaluationValue.score.identity
-    : undefined
+  const scoreIdentity =
+    record(evaluationValue.score) && record(evaluationValue.score.identity) ? evaluationValue.score.identity : undefined
   const taskAuthority = campaign.tasks.find((candidate) => candidate.id === run.taskID)
   if (
     !scoreIdentity ||
@@ -1133,8 +1159,14 @@ async function readRunCheckpoint(
     costs[item.currency] += BigInt(item.chargedMicros)
   }
   const usage = totalUsage(ledgerUsage)
-  const expectedCalls = run.armID === "A" ? 8 : 2
-  const expectedChatCalls = run.armID === "A" ? 3 : run.armID === "C" || run.armID === "E" ? 2 : 0
+  const expectedCalls = expectedOfflineCalls(run.armID, task.kind)
+  const expectedChatCalls = expectedRejection
+    ? 0
+    : run.armID === "A"
+      ? 3
+      : run.armID === "C" || run.armID === "E"
+        ? 2
+        : 0
   const expectedResponseCalls = expectedCalls - expectedChatCalls
   if (
     checkpoint.providerCalls !== expectedCalls ||
@@ -1169,6 +1201,15 @@ async function readRunCheckpoint(
   ) {
     throw new TypeError("TASK24_OFFLINE_CHECKPOINT_CONTENT_MISMATCH")
   }
+  if (
+    expectedRejection &&
+    (checkpoint.reportRun.qualifiedSuccess ||
+      checkpoint.reportRun.functionalSuccess ||
+      checkpoint.reportRun.changedFiles !== 0 ||
+      checkpoint.reportRun.revisionLoops !== 0 ||
+      checkpoint.reportRun.failureCategory !== "preview_configuration_required")
+  )
+    throw new TypeError("TASK24_OFFLINE_CAPABILITY_FAILURE_INVALID")
   return checkpoint
 }
 
@@ -1495,7 +1536,11 @@ function expectedProviderCalls(campaign: SealedCampaign, runs: ReturnType<typeof
   if (benchmarkArmIDs.some((arm) => !armIDs.has(arm))) {
     throw new TypeError("TASK24_OFFLINE_ARM_MATRIX_INCOMPLETE")
   }
-  return runs.reduce((sum, run) => sum + (run.armID === "A" ? 8 : 2), 0)
+  return runs.reduce(
+    (sum, run) =>
+      sum + expectedOfflineCalls(run.armID, campaign.tasks.find((task) => task.id === run.taskID)?.kind ?? "primary"),
+    0,
+  )
 }
 
 function totalUsage(values: readonly ProviderUsage[]): ProviderUsage {
@@ -1577,6 +1622,7 @@ function makeReportModel(
     },
     limitations: [
       "This report validates the harness with deterministic fake providers; it does not estimate live model quality.",
+      "The visual-build host cannot admit nonvisual guardrail projects; those arm A capability failures are retained, not excluded or repaired with dummy HTML.",
     ],
     exclusions: [],
     harnessFailures: [],
@@ -1735,7 +1781,12 @@ async function verifySecurityEvidence(
   evidenceFile: string,
 ): Promise<void> {
   const value = await readJson(evidenceFile)
-  if (!record(value) || value.schemaVersion !== 1 || !Array.isArray(value.checks) || !Array.isArray(value.exactBinaryChecks)) {
+  if (
+    !record(value) ||
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.checks) ||
+    !Array.isArray(value.exactBinaryChecks)
+  ) {
     throw new TypeError("TASK24_OFFLINE_SECURITY_EVIDENCE_INVALID")
   }
   const checks = new Set(value.checks.filter((item): item is string => typeof item === "string"))
@@ -1749,8 +1800,10 @@ async function verifySecurityEvidence(
     if (!checks.has(required)) throw new TypeError("TASK24_OFFLINE_SECURITY_EVIDENCE_INCOMPLETE")
   }
   const byCheck = new Map<string, Record<string, unknown>>()
-  if (!Array.isArray(value.retainedEvidence) || value.retainedEvidence.length < 8) throw new TypeError("TASK24_OFFLINE_SECURITY_RETAINED_EVIDENCE_MISSING")
-  for (const reference of decodeRetainedEvidence(value.retainedEvidence)) verifyEvidenceFile(path.dirname(evidenceFile), reference)
+  if (!Array.isArray(value.retainedEvidence) || value.retainedEvidence.length < 8)
+    throw new TypeError("TASK24_OFFLINE_SECURITY_RETAINED_EVIDENCE_MISSING")
+  for (const reference of decodeRetainedEvidence(value.retainedEvidence))
+    verifyEvidenceFile(path.dirname(evidenceFile), reference)
   for (const item of value.exactBinaryChecks) {
     if (!record(item) || typeof item.check !== "string" || byCheck.has(item.check)) {
       throw new TypeError("TASK24_OFFLINE_SECURITY_EVIDENCE_INVALID")
@@ -1821,9 +1874,9 @@ async function verifyReportSummary(
     !strictlyContains(expectedRoot, summary.pdf) ||
     path.basename(summary.pdf) !== "report.pdf" ||
     !(await Bun.file(modelFile).exists()) ||
-    (await sha256File(modelFile)) !== summary.reportModelSha256
-    || summary.renderer !== "chromium-double-render"
-    || summary.reproductionSha256 !== summary.hashes.pdf
+    (await sha256File(modelFile)) !== summary.reportModelSha256 ||
+    summary.renderer !== "chromium-double-render" ||
+    summary.reproductionSha256 !== summary.hashes.pdf
   ) {
     throw new TypeError("TASK24_OFFLINE_REPORT_IDENTITY_MISMATCH")
   }
@@ -1884,7 +1937,10 @@ async function singleBrowserRelease(layout: Task24Layout): Promise<string> {
   const verified = verifyFairnessFingerprint(await readJson(path.join(layout.runs, "fairness-fingerprint.json")))
   if (!verified.ok) throw new TypeError(verified.reason)
   const selected = verified.fingerprint.roots.browserRuntime
-  if (path.dirname(selected) !== path.join(layout.toolchain, "browser") || !/^[a-f0-9]{64}$/.test(path.basename(selected))) {
+  if (
+    path.dirname(selected) !== path.join(layout.toolchain, "browser") ||
+    !/^[a-f0-9]{64}$/.test(path.basename(selected))
+  ) {
     throw new TypeError("TASK24_BROWSER_RELEASE_IDENTITY_INVALID")
   }
   loadBrowserRelease(selected)
@@ -1987,10 +2043,10 @@ function isOfflineReportSummary(value: unknown): value is OfflineReportSummary {
     [value.hashes.json, value.hashes.csv, value.hashes.html, value.hashes.pdf].every(
       (hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash),
     ) &&
-    integer(value.captures)
-    && value.renderer === "chromium-double-render"
-    && typeof value.reproductionSha256 === "string"
-    && /^[a-f0-9]{64}$/.test(value.reproductionSha256)
+    integer(value.captures) &&
+    value.renderer === "chromium-double-render" &&
+    typeof value.reproductionSha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(value.reproductionSha256)
   )
 }
 

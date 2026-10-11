@@ -145,6 +145,23 @@ const rowCounts = Effect.gen(function* () {
 })
 
 describe("WorkflowAdmission", () => {
+  it.effect("rejects nonvisual admission with a typed preview failure and no durable writes", () =>
+    Effect.gen(function* () {
+      const root = yield* workspace()
+      yield* Effect.promise(() => Bun.file(`${root.path}/index.html`).delete())
+      const admission = yield* WorkflowAdmission.Service
+      const before = yield* rowCounts
+      const { preview: _preview, ...request } = input()
+      const failure = yield* admission
+        .admitVisualBuild(request, locationOf(root.path), "nonvisual-preview-required")
+        .pipe(Effect.flip)
+      expect(failure).toMatchObject({
+        _tag: "WorkflowAdmission.InvalidAdmission",
+        reason: "preview_configuration_required",
+      })
+      expect(yield* rowCounts).toEqual(before)
+    }),
+  )
   measuredIt.effect("rejects exact-create reconciliation when the trusted transport binding changes", () =>
     Effect.gen(function* () {
       activeBenchmarkBinding = benchmarkBinding(43191)

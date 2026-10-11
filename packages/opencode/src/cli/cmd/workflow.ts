@@ -1,4 +1,4 @@
-import { ClientError, isWorkflowConflictError, OpenCode } from "@opencode-ai/client"
+import { ClientError, isInvalidRequestError, isWorkflowConflictError, OpenCode } from "@opencode-ai/client"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { WorkflowVisualBuild } from "@opencode-ai/schema/workflow-visual-build"
 import type { Argv } from "yargs"
@@ -348,7 +348,7 @@ export const WorkflowRunCommand = effectCmd({
         } satisfies FinalOutput
         await final(output)
         process.exitCode = observed.status === "succeeded" ? 0 : observed.status === "failed" ? 1 : 130
-      } catch {
+      } catch (error) {
         if (interrupted && workflowID && !interruptionAttempted) {
           try {
             await finishInterrupted()
@@ -358,7 +358,14 @@ export const WorkflowRunCommand = effectCmd({
           }
         }
         progress("Workflow run failed")
-        await final({ workflow: null, response: null, artifacts: [] })
+        await final({
+          workflow: null,
+          response: null,
+          artifacts: [],
+          ...(isInvalidRequestError(error) && error.kind === "preview_configuration_required"
+            ? { error: { code: "preview_configuration_required" as const } }
+            : {}),
+        })
         process.exitCode = 1
       } finally {
         process.off("SIGINT", sigint)
@@ -522,6 +529,7 @@ type FinalOutput = {
   readonly workflow: WorkflowSummary | null
   readonly response: ResponseSummary | null
   readonly artifacts: ReadonlyArray<ArtifactSummary>
+  readonly error?: { readonly code: "preview_configuration_required" }
 }
 
 function workflowSummary(input: unknown, statusOverride?: string): WorkflowSummary {
