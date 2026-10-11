@@ -646,11 +646,11 @@ describe("VisualHostClaim generation registry", () => {
     await waitForFile(marker("second", "prechecked"))
     await fs.writeFile(marker("first", "cleanup-resume"), "resume", { flag: "wx" })
     await Promise.all([waitForFile(marker("first", "retire-ready")), waitForFile(marker("second", "retire-ready"))])
-    await Promise.all([
-      fs.writeFile(marker("first", "retire-resume"), "resume", { flag: "wx" }),
-      fs.writeFile(marker("second", "retire-resume"), "resume", { flag: "wx" }),
-    ])
-    await Promise.all([waitForFile(marker("first", "publish-ready")), waitForFile(marker("second", "publish-ready"))])
+    // Serialize the busy_timeout=0 SQLite preflight, not the actual retirement-file publication race.
+    await fs.writeFile(marker("first", "retire-resume"), "resume", { flag: "wx" })
+    await waitForFile(marker("first", "publish-ready"))
+    await fs.writeFile(marker("second", "retire-resume"), "resume", { flag: "wx" })
+    await waitForFile(marker("second", "publish-ready"))
     await Promise.all([
       fs.writeFile(marker("first", "publish-resume"), "resume", { flag: "wx" }),
       fs.writeFile(marker("second", "publish-resume"), "resume", { flag: "wx" }),
@@ -694,11 +694,11 @@ describe("VisualHostClaim generation registry", () => {
     await waitForFile(marker("second", "prechecked"))
     await fs.writeFile(marker("first", "cleanup-resume"), "resume", { flag: "wx" })
     await Promise.all([waitForFile(marker("first", "retire-ready")), waitForFile(marker("second", "retire-ready"))])
-    await Promise.all([
-      fs.writeFile(marker("first", "retire-resume"), "resume", { flag: "wx" }),
-      fs.writeFile(marker("second", "retire-resume"), "resume", { flag: "wx" }),
-    ])
-    await Promise.all([waitForFile(marker("first", "publish-ready")), waitForFile(marker("second", "publish-ready"))])
+    // Both writers remain paused before publication/pending creation until the actual concurrent release below.
+    await fs.writeFile(marker("first", "retire-resume"), "resume", { flag: "wx" })
+    await waitForFile(marker("first", "publish-ready"))
+    await fs.writeFile(marker("second", "retire-resume"), "resume", { flag: "wx" })
+    await waitForFile(marker("second", "publish-ready"))
     await Promise.all([
       fs.writeFile(marker("first", "publish-resume"), "resume", { flag: "wx" }),
       fs.writeFile(marker("second", "publish-resume"), "resume", { flag: "wx" }),
