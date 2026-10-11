@@ -351,6 +351,7 @@ export async function runOfflineCampaign(layout: Task24Layout): Promise<OfflineC
           const rejected = classifyOfflineRejection({
             armID: run.armID,
             kind: bundle.manifest.kind,
+            taskID: run.taskID,
             classification: processResult.classification,
             exitCode: processResult.exitCode,
             stdout,
@@ -874,11 +875,16 @@ async function recoverMissingRunEvidence(
   const family = input.campaign.tasks.find((task) => task.id === run.taskID)?.family
   if (!family || processCheckpoint.family !== family) throw new TypeError("TASK24_OFFLINE_TASK_FAMILY_MISSING")
   const capabilityFailure =
-    run.armID === "A" && input.campaign.tasks.find((task) => task.id === run.taskID)?.kind === "guardrail"
+    expectedOfflineCalls(
+      run.armID,
+      input.campaign.tasks.find((task) => task.id === run.taskID)?.kind ?? "primary",
+      run.taskID,
+    ) === 0
   if (capabilityFailure)
     classifyOfflineRejection({
       armID: run.armID,
-      kind: "guardrail",
+      kind: input.campaign.tasks.find((task) => task.id === run.taskID)?.kind ?? "primary",
+      taskID: run.taskID,
       classification: String(binaryProcess.classification),
       exitCode: binaryProcess.exitCode === 1 ? 1 : null,
       stdout: await fs.readFile(path.join(input.evidenceRoot, `${run.runID}.stdout`), "utf8"),
@@ -1022,7 +1028,11 @@ async function readRunCheckpoint(
   const expectedBinary =
     run.armID === "D" || run.armID === "E" ? campaign.binaries.upstream.sha256 : campaign.binaries.modified.sha256
   const expectedRejection =
-    run.armID === "A" && campaign.tasks.find((task) => task.id === run.taskID)?.kind === "guardrail"
+    expectedOfflineCalls(
+      run.armID,
+      campaign.tasks.find((task) => task.id === run.taskID)?.kind ?? "primary",
+      run.taskID,
+    ) === 0
   if (
     value.binaryProcess.executableSha256 !== expectedBinary ||
     value.binaryProcess.classification !== "exited" ||
@@ -1042,7 +1052,8 @@ async function readRunCheckpoint(
   if (expectedRejection)
     classifyOfflineRejection({
       armID: run.armID,
-      kind: "guardrail",
+      kind: campaign.tasks.find((task) => task.id === run.taskID)?.kind ?? "primary",
+      taskID: run.taskID,
       classification: value.binaryProcess.classification,
       exitCode: 1,
       stdout: await fs.readFile(path.join(evidenceRoot, `${run.runID}.stdout`), "utf8"),
@@ -1159,7 +1170,7 @@ async function readRunCheckpoint(
     costs[item.currency] += BigInt(item.chargedMicros)
   }
   const usage = totalUsage(ledgerUsage)
-  const expectedCalls = expectedOfflineCalls(run.armID, task.kind)
+  const expectedCalls = expectedOfflineCalls(run.armID, task.kind, run.taskID)
   const expectedChatCalls = expectedRejection
     ? 0
     : run.armID === "A"
@@ -1538,7 +1549,12 @@ function expectedProviderCalls(campaign: SealedCampaign, runs: ReturnType<typeof
   }
   return runs.reduce(
     (sum, run) =>
-      sum + expectedOfflineCalls(run.armID, campaign.tasks.find((task) => task.id === run.taskID)?.kind ?? "primary"),
+      sum +
+      expectedOfflineCalls(
+        run.armID,
+        campaign.tasks.find((task) => task.id === run.taskID)?.kind ?? "primary",
+        run.taskID,
+      ),
     0,
   )
 }
@@ -1622,7 +1638,8 @@ function makeReportModel(
     },
     limitations: [
       "This report validates the harness with deterministic fake providers; it does not estimate live model quality.",
-      "The visual-build host cannot admit nonvisual guardrail projects; those arm A capability failures are retained, not excluded or repaired with dummy HTML.",
+      "The visual-build host cannot admit the four nonvisual guardrails or four frozen SWE library projects without trusted preview configuration; all sixteen arm A capability failures are retained, not excluded or repaired with dummy HTML.",
+      "The offline static-page evaluator does not render the four SWE library projects. Missing visual/build evidence fails qualification; a library-specific preview/evaluation adapter and production entry are required before the three-family paid pilot.",
     ],
     exclusions: [],
     harnessFailures: [],

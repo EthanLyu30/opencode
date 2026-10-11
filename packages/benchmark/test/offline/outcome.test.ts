@@ -4,6 +4,7 @@ import { classifyOfflineRejection, expectedOfflineCalls } from "../../src/offlin
 const rejection = {
   armID: "A",
   kind: "guardrail",
+  taskID: "guardrail-data-normalization",
   classification: "exited",
   exitCode: 1,
   calls: [],
@@ -22,12 +23,13 @@ test("retains only exact zero-dispatch nonvisual guardrail capability failures",
     toolCalls: 0,
     failureCategory: "preview_configuration_required",
   })
-  expect(expectedOfflineCalls("A", "guardrail")).toBe(0)
-  expect(expectedOfflineCalls("A", "primary")).toBe(8)
-  expect(expectedOfflineCalls("C", "guardrail")).toBe(2)
+  expect(expectedOfflineCalls("A", "guardrail", rejection.taskID)).toBe(0)
+  expect(expectedOfflineCalls("A", "primary", "private-analytics-dashboard")).toBe(8)
+  expect(expectedOfflineCalls("C", "guardrail", rejection.taskID)).toBe(2)
   for (const change of [
     { armID: "B" },
     { kind: "primary" },
+    { taskID: "unknown-guardrail" },
     { classification: "timed_out" },
     { exitCode: 2 },
     { unchanged: false },
@@ -37,4 +39,23 @@ test("retains only exact zero-dispatch nonvisual guardrail capability failures",
   ] as const) {
     expect(() => classifyOfflineRejection({ ...rejection, ...change })).toThrow("TASK24_OFFLINE_BINARY_PROCESS_FAILED")
   }
+})
+
+test("retains the four frozen unsupported library tasks as capability failures, never arbitrary primary failures", () => {
+  for (const taskID of [
+    "swe-chartjs__chart.js-10157",
+    "swe-chartjs__chart.js-10301",
+    "swe-diegomura__react-pdf-1363",
+    "swe-markedjs__marked-1535",
+  ]) {
+    expect(classifyOfflineRejection({ ...rejection, kind: "primary", taskID })).toMatchObject({
+      failureCategory: "preview_configuration_required",
+      workflowCalls: 0,
+    })
+    expect(expectedOfflineCalls("A", "primary", taskID)).toBe(0)
+    expect(expectedOfflineCalls("B", "primary", taskID)).toBe(2)
+  }
+  expect(() =>
+    classifyOfflineRejection({ ...rejection, kind: "primary", taskID: "private-analytics-dashboard" }),
+  ).toThrow("TASK24_OFFLINE_BINARY_PROCESS_FAILED")
 })
