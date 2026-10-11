@@ -7,6 +7,41 @@ import { observeWorkflow, workflowRunLimits } from "../../src/cli/cmd/workflow"
 const preload = path.join(import.meta.dir, "fixtures", "workflow-server-preload.ts")
 
 describe("workflow observer", () => {
+  test("recovers the zero-based creation event before accepting an initial gap", async () => {
+    const eventCalls: Array<{ workflowID: string; after?: number }> = []
+    const historyCalls: Array<{ workflowID: string; after?: number; limit?: number }> = []
+    const progress: string[] = []
+    const created = workflowCreated(0)
+    const design = stageEvent(1, "workflow.stage.started", "wfs_design")
+    const terminal = workflowEvent(2, "workflow.succeeded", {
+      workflowID: "wfl_fixture",
+      timestamp: 2,
+      usage: usage(),
+    })
+    const result = await observeWorkflow({
+      workflowID: "wfl_fixture",
+      signal: new AbortController().signal,
+      client: {
+        events(input) {
+          eventCalls.push(input)
+          return stream(eventCalls.length === 1 ? [] : [design, terminal])
+        },
+        async history(input) {
+          historyCalls.push(input)
+          return { data: [created], hasMore: false }
+        },
+        async get() {
+          throw new Error("terminal observation must not fetch workflow state")
+        },
+      },
+      onProgress: (line) => progress.push(line),
+      sleep: async () => undefined,
+    })
+    expect(result).toEqual({ type: "terminal", status: "succeeded", seq: 2 })
+    expect(eventCalls).toEqual([{ workflowID: "wfl_fixture" }, { workflowID: "wfl_fixture" }])
+    expect(historyCalls).toEqual([{ workflowID: "wfl_fixture", limit: 100 }])
+    expect(progress).toEqual(["Kimi K3 design r0 started", "Workflow succeeded"])
+  })
   test("validates explicit CLI workflow limits without changing existing defaults", () => {
     expect(workflowRunLimits().budget.maxAttempts).toBe(3)
     const budget = { maxTokens: 240000, maxTurns: 156, maxToolCalls: 120, maxAttempts: 36, maxDurationMs: 3600000 }
@@ -19,10 +54,10 @@ describe("workflow observer", () => {
     const eventCalls: Array<{ workflowID: string; after?: number }> = []
     const historyCalls: Array<{ workflowID: string; after?: number; limit?: number }> = []
     const progress: string[] = []
-    const created = workflowCreated(1)
-    const design = stageEvent(2, "workflow.stage.started", "wfs_design")
-    const testStage = stageEvent(3, "workflow.stage.started", "wfs_test_0")
-    const budget = workflowEvent(4, "workflow.budget.threshold_reached", {
+    const created = workflowCreated(0)
+    const design = stageEvent(1, "workflow.stage.started", "wfs_design")
+    const testStage = stageEvent(2, "workflow.stage.started", "wfs_test_0")
+    const budget = workflowEvent(3, "workflow.budget.threshold_reached", {
       workflowID: "wfl_fixture",
       timestamp: 4,
       percent: 80,
@@ -30,9 +65,9 @@ describe("workflow observer", () => {
       usage: usage(),
       budget: { maxTokens: 20_000 },
     })
-    const repair = stageEvent(5, "workflow.stage.started", "wfs_repair_1")
-    const visual = stageEvent(6, "workflow.stage.started", "wfs_visual_1")
-    const artifact = workflowEvent(7, "workflow.artifact.created", {
+    const repair = stageEvent(4, "workflow.stage.started", "wfs_repair_1")
+    const visual = stageEvent(5, "workflow.stage.started", "wfs_visual_1")
+    const artifact = workflowEvent(6, "workflow.artifact.created", {
       workflowID: "wfl_fixture",
       timestamp: 7,
       stageID: "wfs_visual_1",
@@ -49,7 +84,7 @@ describe("workflow observer", () => {
         timeCreated: 7,
       },
     })
-    const terminal = workflowEvent(8, "workflow.succeeded", {
+    const terminal = workflowEvent(7, "workflow.succeeded", {
       workflowID: "wfl_fixture",
       timestamp: 8,
       usage: usage(),
@@ -67,8 +102,8 @@ describe("workflow observer", () => {
         },
         async history(input) {
           historyCalls.push(input)
-          if (input.after === 2) return { data: [testStage, budget], hasMore: true }
-          if (input.after === 4) return { data: [repair, visual, artifact], hasMore: false }
+          if (input.after === 1) return { data: [testStage, budget], hasMore: true }
+          if (input.after === 3) return { data: [repair, visual, artifact], hasMore: false }
           throw new Error(`unexpected history cursor ${String(input.after)}`)
         },
         async get() {
@@ -79,11 +114,11 @@ describe("workflow observer", () => {
       sleep: async () => undefined,
     })
 
-    expect(result).toMatchObject({ type: "terminal", status: "succeeded", seq: 8 })
-    expect(eventCalls).toEqual([{ workflowID: "wfl_fixture" }, { workflowID: "wfl_fixture", after: 2 }])
+    expect(result).toMatchObject({ type: "terminal", status: "succeeded", seq: 7 })
+    expect(eventCalls).toEqual([{ workflowID: "wfl_fixture" }, { workflowID: "wfl_fixture", after: 1 }])
     expect(historyCalls).toEqual([
-      { workflowID: "wfl_fixture", after: 2, limit: 100 },
-      { workflowID: "wfl_fixture", after: 4, limit: 100 },
+      { workflowID: "wfl_fixture", after: 1, limit: 100 },
+      { workflowID: "wfl_fixture", after: 3, limit: 100 },
     ])
     expect(progress).toEqual([
       "Kimi K3 design r0 started",
@@ -109,7 +144,7 @@ describe("workflow observer", () => {
             events(input) {
               eventCalls.push(input)
               if (eventCalls.length > 6) throw new Error("observer exceeded its reconnect bound")
-              if (scenario === "duplicate") return stream([workflowCreated(1)])
+              if (scenario === "duplicate") return stream([workflowCreated(0)])
               return stream([])
             },
             async history() {
@@ -134,11 +169,10 @@ describe("workflow observer", () => {
       expect(delays).toEqual([50, 100, 250, 500, 1_000])
       expect(eventCalls).toEqual([
         { workflowID: "wfl_fixture" },
-        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
-        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
-        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
-        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
-        { workflowID: "wfl_fixture", after: scenario === "duplicate" ? 1 : 0 },
+        ...Array.from({ length: 5 }, () => ({
+          workflowID: "wfl_fixture",
+          ...(scenario === "duplicate" ? { after: 0 } : {}),
+        })),
       ])
     }
   })
@@ -149,10 +183,10 @@ describe("workflow observer", () => {
     const deliveries = [
       [] as ReadonlyArray<unknown>,
       [] as ReadonlyArray<unknown>,
-      [workflowCreated(1)],
+      [workflowCreated(0)],
       [] as ReadonlyArray<unknown>,
       [
-        workflowEvent(2, "workflow.succeeded", {
+        workflowEvent(1, "workflow.succeeded", {
           workflowID: "wfl_fixture",
           timestamp: 2,
           usage: usage(),
@@ -183,14 +217,14 @@ describe("workflow observer", () => {
       },
     })
 
-    expect(result).toEqual({ type: "terminal", status: "succeeded", seq: 2 })
+    expect(result).toEqual({ type: "terminal", status: "succeeded", seq: 1 })
     expect(delays).toEqual([50, 100, 50, 100])
     expect(eventCalls).toEqual([
       { workflowID: "wfl_fixture" },
+      { workflowID: "wfl_fixture" },
+      { workflowID: "wfl_fixture" },
       { workflowID: "wfl_fixture", after: 0 },
       { workflowID: "wfl_fixture", after: 0 },
-      { workflowID: "wfl_fixture", after: 1 },
-      { workflowID: "wfl_fixture", after: 1 },
     ])
   })
 
@@ -203,8 +237,8 @@ describe("workflow observer", () => {
       client: {
         events: () =>
           stream([
-            workflowCreated(1),
-            workflowEvent(2, "workflow.approval.requested", {
+            workflowCreated(0),
+            workflowEvent(1, "workflow.approval.requested", {
               workflowID: "wfl_fixture",
               timestamp: 2,
               reason: "budget_exhausted",
@@ -227,7 +261,7 @@ describe("workflow observer", () => {
       sleep: async () => undefined,
     })
 
-    expect(result).toMatchObject({ type: "approval", status: "waiting_approval", seq: 2 })
+    expect(result).toMatchObject({ type: "approval", status: "waiting_approval", seq: 1 })
     expect(gets).toEqual(["wfl_fixture"])
     expect(progress).toEqual(["Approval required"])
     expect(progress.join(" ")).not.toContain("raw-secret")
@@ -357,7 +391,7 @@ describe("workflow observer", () => {
       ["repair", "DeepSeek V4 Pro", 1],
       ["deliver", "DeepSeek V4 Pro", 1],
     ] as const
-    const created = workflowEvent(1, "workflow.created", {
+    const created = workflowEvent(0, "workflow.created", {
       workflowID: "wfl_fixture",
       timestamp: 1,
       type: "visual-build",
@@ -373,8 +407,8 @@ describe("workflow observer", () => {
         events: () =>
           stream([
             created,
-            ...definitions.map(([role], index) => stageEvent(index + 2, "workflow.stage.started", `wfs_${role}`)),
-            workflowEvent(9, "workflow.succeeded", {
+            ...definitions.map(([role], index) => stageEvent(index + 1, "workflow.stage.started", `wfs_${role}`)),
+            workflowEvent(8, "workflow.succeeded", {
               workflowID: "wfl_fixture",
               timestamp: 9,
               usage: usage(),
@@ -391,7 +425,7 @@ describe("workflow observer", () => {
       sleep: async () => undefined,
     })
 
-    expect(result).toMatchObject({ type: "terminal", status: "succeeded", seq: 9 })
+    expect(result).toMatchObject({ type: "terminal", status: "succeeded", seq: 8 })
     expect(progress).toEqual([
       ...definitions.map(([role, label, revision]) => `${label} ${role} r${revision} started`),
       "Workflow succeeded",

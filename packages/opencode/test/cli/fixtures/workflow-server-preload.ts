@@ -100,36 +100,36 @@ function events(request: Request) {
     if (connection === 0 && url.searchParams.has("after")) {
       return Response.json({ message: "first replay included a cursor" }, { status: 500 })
     }
-    if (connection === 1 && url.searchParams.get("after") !== "2") {
+    if (connection === 1 && url.searchParams.get("after") !== "1") {
       return Response.json({ message: "reconnect cursor was not exclusive" }, { status: 500 })
     }
-    if (connection === 0) return sse([created(1), stageStarted(2, "wfs_design")])
-    if (connection === 1) return sse([stageStarted(2, "wfs_design"), succeeded(8)])
+    if (connection === 0) return sse([created(0), stageStarted(1, "wfs_design")])
+    if (connection === 1) return sse([stageStarted(1, "wfs_design"), succeeded(7)])
     return Response.json({ message: "too many reconnects" }, { status: 500 })
   }
 
   if (url.searchParams.has("after"))
     return Response.json({ message: "first replay included a cursor" }, { status: 500 })
-  if (scenario === "approval") return sse([created(1), approval(2)])
+  if (scenario === "approval") return sse([created(0), approval(1)])
   if (scenario === "failed") {
     state.terminalAvailable = true
-    return sse([created(1), failed(2)])
+    return sse([created(0), failed(1)])
   }
   state.terminalAvailable = true
-  return sse([created(1), cancelled(2)])
+  return sse([created(0), cancelled(1)])
 }
 
 function history(url: URL) {
   if (scenario !== "success" || url.searchParams.get("limit") !== "100") {
     return Response.json({ message: "unexpected history request" }, { status: 500 })
   }
-  if (url.searchParams.get("after") === "2") {
-    return Response.json({ data: [stageStarted(3, "wfs_test_0"), budget(4)], hasMore: true })
+  if (url.searchParams.get("after") === "1") {
+    return Response.json({ data: [stageStarted(2, "wfs_test_0"), budget(3)], hasMore: true })
   }
-  if (url.searchParams.get("after") === "4") {
+  if (url.searchParams.get("after") === "3") {
     state.terminalAvailable = true
     return Response.json({
-      data: [stageStarted(5, "wfs_repair_1"), stageStarted(6, "wfs_visual_1"), artifactCreated(7)],
+      data: [stageStarted(4, "wfs_repair_1"), stageStarted(5, "wfs_visual_1"), artifactCreated(6)],
       hasMore: false,
     })
   }

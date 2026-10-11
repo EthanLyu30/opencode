@@ -96,8 +96,8 @@ export async function observeWorkflow(input: {
 }): Promise<WorkflowObservation> {
   const stages = new Map<string, Stage>()
   const pause = input.sleep ?? sleep
-  let lastSeq = 0
-  let firstConnection = true
+  // Durable workflow sequences start at zero; no cursor exists before creation.
+  let lastSeq = -1
   let consecutiveDisconnects = 0
 
   const processEvent = async (event: ParsedEvent): Promise<WorkflowObservation | undefined> => {
@@ -125,7 +125,7 @@ export async function observeWorkflow(input: {
       while (true) {
         const page = parseHistory(
           await input.client.history(
-            { workflowID: input.workflowID, after: lastSeq, limit: HISTORY_PAGE_SIZE },
+            { workflowID: input.workflowID, ...(lastSeq < 0 ? {} : { after: lastSeq }), limit: HISTORY_PAGE_SIZE },
             { signal: input.signal },
           ),
           input.workflowID,
@@ -151,10 +151,7 @@ export async function observeWorkflow(input: {
 
   while (true) {
     if (input.signal.aborted) return { type: "interrupted" }
-    const request = firstConnection
-      ? { workflowID: input.workflowID }
-      : { workflowID: input.workflowID, after: lastSeq }
-    firstConnection = false
+    const request = lastSeq < 0 ? { workflowID: input.workflowID } : { workflowID: input.workflowID, after: lastSeq }
     const beforeConnectionSeq = lastSeq
     try {
       for await (const raw of input.client.events(request, { signal: input.signal })) {
@@ -423,7 +420,7 @@ function parseEvent(input: unknown, workflowID: string): ParsedEvent {
     throw new ObservationError("Workflow event authority is invalid")
   }
   const seq = event.durable.seq
-  if (!Number.isSafeInteger(seq) || typeof seq !== "number" || seq < 1) {
+  if (!Number.isSafeInteger(seq) || typeof seq !== "number" || seq < 0) {
     throw new ObservationError("Workflow event sequence is invalid")
   }
   return { type: event.type, seq, data: event.data as Record<string, unknown> }
