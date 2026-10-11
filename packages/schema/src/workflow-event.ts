@@ -203,7 +203,12 @@ export namespace Approval {
       attempt: NonNegativeInt.pipe(optional),
       leaseOwner: Schema.String.pipe(optional),
       leaseFence: leaseFence.pipe(optional),
-      reason: Schema.Literals(["ambiguous_execution", "budget_exhausted", "workflow_location_required"]),
+      reason: Schema.Literals([
+        "ambiguous_execution",
+        "budget_exhausted",
+        "workflow_location_required",
+        "workflow_model_required",
+      ]),
       failure: Workflow.Failure.pipe(optional),
       usage: Workflow.Usage.pipe(optional),
     },

@@ -18,6 +18,8 @@ import { WorkflowProjector } from "./workflow/projector"
 import { WorkflowRetry } from "./workflow/retry"
 import { ResponsesV2 } from "./responses"
 import { DateTime } from "effect"
+import { ModelSelection } from "./workflow/model-selection"
+import { ModelAvailability } from "./workflow/model-availability"
 import {
   ConflictError,
   matchesAdmissionInput,
@@ -105,6 +107,7 @@ const layer = Layer.effect(
     const store = yield* WorkflowStore.Service
     const execution = yield* WorkflowExecution.Service
     const responses = yield* ResponsesV2.Service
+    const availability = yield* ModelAvailability.Service
 
     const activeResponses = (detail: Workflow.Detail) => responses.activeByWorkflowID(detail.run.id)
 
@@ -141,6 +144,8 @@ const layer = Layer.effect(
       yield* guardSafe(input)
 
       const workflowID = input.id ?? Workflow.ID.create()
+      if (Object.hasOwn(input.input, ModelSelection.RESERVED_INPUT_KEY))
+        return yield* new ConflictError({ workflowID, operation: "create" })
       const stages = [
         {
           ...input.stages[0],
@@ -356,6 +361,19 @@ const layer = Layer.effect(
         if (stage.status !== "waiting_approval") {
           return yield* new ConflictError({ workflowID: input.workflowID, operation: "resolveRecovery" })
         }
+        if (stage.error?.code === "model_unavailable" && input.action !== "fail") {
+          if (input.action !== "retry")
+            return yield* new ConflictError({ workflowID: input.workflowID, operation: "resolveRecovery" })
+          const selection = yield* Effect.try({
+            try: () => ModelSelection.fromWorkflow(detail.run),
+            catch: () => new ConflictError({ workflowID: input.workflowID, operation: "resolveRecovery" }),
+          })
+          yield* availability
+            .check(selection)
+            .pipe(
+              Effect.mapError(() => new ConflictError({ workflowID: input.workflowID, operation: "resolveRecovery" })),
+            )
+        }
 
         const checkpoint =
           input.action === "fail"
@@ -517,5 +535,6 @@ export const node = makeGlobalNode({
     WorkflowStore.node,
     WorkflowExecution.node,
     ResponsesV2.node,
+    ModelAvailability.node,
   ],
 })

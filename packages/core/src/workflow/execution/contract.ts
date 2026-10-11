@@ -10,6 +10,7 @@ import { WorkflowBusinessArtifact } from "../artifacts/business"
 import { WorkflowBenchmarkTransport } from "../benchmark-transport"
 import { WorkflowPermissions } from "../permissions"
 import { WorkflowRouting } from "../routing"
+import { ModelSelection } from "../model-selection"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 const Summary = Schema.NonEmptyString.check(
@@ -183,7 +184,7 @@ export interface MediaDigest {
   readonly filename?: string
 }
 
-export interface Authority {
+export interface AuthorityV1 {
   readonly authorityVersion: 1
   readonly role: WorkflowRole.Role
   readonly revision: number
@@ -206,6 +207,11 @@ export interface Authority {
   readonly inputArtifacts: readonly ArtifactDigest[]
   readonly contextDigest: string
 }
+export interface AuthorityV2 extends Omit<AuthorityV1, "authorityVersion"> {
+  readonly authorityVersion: 2
+  readonly modelSelectionSha256: string
+}
+export type Authority = AuthorityV1 | AuthorityV2
 
 export interface Contract {
   readonly contractVersion: 1
@@ -235,6 +241,17 @@ export interface BuildInput {
 export function build(input: BuildInput): Contract {
   const role = Schema.decodeUnknownSync(WorkflowRole.Role)(input.stage.type)
   if (role !== input.route.role) throw new Error("Role contract route does not match the persisted stage")
+  const selection = ModelSelection.optionalFromWorkflow(input.workflow)
+  if (selection) {
+    const pinned = WorkflowRouting.resolve({ role, budget: input.workflow.budget, selection })
+    if (
+      input.route.modelID !== pinned.modelID ||
+      input.route.providerID !== pinned.providerID ||
+      input.route.protocol !== pinned.protocol ||
+      input.route.reasoningEffort !== pinned.reasoningEffort
+    )
+      throw new Error("Role contract route does not match the frozen admission")
+  }
   const revision = revisionOf(input.stage)
   const output = outputs[role]
   const outputIdentifier = `WorkflowRoleContract.${role}.Envelope@1`
@@ -257,7 +274,9 @@ export function build(input: BuildInput): Contract {
   const messages = Object.freeze([...(input.messages ?? defaultMessages(input, inputArtifacts))])
   assertTextSafe(systems[role], messages)
   const authority: Authority = Object.freeze({
-    authorityVersion: 1,
+    ...(selection
+      ? { authorityVersion: 2 as const, modelSelectionSha256: selection.sha256 }
+      : { authorityVersion: 1 as const }),
     role,
     revision,
     route: routeFacts,
@@ -306,6 +325,7 @@ export function verifyAuthority(input: {
   const route = WorkflowRouting.resolve({
     role,
     budget: input.workflow.budget,
+    selection: ModelSelection.optionalFromWorkflow(input.workflow),
     requested: WorkflowRouting.requestedFromStage(role, input.stage.input),
     benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(input.workflow),
   })

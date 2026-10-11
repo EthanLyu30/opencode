@@ -289,8 +289,13 @@ export const settle = Effect.fn("WorkflowRoleExecution.settle")(function* (input
     size: Buffer.byteLength(body),
     metadata: binding,
   })
-  const receipt = Receipt.make({
-    receiptVersion: 1,
+  const receipt = Schema.decodeUnknownSync(Receipt)({
+    ...(input.contract.authority.authorityVersion === 2
+      ? {
+          receiptVersion: 2,
+          modelSelectionSha256: input.contract.authority.modelSelectionSha256,
+        }
+      : { receiptVersion: 1 }),
     workflowID: input.workflow.id,
     stageID: input.stage.id,
     role: input.contract.role,

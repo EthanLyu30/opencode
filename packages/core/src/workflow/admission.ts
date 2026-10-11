@@ -30,6 +30,8 @@ import { WorkflowProjector } from "./projector"
 import { WorkflowRouting } from "./routing"
 import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowStore } from "./store"
+import { ModelSelection } from "./model-selection"
+import { WorkflowModelCatalog } from "@opencode-ai/schema/workflow-model-catalog"
 
 const CLAIM_DOMAIN = "opencode.workflow.visual-build.admission-claim.v1"
 const ID_DOMAIN = "opencode.workflow.visual-build.deterministic-id.v1"
@@ -76,6 +78,7 @@ export interface Interface {
     | InvalidIdempotencyKey
     | WorkflowSecretGuard.UnsafePersistenceError
     | AgentV2.ReservedSelectionError
+    | WorkflowModelCatalog.CatalogError
   >
 }
 
@@ -90,8 +93,19 @@ export function prepare(
     readonly stages: readonly [AdmittedStage, ...AdmittedStage[]]
     readonly timestamp: DateTime.Utc
     readonly admission?: Pick<Workflow.AdmissionInput, "location" | "sessionID" | "agent">
+    readonly modelSelection?: ModelSelection.FrozenSelection
   },
 ) {
+  if (Object.hasOwn(input.input, ModelSelection.RESERVED_INPUT_KEY)) {
+    if (
+      !options.modelSelection ||
+      !options.admission?.location ||
+      ModelSelection.validate(input.input[ModelSelection.RESERVED_INPUT_KEY]).sha256 !==
+        options.modelSelection.sha256 ||
+      options.modelSelection.locationSha256 !== WorkflowBusinessArtifact.hash(options.admission.location)
+    )
+      throw new WorkflowModelCatalog.CatalogError({ code: "snapshot_corrupt" })
+  }
   const ordinals = new Set<number>()
   const keys = new Set<string>()
   for (const stage of options.stages) {
@@ -191,6 +205,7 @@ const layer = Layer.effect(
     const execution = yield* WorkflowExecution.Service
     const locations = yield* LocationServiceMap.Service
     const benchmarkTransport = yield* WorkflowBenchmarkTransport.Service
+    const modelSelections = yield* ModelSelection.Service
 
     const reconcile = Effect.fn("WorkflowAdmission.reconcile")(function* (expected: PreparedVisualBuild) {
       const winner = yield* responses.request(expected.response.resource.requestHash)
@@ -200,17 +215,41 @@ const layer = Layer.effect(
       const receiptItems = yield* responses.items(winner.id, "context")
       const detail = yield* workflows.get(expected.workflow.info.id)
       const session = yield* sessions.getWorkflow(expected.session.info.id)
-      let receipt: ResponsesAdmission.VisualBuildReceipt | undefined
+      let receipt: ResponsesAdmission.AdmissionReceipt | undefined
       try {
         receipt =
           receiptItems.length === 1 ? ResponsesAdmission.decodeVisualBuildReceipt(receiptItems[0].payload) : undefined
       } catch {
         receipt = undefined
       }
+      if (
+        !receipt ||
+        !isDeepStrictEqual(receipt.request, expected.receipt.request) ||
+        !isDeepStrictEqual(receipt.location, expected.receipt.location) ||
+        !isDeepStrictEqual(receipt.ids, expected.receipt.ids)
+      )
+        return yield* new ConflictError({ workflowID: expected.workflow.info.id, operation: "admitVisualBuild" })
+      const { [ModelSelection.RESERVED_INPUT_KEY]: _selection, ...expectedInput } = expected.workflow.info.input
+      const frozenInput =
+        receipt.schemaVersion === 2
+          ? ModelSelection.withSelection(expectedInput, receipt.modelSelection)
+          : expectedInput
+      const expectedReceipt = {
+        ...expected.receipt,
+        schemaVersion: receipt.schemaVersion,
+        kind: receipt.kind,
+        profile: receipt.profile,
+        routeMatrix: receipt.routeMatrix,
+        response: receipt.response,
+      }
+      const { modelSelection: _newSelection, ...semanticReceipt } =
+        expectedReceipt as ResponsesAdmission.VisualBuildReceiptV2
+      const pinnedReceipt =
+        receipt.schemaVersion === 2 ? { ...semanticReceipt, modelSelection: receipt.modelSelection } : semanticReceipt
       const immutableResponse =
         winner.id === expected.response.resource.id &&
         winner.workflowID === expected.response.resource.workflowID &&
-        winner.model === expected.response.resource.model &&
+        winner.model === receipt.response.model &&
         winner.background === expected.response.resource.background &&
         winner.store &&
         winner.previousResponseID === undefined &&
@@ -221,17 +260,17 @@ const layer = Layer.effect(
         session.id === expected.session.info.id &&
         session.visibility === "workflow" &&
         session.projectID === expected.session.info.projectID &&
-        session.agent === expected.session.info.agent &&
+        session.agent === receipt.profile.agent &&
         session.location.directory === expected.session.info.location.directory &&
         session.location.workspaceID === expected.session.info.location.workspaceID
       const immutableWorkflow =
         detail !== undefined &&
         detail.run.type === expected.workflow.info.type &&
-        isDeepStrictEqual(detail.run.input, expected.workflow.info.input) &&
+        isDeepStrictEqual(detail.run.input, frozenInput) &&
         isDeepStrictEqual(detail.run.budget, expected.workflow.info.budget) &&
         isDeepStrictEqual(detail.run.location, expected.workflow.info.location) &&
         detail.run.sessionID === expected.workflow.info.sessionID &&
-        detail.run.agent === expected.workflow.info.agent &&
+        detail.run.agent === receipt.profile.agent &&
         detail.stages.length === expected.workflow.stages.length &&
         expected.workflow.stages.every((stage, index) => {
           const current = detail.stages[index]
@@ -252,7 +291,7 @@ const layer = Layer.effect(
         !immutableSession ||
         !immutableWorkflow ||
         receipt === undefined ||
-        !isDeepStrictEqual(receipt, expected.receipt)
+        !isDeepStrictEqual(receipt, pinnedReceipt)
       ) {
         return yield* new ConflictError({ workflowID: expected.workflow.info.id, operation: "admitVisualBuild" })
       }
@@ -284,6 +323,27 @@ const layer = Layer.effect(
         })
         const claim = `${CLAIM_DOMAIN}:${WorkflowBusinessArtifact.hash({ domain: CLAIM_DOMAIN, key })}`
         const ids = deterministicIDs(claim, request.visual.maxRevisions)
+        const winner = yield* responses.request(claim)
+        const previousItems = winner ? yield* responses.items(winner.id, "context") : []
+        const previousReceipt =
+          previousItems.length === 1
+            ? ResponsesAdmission.tryDecodeVisualBuildReceipt(previousItems[0].payload)
+            : undefined
+        if (
+          winner &&
+          (!previousReceipt ||
+            !isDeepStrictEqual(previousReceipt.request, request) ||
+            !isDeepStrictEqual(previousReceipt.location, location))
+        )
+          return yield* new ConflictError({ workflowID: ids.workflowID, operation: "admitVisualBuild" })
+        const snapshot = previousReceipt ? undefined : yield* modelSelections.snapshot()
+        const selection =
+          previousReceipt?.schemaVersion === 2
+            ? ModelSelection.validate(previousReceipt.modelSelection)
+            : snapshot === undefined
+              ? undefined
+              : ModelSelection.freeze(snapshot, location)
+        const responseModel = selection?.snapshot.routes.deliver.modelID ?? RESPONSE_MODEL
         const productionHostPlan = yield* Effect.try({
           try: () => {
             const preview = PreviewPlan.freeze({ authority: "admission", location, preview: request.preview })
@@ -302,12 +362,14 @@ const layer = Layer.effect(
             }),
         })
         const project = yield* projects.resolve(location.directory)
-        const selected = yield* Effect.gen(function* () {
-          const agents = yield* AgentV2.Service
-          return yield* agents.select()
-        }).pipe(Effect.provide(locations.get(location)))
+        const selected = previousReceipt
+          ? { id: previousReceipt.profile.agent }
+          : yield* Effect.gen(function* () {
+              const agents = yield* AgentV2.Service
+              return yield* agents.select()
+            }).pipe(Effect.provide(locations.get(location)))
         const timestamp = yield* DateTime.now
-        const routeMatrix = buildRouteMatrix(request.budget, transportBinding)
+        const routeMatrix = buildRouteMatrix(request.budget, transportBinding, selection)
         const graph = Schema.decodeUnknownSync(ResponsesAdmission.VisualBuildGraph)(
           WorkflowGraph.expandVisualBuild({
             maxRevisions: request.visual.maxRevisions,
@@ -325,10 +387,11 @@ const layer = Layer.effect(
           },
           productionHostPlan,
         )
+        const routedInput = selection ? ModelSelection.withSelection(productionInput, selection) : productionInput
         const workflowInput =
           transportBinding === undefined
-            ? productionInput
-            : WorkflowBenchmarkTransport.withBinding(productionInput, transportBinding)
+            ? routedInput
+            : WorkflowBenchmarkTransport.withBinding(routedInput, transportBinding)
         const workflowCreate: Workflow.CreateInput = {
           id: ids.workflowID,
           type: WORKFLOW_TYPE,
@@ -341,6 +404,7 @@ const layer = Layer.effect(
           stages: graph,
           timestamp,
           admission: { location, sessionID: ids.sessionID, agent: selected.id },
+          modelSelection: selection,
         })
         const session = SessionAdmission.prepare({
           id: ids.sessionID,
@@ -350,9 +414,12 @@ const layer = Layer.effect(
           visibility: "workflow",
           timestamp: DateTime.toEpochMillis(timestamp),
         })
-        const receipt = ResponsesAdmission.VisualBuildReceipt.make({
-          schemaVersion: 1,
-          kind: ResponsesAdmission.VISUAL_BUILD_RECEIPT_TYPE,
+        const receipt = Schema.decodeUnknownSync(ResponsesAdmission.AdmissionReceipt)({
+          schemaVersion: selection ? 2 : 1,
+          kind: selection
+            ? ResponsesAdmission.VISUAL_BUILD_RECEIPT_V2_TYPE
+            : ResponsesAdmission.VISUAL_BUILD_RECEIPT_TYPE,
+          ...(selection ? { modelSelection: selection } : {}),
           requestHash: claim,
           request,
           location,
@@ -366,7 +433,7 @@ const layer = Layer.effect(
           },
           profile: { agent: selected.id, sessionVisibility: "workflow" },
           response: {
-            model: RESPONSE_MODEL,
+            model: responseModel,
             store: true,
             background: request.delivery === "background",
             delivery: request.delivery,
@@ -377,7 +444,7 @@ const layer = Layer.effect(
         const responseInput: Responses.CreateInput = {
           id: ids.responseID,
           workflowID: ids.workflowID,
-          model: RESPONSE_MODEL,
+          model: responseModel,
           background: request.delivery === "background",
           store: true,
           requestHash: claim,
@@ -436,7 +503,7 @@ type PreparedVisualBuild = {
   readonly workflow: ReturnType<typeof prepare>
   readonly session: ReturnType<typeof SessionAdmission.prepare>
   readonly response: ReturnType<typeof ResponsesAdmission.prepareVisualBuild>
-  readonly receipt: ResponsesAdmission.VisualBuildReceipt
+  readonly receipt: ResponsesAdmission.AdmissionReceipt
 }
 
 function normalizeKey(
@@ -490,9 +557,10 @@ function deterministicIDs(claim: string, maxRevisions: number) {
 function buildRouteMatrix(
   budget: Workflow.Budget,
   benchmarkTransport?: WorkflowBenchmarkTransport.Binding,
-): ResponsesAdmission.VisualBuildReceipt["routeMatrix"] {
+  selection?: ModelSelection.FrozenSelection,
+): ResponsesAdmission.AdmissionReceipt["routeMatrix"] {
   const route = (role: WorkflowRole.Role) => {
-    const resolved = WorkflowRouting.resolve({ role, budget, benchmarkTransport })
+    const resolved = WorkflowRouting.resolve({ role, budget, benchmarkTransport, selection })
     return {
       providerID: resolved.providerID,
       modelID: resolved.modelID,
@@ -527,5 +595,6 @@ export const node = makeGlobalNode({
     LocationServiceMap.node,
     WorkflowExecution.node,
     WorkflowBenchmarkTransport.node,
+    ModelSelection.node,
   ],
 })

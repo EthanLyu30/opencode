@@ -98,6 +98,10 @@ export const WorkflowHandler = HttpApiBuilder.group(Api, "server.workflow", (han
               Effect.catchTag("WorkflowAdmission.InvalidIdempotencyKey", invalidIdempotencyKey),
               Effect.catchTag("Workflow.UnsafePersistenceError", unsafePersistence),
               Effect.catchTag("AgentV2.ReservedSelectionError", reservedAgent),
+              Effect.catchTag(
+                "WorkflowModelCatalog.CatalogError",
+                (error) => new InvalidRequestError({ message: error.message, kind: error.code }),
+              ),
             )
           return {
             data: ctx.payload.delivery === "foreground" ? yield* followResponse(admitted) : admitted,

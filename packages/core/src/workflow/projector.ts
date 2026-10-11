@@ -766,7 +766,15 @@ const layer = Layer.effectDiscard(
       Effect.gen(function* () {
         const data = event.data
         const runRow = yield* requireNotCancelled(db, data.workflowID, data.stageID)
-        if (data.reason === "ambiguous_execution") {
+        if (
+          data.reason === "workflow_model_required" &&
+          (data.failure?.code !== "model_unavailable" ||
+            data.failure.category !== "invalid_request" ||
+            data.leaseFence?.variant !== "live_execution" ||
+            (data.usage !== undefined && Object.values(data.usage).some((value) => value !== 0)))
+        )
+          throw new LifecycleConflict(data.workflowID, data.stageID)
+        if (data.reason === "ambiguous_execution" || data.reason === "workflow_model_required") {
           if (data.stageID === undefined || data.failure === undefined) throw new LifecycleConflict(data.workflowID)
           const row = yield* guardTransition(db, data.workflowID, data.stageID, "waiting_approval")
           const historicalReplay = event.durable?.replay === true

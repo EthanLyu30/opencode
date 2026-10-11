@@ -16,6 +16,8 @@ import { WorkflowGraph } from "../workflow/graph"
 import { PreviewPlan } from "../workflow/preview-plan"
 import { WorkflowProductionHostPlan } from "../workflow/production-host-plan"
 import { WorkflowRouting } from "../workflow/routing"
+import { WorkflowModelCatalog } from "@opencode-ai/schema/workflow-model-catalog"
+import { ModelSelection } from "../workflow/model-selection"
 
 export const VISUAL_BUILD_RECEIPT_TYPE = "workflow.visual-build.admission-receipt.v1"
 export const MAX_VISUAL_BUILD_RECEIPT_BYTES = 256 * 1024
@@ -88,6 +90,37 @@ export const VisualBuildReceiptPayload = Schema.Struct({
 }).annotate({ identifier: "ResponsesAdmission.VisualBuildReceiptPayload", ...exact })
 export interface VisualBuildReceiptPayload extends Schema.Schema.Type<typeof VisualBuildReceiptPayload> {}
 
+export const VISUAL_BUILD_RECEIPT_V2_TYPE = "workflow.visual-build.admission-receipt.v2"
+const DynamicReceiptRoute = Schema.Struct({ ...ReceiptRoute.fields, modelID: WorkflowModelCatalog.ModelID }).annotate(
+  exact,
+)
+export const VisualBuildReceiptV2 = Schema.Struct({
+  ...VisualBuildReceipt.fields,
+  schemaVersion: Schema.Literal(2),
+  kind: Schema.Literal(VISUAL_BUILD_RECEIPT_V2_TYPE),
+  modelSelection: ModelSelection.FrozenSelection,
+  response: Schema.Struct({
+    ...VisualBuildReceipt.fields.response.fields,
+    model: WorkflowModelCatalog.ModelID,
+  }).annotate(exact),
+  routeMatrix: Schema.Struct(
+    Object.fromEntries(WorkflowRole.Role.literals.map((role) => [role, DynamicReceiptRoute])) as Record<
+      WorkflowRole.Role,
+      typeof DynamicReceiptRoute
+    >,
+  ).annotate(exact),
+}).annotate({ identifier: "ResponsesAdmission.VisualBuildReceiptV2", ...exact })
+export interface VisualBuildReceiptV2 extends Schema.Schema.Type<typeof VisualBuildReceiptV2> {}
+export const AdmissionReceipt = Schema.Union([VisualBuildReceipt, VisualBuildReceiptV2])
+export type AdmissionReceipt = typeof AdmissionReceipt.Type
+const AdmissionReceiptPayload = Schema.Union([
+  VisualBuildReceiptPayload,
+  Schema.Struct({
+    type: Schema.Literal(VISUAL_BUILD_RECEIPT_V2_TYPE),
+    receipt: VisualBuildReceiptV2,
+  }).annotate(exact),
+])
+
 export class InvalidCreate extends Error {
   constructor(
     readonly reason: "invalid_relationship" | "invalid_receipt" | "receipt_too_large",
@@ -97,21 +130,21 @@ export class InvalidCreate extends Error {
   }
 }
 
-export function receiptPayload(receipt: VisualBuildReceipt): VisualBuildReceiptPayload {
-  const validated = validateVisualBuildReceipt(Schema.decodeUnknownSync(VisualBuildReceipt)(receipt))
+export function receiptPayload(receipt: AdmissionReceipt) {
+  const validated = validateVisualBuildReceipt(Schema.decodeUnknownSync(AdmissionReceipt)(receipt))
   return bounded(
-    Schema.decodeUnknownSync(VisualBuildReceiptPayload)({
-      type: VISUAL_BUILD_RECEIPT_TYPE,
+    Schema.decodeUnknownSync(AdmissionReceiptPayload)({
+      type: validated.kind,
       receipt: validated,
     }),
   )
 }
 
-export function decodeVisualBuildReceipt(input: unknown): VisualBuildReceipt {
-  return validateVisualBuildReceipt(bounded(Schema.decodeUnknownSync(VisualBuildReceiptPayload)(input)).receipt)
+export function decodeVisualBuildReceipt(input: unknown): AdmissionReceipt {
+  return validateVisualBuildReceipt(bounded(Schema.decodeUnknownSync(AdmissionReceiptPayload)(input)).receipt)
 }
 
-export function tryDecodeVisualBuildReceipt(input: unknown): VisualBuildReceipt | undefined {
+export function tryDecodeVisualBuildReceipt(input: unknown): AdmissionReceipt | undefined {
   try {
     return decodeVisualBuildReceipt(input)
   } catch {
@@ -175,10 +208,10 @@ export function prepareVisualBuild(
   options: {
     readonly responseID: Responses.ID
     readonly timestamp: DateTime.Utc
-    readonly receipt: VisualBuildReceipt
+    readonly receipt: AdmissionReceipt
   },
 ) {
-  const receipt = validateVisualBuildReceipt(Schema.decodeUnknownSync(VisualBuildReceipt)(options.receipt))
+  const receipt = validateVisualBuildReceipt(Schema.decodeUnknownSync(AdmissionReceipt)(options.receipt))
   if (
     !input.store ||
     input.previousResponseID !== undefined ||
@@ -199,7 +232,10 @@ export function prepareVisualBuild(
   })
 }
 
-function validateVisualBuildReceipt(receipt: VisualBuildReceipt): VisualBuildReceipt {
+function validateVisualBuildReceipt(receipt: AdmissionReceipt): AdmissionReceipt {
+  const selection = receipt.schemaVersion === 2 ? ModelSelection.validate(receipt.modelSelection) : undefined
+  if (selection && selection.locationSha256 !== WorkflowBusinessArtifact.hash(receipt.location))
+    throw new InvalidCreate("invalid_receipt", "Model selection owner does not match the admission")
   const expectedGraph = WorkflowGraph.expandVisualBuild({
     maxRevisions: receipt.request.visual.maxRevisions,
     maxAttempts: receipt.request.budget.maxAttempts ?? 1,
@@ -207,7 +243,7 @@ function validateVisualBuildReceipt(receipt: VisualBuildReceipt): VisualBuildRec
   }).map((stage, index) => ({ ...stage, id: receipt.ids.stageIDs[index] }))
   const expectedRouteMatrix = Object.fromEntries(
     WorkflowRole.Role.literals.map((role) => {
-      const route = WorkflowRouting.resolve({ role, budget: receipt.request.budget })
+      const route = WorkflowRouting.resolve({ role, budget: receipt.request.budget, selection })
       return [
         role,
         {
@@ -231,6 +267,7 @@ function validateVisualBuildReceipt(receipt: VisualBuildReceipt): VisualBuildRec
     preview,
   })
   if (
+    receipt.response.model !== (selection?.snapshot.routes.deliver.modelID ?? "deepseek-v4-pro") ||
     receipt.response.delivery !== receipt.request.delivery ||
     receipt.response.background !== (receipt.request.delivery === "background") ||
     !isDeepStrictEqual(receipt.graph, expectedGraph) ||
@@ -243,7 +280,7 @@ function validateVisualBuildReceipt(receipt: VisualBuildReceipt): VisualBuildRec
   return receipt
 }
 
-function bounded<A extends VisualBuildReceiptPayload>(value: A): A {
+function bounded<A extends typeof AdmissionReceiptPayload.Type>(value: A): A {
   if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_VISUAL_BUILD_RECEIPT_BYTES) {
     throw new InvalidCreate("receipt_too_large", "Visual-build admission receipt exceeds its durable bound")
   }

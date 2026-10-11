@@ -1,18 +1,19 @@
 export * as WorkflowRouting from "./routing"
 
-import { Capabilities, type Model } from "@opencode-ai/llm"
+import { Capabilities, ModelContract, type Model } from "@opencode-ai/llm"
 import { DeepSeek, Kimi } from "@opencode-ai/llm/providers"
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Data, Schema } from "effect"
 import { WorkflowBenchmarkTransport } from "./benchmark-transport"
 import { WorkflowSecretGuard } from "./secret-guard"
+import { ModelSelection } from "./model-selection"
 
 type Capability = Capabilities.ProviderCapability
 
 interface Policy {
   readonly providerID: "kimi" | "deepseek"
-  readonly modelID: "kimi-k3" | "deepseek-v4-flash" | "deepseek-v4-pro"
+  readonly modelID: string
   readonly protocol: WorkflowRole.Protocol
   readonly reasoningEffort: WorkflowRole.ReasoningEffort
   readonly requiredCapability: Capability
@@ -104,13 +105,14 @@ export class InvalidRouteOverride extends Data.TaggedError("WorkflowRouting.Inva
 export interface Route {
   readonly role: WorkflowRole.Role
   readonly providerID: "kimi" | "deepseek"
-  readonly modelID: "kimi-k3" | "deepseek-v4-flash" | "deepseek-v4-pro"
+  readonly modelID: string
   readonly protocol: WorkflowRole.Protocol
   readonly reasoningEffort: WorkflowRole.ReasoningEffort
   readonly requiredCapabilities: ReadonlyArray<Capability>
   readonly budget: Workflow.Budget
   readonly model: Model
   readonly benchmarkTransport?: WorkflowBenchmarkTransport.Binding
+  readonly modelContract?: ModelContract.Binding
 }
 
 export interface ResolveInput {
@@ -118,6 +120,7 @@ export interface ResolveInput {
   readonly budget: Workflow.Budget
   readonly requested?: WorkflowRole.RequestedRoute
   readonly benchmarkTransport?: WorkflowBenchmarkTransport.Binding
+  readonly selection?: ModelSelection.FrozenSelection
   /** Trusted deterministic clock seam for benchmark admission and recovery tests. */
   readonly now?: number
 }
@@ -133,13 +136,19 @@ export function forResponseModel(route: Route, modelID: string): Route {
   if (modelID !== route.modelID) throw new Error("The linked Response model must match the fixed deliver route")
 
   for (const required of route.requiredCapabilities) {
-    Capabilities.requireModelCapability({ provider: route.providerID, model: modelID, required })
+    Capabilities.requireModelCapability({
+      provider: route.providerID,
+      model: modelID,
+      required,
+      modelContract: route.modelContract,
+    })
   }
 
   return Object.freeze({
     ...route,
     modelID,
     model: DeepSeek.configure({
+      ...(route.modelContract === undefined ? {} : { modelContract: route.modelContract }),
       ...(route.benchmarkTransport === undefined
         ? {}
         : { baseURL: WorkflowBenchmarkTransport.baseURL(route.benchmarkTransport, "deepseek") }),
@@ -148,13 +157,43 @@ export function forResponseModel(route: Route, modelID: string): Route {
   })
 }
 
+export function resolve(
+  input: ResolveInput & { readonly selection?: undefined },
+): Route & { readonly modelID: "kimi-k3" | "deepseek-v4-flash" | "deepseek-v4-pro" }
+export function resolve(input: ResolveInput): Route
 export function resolve(input: ResolveInput): Route {
-  const policy = policies[input.role]
+  const selection = input.selection === undefined ? undefined : ModelSelection.validate(input.selection)
+  const chosen = selection?.snapshot.routes[input.role]
+  const policy: Policy =
+    chosen === undefined
+      ? policies[input.role]
+      : {
+          ...chosen,
+          requiredCapability: policies[input.role].requiredCapability,
+          requiredCapabilities: chosen.requiredCapabilities as readonly Capability[],
+        }
+  const modelContract =
+    chosen === undefined
+      ? undefined
+      : ModelContract.bind({
+          providerID: chosen.providerID,
+          modelID: chosen.modelID,
+          profileID: chosen.adapterProfileID,
+          profileSha256: chosen.adapterProfileSha256,
+          capabilities: chosen.requiredCapabilities,
+          effortLevels: [chosen.reasoningEffort],
+          sourceSha256: selection!.snapshot.catalogueSha256,
+        })
   if (input.requested && !matches(policy, input.requested)) throw violation(input.role, input.requested, policy)
 
   for (const required of policy.requiredCapabilities) {
     try {
-      Capabilities.requireModelCapability({ provider: policy.providerID, model: policy.modelID, required })
+      Capabilities.requireModelCapability({
+        provider: policy.providerID,
+        model: policy.modelID,
+        required,
+        modelContract,
+      })
     } catch (error) {
       if (!(error instanceof Capabilities.UnsupportedModelCapability)) throw error
       throw new PolicyViolation({
@@ -176,12 +215,14 @@ export function resolve(input: ResolveInput): Route {
   const model =
     policy.providerID === "kimi"
       ? Kimi.configure({
+          ...(modelContract === undefined ? {} : { modelContract }),
           ...(benchmarkTransport === undefined
             ? {}
             : { baseURL: WorkflowBenchmarkTransport.baseURL(benchmarkTransport, "kimi", input.now) }),
           providerOptions: { kimi: { reasoningEffort: policy.reasoningEffort } },
         }).model(policy.modelID)
       : DeepSeek.configure({
+          ...(modelContract === undefined ? {} : { modelContract }),
           ...(benchmarkTransport === undefined
             ? {}
             : { baseURL: WorkflowBenchmarkTransport.baseURL(benchmarkTransport, "deepseek", input.now) }),
@@ -197,6 +238,7 @@ export function resolve(input: ResolveInput): Route {
     requiredCapabilities: Object.freeze([...policy.requiredCapabilities]),
     budget: Object.freeze({ ...input.budget }),
     model,
+    ...(modelContract === undefined ? {} : { modelContract }),
     ...(benchmarkTransport === undefined ? {} : { benchmarkTransport }),
   })
 }

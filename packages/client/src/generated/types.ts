@@ -2904,7 +2904,11 @@ export type WorkflowsHistoryOutput = {
                 readonly expectedStatus: "leased" | "running"
                 readonly observedLeaseExpiresAt: number
               }
-          readonly reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+          readonly reason:
+            | "ambiguous_execution"
+            | "budget_exhausted"
+            | "workflow_location_required"
+            | "workflow_model_required"
           readonly failure?: {
             readonly category:
               | "transient"
@@ -3483,7 +3487,11 @@ export type WorkflowsEventsOutput =
               readonly expectedStatus: "leased" | "running"
               readonly observedLeaseExpiresAt: number
             }
-        readonly reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+        readonly reason:
+          | "ambiguous_execution"
+          | "budget_exhausted"
+          | "workflow_location_required"
+          | "workflow_model_required"
         readonly failure?: {
           readonly category:
             | "transient"

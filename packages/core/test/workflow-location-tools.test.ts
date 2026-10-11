@@ -38,6 +38,9 @@ import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { DesignArtifact } from "@opencode-ai/schema/design-artifact"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
+import { ModelSelection } from "../src/workflow/model-selection"
+import { ModelAvailability } from "../src/workflow/model-availability"
+import { fixtureAdmissionSnapshot, fixtureCatalogue } from "./fixtures/workflow-model-catalog"
 
 const projects = Layer.succeed(
   ProjectV2.Service,
@@ -73,6 +76,8 @@ const modelResponses: LLMResponse[] = []
 const modelTimeline: string[] = []
 let modelCredentialReads = 0
 let modelCredentialMissing = false
+let pinnedAvailable = true
+let availabilityChecks = 0
 const modelClient = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
@@ -122,6 +127,24 @@ const modelIt = testEffect(
       [SessionExecution.node, SessionExecution.noopLayer],
       [Credential.node, credentials],
       [llmClient, modelClient],
+      [
+        ModelAvailability.node,
+        Layer.succeed(ModelAvailability.Service, {
+          check: (selection) =>
+            Effect.suspend(() => {
+              availabilityChecks++
+              return ModelAvailability.checkCatalogue(
+                selection,
+                fixtureCatalogue({
+                  models: fixtureCatalogue().models.map((entry) => ({
+                    ...entry,
+                    availability: pinnedAvailable ? "available" : "missing",
+                  })),
+                }),
+              )
+            }),
+        }),
+      ],
     ],
   ),
 )
@@ -337,6 +360,111 @@ const expectedRules = (role: WorkflowRole.Role) => [
 ]
 
 describe("Workflow Location tools", () => {
+  modelIt.live("a pinned settled provider result replays without checking today's missing model or dispatching", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          availabilityChecks = 0
+          pinnedAvailable = true
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_pinned_provider_replay")
+          yield* createWorkflowSession(location, sessionID)
+          const selection = ModelSelection.freeze(fixtureAdmissionSnapshot(), location)
+          const base = modelInput(
+            location,
+            sessionID,
+            () => Effect.void,
+            {},
+            { workflowInput: ModelSelection.withSelection({ brief: "pinned replay" }, selection) },
+          )
+          let settled: Readonly<Record<string, unknown>> | undefined
+          const first = {
+            ...base,
+            route: WorkflowRouting.resolve({ role: "design", budget: base.workflow.budget, selection }),
+            saveCheckpoint: (checkpoint: Readonly<Record<string, unknown>>) => {
+              const turn = checkpoint.providerTurn
+              if (typeof turn === "object" && turn !== null && "result" in turn) {
+                settled = checkpoint
+                return Effect.fail({
+                  failure: {
+                    category: "transient" as const,
+                    code: "offline_crash_after_settled",
+                    message: "offline checkpoint crash",
+                  },
+                  usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+                })
+              }
+              return Effect.void
+            },
+          }
+          modelResponses.push(providerResponse(providerDesignEnvelope())!)
+          yield* WorkflowModelExecution.Service.use((models) => models.execute(first).pipe(Effect.flip))
+          expect(modelRequests).toHaveLength(1)
+          expect(availabilityChecks).toBe(1)
+          if (!settled) throw new Error("missing pinned settled fixture")
+          pinnedAvailable = false
+          const resumed = yield* WorkflowModelExecution.Service.use((models) =>
+            models.execute({
+              ...first,
+              stage: Workflow.Stage.make({ ...first.stage, checkpoint: JSON.parse(JSON.stringify(settled)) }),
+              saveCheckpoint: () => Effect.void,
+            }),
+          )
+          expect(resumed.outcome).toMatchObject({ role: "design", verdict: "ready" })
+          expect(modelRequests).toHaveLength(1)
+          expect(availabilityChecks).toBe(1)
+          expect(resumed.contract?.authority.authorityVersion).toBe(2)
+          pinnedAvailable = true
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+  modelIt.live("a missing pinned model stops before provider intent or generation", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          pinnedAvailable = false
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_pinned_missing_dispatch")
+          yield* createWorkflowSession(location, sessionID)
+          const selection = ModelSelection.freeze(fixtureAdmissionSnapshot(), location)
+          let checkpoints = 0
+          const base = modelInput(
+            location,
+            sessionID,
+            () =>
+              Effect.sync(() => {
+                checkpoints++
+              }),
+            {},
+            { workflowInput: ModelSelection.withSelection({ brief: "missing pin" }, selection) },
+          )
+          modelResponses.push(providerResponse(providerDesignEnvelope())!)
+          const failed = yield* WorkflowModelExecution.Service.use((models) =>
+            models
+              .execute({
+                ...base,
+                route: WorkflowRouting.resolve({ role: "design", budget: base.workflow.budget, selection }),
+              })
+              .pipe(Effect.flip),
+          )
+          expect(failed).toMatchObject({
+            failure: { code: "model_unavailable", category: "invalid_request" },
+            usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 0 },
+          })
+          expect(modelRequests).toHaveLength(0)
+          expect(checkpoints).toBe(0)
+          pinnedAvailable = true
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
   modelIt.live("fails closed with a typed benchmark-auth error before provider access", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

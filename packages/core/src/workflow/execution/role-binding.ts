@@ -71,14 +71,36 @@ const ReceiptFields = Schema.Struct({
   outcomeSha256: Sha256,
   authority: ContractAuthority,
 })
-export const Receipt = ReceiptFields.check(
+export const ReceiptV1 = ReceiptFields.check(
   Schema.makeFilter<typeof ReceiptFields.Type>((receipt) =>
     Buffer.byteLength(WorkflowBusinessArtifact.encode(receipt)) <= 128 * 1024
       ? undefined
       : "Role receipt must not exceed 128 KiB",
   ),
 ).annotate({ identifier: "WorkflowRoleExecution.Receipt", ...exact })
-export interface Receipt extends Schema.Schema.Type<typeof Receipt> {}
+const ContractAuthorityV2 = Schema.Struct({
+  ...ContractAuthority.fields,
+  authorityVersion: Schema.Literal(2),
+  modelSelectionSha256: Sha256,
+}).annotate({ identifier: "WorkflowRoleExecution.ContractAuthorityV2", ...exact })
+export const ReceiptV2 = Schema.Struct({
+  ...ReceiptFields.fields,
+  receiptVersion: Schema.Literal(2),
+  modelSelectionSha256: Sha256,
+  authority: ContractAuthorityV2,
+})
+  .check(
+    Schema.makeFilter((receipt) =>
+      receipt.modelSelectionSha256 !== receipt.authority.modelSelectionSha256
+        ? "Role receipt selection mismatch"
+        : Buffer.byteLength(WorkflowBusinessArtifact.encode(receipt)) > 128 * 1024
+          ? "Role receipt must not exceed 128 KiB"
+          : undefined,
+    ),
+  )
+  .annotate({ identifier: "WorkflowRoleExecution.ReceiptV2", ...exact })
+export const Receipt = Schema.Union([ReceiptV1, ReceiptV2])
+export type Receipt = typeof Receipt.Type
 
 export interface ValidateSettlementInput {
   readonly workflow: Workflow.Info

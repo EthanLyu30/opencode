@@ -16,6 +16,7 @@ import { WorkflowRouting } from "./routing"
 import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowStageMachine } from "./stage-machine"
 import { WorkflowGraph } from "./graph"
+import { ModelSelection } from "./model-selection"
 
 export interface ExecutionInput {
   readonly workflow: Workflow.Info
@@ -132,6 +133,7 @@ const injectedRoleLayer = Layer.effect(
               WorkflowRouting.resolve({
                 role,
                 budget: input.workflow.budget,
+                selection: ModelSelection.optionalFromWorkflow(input.workflow),
                 requested: WorkflowRouting.requestedFromStage(role, input.stage.input),
                 benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(input.workflow),
               }),

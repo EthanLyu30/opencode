@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Layer, Option, Stream } from "effect"
+import { DateTime, Effect, Layer, Option, Schema, Stream } from "effect"
 import { eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -331,7 +331,7 @@ const invalidBranchOutcomeExecutor = Layer.succeed(
             metadata: binding,
           },
         ],
-        roleReceipt: WorkflowRoleExecution.Receipt.make({
+        roleReceipt: Schema.decodeUnknownSync(WorkflowRoleExecution.Receipt)({
           receiptVersion: 1,
           workflowID: workflow.id,
           stageID: stage.id,

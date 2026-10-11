@@ -25,6 +25,8 @@ import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowToolLineage } from "../tool-lineage"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
 import { WorkflowBenchmarkTransport } from "../benchmark-transport"
+import { ModelSelection } from "../model-selection"
+import { ModelAvailability } from "../model-availability"
 import { WorkflowRoleContract } from "./contract"
 import { WorkflowRoleExecution } from "./role"
 import * as WorkflowProviderRequest from "./provider-request"
@@ -175,6 +177,7 @@ const productionLayer = Layer.effect(
     const modelClient = yield* LLMClient.Service
     const locations = yield* LocationServiceMap.Service
     const sessions = yield* SessionStore.Service
+    const availability = yield* ModelAvailability.Service
 
     return Service.of({
       execute: (input) => {
@@ -444,6 +447,18 @@ const productionLayer = Layer.effect(
                   if (remainingTokens === 0)
                     return yield* Effect.fail(
                       budgetFailure("token", WorkflowRetry.usageDelta(usage, checkpointedUsage)),
+                    )
+                  const selection = ModelSelection.optionalFromWorkflow(input.workflow)
+                  if (selection)
+                    yield* availability.check(selection).pipe(
+                      Effect.mapError(() => ({
+                        failure: {
+                          category: "invalid_request" as const,
+                          code: "model_unavailable",
+                          message: "Pinned model requires configuration resolution",
+                        },
+                        usage: WorkflowRetry.usageDelta(usage, checkpointedUsage),
+                      })),
                     )
                   yield* WorkflowRoleAgents.reassert(route.role)
                   materialization = yield* registry.materialize(contract.permissions)
@@ -825,7 +840,14 @@ const productionLayer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer: productionLayer,
-  deps: [Credential.node, ResponsesV2.node, LocationServiceMap.node, SessionStore.node, llmClient],
+  deps: [
+    Credential.node,
+    ResponsesV2.node,
+    LocationServiceMap.node,
+    SessionStore.node,
+    llmClient,
+    ModelAvailability.node,
+  ],
 })
 
 function responseIDFromStage(input: Readonly<Record<string, unknown>>) {

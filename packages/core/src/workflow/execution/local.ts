@@ -524,6 +524,20 @@ export const layerWith = (options: Options) =>
           yield* ensureNotCancelled(stage.workflowID)
           if (!(yield* currentLease(stage, DateTime.toEpochMillis(completedAt)))) return
           const failure = WorkflowSecretGuard.sanitizeFailure(error.failure)
+          if (failure.code === "model_unavailable" && failure.category === "invalid_request") {
+            yield* events.publish(WorkflowEvent.Approval.Requested, {
+              workflowID: stage.workflowID,
+              stageID: stage.id,
+              timestamp: completedAt,
+              attempt: stage.attempt,
+              leaseOwner: options.ownerID,
+              leaseFence: { variant: "live_execution", expectedStatus: "running" },
+              reason: "workflow_model_required",
+              failure,
+              usage: error.usage,
+            })
+            return
+          }
           const decision = WorkflowRetry.decide({
             failure,
             attempt: stage.attempt,
@@ -1080,16 +1094,25 @@ export const layerWith = (options: Options) =>
             if (!hasCapacity()) return
             // The private benchmark seam pauses only between fully settled stages;
             // the ordinary scheduler, leases, checkpointing and recovery remain unchanged.
-            if (process.env.TASK24_INTERNAL_WORKFLOW_CRASH_AT && process.env.TASK24_INTERNAL_CRASH_TEST === "task24-owned-v1") {
+            if (
+              process.env.TASK24_INTERNAL_WORKFLOW_CRASH_AT &&
+              process.env.TASK24_INTERNAL_CRASH_TEST === "task24-owned-v1"
+            ) {
               const runs = yield* store.list({ limit: 100 })
               for (const run of runs) {
                 const binding = WorkflowBenchmarkTransport.fromWorkflow(run)
                 if (!binding || !WorkflowBenchmarkTransport.recoveryProbe(binding)) continue
                 const detail = yield* store.get(run.id)
                 const design = detail?.stages.find((stage) => stage.type === "design" && stage.status === "succeeded")
-                if (detail?.run.status === "running" && design && detail.stages.some((stage) => stage.status === "pending") &&
-                  !detail.stages.some((stage) => stage.status === "running" || stage.status === "leased")) {
-                  yield* Effect.promise(() => WorkflowBenchmarkTransport.pauseRecoveryCheckpoint(binding, run.id, design.id))
+                if (
+                  detail?.run.status === "running" &&
+                  design &&
+                  detail.stages.some((stage) => stage.status === "pending") &&
+                  !detail.stages.some((stage) => stage.status === "running" || stage.status === "leased")
+                ) {
+                  yield* Effect.promise(() =>
+                    WorkflowBenchmarkTransport.pauseRecoveryCheckpoint(binding, run.id, design.id),
+                  )
                 }
               }
             }

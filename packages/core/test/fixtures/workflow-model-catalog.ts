@@ -1,7 +1,45 @@
 import { WorkflowModelCatalog } from "@opencode-ai/schema/workflow-model-catalog"
 import { WorkflowModelCatalogPolicy } from "../../src/workflow/model-catalog/policy"
+import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
+import { Schema } from "effect"
+import { WorkflowBusinessArtifact } from "../../src/workflow/artifacts/business"
 
 export const fixtureScope = "a".repeat(64)
+
+export function fixtureAdmissionSnapshot(successor = false) {
+  const catalogue = fixtureCatalogue()
+  const routes = Object.fromEntries(
+    WorkflowRole.Role.literals.map((role) => {
+      const rule = WorkflowModelCatalogPolicy.requirements[role]
+      const entry = catalogue.models.find((entry) => entry.family === rule.family)!
+      return [
+        role,
+        {
+          providerID: entry.providerID,
+          modelID: successor ? `${entry.modelID}-successor-fixture` : entry.modelID,
+          protocol: rule.protocol,
+          reasoningEffort: rule.reasoningEffort,
+          requiredCapabilities: [...rule.capabilities],
+          adapterProfileID: entry.adapterProfileID,
+          adapterProfileSha256: entry.adapterProfileSha256,
+          priceSha256: entry.priceSha256,
+          advertisedRevision: entry.advertisedRevision,
+        },
+      ]
+    }),
+  )
+  const content = {
+    schemaVersion: 1,
+    catalogueSha256: catalogue.sha256,
+    policySha256: "d".repeat(64),
+    scopeSha256: catalogue.scopeSha256,
+    routes,
+  }
+  return Schema.decodeUnknownSync(WorkflowModelCatalog.AdmissionSnapshot)({
+    ...content,
+    sha256: WorkflowBusinessArtifact.hash(content),
+  })
+}
 
 export function fixtureEntry(
   family: WorkflowModelCatalog.SelectedFamily,
