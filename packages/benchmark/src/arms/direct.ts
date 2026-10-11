@@ -115,7 +115,7 @@ export function collectDirectOutput(stdout: string): {
       const part = Reflect.get(event, "part")
       finalStepSuccessful =
         part !== null && typeof part === "object" && typeof Reflect.get(part, "reason") === "string"
-          ? Reflect.get(part, "reason") !== "unknown"
+          ? Reflect.get(part, "reason") === "stop"
           : false
     }
   }

@@ -475,7 +475,18 @@ function responsesStream(terminal: FakeTerminal, content?: string): string {
 }
 
 function responseTerminal(type: "response.incomplete" | "response.failed", usage: object): string {
-  const frame = { type, sequence_number: 0, response: { id: "resp_offline", status: type.slice(9), usage } }
+  const frame = {
+    type,
+    sequence_number: 0,
+    response: {
+      id: "resp_offline",
+      status: type.slice(9),
+      usage,
+      ...(type === "response.incomplete"
+        ? { incomplete_details: { reason: "max_output_tokens" } }
+        : { error: { code: "offline_provider_failed", message: "Deterministic offline failure" } }),
+    },
+  }
   return `event: ${type}\ndata: ${JSON.stringify(frame)}\n\n`
 }
 

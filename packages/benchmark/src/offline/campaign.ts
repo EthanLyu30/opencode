@@ -35,7 +35,12 @@ import { runSecurityAcceptance, scanDurableText, type SecurityAcceptanceResult }
 import { evaluateOfflineWorkspace, offlineEvaluatorSha256 } from "./evaluator"
 import { publishImmutable, recoverAtomicTree } from "./atomic"
 import { offlineRuns, offlinePointerName, recoveryProbeID, scopeRecoveryCampaign } from "./probe"
-import { decodeRetainedEvidence, verifyEvaluationEvidence, workspaceDirectoryExists } from "./evidence"
+import {
+  decodeRetainedEvidence,
+  verifyEvaluationEvidence,
+  verifySecurityEvidenceCoverage,
+  workspaceDirectoryExists,
+} from "./evidence"
 import { verifyEvidenceFile } from "../evaluator/evidence"
 import { verifyFairnessFingerprint } from "../campaign/fairness"
 
@@ -1817,8 +1822,7 @@ async function verifySecurityEvidence(
     if (!checks.has(required)) throw new TypeError("TASK24_OFFLINE_SECURITY_EVIDENCE_INCOMPLETE")
   }
   const byCheck = new Map<string, Record<string, unknown>>()
-  if (!Array.isArray(value.retainedEvidence) || value.retainedEvidence.length < 8)
-    throw new TypeError("TASK24_OFFLINE_SECURITY_RETAINED_EVIDENCE_MISSING")
+  verifySecurityEvidenceCoverage(value)
   for (const reference of decodeRetainedEvidence(value.retainedEvidence))
     verifyEvidenceFile(path.dirname(evidenceFile), reference)
   for (const item of value.exactBinaryChecks) {

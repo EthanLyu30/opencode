@@ -1,6 +1,29 @@
 import { test, expect } from "bun:test"
 import { createFakeProvider } from "../../src/offline/fake-provider"
 
+test.each(["incomplete", "failed"] as const)(
+  "fake Responses %s carries terminal detail instead of a normal stop",
+  async (terminal) => {
+    const fake = createFakeProvider({ terminals: [terminal] })
+    const response = await fake.upstream(
+      new Request("https://api.deepseek.com/responses", {
+        method: "POST",
+        headers: { authorization: "Bearer sk-TASK24_FAKE_DEEPSEEK" },
+        body: JSON.stringify({ model: "deepseek-v4-pro", stream: true }),
+      }),
+    )
+    const line = (await response.text()).split("\n").find((value) => value.startsWith("data: "))!
+    const frame = JSON.parse(line.slice(6))
+    expect(frame.response.status).toBe(terminal)
+    if (terminal === "incomplete") expect(frame.response.incomplete_details).toEqual({ reason: "max_output_tokens" })
+    if (terminal === "failed")
+      expect(frame.response.error).toEqual({
+        code: "offline_provider_failed",
+        message: "Deterministic offline failure",
+      })
+  },
+)
+
 test.each(["kimi", "deepseek"])("fake %s edit uses the write tool actually advertised by the CLI", async (provider) => {
   const fake = createFakeProvider()
   const tool = { type: "function", name: "write", parameters: { type: "object" } }

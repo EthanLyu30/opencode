@@ -12,6 +12,46 @@ afterEach(async () => {
 })
 
 describe("Task24 offline security and leakage acceptance", () => {
+  const exactSecurity = process.env.TASK24_EXACT_BINARY_SECURITY === "1" ? test : test.skip
+  exactSecurity(
+    "verifies real binary terminal/network rejection and records empty logs without invalid references",
+    async () => {
+      const layout = Task24Root.ensure()
+      const candidate = await Bun.file(path.join(layout.runs, "preregistration.candidate.json")).json()
+      const evidenceRoot = path.join(layout.runs, `test-security-exact-${crypto.randomUUID()}`)
+      cleanup.push(evidenceRoot)
+      const result = await runSecurityAcceptance(layout, compilePriceBook(candidate.pricing), {
+        modified: {
+          ...candidate.binaries.modified,
+          runtime: "modified",
+          executable: "D:\\OpenCode-Local\\bin\\opencode-local.exe",
+        },
+        upstream: {
+          ...candidate.binaries.upstream,
+          runtime: "upstream",
+          executable: path.join(layout.toolchain, "upstream", "opencode.exe"),
+        },
+        evidenceRoot,
+      })
+      expect(result.exactBinaryChecks).toEqual([
+        "exact_binary_incomplete",
+        "exact_binary_failed",
+        "exact_binary_external_network",
+      ])
+      expect(result.leaks).toBe(0)
+      const evidence = await Bun.file(result.evidenceFile).json()
+      expect(evidence.emptyLogs.length).toBeGreaterThan(0)
+      expect(
+        evidence.emptyLogs.every(
+          (log: { bytes: number; sha256: string }) =>
+            log.bytes === 0 && log.sha256 === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ),
+      ).toBe(true)
+      expect(evidence.retainedEvidence.every((file: { bytes: number }) => file.bytes > 0)).toBe(true)
+    },
+    180_000,
+  )
+
   test("rejects transport, traversal, replay, forged usage, oversized input, and evaluator mutation attacks", async () => {
     const result = await runSecurityAcceptance(Task24Root.ensure(), compilePriceBook(priceFixture))
     expect(result.leaks).toBe(0)

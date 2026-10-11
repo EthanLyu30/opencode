@@ -103,4 +103,20 @@ describe("Task24 direct arms", () => {
     )
     expect(await Bun.file(path.join(runRoot, "config", "opencode.json")).exists()).toBe(false)
   })
+
+  test("does not accept truncated, filtered, failed or tool-only final steps", () => {
+    const step = (reason: string) =>
+      JSON.stringify({
+        type: "step_finish",
+        sessionID: "session-terminal",
+        part: { type: "step-finish", reason },
+      })
+    for (const reason of ["length", "content-filter", "error", "tool-calls", "unknown", "forged-success"]) {
+      expect(() => collectDirectOutput(step(reason))).toThrow("TASK24_DIRECT_NOT_TERMINAL")
+    }
+    expect(collectDirectOutput(step("tool-calls") + "\n" + step("stop"))).toMatchObject({
+      sessionID: "session-terminal",
+      eventCount: 2,
+    })
+  })
 })

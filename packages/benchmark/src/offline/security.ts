@@ -15,6 +15,7 @@ import { createFakeProvider, fakeRequest } from "./fake-provider"
 import { runFunctionalEvaluation } from "../evaluator/functional"
 import { publishImmutable } from "./atomic"
 import { bindEvidenceFile } from "../evaluator/evidence"
+import { verifySecurityEvidenceCoverage } from "./evidence"
 
 export interface SecurityAcceptanceResult {
   readonly checks: readonly string[]
@@ -274,25 +275,41 @@ export async function runSecurityAcceptance(
     const evidenceRoot = exact?.evidenceRoot ?? root
     await fs.mkdir(evidenceRoot, { recursive: true })
     const retainedEvidence = []
+    const emptyLogs = []
     if (exact) {
       const retained = path.join(evidenceRoot, "binary-evidence")
       await fs.mkdir(retained)
-      for (const caseID of ["exact-modified-incomplete", "exact-upstream-failed", "exact-modified-network", "evaluator-sandbox"]) {
+      for (const caseID of [
+        "exact-modified-incomplete",
+        "exact-upstream-failed",
+        "exact-modified-network",
+        "evaluator-sandbox",
+      ]) {
         const caseRoot = path.join(root, caseID)
         for (const relative of ["output/stdout.jsonl", "output/stderr.log", "broker.sqlite"]) {
           const source = path.join(caseRoot, relative)
           if (!(await Bun.file(source).exists())) continue
           const target = path.join(retained, `${caseID}-${path.basename(relative)}`)
+          if ((await fs.stat(source)).size === 0 && !relative.endsWith("sqlite")) {
+            emptyLogs.push({
+              caseID,
+              relativePath: `binary-evidence/${path.basename(target)}`,
+              sha256: await sha256File(source),
+              bytes: 0,
+            })
+            continue
+          }
           await fs.copyFile(source, target, fs.constants.COPYFILE_EXCL)
-          retainedEvidence.push(bindEvidenceFile(evidenceRoot, target, relative.endsWith("sqlite") ? "security-ledger" : "security-log"))
+          retainedEvidence.push(
+            bindEvidenceFile(evidenceRoot, target, relative.endsWith("sqlite") ? "security-ledger" : "security-log"),
+          )
         }
       }
     }
     const evidenceFile = path.join(evidenceRoot, "security-acceptance.json")
-    await publishImmutable(
-      evidenceFile,
-      canonicalJson({ schemaVersion: 1, checks, exactBinaryChecks: exactEvidence, retainedEvidence }) + "\n",
-    )
+    const evidence = { schemaVersion: 1, checks, exactBinaryChecks: exactEvidence, retainedEvidence, emptyLogs }
+    if (exact) verifySecurityEvidenceCoverage(evidence)
+    await publishImmutable(evidenceFile, canonicalJson(evidence) + "\n")
     return Object.freeze({
       checks: Object.freeze(checks),
       rejected: checks.length,
@@ -326,9 +343,9 @@ async function runEvaluatorSandboxCase(root: string): Promise<Readonly<Record<st
     'try{await Bun.write("/starter/task24-probe","x")}catch{writeDenied=true}',
     'const socket=await Bun.file("/var/run/docker.sock").exists()',
     'const hiddenGoldAbsent=!(await Bun.file("/evaluation/functional.test.ts").exists())',
-    'const vectorAbsent=process.env.TASK24_VECTOR_REQUEST===undefined',
-    'if(!networkDenied||!writeDenied||socket||!hiddenGoldAbsent||!vectorAbsent)process.exit(2)',
-    'console.log(JSON.stringify({networkDenied,writeDenied,dockerSocketAbsent:!socket,hiddenGoldAbsent,vectorAbsent}))',
+    "const vectorAbsent=process.env.TASK24_VECTOR_REQUEST===undefined",
+    "if(!networkDenied||!writeDenied||socket||!hiddenGoldAbsent||!vectorAbsent)process.exit(2)",
+    "console.log(JSON.stringify({networkDenied,writeDenied,dockerSocketAbsent:!socket,hiddenGoldAbsent,vectorAbsent}))",
   ].join(";")
   const result = await superviseProcess({
     executable: "D:\\Applications\\Docker\\resources\\bin\\docker.exe",
