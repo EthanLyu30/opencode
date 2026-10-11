@@ -49,6 +49,7 @@ describe("Task24 self-contained technical report", () => {
     expect(html).toContain(".table-wrap{overflow:visible}")
     expect(html).toContain(".dense{table-layout:fixed;width:100%}")
     expect(html).toContain(".dense th,.dense td{overflow-wrap:anywhere}")
+    expect(html).toContain("tr{break-inside:avoid;page-break-inside:avoid}")
   })
 })
 

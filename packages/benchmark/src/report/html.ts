@@ -13,7 +13,7 @@ export function reportHtml(value: ReportModel): string {
 <title>Task24 workflow-effect benchmark</title>
 <style>${styles}
 @page{size:A4;margin:14mm 12mm}
-@media print{.table-wrap{overflow:visible}.dense{table-layout:fixed;width:100%}.dense th,.dense td{overflow-wrap:anywhere}.dense th:first-child{width:24%}}
+@media print{.table-wrap{overflow:visible}tr{break-inside:avoid;page-break-inside:avoid}.dense{table-layout:fixed;width:100%}.dense th,.dense td{overflow-wrap:anywhere}.dense th:first-child{width:24%}}
 </style>
 </head>
 <body>
