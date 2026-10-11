@@ -1465,6 +1465,12 @@ describe("Workflow local execution", () => {
           .where(eq(WorkflowStageTable.id, input.stages[0].id!))
           .run()
           .pipe(Effect.orDie)
+        // An inactive gap between attempts does not mean the workflow has finished.
+        yield* workflow.events({ workflowID: input.id! }).pipe(
+          Stream.filter((event) => event.type === "workflow.succeeded"),
+          Stream.runHead,
+          Effect.timeout("2 seconds"),
+        )
         yield* waitForActive(execution, input.id!, false).pipe(Effect.timeout("2 seconds"))
 
         const detail = yield* workflow.get(input.id!)
