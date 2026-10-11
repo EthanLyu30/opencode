@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, mock } from "bun:test"
+import { afterEach, describe, expect, mock, test } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Schema } from "effect"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { SyncPaths } from "../../src/server/routes/instance/httpapi/groups/sync"
+import { ReplayEvent, HistoryEvent, SyncPaths } from "../../src/server/routes/instance/httpapi/groups/sync"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
 import { Session } from "@/session/session"
 import { resetDatabase } from "../fixture/db"
@@ -22,6 +22,35 @@ afterEach(async () => {
 })
 
 describe("sync HttpApi", () => {
+  test("sync wire codecs retain complete optional batch identity", () => {
+    const history = {
+      id: "evt_sync_batch_codec",
+      aggregate_id: "ses_sync_batch_codec",
+      seq: 0,
+      type: "session.created.1",
+      data: {},
+      batch_id: "sync-batch",
+      batch_index: 0,
+      batch_size: 1,
+    }
+    expect(Schema.decodeUnknownSync(HistoryEvent)(history)).toMatchObject({
+      batch_id: "sync-batch",
+      batch_index: 0,
+      batch_size: 1,
+    })
+    expect(
+      Schema.decodeUnknownSync(ReplayEvent)({
+        id: history.id,
+        aggregateID: history.aggregate_id,
+        seq: history.seq,
+        type: history.type,
+        data: {},
+        batchID: history.batch_id,
+        batchIndex: history.batch_index,
+        batchSize: history.batch_size,
+      }),
+    ).toMatchObject({ batchID: "sync-batch", batchIndex: 0, batchSize: 1 })
+  })
   it.instance(
     "serves sync routes",
     () =>
@@ -47,6 +76,9 @@ describe("sync HttpApi", () => {
           seq: number
           type: string
           data: Record<string, unknown>
+          batch_id?: string | null
+          batch_index?: number | null
+          batch_size?: number | null
         }>
         expect(rows.map((row) => row.aggregate_id)).toContain(session.id)
 
@@ -63,11 +95,60 @@ describe("sync HttpApi", () => {
                 seq: row.seq,
                 type: row.type,
                 data: row.data,
+                ...(row.batch_id == null
+                  ? {}
+                  : {
+                      batchID: row.batch_id,
+                      batchIndex: row.batch_index,
+                      batchSize: row.batch_size,
+                    }),
               })),
           }),
         })
         expect(replayed.status).toBe(200)
         expect(yield* replayed.json).toEqual({ sessionID: session.id })
+        const batch = rows.find((row) => row.aggregate_id === session.id && row.batch_id != null)
+        expect(batch).toBeDefined()
+        if (!batch) throw new Error("missing durable batch fixture")
+        const partial = yield* requestInDirectory(SyncPaths.replay, tmp.directory, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            directory: tmp.directory,
+            events: [
+              {
+                id: batch.id,
+                aggregateID: batch.aggregate_id,
+                seq: batch.seq,
+                type: batch.type,
+                data: batch.data,
+                batchID: batch.batch_id,
+                batchSize: batch.batch_size,
+              },
+            ],
+          }),
+        })
+        expect(partial.status).toBe(400)
+        const divergent = yield* requestInDirectory(SyncPaths.replay, tmp.directory, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            directory: tmp.directory,
+            events: [
+              {
+                id: batch.id,
+                aggregateID: batch.aggregate_id,
+                seq: batch.seq,
+                type: batch.type,
+                data: batch.data,
+                batchID: "not-the-stored-batch",
+                batchIndex: batch.batch_index,
+                batchSize: batch.batch_size,
+              },
+            ],
+          }),
+        })
+        expect(divergent.status).toBe(400)
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )

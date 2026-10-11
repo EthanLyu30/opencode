@@ -3,11 +3,13 @@ import net from "node:net"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { Flag } from "@opencode-ai/core/flag/flag"
+import { Global } from "@opencode-ai/core/global"
 import { Server } from "../../src/server/server"
 import { PtyPaths } from "../../src/server/routes/instance/httpapi/groups/pty"
 import { withTimeout } from "../../src/util/timeout"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
+import { markPluginDependenciesReady } from "../fixture/plugin"
 
 const original = {
   OPENCODE_SERVER_PASSWORD: Flag.OPENCODE_SERVER_PASSWORD,
@@ -305,6 +307,8 @@ describe("HttpApi Server.listen", () => {
   test("plugin client requests reuse the listening server instance", async () => {
     await using tmp = await tmpdir({
       init: async (directory) => {
+        await markPluginDependenciesReady(Global.Path.config)
+        await markPluginDependenciesReady(path.join(directory, ".opencode"))
         const plugin = path.join(directory, "plugin.ts")
         const initialized = path.join(directory, "initialized.txt")
         const completed = path.join(directory, "completed.txt")

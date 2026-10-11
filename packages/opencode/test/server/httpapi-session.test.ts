@@ -424,7 +424,10 @@ describe("session HttpApi", () => {
         cwd: sessionDirectory,
         root: sessionDirectory,
       })
-    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+    }).pipe(
+      Effect.provide(Layer.fresh(TestLLMServer.layer)),
+      Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node)),
+    ),
   )
 
   it.instance(

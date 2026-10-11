@@ -440,7 +440,7 @@ describe("tool.shell permissions", () => {
                 expect(
                   yield* fail(
                     {
-                      command: 'Get-Content "C:../outside.txt"',
+                      command: `Get-Content "${path.parse(tmp).root.slice(0, 2)}../outside.txt"`,
                     },
                     capture(requests, err),
                   ),
@@ -1109,17 +1109,40 @@ describe("tool.shell abort", () => {
     runIn(
       projectRoot,
       Effect.gen(function* () {
+        const temporary = yield* tmpdirScoped()
+        const gate = path.join(temporary, "metadata-observed")
+        const script = path.join(temporary, "metadata-stream.mjs")
+        yield* Effect.promise(() =>
+          Bun.write(
+            script,
+            `
+import fs from "node:fs"
+const gate = ${JSON.stringify(gate)}
+let release
+const observed = new Promise((resolve) => { release = resolve })
+const watcher = fs.watch(${JSON.stringify(temporary)}, () => {
+  if (fs.existsSync(gate)) release()
+})
+console.log("first")
+if (!fs.existsSync(gate)) await observed
+watcher.close()
+console.log("second")
+`,
+          ),
+        )
         const updates: string[] = []
         const result = yield* run(
           {
-            command: `echo first && sleep 0.1 && echo second`,
+            command: `${PS.has(sh()) ? "& " : ""}${bin} --no-env-file ${quote(script.replaceAll("\\", "/"))}`,
           },
           {
             ...ctx,
             metadata: (input) =>
-              Effect.sync(() => {
+              Effect.gen(function* () {
                 const output = (input.metadata as { output?: string })?.output
                 if (output) updates.push(output)
+                if (output?.includes("first") && !output.includes("second"))
+                  yield* Effect.promise(() => Bun.write(gate, "observed"))
               }),
           },
         )

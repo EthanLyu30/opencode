@@ -1242,7 +1242,7 @@ describe("session.compaction.process", () => {
         expect(Exit.isFailure(exit)).toBe(true)
         if (Exit.isFailure(exit)) {
           expect(Cause.hasInterrupts(exit.cause)).toBe(true)
-          expect(Date.now() - start).toBeLessThan(250)
+          expect(Date.now() - start).toBeLessThan(process.platform === "win32" ? 1000 : 250)
         }
       }).pipe(withCompaction({ llm: stub.llmLayer }))
     },

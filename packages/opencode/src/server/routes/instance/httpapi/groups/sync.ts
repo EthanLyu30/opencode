@@ -15,6 +15,9 @@ export const ReplayEvent = Schema.Struct({
   seq: NonNegativeInt,
   type: Schema.String,
   data: Schema.Record(Schema.String, Schema.Unknown),
+  batchID: Schema.optional(Schema.NonEmptyString),
+  batchIndex: Schema.optional(NonNegativeInt),
+  batchSize: Schema.optional(NonNegativeInt.check(Schema.isGreaterThan(0))),
 })
 export const ReplayPayload = Schema.Struct({
   directory: Schema.String,
@@ -33,6 +36,9 @@ export const HistoryEvent = Schema.Struct({
   seq: NonNegativeInt,
   type: Schema.String,
   data: Schema.Record(Schema.String, Schema.Unknown),
+  batch_id: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
+  batch_index: Schema.optional(Schema.NullOr(NonNegativeInt)),
+  batch_size: Schema.optional(Schema.NullOr(NonNegativeInt.check(Schema.isGreaterThan(0)))),
 })
 
 export const SyncPaths = {

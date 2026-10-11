@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer } from "effect"
 import path from "path"
 import { resetDatabase } from "../fixture/db"
@@ -106,6 +107,7 @@ function requestCallback(input: { providerID: string; method: number; headers: H
 function writeProviderAuthPlugin(dir: string) {
   return Effect.gen(function* () {
     const fs = yield* FSUtil.Service
+    yield* Effect.promise(() => markPluginDependenciesReady(Global.Path.config))
     yield* Effect.promise(() => markPluginDependenciesReady(path.join(dir, ".opencode")))
 
     yield* fs.writeWithDirs(
@@ -141,6 +143,7 @@ function writeProviderAuthPlugin(dir: string) {
 function writeProviderAuthValidationPlugin(dir: string) {
   return Effect.gen(function* () {
     const fs = yield* FSUtil.Service
+    yield* Effect.promise(() => markPluginDependenciesReady(Global.Path.config))
     yield* Effect.promise(() => markPluginDependenciesReady(path.join(dir, ".opencode")))
 
     yield* fs.writeWithDirs(
@@ -183,6 +186,7 @@ function writeProviderAuthValidationPlugin(dir: string) {
 function writeFunctionOptionsPlugin(dir: string) {
   return Effect.gen(function* () {
     const fs = yield* FSUtil.Service
+    yield* Effect.promise(() => markPluginDependenciesReady(Global.Path.config))
     yield* Effect.promise(() => markPluginDependenciesReady(path.join(dir, ".opencode")))
 
     yield* fs.writeWithDirs(
@@ -215,6 +219,7 @@ function writeFunctionOptionsPlugin(dir: string) {
 function writeProviderModelsMutationPlugin(dir: string) {
   return Effect.gen(function* () {
     const fs = yield* FSUtil.Service
+    yield* Effect.promise(() => markPluginDependenciesReady(Global.Path.config))
     yield* Effect.promise(() => markPluginDependenciesReady(path.join(dir, ".opencode")))
 
     yield* fs.writeWithDirs(

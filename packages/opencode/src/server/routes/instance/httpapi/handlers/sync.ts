@@ -32,6 +32,9 @@ export const syncHandlers = HttpApiBuilder.group(InstanceHttpApi, "sync", (handl
         seq: event.seq,
         type: event.type,
         data: { ...event.data },
+        ...(event.batchID === undefined ? {} : { batchID: event.batchID }),
+        ...(event.batchIndex === undefined ? {} : { batchIndex: event.batchIndex }),
+        ...(event.batchSize === undefined ? {} : { batchSize: event.batchSize }),
       }))
       const source = payload[0].aggregateID
       yield* Effect.logInfo("sync replay requested", {

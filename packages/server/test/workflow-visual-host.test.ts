@@ -876,9 +876,13 @@ describe("WorkflowVisualHostServer", () => {
               viewport: { name: "mobile", width: 390, height: 844 },
             })
             .pipe(Effect.forkChild)
-          yield* Effect.promise(() => waitUntil(() => runtime.gotoStarted === 1))
-          yield* Fiber.interrupt(first).pipe(Effect.timeout("200 millis"))
-          yield* Effect.promise(() => waitUntil(() => runtime.contextsClosed === 1, 200))
+          yield* Effect.promise(() =>
+            waitUntil(() => runtime.gotoStarted === 1, process.platform === "win32" ? 5000 : 1000),
+          )
+          yield* Fiber.interrupt(first).pipe(Effect.timeout(process.platform === "win32" ? "2 seconds" : "200 millis"))
+          yield* Effect.promise(() =>
+            waitUntil(() => runtime.contextsClosed === 1, process.platform === "win32" ? 2000 : 200),
+          )
           expect(runtime.contextsClosed).toBe(1)
           return yield* host
             .capture({
@@ -886,7 +890,7 @@ describe("WorkflowVisualHostServer", () => {
               stageID: captureStageID,
               viewport: { name: "mobile", width: 390, height: 844 },
             })
-            .pipe(Effect.timeout("500 millis"))
+            .pipe(Effect.timeout(process.platform === "win32" ? "5 seconds" : "500 millis"))
         }),
       ).pipe(Effect.provide(WorkflowVisualHostServer.makeLayer({ hostRoot: temp.path, browser: runtime.runtime }))),
     )
@@ -1372,8 +1376,10 @@ describe("WorkflowVisualHostServer", () => {
           const acquisition = yield* host
             .prepareImplementation({ workflowID, revision: 1, plan })
             .pipe(Effect.forkChild)
-          yield* Effect.promise(() => waitUntil(() => entered, 200))
-          yield* Fiber.interrupt(acquisition).pipe(Effect.timeout("200 millis"))
+          yield* Effect.promise(() => waitUntil(() => entered, process.platform === "win32" ? 5000 : 200))
+          yield* Fiber.interrupt(acquisition).pipe(
+            Effect.timeout(process.platform === "win32" ? "2 seconds" : "200 millis"),
+          )
         }),
       ).pipe(
         Effect.provide(
