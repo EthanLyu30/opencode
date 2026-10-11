@@ -83,7 +83,7 @@ The test excerpts below pin names/assertions rather than repeat package fixture 
 
 **Interfaces:** Produce `normalizeCatalogue(input: unknown, scopeSha256: string): Catalogue`, `mergeObservation(previous: Catalogue | null, observed: Catalogue, now: number): Catalogue`, `eligible(entry: ModelEntry, role: WorkflowRole.Role): boolean`, and `replacePolicy(input: { catalogue: Catalogue, policy: Policy, replacements: ActivationInput["replacements"] }): { catalogue: Catalogue, policy: Policy }`. Schema DTOs and canonical hashes are the only persisted outputs.
 
-- [ ] **Step 1: Write failing pure-policy tests.** Assert a fixture same-family Kimi successor is visible/eligible for all three Kimi roles only with a trusted Chat profile and vision; Kimi 2.x is excluded even if a reply claims flagship lineage. A Flash successor cannot retire Pro; unknown/specialized lineage is unverified; unsupported high/max effort and missing required capabilities fail. Reordered replies and `created` values do not change choices/hashes. For omission: one observation at `t=0`, a second at `t=3_599_999` do not mark missing; a complete successful observation at `t=3_600_000` does. Duplicate IDs/conflicting profiles and unknown persisted fields are rejected.
+- [x] **Step 1: Write failing pure-policy tests.** Assert a fixture same-family Kimi successor is visible/eligible for all three Kimi roles only with a trusted Chat profile and vision; Kimi 2.x is excluded even if a reply claims flagship lineage. A Flash successor cannot retire Pro; unknown/specialized lineage is unverified; unsupported high/max effort and missing required capabilities fail. Reordered replies and `created` values do not change choices/hashes. For omission: one observation at `t=0`, a second at `t=3_599_999` do not mark missing; a complete successful observation at `t=3_600_000` does. Duplicate IDs/conflicting profiles and unknown persisted fields are rejected.
 
 ```ts
 test("rejects Kimi 2.x despite claimed flagship lineage", () => {
@@ -92,10 +92,10 @@ test("rejects Kimi 2.x despite claimed flagship lineage", () => {
 })
 ```
 
-- [ ] **Step 2: Run RED.** From `packages/core`: `bun test test/workflow-model-catalog-policy.test.ts`; verify failures concern missing APIs/incorrect assertions, not fixture setup.
-- [ ] **Step 3: Implement the DTOs, profile descriptors and pure functions with exact spec constants.** Use hash/secret-guard conventions, reject backwards observation time, never parse generation/order from arbitrary model IDs. The Kimi 2.x deny policy wins over alleged lineage. A replacement requires verified lineage and cannot replace a newer selection with its predecessor. Descriptor definitions belong to Schema so both Core source verification and the later LLM binding use one dependency-safe authority.
-- [ ] **Step 4: Run GREEN/typechecks.** The new policy test passes; `bun typecheck` in Schema and Core passes.
-- [ ] **Step 5: Commit/push.** Stage only MC1 files; `feat(workflow): define model catalogue eligibility` and push `fork/dev`.
+- [x] **Step 2: Run RED.** From `packages/core`: `bun test test/workflow-model-catalog-policy.test.ts`; verify failures concern missing APIs/incorrect assertions, not fixture setup.
+- [x] **Step 3: Implement the DTOs, profile descriptors and pure functions with exact spec constants.** Use hash/secret-guard conventions, reject backwards observation time, never parse generation/order from arbitrary model IDs. The Kimi 2.x deny policy wins over alleged lineage. A replacement requires verified lineage and cannot replace a newer selection with its predecessor. Descriptor definitions belong to Schema so both Core source verification and the later LLM binding use one dependency-safe authority.
+- [x] **Step 4: Run GREEN/typechecks.** The new policy test passes; `bun typecheck` in Schema and Core passes.
+- [x] **Step 5: Commit/push.** Stage only MC1 files; `feat(workflow): define model catalogue eligibility` and push `fork/dev`.
 
 ### Task MC2: Implement First-Party Discovery and Crash-Safe Snapshot Storage
 
@@ -271,3 +271,16 @@ Before running, set a new task-specific `OPENCODE_VERSION` and the existing veri
 - Spec coverage: catalogue/source trust and lifecycle → MC1/MC2; confirmation/retirement → MC3; adapters → MC4; immutable admissions/recovery/seals → MC5; shared CLI/API/roots → MC6; process/security/deployment/cleanup → MC7. All twelve spec acceptance cases are assigned; the other three readiness subsystems are excluded.
 - Review Focus cases have explicit owning test steps. All new DTOs/services/factories are defined above before consumption. No new SQL schema, mutable global capability table, silent model fallback, paid probe or historical-receipt reinterpretation is planned.
 - Execution method is native, preserved from the prior workflow. The next gate is the user's written-plan review; approval starts MC1, not the other readiness subsystems or a paid pilot.
+
+## Execution checkpoint — MC1, 2026-10-11
+
+The user approved the written plan. MC1 source is committed and pushed as `22fc28b70` (`feat(workflow): define model catalogue eligibility`); only its four new files changed. Existing Task2–9 execution algorithms, provider adapters, production admission and deployment remain unchanged. This is not a finished automatic-discovery feature: MC2–MC7 have not been implemented or reviewed.
+
+- RED: missing module, then API stubs produced eight intended behavior failures; pure implementation passed twelve tests. Additional cross-provider evidence and cyclic/cross-family lineage tests failed before their fixes.
+- GREEN: catalogue policy 14 pass / 0 fail / 51 assertions. Catalogue + existing routing/secret-guard regression: 64 pass / 0 fail / 169 assertions. Schema suite: 37 pass / 0 fail / 143 assertions. Schema and Core typechecks pass; the push hook completed 31/31 workspace typecheck tasks.
+- Full Core baseline, started before MC1 implementation: 1,627 pass, 7 skip, 1 fail, 1 error, 5,016 assertions across 178 files (612.92 seconds). The failure is `Snapshot > isolates snapshot indexes by canonical Git worktree`, at its existing 30-second timeout; cleanup then produced an unhandled ENOENT for that test's snapshot directory. This is not reported as a green full suite.
+- The unchanged Snapshot test independently reproduced the 30-second timeout. A temporary diagnostic running the same steps/assertions with a longer observation bound passed all four assertions in 33.79 seconds: setup 4.67 seconds, first capture 18.57 seconds, second capture 30.83 seconds, separate Location lookup 33.77 seconds. No production or existing test source was changed by the diagnostic.
+- Before proceeding to MC2, request user direction on a narrowly scoped Windows-only deadline correction for this existing test. Do not silently widen the approved MC1 file list or weaken its assertions.
+- No real credentials or `.env.local` were read; no authenticated discovery, generation or paid probe ran. Catalogue fixtures are invented offline data. All task-owned runtime/test roots were on D. Temporary diagnostic source/output are removed after this evidence is recorded; the in-flight plan ledger and full baseline log remain needed for continuation.
+
+Public source follow-up, without credentials: Kimi's [official model-list reference](https://platform.kimi.com/docs/api/list-models) is now readable and documents `/v1/models` and model capability fields. Its [overview](https://platform.kimi.com/docs/api/overview) also lists a Responses endpoint. MC2 can use that first-party discovery-schema evidence; this does not prove account access, successor lineage, pricing or a new tested wire contract, and does not authorize changing the agreed historical Chat profile.
