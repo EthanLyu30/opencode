@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-11
 
-**Status:** Approved for implementation planning on 2026-10-11. The user adopted the production-host extension route and explicitly confirmed “自动发现、确认启用” after the written-spec handoff, then approved its implementation plan. MC1 contracts/pure rules are committed as `22fc28b70`; MC2–MC7 and deployment remain pending. See the implementation plan's execution checkpoint for verification and the existing Snapshot baseline timeout gate.
+**Status:** Approved for implementation planning on 2026-10-11. The user adopted the production-host extension route and explicitly confirmed “自动发现、确认启用” after the written-spec handoff, then approved its implementation plan. MC1 contracts/pure rules are committed as `22fc28b70`; MC2 trusted discovery/storage is committed and pushed as `c9d89a014`. The user-approved Windows-only Snapshot test deadline correction is `6b196530c`; the corrected full Core suite passes. MC3–MC7 and deployment remain pending. See the implementation plan's execution checkpoints for proof and implementation decisions.
 
 ## Intent and place in the readiness work
 
@@ -41,6 +41,8 @@ Use the configured provider's first-party, authenticated model-discovery endpoin
 DeepSeek documents `GET /models` and model metadata such as display name, context/output limits, modalities and supported effort levels. Its published metadata is useful but does not prove every required Responses feature. Cross-check the protocol contract rather than deriving Responses compatibility from an identifier. [DeepSeek model-list reference](https://api-docs.deepseek.com/api/list-models/), [Responses reference](https://api-docs.deepseek.com/api/create-response/).
 
 For Kimi, verify the current first-party model-list endpoint and its actual schema before enabling its discovery adapter. The intended existing CN endpoint is `https://api.moonshot.cn/v1/models`, not a third-party gateway. The Kimi documentation pages attempted during this design were not reliably readable through the documentation reader; no new live catalogue, exact response fields or account access has been verified. Missing discovery metadata remains an explicit unsupported/configuration state, not a fabricated catalogue. [Kimi official documentation entry](https://platform.kimi.com/docs/api/overview).
+
+MC2 follow-up on 2026-10-11: the [first-party model-list reference](https://platform.kimi.com/docs/api/list-models) is now readable and its endpoint/schema projection was reviewed and hashed before parser implementation. Offline tests validate its identity/context/capability fields; no authenticated account access or generation was verified. This documentation evidence does not prove successor lineage, price or an alternate wire contract, and does not change the existing Kimi Chat adapter. Exact source descriptors and hashes are recorded in the implementation plan.
 
 Official release/compatibility metadata establishes model lineage and adapter contracts. Do not rank model IDs lexicographically, infer chronology from list order, treat an arbitrary `created` timestamp as release order, or use a third-party alias as proof of the underlying model.
 
