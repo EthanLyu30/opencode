@@ -127,7 +127,7 @@ test("CAS rejects a second initial publication without changing the head", async
 
 **Interfaces:** Add `Service.activate(input: ActivationInput): Effect<View, CatalogError>` and `Service.snapshot(): Effect<AdmissionSnapshot, CatalogError>`. Activation reloads the exact head under CAS and uses MC1 replacement rules; snapshot expands the three selected families into the seven fixed roles with their exact effort/capability requirements. Bootstrap may preserve the known legacy selections as explicit policy history, but cannot fabricate current availability/prices or activate a newly discovered ID.
 
-- [ ] **Step 1: Write failing activation tests.** Assert discovery alone leaves policy unchanged; explicit replacement publishes catalogue+policy together, hides the predecessor from normal new-task choices and preserves its immutable history. Stale confirmation yields `selection_conflict`. Mixed invalid replacements make no change. The same candidate with changed profile/price requires a fresh confirmation. Unknown price cannot create an eligible metered route; no activation invents a spend approval. Independent family replacement leaves the other two selections fixed. Reverse-generation rollback, Kimi 2.x and unverified lineage are rejected.
+- [x] **Step 1: Write failing activation tests.** Assert discovery alone leaves policy unchanged; explicit replacement publishes catalogue+policy together, hides the predecessor from normal new-task choices and preserves its immutable history. Stale confirmation yields `selection_conflict`. Mixed invalid replacements make no change. The same candidate with changed profile/price requires a fresh confirmation. Unknown price cannot create an eligible metered route; no activation invents a spend approval. Independent family replacement leaves the other two selections fixed. Reverse-generation rollback, Kimi 2.x and unverified lineage are rejected.
 
 ```ts
 test("discovery publishes candidates without activating them", async () => {
@@ -137,10 +137,10 @@ test("discovery publishes candidates without activating them", async () => {
 })
 ```
 
-- [ ] **Step 2: Run RED.** Core `bun test test/workflow-model-catalog-activation.test.ts`.
-- [ ] **Step 3: Implement both service methods.** Inputs contain identifiers/families only; trusted catalogue owns evidence and price/profile bindings. Return a body-free diff to the user surface, not key/provider payloads. No provider generation or mutable global registry is involved.
-- [ ] **Step 4: Run GREEN/typecheck.** Activation suite and MC1/MC2 suites pass; Core `bun typecheck` passes.
-- [ ] **Step 5: Commit/push.** `feat(workflow): confirm model replacements atomically`.
+- [x] **Step 2: Run RED.** Core `bun test test/workflow-model-catalog-activation.test.ts`.
+- [x] **Step 3: Implement both service methods.** Inputs contain identifiers/families only; trusted catalogue owns evidence and price/profile bindings. Return a body-free diff to the user surface, not key/provider payloads. No provider generation or mutable global registry is involved.
+- [x] **Step 4: Run GREEN/typecheck.** Activation suite and MC1/MC2 suites pass; Core `bun typecheck` passes.
+- [x] **Step 5: Commit/push.** `feat(workflow): confirm model replacements atomically`.
 
 ### Task MC4: Bind Dynamic Model IDs to Tested Provider Contracts
 
@@ -320,3 +320,32 @@ Windows-only test deadline correction: `6b196530c` (`test(core): allow Windows w
 MC2 is complete as a trusted, offline-verified discovery/storage foundation, **not** the finished automatic model-selection product. MC3 supplies explicit activation and frozen route snapshots; MC4–MC7 remain unchanged pending tasks. Real account access and changed/new generation contracts still require their distinct opt-in/review gates.
 
 Cleanup limitation: the exact owned test-TEMP root `D:\OpenCode-Model-Catalog-Test-20261011-f8916686` and this plan's `.superpowers/sdd/2026-10-11-opencode-workflow-model-catalog/runtime` directory remain, together with `baseline-core-tests.log`, `task-MC1-tests.log`, `task-MC2-core-tests.log`, `task-MC2-core-corrected-tests.log` and `task-MC2-tests.log`. The removal command was rejected by safety policy before execution; no deletion succeeded and no alternate deletion/move was attempted. These targets join the blocked-cleanup list: do not retry or bypass them. The small in-flight ledger/environment/identity files are still needed for MC3–MC7; retained worker tests are final source fixtures. No user inputs, deployment files, historical campaign or old blocked targets were removed.
+
+## MC3 implementation decisions — 2026-10-11
+
+This implements the confirmed MC3 continuation, not a live model activation. Source scope is `model-catalog/service.ts` plus its new activation integration suite; Schema/Protocol/Client, provider generation adapters, Task2–9 algorithms and deployment remain unchanged.
+
+1. Stable expired confirmation frames require explicit refresh/reconfirmation. Volatile credential references perform fresh metadata discovery **without an intermediate head publication**. The service compares the post-replacement choices' model/profile/price/evidence bindings to the displayed frame, ignoring observation timestamps and local retirement bookkeeping, then publishes the catalogue/policy once under the original CAS. Changed bindings require a new confirmation; an absent old predecessor can retire if every new selection is freshly available and MC1 verifies its lineage. This avoids a synthetic conflict on every unstable-reference confirmation without silently switching models.
+2. Snapshot reads refresh expired/volatile metadata before expanding the three family choices into seven exact role routes. A volatile account cannot reuse an omitted model from cached observations. Missing/deprecation history still follows MC1; successful new metadata does not activate candidates or grant a spend approval. The extra work is metadata GET, not generation.
+3. The existing Store `before_head` private runtime hook re-resolves trusted identity inside Flock, with the outer AbortSignal propagated. Cancellation during that final check releases Flock and leaves the old head intact. No store/lease/event algorithm or public request field was added. Future runtime composition must preserve this identity/cancellation fence.
+4. The approved return type stays the sanitized `View`; MC6 derives a body-free confirmation diff from hashed before/after views and retains the expected head the user saw. No undeclared diff field, credential or raw provider payload is added.
+
+All fixtures use invented successor IDs, prices and reviewed contracts. They do not prove current account access or model generation compatibility. Real task admission/continuation pinning remains MC5; CLI/API confirmation and deployment remain MC6/MC7.
+
+MC3 initial verification checkpoint: 34 new activation/snapshot tests pass; MC1–MC3 total 84 pass / 0 fail / 346 assertions; with existing routing/secret guard 134 pass / 0 fail / 464 assertions. Core typecheck and touched-file format/diff/zero-key-shape checks pass. The first full Core run reported 1,711 pass / 7 skip / 1 fail, 5,358 assertions across 182 files (1,719 tests, 726.26 seconds). The failure was the unchanged `Workflow local execution > prevents stale success when heartbeat renewal loses the lease`, independently reproduced: it observes the transient inactive gap between attempts and checks for `succeeded` while the durable stage is still `retry_wait`. No MC3 module is imported by that test/executor; this initial result is not a green full regression.
+
+The user subsequently authorized **only** the old test's synchronization correction. The correction adds a bounded wait for `workflow.succeeded` before the existing inactivity check; every assertion, the five-second outer bound, fixture executor and business algorithm remain unchanged. Fresh RED reproduced `retry_wait`; GREEN passed the original seven assertions (1 pass / 0 fail), then the complete execution test file passed 26 tests / 0 fail / 113 assertions. This is the sole approved extension to MC3's source/test file list; final verification and source commits follow below.
+
+## Execution checkpoint — MC3, 2026-10-11
+
+MC3 is committed and pushed to `fork/dev`: [54a1500a93d139841819badf1da16a42a788f17d](https://github.com/EthanLyu30/opencode/commit/54a1500a93d139841819badf1da16a42a788f17d) (`feat(workflow): confirm model replacements atomically`). The separate authorized test correction is `eb19a4106` (`test(workflow): await terminal lease recovery`). Work stayed directly on `dev` with no new worktree/merge, and `dev` equaled `fork/dev` at this source checkpoint.
+
+- Final task completion run: 34 activation/snapshot tests pass / 0 fail / 165 assertions. MC1–MC3: 84 pass / 0 fail / 346 assertions. Including existing routing/secret guard: 134 pass / 0 fail / 464 assertions.
+- Corrected **full Core regression**: 1,712 pass / 7 skip / **0 fail**, 5,364 assertions, 1,719 tests across 182 files, 688.72 seconds. This supersedes the initial red run, not by suppressing a test but by the separately approved event-based synchronization correction.
+- Core typecheck and touched-file formatter/diff checks pass. Both MC3 source/test files contain zero key-shaped values. Source push hook: 31/31 typecheck tasks succeeded (Core fresh, 30 unchanged cache hits).
+- Only the new catalogue service behavior, its activation test and the six-line authorized old-test synchronization changed. Existing Task2–9 scheduler/lease/retry/event/replay business algorithms, Schema/Protocol/Client, provider generation contracts, historical benchmark seals and deployment remain unchanged.
+- All model/price/contract proofs are deterministic offline fixtures. No real keys or `.env.local` were read, no authenticated discovery or paid generation was performed, and no actual production model was selected.
+
+This completes MC3's explicit atomic replacement and seven-role snapshot foundation. Provider binding remains MC4, actual durable admission/recovery pinning remains MC5, CLI/API composition remains MC6 and final review/redeployment remains MC7. Completing these source methods is not a claim that the deployed r4 already exposes the new model-selection feature.
+
+MC3 cleanup limitation: safety policy rejected both removal requests before execution: (1) the newly owned `D:\OpenCode-Model-Catalog-MC3-Tests-20261011-926c2e75` and this plan's `runtime-mc3` directory; (2) the five owned `task-MC3-{red-tests,boundary-red-tests,core-tests,core-corrected-tests,tests}.log` files. All remain and must not be retried or bypassed. Read-only inventory showed 15 files / <0.01 MiB in the test-TEMP root, 68 files / 9.73 MiB in runtime-mc3, and no reparse points in either tree. Earlier blocked targets and user-owned/deployment/campaign files were untouched. The small ledger/environment/identity files remain needed for MC4–MC7 continuation.

@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-11
 
-**Status:** Approved for implementation planning on 2026-10-11. The user adopted the production-host extension route and explicitly confirmed “自动发现、确认启用” after the written-spec handoff, then approved its implementation plan. MC1 contracts/pure rules are committed as `22fc28b70`; MC2 trusted discovery/storage is committed and pushed as `c9d89a014`. The user-approved Windows-only Snapshot test deadline correction is `6b196530c`; the corrected full Core suite passes. MC3–MC7 and deployment remain pending. See the implementation plan's execution checkpoints for proof and implementation decisions.
+**Status:** Approved for implementation planning on 2026-10-11. The user adopted the production-host extension route and explicitly confirmed “自动发现、确认启用” after the written-spec handoff, then approved its implementation plan. MC1 contracts/pure rules are committed as `22fc28b70`; MC2 trusted discovery/storage is committed and pushed as `c9d89a014`; MC3 atomic activation and route snapshots are committed and pushed as `54a1500a9`. The separately authorized test-only corrections are `6b196530c` (Windows Snapshot deadline) and `eb19a4106` (lease test terminal-event synchronization); the corrected full Core suite passes. MC4–MC7 and deployment remain pending. See the implementation plan's execution checkpoints for proof and implementation decisions.
 
 ## Intent and place in the readiness work
 
