@@ -33,6 +33,35 @@ import { WorkflowCommand } from "./cli/cmd/workflow"
 
 const args = hideBin(process.argv)
 
+// Private retained acceptance fixture, never a public provider/credential override.
+if (args[0] === "--internal-catalogue-probe") {
+  if (
+    (args.length !== 4 && args.length !== 5) ||
+    process.env.NODE_ENV !== "test" ||
+    process.env.RECORD !== "false" ||
+    process.env.OPENCODE_DISABLE_MODELS_FETCH !== "true" ||
+    process.env.OPENCODE_DISABLE_WORKFLOW_MODEL_DISCOVERY !== "true" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(args[2] ?? "") ||
+    process.env.OPENCODE_PRIVATE_CATALOGUE_PROBE !== args[2]
+  ) {
+    process.stderr.write("Private catalogue probe unavailable\n")
+    process.exit(1)
+  }
+  for (const name of ["MOONSHOT_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"]) delete process.env[name]
+  try {
+    const { runPrivateCatalogueWorker } = await import("../../server/test/fixtures/workflow-model-catalog-worker")
+    await runPrivateCatalogueWorker(args.slice(1))
+  } catch (error) {
+    process.stderr.write(
+      error instanceof Error && error.message.startsWith("Private catalogue fixture:")
+        ? error.message + "\n"
+        : "Private catalogue probe failed\n",
+    )
+    process.exit(1)
+  }
+  process.exit(0)
+}
+
 function show(out: string) {
   const text = out.trimStart()
   if (!text.startsWith("opencode ")) {
