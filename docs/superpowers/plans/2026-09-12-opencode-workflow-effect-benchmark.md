@@ -800,6 +800,19 @@ Durable runs and transitive evidence: `D:\OpenCode-Benchmark\Task24\runs\offline
 
 Paid-gate handoff: proposed pilot remains `private-analytics-dashboard`, `d2c-g29-spelling-bee`, and `swe-chartjs__chart.js-10157` (24 cells, concurrency 1). Historical frozen worst-case proposal is Kimi CNY 120 and DeepSeek USD 6.336, excluding minimal paid preflight; it is neither a current-price quote nor authorization. Task24.12–14 remain pending. First complete the nonvisual/library entry, shared reproducible preview/evaluation adapters, and actual live pilot execution loop; refreeze and rerun Task24A, revalidate prices, and obtain separate native-currency approval before any paid request.
 
+Completion ledger: `task-done` independently reran `campaign verify` successfully and recorded Task24.11 complete for source range `2f311bc..2c2a979`. All chronological rulings and verification evidence have been preserved in this tracked plan.
+
+Cleanup status (2026-10-11): the native PowerShell scoped cleanup command was rejected by environment policy before process creation; none of its targets were deleted. Do not retry through another shell/helper or bypass that restriction. Final artifacts, deployment/rollback, sealed graphs and uncertain/user-owned inputs are preserved. These Codex-owned intermediates remain:
+
+- Under `D:\OpenCode-Benchmark\Task24\reports`: `layout-qa-20261011`, `layout-qa-fixed-20261011`, `layout-qa-final-20261011`, `pagination-qa-20261011`.
+- Under `D:\OpenCode-Benchmark\Task24\tmp\pdfs`: the same four QA directory names, plus `final-34a01bc0-20261011` and `final-a401b41d-20261011`.
+- `D:\OpenCode-Benchmark\Task24\runs\security-diagnostic-3ff7094d-dc31-46bb-8916-7470684d4082` (failed standalone diagnostic, not a final sealed input).
+- `D:\OpenCode-Benchmark\Task24\tmp\materialize-offline-26524836df7303464e0a148d-run-bba38d08452087624e4ab309-aq7Qw5` and `D:\OpenCode-Benchmark\Task24\tmp\materialize-offline-2ffa986c9717a9db418507c8-run-4685343d01f94ab8a9911fa9-cZRl36` (process-death staging copies; completed recovery evidence is retained separately).
+- `D:\OpenCode-Audit\packages\opencode\dist\opencode-windows-x64` (duplicate compile output; its executable hash was verified equal to the deployed r4 hash).
+- `D:\OpenCode-Audit\.superpowers\sdd\2026-09-12-opencode-workflow-effect-benchmark` (task-specific logs, helper scripts, preview inputs and ledger; durable evidence/rulings are summarized above).
+
+Two previously policy-blocked browser roots also remain under `D:\OpenCode-Benchmark\Task24\toolchain\browser`: `80e75363a1b17cf12eb17ab39a909b97db3eab26bbede08ffebaa2b46dab55ee` and `dc2fe6b660fbb34f3f79f92026e8d81cedfe32625bb272d58e0833086e4cdcab`. They are not selected runtimes. Historical campaign graphs and uncertain older temporary directories are intentionally not treated as disposable; preserve their transitive audit evidence until ownership/retention is resolved.
+
 **Files:**
 
 - Create: `packages/benchmark/test/e2e/offline-campaign.test.ts`
