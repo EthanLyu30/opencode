@@ -20,6 +20,7 @@ import { ProjectCopyHandler } from "./handlers/project-copy"
 import { WorkflowHandler } from "./handlers/workflow"
 import { ResponsesHandler } from "./handlers/responses"
 import { ConversationHandler } from "./handlers/conversation"
+import { WorkflowModelHandler } from "./handlers/workflow-model"
 
 export const handlers = Layer.mergeAll(
   HealthHandler,
@@ -29,6 +30,7 @@ export const handlers = Layer.mergeAll(
   WorkflowHandler,
   ResponsesHandler,
   ConversationHandler,
+  WorkflowModelHandler,
   MessageHandler,
   ModelHandler,
   ProviderHandler,

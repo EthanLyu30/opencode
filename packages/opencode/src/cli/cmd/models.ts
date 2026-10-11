@@ -7,7 +7,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 
 export const ModelsCommand = effectCmd({
   command: "models [provider]",
-  describe: "list all available models",
+  describe: "list available models (workflow choices: opencode workflow models)",
   builder: (yargs) =>
     yargs
       .positional("provider", {

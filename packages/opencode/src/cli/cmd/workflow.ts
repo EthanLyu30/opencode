@@ -6,6 +6,8 @@ import { Effect, Schema } from "effect"
 import { writeSync } from "node:fs"
 import { EOL } from "os"
 import { effectCmd } from "../effect-cmd"
+import { WorkflowModelsCommand } from "./workflow-models"
+import { WorkflowModelCatalog } from "@opencode-ai/schema/workflow-model-catalog"
 
 const DEFAULT_BUDGET = Object.freeze({
   maxTokens: 20_000,
@@ -76,6 +78,7 @@ type ParsedEvent = {
 }
 
 type Stage = {
+  readonly modelLabel?: string
   readonly role: Role
   readonly revision: number
 }
@@ -378,7 +381,7 @@ export const WorkflowCommand = effectCmd({
   command: "workflow",
   describe: "run production workflows",
   instance: false,
-  builder: (yargs: Argv) => yargs.command(WorkflowRunCommand).demandCommand(),
+  builder: (yargs: Argv) => yargs.command(WorkflowRunCommand).command(WorkflowModelsCommand).demandCommand(),
   handler: Effect.fn("Cli.workflow")(function* () {}),
 })
 
@@ -444,12 +447,25 @@ function parseHistory(input: unknown, workflowID: string) {
 }
 
 function recordStages(data: Record<string, unknown>, stages: Map<string, Stage>) {
+  const selection = isRecord(data.input) ? data.input["workflow.model-selection.v1"] : undefined
+  const snapshot =
+    selection === undefined
+      ? undefined
+      : Schema.decodeUnknownSync(WorkflowModelCatalog.AdmissionSnapshot)(
+          isRecord(selection) ? selection.snapshot : undefined,
+        )
   if (!Array.isArray(data.stages)) throw new ObservationError("Workflow stage definitions are missing")
   for (const input of data.stages) {
     if (!isRecord(input) || !isRecord(input.input) || typeof input.id !== "string" || !isRole(input.type)) continue
     const revision = input.input.revision
     if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) continue
-    stages.set(input.id, { role: input.type, revision })
+    stages.set(input.id, {
+      role: input.type,
+      revision,
+      ...(snapshot
+        ? { modelLabel: `${snapshot.routes[input.type].providerID}/${snapshot.routes[input.type].modelID}` }
+        : {}),
+    })
   }
 }
 
@@ -468,7 +484,7 @@ function progressLine(event: ParsedEvent, stages: Map<string, Stage>): string | 
       "workflow.stage.cancelled": "cancelled",
     }[event.type]
     if (!action) return undefined
-    return `${roles[stage.role]} ${stage.role} r${stage.revision} ${action}`
+    return `${stage.modelLabel ?? roles[stage.role]} ${stage.role} r${stage.revision} ${action}`
   }
   if (event.type === "workflow.artifact.created") {
     const stage = typeof event.data.stageID === "string" ? stages.get(event.data.stageID) : undefined

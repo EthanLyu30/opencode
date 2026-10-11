@@ -79,6 +79,11 @@ import type {
   ConversationsAppendItemOutput,
   ConversationsItemsInput,
   ConversationsItemsOutput,
+  WorkflowModelsListOutput,
+  WorkflowModelsRefreshInput,
+  WorkflowModelsRefreshOutput,
+  WorkflowModelsActivateInput,
+  WorkflowModelsActivateOutput,
   MessagesListInput,
   MessagesListOutput,
   ModelsListInput,
@@ -854,6 +859,43 @@ export function make(options: ClientOptions) {
             path: `/v1/conversations/${encodeURIComponent(input.conversationID)}/items`,
             successStatus: 200,
             declaredStatuses: [404, 401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+    },
+    workflowModels: {
+      list: (requestOptions?: RequestOptions) =>
+        request<{ readonly data: WorkflowModelsListOutput }>(
+          {
+            method: "GET",
+            path: `/api/workflow-models`,
+            successStatus: 200,
+            declaredStatuses: [400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      refresh: (input: WorkflowModelsRefreshInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: WorkflowModelsRefreshOutput }>(
+          {
+            method: "POST",
+            path: `/api/workflow-models/refresh`,
+            body: { force: input["force"] },
+            successStatus: 200,
+            declaredStatuses: [400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      activate: (input: WorkflowModelsActivateInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: WorkflowModelsActivateOutput }>(
+          {
+            method: "POST",
+            path: `/api/workflow-models/activate`,
+            body: { expectedHeadSha256: input["expectedHeadSha256"], replacements: input["replacements"] },
+            successStatus: 200,
+            declaredStatuses: [400, 401],
             empty: false,
           },
           requestOptions,

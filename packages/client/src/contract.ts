@@ -22,6 +22,7 @@ export const groupNames = {
   "server.agent": "agents",
   "server.session": "sessions",
   "server.workflow": "workflows",
+  "server.workflowModels": "workflowModels",
   "server.responses": "responses",
   "server.conversation": "conversations",
   "server.message": "messages",

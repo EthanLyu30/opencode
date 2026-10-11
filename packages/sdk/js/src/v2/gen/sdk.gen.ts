@@ -24,6 +24,7 @@ import type {
   ConfigProvidersResponses,
   ConfigUpdateErrors,
   ConfigUpdateResponses,
+  DesignArtifactSha256,
   EventSubscribeResponses,
   EventTuiCommandExecute,
   EventTuiPromptAppend,
@@ -178,6 +179,12 @@ import type {
   ResponsesConversationCreateInput,
   ResponsesConversationItemAppendPayload,
   ResponsesCreatePayload,
+  ServerWorkflowModelsWorkflowModelsActivateErrors,
+  ServerWorkflowModelsWorkflowModelsActivateResponses,
+  ServerWorkflowModelsWorkflowModelsListErrors,
+  ServerWorkflowModelsWorkflowModelsListResponses,
+  ServerWorkflowModelsWorkflowModelsRefreshErrors,
+  ServerWorkflowModelsWorkflowModelsRefreshResponses,
   SessionAbortErrors,
   SessionAbortResponses,
   SessionChildrenErrors,
@@ -440,6 +447,10 @@ import type {
   VcsStatusResponses,
   WorkflowBudget,
   WorkflowCreateInput,
+  WorkflowModelCatalogModelId,
+  WorkflowModelCatalogProviderId,
+  WorkflowModelCatalogRefreshInput,
+  WorkflowModelCatalogSelectedFamily,
   WorkflowVisualBuildCreateErrors,
   WorkflowVisualBuildCreateInput,
   WorkflowVisualBuildCreateResponses,
@@ -4542,6 +4553,9 @@ export class Sync extends HeyApiClient {
         data: {
           [key: string]: unknown
         }
+        batchID?: string
+        batchIndex?: number
+        batchSize?: number
       }>
     },
     options?: Options<never, ThrowOnError>,
@@ -7676,6 +7690,94 @@ export class V1 extends HeyApiClient {
   }
 }
 
+export class WorkflowModels extends HeyApiClient {
+  public list<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<
+      ServerWorkflowModelsWorkflowModelsListResponses,
+      ServerWorkflowModelsWorkflowModelsListErrors,
+      ThrowOnError
+    >({ url: "/api/workflow-models", ...options })
+  }
+
+  public refresh<ThrowOnError extends boolean = false>(
+    parameters: {
+      workflowModelCatalogRefreshInput: WorkflowModelCatalogRefreshInput
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [{ args: [{ key: "workflowModelCatalogRefreshInput", map: "body" }] }],
+    )
+    return (options?.client ?? this.client).post<
+      ServerWorkflowModelsWorkflowModelsRefreshResponses,
+      ServerWorkflowModelsWorkflowModelsRefreshErrors,
+      ThrowOnError
+    >({
+      url: "/api/workflow-models/refresh",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  public activate<ThrowOnError extends boolean = false>(
+    parameters?: {
+      expectedHeadSha256?: DesignArtifactSha256
+      replacements?: Array<{
+        family: WorkflowModelCatalogSelectedFamily
+        providerID: WorkflowModelCatalogProviderId
+        modelID: WorkflowModelCatalogModelId
+      }>
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "body", key: "expectedHeadSha256" },
+            { in: "body", key: "replacements" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      ServerWorkflowModelsWorkflowModelsActivateResponses,
+      ServerWorkflowModelsWorkflowModelsActivateErrors,
+      ThrowOnError
+    >({
+      url: "/api/workflow-models/activate",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
+export class WorkflowModels2 extends HeyApiClient {
+  private _workflowModels?: WorkflowModels
+  get workflowModels(): WorkflowModels {
+    return (this._workflowModels ??= new WorkflowModels({ client: this.client }))
+  }
+}
+
+export class Server extends HeyApiClient {
+  private _workflowModels?: WorkflowModels2
+  get workflowModels(): WorkflowModels2 {
+    return (this._workflowModels ??= new WorkflowModels2({ client: this.client }))
+  }
+}
+
 export class OpencodeClient extends HeyApiClient {
   public static readonly __registry = new HeyApiRegistry<OpencodeClient>()
 
@@ -7827,5 +7929,10 @@ export class OpencodeClient extends HeyApiClient {
   private _v1?: V1
   get v1(): V1 {
     return (this._v1 ??= new V1({ client: this.client }))
+  }
+
+  private _server?: Server
+  get server(): Server {
+    return (this._server ??= new Server({ client: this.client }))
   }
 }

@@ -618,6 +618,7 @@ await Bun.write(Bun.argv.at(-1), lines.length === 0 ? "" : `${lines}\n`)
   $actualEnvironment = Read-EnvironmentDump $environmentDump
   $expectedEnvironment = [ordered]@{
     OPENCODE_WORKFLOW_HOST_ROOT = $deploymentRoot
+    OPENCODE_WORKFLOW_MODEL_CATALOG_ROOT = Join-Path $deploymentRoot "data\workflow-model-catalog"
     OPENCODE_WORKFLOW_HOST_DATA = Join-Path $deploymentRoot "data\workflow-host"
     OPENCODE_WORKFLOW_HOST_RUNTIME = Join-Path $deploymentRoot "runtime\playwright"
     OPENCODE_WORKFLOW_HOST_CACHE = Join-Path $deploymentRoot "cache\playwright"
@@ -629,7 +630,7 @@ await Bun.write(Bun.argv.at(-1), lines.length === 0 ? "" : `${lines}\n`)
     OPENCODE_WORKFLOW_SANDBOX_CONFIG = Join-Path $deploymentRoot "config\docker"
     OPENCODE_WORKFLOW_SANDBOX_TEMP = Join-Path $deploymentRoot "tmp\workflow-sandbox"
   }
-  Assert-Equal $actualEnvironment.Count 11 "Launcher did not export exactly eleven workflow-host variables"
+  Assert-Equal $actualEnvironment.Count 12 "Launcher did not export exactly twelve workflow-host/catalogue variables"
   foreach ($entry in $expectedEnvironment.GetEnumerator()) {
     Assert-Equal $actualEnvironment[$entry.Key] $entry.Value "Launcher exported the wrong $($entry.Key)"
   }

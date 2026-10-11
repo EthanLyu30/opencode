@@ -114,6 +114,7 @@ run production workflows
 
 Commands:
   opencode workflow run <prompt>  run a production visual workflow
+  opencode workflow models        list and confirm workflow model choices
 
 Options:
   -h, --help        show help                                                              [boolean]
@@ -264,7 +265,7 @@ Options:
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode models --help 1`] = `
 "opencode models [provider]
 
-list all available models
+list available models (workflow choices: opencode workflow models)
 
 Positionals:
   provider  provider ID to filter models by                                                 [string]
@@ -606,12 +607,53 @@ Positionals:
   prompt  workflow prompt                                                        [string] [required]
 
 Options:
+  -h, --help           show help                                                           [boolean]
+  -v, --version        show version number                                                 [boolean]
+      --print-logs     print logs to stderr                                                [boolean]
+      --log-level      log level                [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure           run without external plugins                                        [boolean]
+      --format         output format      [string] [choices: "default", "json"] [default: "default"]
+      --budget         workflow budget as validated JSON                                    [string]
+      --visual-budget  visual workflow budget as validated JSON                             [string]"
+`;
+
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode workflow models --help 1`] = `
+"opencode workflow models
+
+list and confirm workflow model choices
+
+Commands:
+  opencode workflow models activate <family>          confirm a workflow model replacement
+  <modelID>
+
+Options:
   -h, --help        show help                                                              [boolean]
   -v, --version     show version number                                                    [boolean]
       --print-logs  print logs to stderr                                                   [boolean]
       --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
       --pure        run without external plugins                                           [boolean]
-      --format      output format         [string] [choices: "default", "json"] [default: "default"]"
+      --refresh                                                           [boolean] [default: false]
+      --json                                                              [boolean] [default: false]"
+`;
+
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode workflow models activate --help 1`] = `
+"opencode workflow models activate <family> <modelID>
+
+confirm a workflow model replacement
+
+Positionals:
+  family            [string] [required] [choices: "kimi-flagship", "deepseek-pro", "deepseek-flash"]
+  modelID                                                                        [string] [required]
+
+Options:
+  -h, --help        show help                                                              [boolean]
+  -v, --version     show version number                                                    [boolean]
+      --print-logs  print logs to stderr                                                   [boolean]
+      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure        run without external plugins                                           [boolean]
+      --refresh                                                           [boolean] [default: false]
+      --json                                                              [boolean] [default: false]
+      --yes                                                               [boolean] [default: false]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode github install --help 1`] = `

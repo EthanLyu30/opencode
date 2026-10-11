@@ -11,7 +11,7 @@ import { createClient } from "@hey-api/openapi-ts"
 
 const opencode = path.resolve(dir, "../../opencode")
 
-await $`bun dev generate > ${dir}/openapi.json`.cwd(opencode)
+await $`bun --no-env-file run --conditions=browser ./src/index.ts generate > ${dir}/openapi.json`.cwd(opencode)
 
 const document = (await Bun.file("./openapi.json").json()) as {
   components?: { schemas?: Record<string, unknown> }
@@ -112,8 +112,10 @@ if (sseTypesPatched === sseTypesSource) {
 }
 await Bun.write(sseTypesPath, sseTypesPatched)
 
-await $`bun prettier --write src/gen`
-await $`bun prettier --write src/v2`
-await $`rm -rf dist`
-await $`bun tsc`
+await $`bun --no-env-file prettier --write src/gen`
+await $`bun --no-env-file prettier --write src/v2`
+if (!process.argv.includes("--generate-only")) {
+  await $`rm -rf dist`
+  await $`bun --no-env-file tsc`
+}
 await $`rm openapi.json`

@@ -1504,7 +1504,7 @@ export type GlobalEvent = {
                 expectedStatus: "leased" | "running"
                 observedLeaseExpiresAt: number
               }
-          reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+          reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required" | "workflow_model_required"
           failure?: WorkflowFailure
           usage?: WorkflowUsage
         }
@@ -4910,7 +4910,7 @@ export type SyncEventWorkflowApprovalRequested = {
             expectedStatus: "leased" | "running"
             observedLeaseExpiresAt: number
           }
-      reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+      reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required" | "workflow_model_required"
       failure?: WorkflowFailure
       usage?: WorkflowUsage
     }
@@ -6761,7 +6761,7 @@ export type WorkflowApprovalRequested = {
           expectedStatus: "leased" | "running"
           observedLeaseExpiresAt: number
         }
-    reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+    reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required" | "workflow_model_required"
     failure?: WorkflowFailure
     usage?: WorkflowUsage
   }
@@ -7268,6 +7268,31 @@ export type ResponsesConversationItem = {
     [key: string]: unknown
   }
 }
+
+export type DesignArtifactSha256 = string
+
+export type WorkflowModelCatalogHead = {
+  schemaVersion: 1
+  scopeSha256: DesignArtifactSha256
+  generation: number
+  catalogueSha256: DesignArtifactSha256
+  policySha256: DesignArtifactSha256
+  sha256: DesignArtifactSha256
+}
+
+export type WorkflowModelCatalogProviderId = "kimi" | "deepseek"
+
+export type WorkflowModelCatalogModelId = string
+
+export type WorkflowModelCatalogFamily = "kimi-flagship" | "deepseek-pro" | "deepseek-flash" | "unknown"
+
+export type WorkflowRoleProtocol = "openai-chat" | "openai-responses"
+
+export type WorkflowModelCatalogRefreshInput = {
+  force: boolean
+}
+
+export type WorkflowModelCatalogSelectedFamily = "kimi-flagship" | "deepseek-pro" | "deepseek-flash"
 
 export type ModelApi =
   | {
@@ -10345,7 +10370,7 @@ export type EventWorkflowApprovalRequested = {
           expectedStatus: "leased" | "running"
           observedLeaseExpiresAt: number
         }
-    reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required"
+    reason: "ambiguous_execution" | "budget_exhausted" | "workflow_location_required" | "workflow_model_required"
     failure?: WorkflowFailure
     usage?: WorkflowUsage
   }
@@ -14300,6 +14325,9 @@ export type SyncReplayData = {
       data: {
         [key: string]: unknown
       }
+      batchID?: string
+      batchIndex?: number
+      batchSize?: number
     }>
   }
   path?: never
@@ -14395,6 +14423,9 @@ export type SyncHistoryListResponses = {
     data: {
       [key: string]: unknown
     }
+    batch_id?: string
+    batch_index?: number
+    batch_size?: number
   }>
 }
 
@@ -16523,6 +16554,292 @@ export type V1ConversationAppendItemResponses = {
 
 export type V1ConversationAppendItemResponse =
   V1ConversationAppendItemResponses[keyof V1ConversationAppendItemResponses]
+
+export type ServerWorkflowModelsWorkflowModelsListData = {
+  body?: never
+  path?: never
+  query?: never
+  url: "/api/workflow-models"
+}
+
+export type ServerWorkflowModelsWorkflowModelsListErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type ServerWorkflowModelsWorkflowModelsListError =
+  ServerWorkflowModelsWorkflowModelsListErrors[keyof ServerWorkflowModelsWorkflowModelsListErrors]
+
+export type ServerWorkflowModelsWorkflowModelsListResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: {
+      head: WorkflowModelCatalogHead
+      catalogue: {
+        schemaVersion: 1
+        scopeSha256: DesignArtifactSha256
+        observedAt: number
+        models: Array<{
+          providerID: WorkflowModelCatalogProviderId
+          modelID: WorkflowModelCatalogModelId
+          displayName: string
+          family: WorkflowModelCatalogFamily
+          predecessor: WorkflowModelCatalogModelId
+          advertisedRevision: string
+          contextWindow: number
+          maxOutputTokens: number
+          capabilities: Array<string>
+          effortLevels: Array<string>
+          protocol: WorkflowRoleProtocol
+          adapterProfileID: string
+          adapterProfileSha256: DesignArtifactSha256
+          priceSha256: DesignArtifactSha256
+          evidence: Array<{
+            url: string
+            sha256: DesignArtifactSha256
+            observedAt: number
+            contractRevision: string
+          }>
+          availability: "available" | "missing" | "unknown"
+          compatibility: "unverified" | "supported" | "incompatible"
+          lifecycle: "current" | "superseded" | "deprecated"
+          missingObservation: {
+            firstAt: number
+            lastAt: number
+            count: number
+          }
+        }>
+        sha256: DesignArtifactSha256
+      }
+      policy: {
+        schemaVersion: 1
+        scopeSha256: DesignArtifactSha256
+        choices: {
+          "kimi-flagship": {
+            providerID: WorkflowModelCatalogProviderId
+            modelID: WorkflowModelCatalogModelId
+          }
+          "deepseek-pro": {
+            providerID: WorkflowModelCatalogProviderId
+            modelID: WorkflowModelCatalogModelId
+          }
+          "deepseek-flash": {
+            providerID: WorkflowModelCatalogProviderId
+            modelID: WorkflowModelCatalogModelId
+          }
+        }
+        sha256: DesignArtifactSha256
+      }
+      stale: boolean
+      refreshStatus: "idle" | "refreshing" | "failed"
+      failureCode: string
+    }
+  }
+}
+
+export type ServerWorkflowModelsWorkflowModelsListResponse =
+  ServerWorkflowModelsWorkflowModelsListResponses[keyof ServerWorkflowModelsWorkflowModelsListResponses]
+
+export type ServerWorkflowModelsWorkflowModelsRefreshData = {
+  body: WorkflowModelCatalogRefreshInput
+  path?: never
+  query?: never
+  url: "/api/workflow-models/refresh"
+}
+
+export type ServerWorkflowModelsWorkflowModelsRefreshErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type ServerWorkflowModelsWorkflowModelsRefreshError =
+  ServerWorkflowModelsWorkflowModelsRefreshErrors[keyof ServerWorkflowModelsWorkflowModelsRefreshErrors]
+
+export type ServerWorkflowModelsWorkflowModelsRefreshResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: {
+      head: WorkflowModelCatalogHead
+      catalogue: {
+        schemaVersion: 1
+        scopeSha256: DesignArtifactSha256
+        observedAt: number
+        models: Array<{
+          providerID: WorkflowModelCatalogProviderId
+          modelID: WorkflowModelCatalogModelId
+          displayName: string
+          family: WorkflowModelCatalogFamily
+          predecessor: WorkflowModelCatalogModelId
+          advertisedRevision: string
+          contextWindow: number
+          maxOutputTokens: number
+          capabilities: Array<string>
+          effortLevels: Array<string>
+          protocol: WorkflowRoleProtocol
+          adapterProfileID: string
+          adapterProfileSha256: DesignArtifactSha256
+          priceSha256: DesignArtifactSha256
+          evidence: Array<{
+            url: string
+            sha256: DesignArtifactSha256
+            observedAt: number
+            contractRevision: string
+          }>
+          availability: "available" | "missing" | "unknown"
+          compatibility: "unverified" | "supported" | "incompatible"
+          lifecycle: "current" | "superseded" | "deprecated"
+          missingObservation: {
+            firstAt: number
+            lastAt: number
+            count: number
+          }
+        }>
+        sha256: DesignArtifactSha256
+      }
+      policy: {
+        schemaVersion: 1
+        scopeSha256: DesignArtifactSha256
+        choices: {
+          "kimi-flagship": {
+            providerID: WorkflowModelCatalogProviderId
+            modelID: WorkflowModelCatalogModelId
+          }
+          "deepseek-pro": {
+            providerID: WorkflowModelCatalogProviderId
+            modelID: WorkflowModelCatalogModelId
+          }
+          "deepseek-flash": {
+            providerID: WorkflowModelCatalogProviderId
+            modelID: WorkflowModelCatalogModelId
+          }
+        }
+        sha256: DesignArtifactSha256
+      }
+      stale: boolean
+      refreshStatus: "idle" | "refreshing" | "failed"
+      failureCode: string
+    }
+  }
+}
+
+export type ServerWorkflowModelsWorkflowModelsRefreshResponse =
+  ServerWorkflowModelsWorkflowModelsRefreshResponses[keyof ServerWorkflowModelsWorkflowModelsRefreshResponses]
+
+export type ServerWorkflowModelsWorkflowModelsActivateData = {
+  body: {
+    expectedHeadSha256: DesignArtifactSha256
+    replacements: Array<{
+      family: WorkflowModelCatalogSelectedFamily
+      providerID: WorkflowModelCatalogProviderId
+      modelID: WorkflowModelCatalogModelId
+    }>
+  }
+  path?: never
+  query?: never
+  url: "/api/workflow-models/activate"
+}
+
+export type ServerWorkflowModelsWorkflowModelsActivateErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type ServerWorkflowModelsWorkflowModelsActivateError =
+  ServerWorkflowModelsWorkflowModelsActivateErrors[keyof ServerWorkflowModelsWorkflowModelsActivateErrors]
+
+export type ServerWorkflowModelsWorkflowModelsActivateResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: {
+      head: WorkflowModelCatalogHead
+      catalogue: {
+        schemaVersion: 1
+        scopeSha256: DesignArtifactSha256
+        observedAt: number
+        models: Array<{
+          providerID: WorkflowModelCatalogProviderId
+          modelID: WorkflowModelCatalogModelId
+          displayName: string
+          family: WorkflowModelCatalogFamily
+          predecessor: WorkflowModelCatalogModelId
+          advertisedRevision: string
+          contextWindow: number
+          maxOutputTokens: number
+          capabilities: Array<string>
+          effortLevels: Array<string>
+          protocol: WorkflowRoleProtocol
+          adapterProfileID: string
+          adapterProfileSha256: DesignArtifactSha256
+          priceSha256: DesignArtifactSha256
+          evidence: Array<{
+            url: string
+            sha256: DesignArtifactSha256
+            observedAt: number
+            contractRevision: string
+          }>
+          availability: "available" | "missing" | "unknown"
+          compatibility: "unverified" | "supported" | "incompatible"
+          lifecycle: "current" | "superseded" | "deprecated"
+          missingObservation: {
+            firstAt: number
+            lastAt: number
+            count: number
+          }
+        }>
+        sha256: DesignArtifactSha256
+      }
+      policy: {
+        schemaVersion: 1
+        scopeSha256: DesignArtifactSha256
+        choices: {
+          "kimi-flagship": {
+            providerID: WorkflowModelCatalogProviderId
+            modelID: WorkflowModelCatalogModelId
+          }
+          "deepseek-pro": {
+            providerID: WorkflowModelCatalogProviderId
+            modelID: WorkflowModelCatalogModelId
+          }
+          "deepseek-flash": {
+            providerID: WorkflowModelCatalogProviderId
+            modelID: WorkflowModelCatalogModelId
+          }
+        }
+        sha256: DesignArtifactSha256
+      }
+      stale: boolean
+      refreshStatus: "idle" | "refreshing" | "failed"
+      failureCode: string
+    }
+  }
+}
+
+export type ServerWorkflowModelsWorkflowModelsActivateResponse =
+  ServerWorkflowModelsWorkflowModelsActivateResponses[keyof ServerWorkflowModelsWorkflowModelsActivateResponses]
 
 export type V2SessionMessagesData = {
   body?: never

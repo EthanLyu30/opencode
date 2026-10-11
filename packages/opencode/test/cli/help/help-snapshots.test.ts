@@ -82,6 +82,8 @@ const SUBCOMMANDS = [
   ["session", "list"],
   ["session", "delete"],
   ["workflow", "run"],
+  ["workflow", "models"],
+  ["workflow", "models", "activate"],
   ["github", "install"],
   ["github", "run"],
   ["db", "path"],

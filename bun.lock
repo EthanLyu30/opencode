@@ -802,6 +802,7 @@
         "@opencode-ai/core": "workspace:*",
         "@opencode-ai/llm": "workspace:*",
         "@opencode-ai/protocol": "workspace:*",
+        "@opencode-ai/schema": "workspace:*",
         "drizzle-orm": "catalog:",
         "effect": "catalog:",
         "playwright": "catalog:",

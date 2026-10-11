@@ -36,6 +36,9 @@ import { WorkflowCommandSandboxServer } from "./workflow/command-sandbox"
 import { WorkflowRuntimeRecovery } from "./workflow/runtime-recovery"
 import { WorkflowProductionEvidenceServer } from "./workflow/production-evidence"
 import { ProductionHostRuntime } from "./workflow/production-host-runtime"
+import { WorkflowModelCatalogRuntime } from "./workflow/model-catalog-runtime"
+import { ModelSelection } from "@opencode-ai/core/workflow/model-selection"
+import { ModelAvailability } from "@opencode-ai/core/workflow/model-availability"
 
 const deterministicBenchmarkRoleEvidence = makeGlobalNode({
   service: WorkflowRoleExecution.Service,
@@ -60,6 +63,7 @@ const applicationServices = LayerNode.group([
   LocationServiceMap.node,
   WorkflowVisualHost.node,
   WorkflowRuntimeRecovery.node,
+  WorkflowModelCatalogRuntime.node,
 ])
 
 function applicationReplacements(workflow: Parameters<typeof workflowReplacements>[0] = {}) {
@@ -67,6 +71,8 @@ function applicationReplacements(workflow: Parameters<typeof workflowReplacement
     [WorkflowBenchmarkTransport.node, ProductionHostRuntime.benchmarkTransportNode],
     [SessionExecution.node, SessionExecutionLocal.node],
     [WorkflowExecution.node, WorkflowExecutionLocal.node],
+    [ModelSelection.node, WorkflowModelCatalogRuntime.selectionNode],
+    [ModelAvailability.node, WorkflowModelCatalogRuntime.availabilityNode],
     ...workflowReplacements(workflow),
   ] as const
 }

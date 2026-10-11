@@ -6844,6 +6844,227 @@ export type ConversationsItemsOutput = {
   }>
 }["data"]
 
+export type WorkflowModelsListOutput = {
+  readonly data: {
+    readonly head: {
+      readonly schemaVersion: 1
+      readonly scopeSha256: string
+      readonly generation: number
+      readonly catalogueSha256: string
+      readonly policySha256: string
+      readonly sha256: string
+    } | null
+    readonly catalogue: {
+      readonly schemaVersion: 1
+      readonly scopeSha256: string
+      readonly observedAt: number
+      readonly models: ReadonlyArray<{
+        readonly providerID: "kimi" | "deepseek"
+        readonly modelID: string
+        readonly displayName: string
+        readonly family: "kimi-flagship" | "deepseek-pro" | "deepseek-flash" | "unknown"
+        readonly predecessor: string | null
+        readonly advertisedRevision: string | null
+        readonly contextWindow: number | null
+        readonly maxOutputTokens: number | null
+        readonly capabilities: ReadonlyArray<string>
+        readonly effortLevels: ReadonlyArray<string>
+        readonly protocol: ("openai-chat" | "openai-responses") | null
+        readonly adapterProfileID: string | null
+        readonly adapterProfileSha256: string | null
+        readonly priceSha256: string | null
+        readonly evidence: ReadonlyArray<{
+          readonly url: string
+          readonly sha256: string
+          readonly observedAt: number
+          readonly contractRevision: string
+        }>
+        readonly availability: "available" | "missing" | "unknown"
+        readonly compatibility: "unverified" | "supported" | "incompatible"
+        readonly lifecycle: "current" | "superseded" | "deprecated"
+        readonly missingObservation: {
+          readonly firstAt: number
+          readonly lastAt: number
+          readonly count: number
+        } | null
+      }>
+      readonly sha256: string
+    } | null
+    readonly policy: {
+      readonly schemaVersion: 1
+      readonly scopeSha256: string
+      readonly choices: {
+        readonly "kimi-flagship": { readonly providerID: "kimi" | "deepseek"; readonly modelID: string }
+        readonly "deepseek-pro": { readonly providerID: "kimi" | "deepseek"; readonly modelID: string }
+        readonly "deepseek-flash": { readonly providerID: "kimi" | "deepseek"; readonly modelID: string }
+      }
+      readonly sha256: string
+    } | null
+    readonly stale: boolean
+    readonly refreshStatus: "idle" | "refreshing" | "failed"
+    readonly failureCode: string | null
+  }
+}["data"]
+
+export type WorkflowModelsRefreshInput = { readonly force: { readonly force: boolean }["force"] }
+
+export type WorkflowModelsRefreshOutput = {
+  readonly data: {
+    readonly head: {
+      readonly schemaVersion: 1
+      readonly scopeSha256: string
+      readonly generation: number
+      readonly catalogueSha256: string
+      readonly policySha256: string
+      readonly sha256: string
+    } | null
+    readonly catalogue: {
+      readonly schemaVersion: 1
+      readonly scopeSha256: string
+      readonly observedAt: number
+      readonly models: ReadonlyArray<{
+        readonly providerID: "kimi" | "deepseek"
+        readonly modelID: string
+        readonly displayName: string
+        readonly family: "kimi-flagship" | "deepseek-pro" | "deepseek-flash" | "unknown"
+        readonly predecessor: string | null
+        readonly advertisedRevision: string | null
+        readonly contextWindow: number | null
+        readonly maxOutputTokens: number | null
+        readonly capabilities: ReadonlyArray<string>
+        readonly effortLevels: ReadonlyArray<string>
+        readonly protocol: ("openai-chat" | "openai-responses") | null
+        readonly adapterProfileID: string | null
+        readonly adapterProfileSha256: string | null
+        readonly priceSha256: string | null
+        readonly evidence: ReadonlyArray<{
+          readonly url: string
+          readonly sha256: string
+          readonly observedAt: number
+          readonly contractRevision: string
+        }>
+        readonly availability: "available" | "missing" | "unknown"
+        readonly compatibility: "unverified" | "supported" | "incompatible"
+        readonly lifecycle: "current" | "superseded" | "deprecated"
+        readonly missingObservation: {
+          readonly firstAt: number
+          readonly lastAt: number
+          readonly count: number
+        } | null
+      }>
+      readonly sha256: string
+    } | null
+    readonly policy: {
+      readonly schemaVersion: 1
+      readonly scopeSha256: string
+      readonly choices: {
+        readonly "kimi-flagship": { readonly providerID: "kimi" | "deepseek"; readonly modelID: string }
+        readonly "deepseek-pro": { readonly providerID: "kimi" | "deepseek"; readonly modelID: string }
+        readonly "deepseek-flash": { readonly providerID: "kimi" | "deepseek"; readonly modelID: string }
+      }
+      readonly sha256: string
+    } | null
+    readonly stale: boolean
+    readonly refreshStatus: "idle" | "refreshing" | "failed"
+    readonly failureCode: string | null
+  }
+}["data"]
+
+export type WorkflowModelsActivateInput = {
+  readonly expectedHeadSha256: {
+    readonly expectedHeadSha256: string
+    readonly replacements: readonly [
+      {
+        readonly family: "kimi-flagship" | "deepseek-pro" | "deepseek-flash"
+        readonly providerID: "kimi" | "deepseek"
+        readonly modelID: string
+      },
+      ...Array<{
+        readonly family: "kimi-flagship" | "deepseek-pro" | "deepseek-flash"
+        readonly providerID: "kimi" | "deepseek"
+        readonly modelID: string
+      }>,
+    ]
+  }["expectedHeadSha256"]
+  readonly replacements: {
+    readonly expectedHeadSha256: string
+    readonly replacements: readonly [
+      {
+        readonly family: "kimi-flagship" | "deepseek-pro" | "deepseek-flash"
+        readonly providerID: "kimi" | "deepseek"
+        readonly modelID: string
+      },
+      ...Array<{
+        readonly family: "kimi-flagship" | "deepseek-pro" | "deepseek-flash"
+        readonly providerID: "kimi" | "deepseek"
+        readonly modelID: string
+      }>,
+    ]
+  }["replacements"]
+}
+
+export type WorkflowModelsActivateOutput = {
+  readonly data: {
+    readonly head: {
+      readonly schemaVersion: 1
+      readonly scopeSha256: string
+      readonly generation: number
+      readonly catalogueSha256: string
+      readonly policySha256: string
+      readonly sha256: string
+    } | null
+    readonly catalogue: {
+      readonly schemaVersion: 1
+      readonly scopeSha256: string
+      readonly observedAt: number
+      readonly models: ReadonlyArray<{
+        readonly providerID: "kimi" | "deepseek"
+        readonly modelID: string
+        readonly displayName: string
+        readonly family: "kimi-flagship" | "deepseek-pro" | "deepseek-flash" | "unknown"
+        readonly predecessor: string | null
+        readonly advertisedRevision: string | null
+        readonly contextWindow: number | null
+        readonly maxOutputTokens: number | null
+        readonly capabilities: ReadonlyArray<string>
+        readonly effortLevels: ReadonlyArray<string>
+        readonly protocol: ("openai-chat" | "openai-responses") | null
+        readonly adapterProfileID: string | null
+        readonly adapterProfileSha256: string | null
+        readonly priceSha256: string | null
+        readonly evidence: ReadonlyArray<{
+          readonly url: string
+          readonly sha256: string
+          readonly observedAt: number
+          readonly contractRevision: string
+        }>
+        readonly availability: "available" | "missing" | "unknown"
+        readonly compatibility: "unverified" | "supported" | "incompatible"
+        readonly lifecycle: "current" | "superseded" | "deprecated"
+        readonly missingObservation: {
+          readonly firstAt: number
+          readonly lastAt: number
+          readonly count: number
+        } | null
+      }>
+      readonly sha256: string
+    } | null
+    readonly policy: {
+      readonly schemaVersion: 1
+      readonly scopeSha256: string
+      readonly choices: {
+        readonly "kimi-flagship": { readonly providerID: "kimi" | "deepseek"; readonly modelID: string }
+        readonly "deepseek-pro": { readonly providerID: "kimi" | "deepseek"; readonly modelID: string }
+        readonly "deepseek-flash": { readonly providerID: "kimi" | "deepseek"; readonly modelID: string }
+      }
+      readonly sha256: string
+    } | null
+    readonly stale: boolean
+    readonly refreshStatus: "idle" | "refreshing" | "failed"
+    readonly failureCode: string | null
+  }
+}["data"]
+
 export type MessagesListInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]
   readonly limit?: {

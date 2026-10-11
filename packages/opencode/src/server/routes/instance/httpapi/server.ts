@@ -123,6 +123,9 @@ import { schemaErrorLayer } from "./middleware/schema-error"
 import { workflowReplacements } from "@opencode-ai/server/routes"
 import { WorkflowBenchmarkTransport } from "@opencode-ai/core/workflow/benchmark-transport"
 import { ProductionHostRuntime } from "@opencode-ai/server/workflow/production-host-runtime"
+import { WorkflowModelCatalogRuntime } from "@opencode-ai/server/workflow/model-catalog-runtime"
+import { ModelSelection } from "@opencode-ai/core/workflow/model-selection"
+import { ModelAvailability } from "@opencode-ai/core/workflow/model-availability"
 
 export const context = Context.makeUnsafe<unknown>(new Map())
 
@@ -184,6 +187,9 @@ const instanceRoutes = instanceApiRoutes.pipe(
 )
 const serverRoutes = HttpApiBuilder.layer(Api).pipe(
   Layer.provide(handlers),
+  Layer.provide(
+    WorkflowModelCatalogRuntime.authenticationLayer(ServerAuth.Config).pipe(Layer.provide(ServerAuth.Config.layer)),
+  ),
   Layer.provide(PluginPtyEnvironment.layer),
   Layer.provide([serverHttpApiAuthLayer, v2SchemaErrorLayer]),
 )
@@ -279,6 +285,7 @@ const app = LayerNode.group([
   ResponsesV2.node,
   WorkflowExecution.node,
   WorkflowAdmission.node,
+  WorkflowModelCatalogRuntime.node,
 ])
 
 export function createRoutes(
@@ -324,6 +331,8 @@ export function createRoutes(
         [SessionExecution.node, SessionExecutionLocal.node],
         [WorkflowBenchmarkTransport.node, ProductionHostRuntime.benchmarkTransportNode],
         [WorkflowExecution.node, composition.workflowExecution ?? WorkflowExecutionLocal.node],
+        [ModelSelection.node, WorkflowModelCatalogRuntime.selectionNode],
+        [ModelAvailability.node, WorkflowModelCatalogRuntime.availabilityNode],
         ...workflowReplacements(),
       ]),
     ),

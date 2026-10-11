@@ -1186,6 +1186,7 @@ if ($PrepareHostOnly) {
       "cache",
       "state",
       "tmp\process",
+      "data\workflow-model-catalog",
       "cache\bun",
       "cache\npm",
       "cache\pnpm",
@@ -1438,6 +1439,7 @@ if exist "%OPENCODE_ROOT%\.opencode-deploy.transaction" (
 )
 set "OPENCODE_CONFIG_DIR=%OPENCODE_ROOT%\config"
 set "OPENCODE_DB=%OPENCODE_ROOT%\data\opencode.sqlite"
+set "OPENCODE_WORKFLOW_MODEL_CATALOG_ROOT=%OPENCODE_ROOT%\data\workflow-model-catalog"
 set "OPENCODE_DISABLE_AUTOUPDATE=1"
 set "XDG_DATA_HOME=%OPENCODE_ROOT%\data"
 set "XDG_CONFIG_HOME=%OPENCODE_ROOT%\config"

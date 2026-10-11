@@ -12,6 +12,7 @@ test("exposes every standard HTTP API group", () => {
     "workflows",
     "responses",
     "conversations",
+    "workflowModels",
     "messages",
     "models",
     "providers",
