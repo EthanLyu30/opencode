@@ -11,7 +11,10 @@ export function reportHtml(value: ReportModel): string {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Task24 workflow-effect benchmark</title>
-<style>${styles}</style>
+<style>${styles}
+@page{size:A4;margin:14mm 12mm}
+@media print{.table-wrap{overflow:visible}.dense{table-layout:fixed;width:100%}.dense th,.dense td{overflow-wrap:anywhere}.dense th:first-child{width:24%}}
+</style>
 </head>
 <body>
 <main data-task24-evaluate="report">
@@ -56,10 +59,11 @@ function contrastTable(value: ReportModel): string {
 
 function runTable(value: ReportModel): string {
   const rows = value.runs.slice(0, 500)
-  const outcome = `<div class="table-wrap"><table class="dense"><caption>Per-run outcome</caption><thead><tr><th>Run</th><th>Arm</th><th>Qualified</th><th>First functional</th><th>First visual</th><th>Diagnostic</th><th>Visual</th><th>Failure</th></tr></thead><tbody>${rows.map((run) => `<tr><th scope="row">${html(run.runID)}</th><td>${run.armID}</td><td>${yes(run.qualifiedSuccess)}</td><td>${yes(run.firstPassFunctionalSuccess)}</td><td>${yes(run.firstPassVisualSuccess)}</td><td>${format(run.diagnosticScore)}</td><td>${format(run.visualComposite)}</td><td>${html(run.failureCategory ?? "-")}</td></tr>`).join("")}</tbody></table></div>`
+  const outcome = `<div class="table-wrap"><table class="dense"><caption>Per-run outcome</caption><thead><tr><th>Run</th><th>Arm</th><th>Qualified</th><th>Diagnostic</th><th>Visual</th><th>Failure</th></tr></thead><tbody>${rows.map((run) => `<tr><th scope="row">${html(run.runID)}</th><td>${run.armID}</td><td>${yes(run.qualifiedSuccess)}</td><td>${format(run.diagnosticScore)}</td><td>${format(run.visualComposite)}</td><td>${html(run.failureCategory ?? "-")}</td></tr>`).join("")}</tbody></table></div>`
+  const firstPass = `<div class="table-wrap"><table class="dense"><caption>Per-run first-pass success</caption><thead><tr><th>Run</th><th>Arm</th><th>First functional</th><th>First visual</th></tr></thead><tbody>${rows.map((run) => `<tr><th scope="row">${html(run.runID)}</th><td>${run.armID}</td><td>${yes(run.firstPassFunctionalSuccess)}</td><td>${yes(run.firstPassVisualSuccess)}</td></tr>`).join("")}</tbody></table></div>`
   const usage = `<div class="table-wrap"><table class="dense"><caption>Per-run time and token use</caption><thead><tr><th>Run</th><th>Minutes</th><th>Input</th><th>Cached</th><th>Uncached</th><th>Output</th><th>Tools</th></tr></thead><tbody>${rows.map((run) => `<tr><th scope="row">${html(run.runID)}</th><td>${format(run.durationMs / 60_000)}</td><td>${run.inputTokens}</td><td>${run.cachedInputTokens}</td><td>${run.inputTokens - run.cachedInputTokens}</td><td>${run.outputTokens}</td><td>${run.toolCalls}</td></tr>`).join("")}</tbody></table></div>`
   const recovery = `<div class="table-wrap"><table class="dense"><caption>Per-run change and recovery</caption><thead><tr><th>Run</th><th>Changed files</th><th>Retries</th><th>Revisions</th><th>Recoveries</th><th>Cost</th></tr></thead><tbody>${rows.map((run) => `<tr><th scope="row">${html(run.runID)}</th><td>${run.changedFiles}</td><td>${run.retries}</td><td>${run.revisionLoops}</td><td>${run.recoveryCount}</td><td>${html(cny(run.costCnyMicros))}</td></tr>`).join("")}</tbody></table>${value.runs.length > rows.length ? `<p class="note">Showing ${rows.length} of ${value.runs.length} runs; the deterministic CSV contains all rows.</p>` : ""}</div>`
-  return outcome + usage + recovery
+  return outcome + firstPass + usage + recovery
 }
 
 function paretoTable(value: ReportModel): string {

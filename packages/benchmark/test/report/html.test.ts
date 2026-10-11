@@ -33,6 +33,22 @@ describe("Task24 self-contained technical report", () => {
     expect(html).not.toContain("<script>alert(1)</script>")
     expect(html).toContain("&lt;script&gt;")
   })
+
+  test("keeps long per-run IDs and capability codes inside the printed page", () => {
+    const value = structuredClone(fixture)
+    value.runs = Array.from({ length: 128 }, (_, index) => ({
+      ...fixture.runs[0],
+      runID: `run-${String(index).padStart(24, "0")}`,
+      failureCategory: "preview_configuration_required",
+    }))
+    const html = reportHtml(decodeReportModel(value))
+    expect(html).toContain("preview_configuration_required")
+    expect(html).toContain("Per-run first-pass success")
+    expect(html).toContain("@page{size:A4;margin:14mm 12mm}")
+    expect(html).toContain(".table-wrap{overflow:visible}")
+    expect(html).toContain(".dense{table-layout:fixed;width:100%}")
+    expect(html).toContain(".dense th,.dense td{overflow-wrap:anywhere}")
+  })
 })
 
 function contrast(foreground: string, background: string): number {
