@@ -37,7 +37,7 @@ const args = hideBin(process.argv)
 if (args[0] === "--internal-catalogue-probe") {
   if (
     (args.length !== 4 && args.length !== 5) ||
-    process.env.NODE_ENV !== "test" ||
+    Reflect.get(process.env, "NODE_ENV") !== "test" ||
     process.env.RECORD !== "false" ||
     process.env.OPENCODE_DISABLE_MODELS_FETCH !== "true" ||
     process.env.OPENCODE_DISABLE_WORKFLOW_MODEL_DISCOVERY !== "true" ||

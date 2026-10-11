@@ -128,7 +128,7 @@ export async function runPrivateCatalogueWorker(args: readonly string[]) {
   invariant(root && path.isAbsolute(root) && path.basename(root).startsWith("opencode-catalogue-probe-"), "owned root")
   invariant(process.platform !== "win32" || path.parse(root).root.toLowerCase() === "d:\\", "D root")
   invariant(
-    process.env.NODE_ENV === "test" && process.env.OPENCODE_DISABLE_WORKFLOW_MODEL_DISCOVERY === "true",
+    Reflect.get(process.env, "NODE_ENV") === "test" && process.env.OPENCODE_DISABLE_WORKFLOW_MODEL_DISCOVERY === "true",
     "offline gate",
   )
   invariant(nonce && process.env.OPENCODE_PRIVATE_CATALOGUE_PROBE === nonce, "private grant")
