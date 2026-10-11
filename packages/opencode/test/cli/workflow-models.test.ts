@@ -67,6 +67,27 @@ function view(): WorkflowModelCatalog.View {
   })
 }
 describe("confirmed workflow model choices", () => {
+  test.each([true, false])("volatile displayed views reach trusted fresh confirmation (yes=%s)", async (yes) => {
+    const current = { ...view(), stale: true }
+    const requests: WorkflowModelCatalog.ActivationInput[] = []
+    await activateWorkflowModel({
+      client: {
+        list: async () => current,
+        activate: async (input) => {
+          requests.push(input)
+          return current
+        },
+      },
+      family: "deepseek-pro",
+      modelID: "deepseek-pro-successor-fixture",
+      yes,
+      interactive: !yes,
+      confirm: async () => true,
+      preview: () => undefined,
+    })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.expectedHeadSha256).toBe(current.head!.sha256)
+  })
   test("progress uses the admitted model ID instead of today's static generation label", async () => {
     const lines: string[] = []
     const event = (seq: number, type: string, data: unknown) => ({

@@ -7,6 +7,8 @@ import { WorkflowModelCatalogStore } from "./store"
 import { WorkflowModelCatalogPolicy } from "./policy"
 import { WorkflowCredentialScope } from "./credential-scope"
 import { WorkflowModelDiscovery } from "./discovery"
+import { ModelSelection } from "../model-selection"
+import { ModelAvailability } from "../model-availability"
 export class Service extends Context.Service<
   Service,
   {
@@ -16,6 +18,7 @@ export class Service extends Context.Service<
       input: WorkflowModelCatalog.ActivationInput,
     ) => Effect.Effect<WorkflowModelCatalog.View, WorkflowModelCatalog.CatalogError>
     snapshot: () => Effect.Effect<WorkflowModelCatalog.AdmissionSnapshot, WorkflowModelCatalog.CatalogError>
+    checkPinned: (selection: ModelSelection.FrozenSelection) => Effect.Effect<void, WorkflowModelCatalog.CatalogError>
   }
 >()("WorkflowModelCatalogService.Service") {}
 export function layer(input: {
@@ -150,6 +153,27 @@ export function layer(input: {
         return yield* view()
       })
       const refresh = (force = false) => refreshLock.withPermits(1)(refreshUnlocked(force))
+      const checkPinned = Effect.fn("WorkflowModelCatalogService.checkPinned")(function* (
+        selection: ModelSelection.FrozenSelection,
+      ) {
+        const pinned = yield* Effect.try({
+          try: () => ModelSelection.validate(selection),
+          catch: () => new WorkflowModelCatalog.CatalogError({ code: "snapshot_corrupt" }),
+        })
+        const current = yield* identity
+        if (current.sha256 !== pinned.snapshot.scopeSha256)
+          return yield* Effect.fail(new WorkflowModelCatalog.CatalogError({ code: "scope_mismatch" }))
+        const stored = yield* read(yield* open(current.sha256))
+        if (!stored.catalogue)
+          return yield* Effect.fail(new WorkflowModelCatalog.CatalogError({ code: "selection_required" }))
+        // Never mask fresh discovery failure or use the two-observation retirement merge for an existing pin.
+        const catalogue =
+          current.volatile || now() - stored.catalogue.observedAt >= 3_600_000
+            ? yield* observe(current.sha256)
+            : stored.catalogue
+        yield* ModelAvailability.checkCatalogue(pinned, catalogue)
+        yield* ensureScope(current.sha256)
+      })
       const activateUnlocked = Effect.fn("WorkflowModelCatalogService.activate")(function* (
         request: WorkflowModelCatalog.ActivationInput,
       ) {
@@ -320,6 +344,7 @@ export function layer(input: {
         refresh,
         activate: (request) => refreshLock.withPermits(1)(activateUnlocked(request)),
         snapshot: () => refreshLock.withPermits(1)(snapshotUnlocked()),
+        checkPinned: (selection) => refreshLock.withPermits(1)(checkPinned(selection)),
       })
     }),
   )

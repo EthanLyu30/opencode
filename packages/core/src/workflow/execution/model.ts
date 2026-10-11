@@ -408,9 +408,6 @@ const productionLayer = Layer.effect(
                 } satisfies ExecutionFailure)
               continuation = { ...continuation, providerTurn: undefined }
             }
-            const model = yield* credentialedModel(credentials, route).pipe(
-              Effect.mapError((error) => settleExecutionFailure(response, error)),
-            )
             let messages = [...contract.messages, ...(continuation?.turns.flatMap(continuationMessages) ?? [])]
             let usage = continuation?.usage ?? zeroUsage
             let checkpointedUsage = continuation?.usage ?? zeroUsage
@@ -460,6 +457,9 @@ const productionLayer = Layer.effect(
                         usage: WorkflowRetry.usageDelta(usage, checkpointedUsage),
                       })),
                     )
+                  const model = yield* credentialedModel(credentials, route, availability, selection).pipe(
+                    Effect.mapError((error) => settleExecutionFailure(response, error)),
+                  )
                   yield* WorkflowRoleAgents.reassert(route.role)
                   materialization = yield* registry.materialize(contract.permissions)
                   catalogFingerprint = materialization.fingerprint
@@ -1161,11 +1161,34 @@ function continuationMessages(turn: typeof ContinuationTurn.Type): Message[] {
   ]
 }
 
-function credentialedModel(credentials: Credential.Interface, route: WorkflowRouting.Route) {
-  return credentials.list(Integration.ID.make(route.providerID)).pipe(
-    Effect.flatMap((saved) => {
-      const value = saved.at(-1)?.value
-      let secret = value?.type === "key" ? value.key : value?.type === "oauth" ? value.access : undefined
+function credentialedModel(
+  credentials: Credential.Interface,
+  route: WorkflowRouting.Route,
+  availability: ModelAvailability.Service["Service"],
+  selection?: ModelSelection.FrozenSelection,
+) {
+  const trusted: Effect.Effect<string | undefined, ExecutionFailure> =
+    selection && availability.credential && route.benchmarkTransport === undefined
+      ? availability
+          .credential(selection, route.providerID)
+          .pipe(
+            Effect.mapError(() =>
+              executionFailure(
+                "invalid_request",
+                "model_unavailable",
+                "Pinned credential requires configuration resolution",
+              ),
+            ),
+          )
+      : credentials.list(Integration.ID.make(route.providerID)).pipe(
+          Effect.map((saved) => {
+            const value = saved.at(-1)?.value
+            return value?.type === "key" ? value.key : value?.type === "oauth" ? value.access : undefined
+          }),
+        )
+  return trusted.pipe(
+    Effect.flatMap((credential) => {
+      let secret = credential
       if (route.benchmarkTransport !== undefined) {
         try {
           secret = WorkflowBenchmarkTransport.runtimeGrant(route.benchmarkTransport, route.providerID, secret)

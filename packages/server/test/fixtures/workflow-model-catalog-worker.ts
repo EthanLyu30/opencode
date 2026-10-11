@@ -117,7 +117,7 @@ function invariant(condition: unknown, label: string): asserts condition {
   if (!condition) throw new Error(`Private catalogue fixture: ${label}`)
 }
 function ready(phase: string, data: Readonly<Record<string, unknown>>, stop = false) {
-  return Effect.sync(() => process.stdout.write(JSON.stringify({ phase, data }) + "\n")).pipe(
+  return Effect.sync(() => process.stdout.write(JSON.stringify({ phase, pid: process.pid, data }) + "\n")).pipe(
     Effect.andThen(stop ? Effect.never : Effect.void),
   )
 }

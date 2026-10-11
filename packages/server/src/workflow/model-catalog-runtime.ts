@@ -35,33 +35,32 @@ export function rootFromEnvironment(environment: Readonly<Record<string, string 
     throw unavailable()
   return root
 }
+export function credentialConfiguration(environment: Readonly<Record<string, string | undefined>>) {
+  const configuration = (providerID: "kimi" | "deepseek"): WorkflowCredentialScope.Configuration => {
+    const name = providerID === "kimi" ? "MOONSHOT_API_KEY" : "DEEPSEEK_API_KEY"
+    return {
+      origin: providerID === "kimi" ? "https://api.moonshot.cn" : "https://api.deepseek.com",
+      configurationRevision: "workflow-model-catalog-first-party-v1",
+      ...(environment[name]
+        ? {
+            environment: {
+              referenceID: `environment:${name}`,
+              file: environment.OPENCODE_ENV_FILE,
+              read: () =>
+                Effect.suspend(() =>
+                  environment[name] ? Effect.succeed(environment[name]!) : Effect.fail(unavailable()),
+                ),
+            },
+          }
+        : { integrationID: Integration.ID.make(providerID) }),
+    }
+  }
+  return { providers: { kimi: configuration("kimi"), deepseek: configuration("deepseek") } }
+}
 const scopeNode = makeGlobalNode({
   service: WorkflowCredentialScope.Service,
   layer: WorkflowCredentialScope.layer.pipe(
-    Layer.provide(
-      Layer.sync(WorkflowCredentialScope.Runtime, () => {
-        const configuration = (providerID: "kimi" | "deepseek"): WorkflowCredentialScope.Configuration => {
-          const name = providerID === "kimi" ? "MOONSHOT_API_KEY" : "DEEPSEEK_API_KEY"
-          return {
-            origin: providerID === "kimi" ? "https://api.moonshot.cn" : "https://api.deepseek.com",
-            configurationRevision: "workflow-model-catalog-first-party-v1",
-            ...(process.env[name]
-              ? {
-                  environment: {
-                    referenceID: `environment:${name}`,
-                    file: process.env.OPENCODE_ENV_FILE,
-                    read: () =>
-                      Effect.suspend(() =>
-                        process.env[name] ? Effect.succeed(process.env[name]!) : Effect.fail(unavailable()),
-                      ),
-                  },
-                }
-              : { integrationID: Integration.ID.make(providerID) }),
-          }
-        }
-        return { providers: { kimi: configuration("kimi"), deepseek: configuration("deepseek") } }
-      }),
-    ),
+    Layer.provide(Layer.sync(WorkflowCredentialScope.Runtime, () => credentialConfiguration(process.env))),
   ),
   deps: [Database.node, Credential.node],
 })
@@ -89,6 +88,7 @@ export const node = makeGlobalNode({
           refresh: () => Effect.fail(unavailable()),
           activate: () => Effect.fail(unavailable()),
           snapshot: () => Effect.fail(unavailable()),
+          checkPinned: () => Effect.fail(unavailable()),
         })
       return WorkflowModelCatalogService.layer({
         root,
@@ -121,21 +121,27 @@ export const selectionNode = makeGlobalNode({
   ),
   deps: [node],
 })
+export const availabilityLayer = Layer.effect(
+  ModelAvailability.Service,
+  Effect.gen(function* () {
+    const catalogue = yield* WorkflowModelCatalogService.Service
+    const scope = yield* WorkflowCredentialScope.Service
+    return {
+      check: (selection: ModelSelection.FrozenSelection) => catalogue.checkPinned(selection),
+      credential: (selection: ModelSelection.FrozenSelection, providerID: WorkflowModelCatalog.ProviderID) =>
+        Effect.gen(function* () {
+          const pinned = ModelSelection.validate(selection)
+          const kimi = yield* scope.resolve("kimi")
+          const deepseek = yield* scope.resolve("deepseek")
+          if (WorkflowCredentialScope.hash([kimi, deepseek]) !== pinned.snapshot.scopeSha256)
+            return yield* Effect.fail(new WorkflowModelCatalog.CatalogError({ code: "scope_mismatch" }))
+          return yield* scope.credential(providerID, providerID === "kimi" ? kimi : deepseek)
+        }),
+    }
+  }),
+)
 export const availabilityNode = makeGlobalNode({
   service: ModelAvailability.Service,
-  layer: Layer.effect(
-    ModelAvailability.Service,
-    Effect.gen(function* () {
-      const catalogue = yield* WorkflowModelCatalogService.Service
-      return {
-        check: (selection: ModelSelection.FrozenSelection) =>
-          Effect.gen(function* () {
-            const view = yield* catalogue.refresh(false)
-            if (!view.catalogue) return yield* unavailable()
-            yield* ModelAvailability.checkCatalogue(selection, view.catalogue)
-          }),
-      }
-    }),
-  ),
-  deps: [node],
+  layer: availabilityLayer,
+  deps: [node, scopeNode],
 })

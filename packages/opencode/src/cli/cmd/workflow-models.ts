@@ -26,7 +26,7 @@ export function formatModelChoices(input: WorkflowModelCatalog.View): string[] {
       (entry) =>
         `${entry.providerID}/${entry.modelID} ${entry.family} ${entry.availability} ${entry.compatibility} ${entry.lifecycle} price:${entry.priceSha256 ?? "unknown"}`,
     ) ?? []),
-    ...(view.stale ? ["stale: refresh before confirming a change"] : []),
+    ...(view.stale ? ["stale: activation requires trusted fresh confirmation"] : []),
     ...(view.failureCode ? [`status: ${view.failureCode}`] : []),
     "Existing tasks remain pinned; provider weights cannot be pinned beyond advertised revisions.",
   ]
@@ -36,7 +36,7 @@ export async function activateWorkflowModel(input: ActivationOptions): Promise<W
   const family = Schema.decodeUnknownSync(WorkflowModelCatalog.SelectedFamily)(input.family)
   const modelID = Schema.decodeUnknownSync(WorkflowModelCatalog.ModelID)(input.modelID)
   const view = Schema.decodeUnknownSync(WorkflowModelCatalog.View)(await input.client.list())
-  if (!view.head || !view.policy || !view.catalogue || view.stale)
+  if (!view.head || !view.policy || !view.catalogue || view.failureCode)
     throw new Error("selection_required: refresh and confirm a current catalogue")
   const providerID = family === "kimi-flagship" ? "kimi" : "deepseek"
   const entry = view.catalogue.models.find((entry) => entry.providerID === providerID && entry.modelID === modelID)

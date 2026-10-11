@@ -44,6 +44,7 @@ async function fixture(password: string | undefined = "offline-http-password") {
         [
           WorkflowModelCatalogRuntime.node,
           Layer.succeed(WorkflowModelCatalogService.Service, {
+            checkPinned: () => Effect.die("metadata API cannot execute"),
             view: () => Effect.succeed(expected),
             refresh: () =>
               Effect.sync(() => {

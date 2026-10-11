@@ -364,7 +364,6 @@ describe("catalogue credential scope and service", () => {
           environment: {
             referenceID: "opaque-runtime-ref",
             file: envFile,
-            reloadRevision: "1",
             read: () => Effect.succeed(canary),
           },
         },
@@ -392,6 +391,8 @@ describe("catalogue credential scope and service", () => {
         ),
       )
     const first = await run("kimi")
+    expect(await run("kimi")).toEqual(first)
+    expect(first.revision.startsWith("ephemeral:")).toBe(false)
     await fs.writeFile(envFile, "changed metadata, not a credential")
     const second = await run("kimi")
     expect(WorkflowCredentialScope.hash([first])).not.toBe(WorkflowCredentialScope.hash([second]))

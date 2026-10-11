@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto"
 import { Schema } from "effect"
 import { Hash } from "@opencode-ai/core/util/hash"
 import { WorkflowModelCatalog } from "@opencode-ai/schema/workflow-model-catalog"
+import { stopOwnedProbe } from "./workflow-model-catalog-process"
 
 const count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 export const ProbeResult = Schema.Struct({
@@ -17,7 +18,11 @@ export const ProbeResult = Schema.Struct({
   newAdmissionModelID: Schema.NonEmptyString,
 }).annotate({ parseOptions: { onExcessProperty: "error" } })
 export type ProbeResult = typeof ProbeResult.Type
-const message = Schema.Struct({ phase: Schema.String, data: Schema.Record(Schema.String, Schema.Unknown) })
+const message = Schema.Struct({
+  phase: Schema.String,
+  pid: Schema.Int.check(Schema.isGreaterThan(0)),
+  data: Schema.Record(Schema.String, Schema.Unknown),
+})
 const source = path.resolve(import.meta.dirname, "../../opencode/src/index.ts")
 const models = path.resolve(import.meta.dirname, "../../opencode/test/tool/fixtures/models-api.json")
 
@@ -77,17 +82,21 @@ export async function runCatalogueProbe(executable: string): Promise<ProbeResult
     XDG_STATE_HOME: path.join(root, "state"),
   }
   await fs.mkdir(environment.TEMP)
+  let processCleanupComplete = true
   const phase = async (name: string, kill = false, head?: string) => {
     const args = ["--internal-catalogue-probe", root, nonce, name, ...(head ? [head] : [])]
     const command = /(?:^|[\\/])bun(?:\.exe)?$/i.test(executable)
       ? [executable, "--no-env-file", source, ...args]
       : executable.endsWith(".cmd")
-        ? ["cmd.exe", "/d", "/s", "/c", `""${executable}" ${args.map((arg) => `"${arg}"`).join(" ")}"`]
+        ? ["cmd.exe", "/d", "/c", executable, ...args]
         : [executable, ...args]
-    const child = Bun.spawn(command, { cwd: root, env: environment, stdout: "pipe", stderr: "pipe" })
+    const child = Bun.spawn(command, { cwd: root, env: environment, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+    let workerPID: number | undefined
+    const stderrReader = child.stderr.getReader()
+    const stdoutReader = child.stdout.getReader()
     // Retain only the fixture's body-free failure label; drain all other diagnostics.
     const stderr = (async () => {
-      const reader = child.stderr.getReader()
+      const reader = stderrReader
       const decoder = new TextDecoder()
       let buffered = ""
       let failure: string | undefined
@@ -114,7 +123,7 @@ export async function runCatalogueProbe(executable: string): Promise<ProbeResult
     })
     try {
       const read = async () => {
-        const reader = child.stdout.getReader()
+        const reader = stdoutReader
         const decoder = new TextDecoder()
         let text = ""
         try {
@@ -130,14 +139,15 @@ export async function runCatalogueProbe(executable: string): Promise<ProbeResult
             if (end < 0) continue
             const value = Schema.decodeUnknownSync(message)(JSON.parse(text.slice(0, end)))
             invariant(value.phase === name, "readiness phase")
+            workerPID = value.pid
             return value.data
           }
         } finally {
-          reader.releaseLock()
+          /* Finalization cancels the reader even when readiness hits its deadline. */
         }
       }
       const value = await Promise.race([read(), deadline])
-      if (kill) child.kill()
+      if (kill) await stopOwnedProbe(child, workerPID)
       else invariant((await Promise.race([child.exited, deadline])) === 0, `${name} exit`)
       await child.exited
       if (kill && (name === "publish-before" || name === "publish-after")) {
@@ -158,10 +168,19 @@ export async function runCatalogueProbe(executable: string): Promise<ProbeResult
       }
       return value
     } finally {
-      clearTimeout(timer)
-      if (child.exitCode === null) child.kill()
-      await child.exited
-      await stderr
+      try {
+        await stopOwnedProbe(child, workerPID)
+      } catch (error) {
+        processCleanupComplete = false
+        throw error
+      } finally {
+        // Bounded pipe draining: inherited pipes cannot keep the finalizer alive after the deadline.
+        await stdoutReader.cancel().catch(() => undefined)
+        stdoutReader.releaseLock()
+        await stderrReader.cancel().catch(() => undefined)
+        await stderr
+        clearTimeout(timer)
+      }
     }
   }
   try {
@@ -208,6 +227,7 @@ export async function runCatalogueProbe(executable: string): Promise<ProbeResult
     await scan(root)
     return result
   } finally {
+    invariant(processCleanupComplete, "cleanup withheld because worker termination is unverified")
     await ownedTree(root)
     await fs.rm(root, { recursive: true })
   }

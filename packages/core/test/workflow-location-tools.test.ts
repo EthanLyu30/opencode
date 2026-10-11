@@ -3,6 +3,7 @@ import path from "path"
 import { describe, expect } from "bun:test"
 import { LLM, LLMClient, LLMEvent, LLMResponse, Message, type LLMRequest } from "@opencode-ai/llm"
 import { DateTime, Effect, Layer, Schema, Stream } from "effect"
+import { Headers } from "effect/unstable/http"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Credential } from "@opencode-ai/core/credential"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -78,6 +79,8 @@ let modelCredentialReads = 0
 let modelCredentialMissing = false
 let pinnedAvailable = true
 let availabilityChecks = 0
+let trustedModelCredential: string | undefined
+let trustedCredentialReads = 0
 const modelClient = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
@@ -130,6 +133,15 @@ const modelIt = testEffect(
       [
         ModelAvailability.node,
         Layer.succeed(ModelAvailability.Service, {
+          get credential() {
+            return trustedModelCredential === undefined
+              ? undefined
+              : () =>
+                  Effect.sync(() => {
+                    trustedCredentialReads++
+                    return trustedModelCredential!
+                  })
+          },
           check: (selection) =>
             Effect.suspend(() => {
               availabilityChecks++
@@ -360,6 +372,59 @@ const expectedRules = (role: WorkflowRole.Role) => [
 ]
 
 describe("Workflow Location tools", () => {
+  for (const missingStoredCredential of [true, false])
+    modelIt.live(
+      `pinned generation uses trusted discovery credentials (stored missing=${missingStoredCredential})`,
+      () =>
+        Effect.acquireUseRelease(
+          Effect.promise(() => tmpdir()),
+          (tmp) =>
+            Effect.gen(function* () {
+              modelRequests.length = 0
+              modelResponses.length = 0
+              modelCredentialReads = 0
+              trustedModelCredential = "offline-environment-account-A"
+              modelCredentialMissing = missingStoredCredential
+              trustedCredentialReads = 0
+              try {
+                const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+                const sessionID = SessionV2.ID.make("ses_trusted_credential")
+                yield* createWorkflowSession(location, sessionID)
+                const selection = ModelSelection.freeze(fixtureAdmissionSnapshot(), location)
+                const base = modelInput(
+                  location,
+                  sessionID,
+                  () => Effect.void,
+                  {},
+                  {
+                    workflowInput: ModelSelection.withSelection({ brief: "trusted credential" }, selection),
+                  },
+                )
+                modelResponses.push(providerResponse(providerDesignEnvelope())!)
+                yield* WorkflowModelExecution.Service.use((models) =>
+                  models.execute({
+                    ...base,
+                    route: WorkflowRouting.resolve({ role: "design", budget: base.workflow.budget, selection }),
+                  }),
+                )
+                const request = modelRequests[0]!
+                const headers = yield* request.model.route.auth.apply({
+                  request,
+                  method: "POST",
+                  url: "https://api.moonshot.cn",
+                  body: "",
+                  headers: Headers.empty,
+                })
+                expect(headers.authorization).toBe("Bearer offline-environment-account-A")
+                expect(trustedCredentialReads).toBe(1)
+              } finally {
+                trustedModelCredential = undefined
+                modelCredentialMissing = false
+              }
+            }),
+          (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+        ),
+    )
   modelIt.live("a pinned settled provider result replays without checking today's missing model or dispatching", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

@@ -15,6 +15,29 @@ test("exact-binary discovery and activation do not generate or replace admitted 
   expect(result.selectedSuccessorID).toBe("kimi-successor-fixture")
 }, 180_000)
 
+test.skipIf(process.platform !== "win32")(
+  "cmd launch shape completes all actual worker crash boundaries",
+  async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-catalogue-launch-"))
+    const launcher = path.join(root, "source.cmd")
+    await fs.writeFile(
+      launcher,
+      `@echo off\r\n"${process.execPath}" --no-env-file "${path.resolve(import.meta.dirname, "../../opencode/src/index.ts")}" %*\r\n`,
+    )
+    try {
+      const result = await runCatalogueProbe(launcher)
+      expect(result.settledCallsReplayed).toBe(0)
+      expect(result.generationCallsDuringDiscovery + result.generationCallsDuringActivation).toBe(0)
+      expect(result.recoveredModelID).toBe(result.originalModelID)
+    } finally {
+      if ((await fs.realpath(root)).toLowerCase() !== root.toLowerCase() || (await fs.lstat(root)).isSymbolicLink())
+        throw new Error("Launcher fixture ownership changed")
+      await fs.rm(root, { recursive: true })
+    }
+  },
+  180_000,
+)
+
 test.each(["ordinary-environment", "wrong-grant"])(
   "private probe rejects %s before creating workflow state",
   async (kind) => {

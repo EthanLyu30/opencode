@@ -8,6 +8,12 @@ export class Service extends Context.Service<
   Service,
   {
     check: (selection: ModelSelection.FrozenSelection) => Effect.Effect<void, WorkflowModelCatalog.CatalogError>
+    // Production catalogue composition binds generation to the same trusted account as discovery.
+    // Absent only for legacy/non-catalogue compositions, which retain their existing credential lookup.
+    credential?: (
+      selection: ModelSelection.FrozenSelection,
+      providerID: WorkflowModelCatalog.ProviderID,
+    ) => Effect.Effect<string, WorkflowModelCatalog.CatalogError>
   }
 >()("Workflow.ModelAvailability") {}
 export const node = makeGlobalNode({

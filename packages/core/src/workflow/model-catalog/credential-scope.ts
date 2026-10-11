@@ -1,6 +1,7 @@
 export * as WorkflowCredentialScope from "./credential-scope"
 import { Context, Effect, Layer } from "effect"
 import fs from "node:fs/promises"
+import path from "node:path"
 import { randomUUID } from "node:crypto"
 import { asc, eq } from "drizzle-orm"
 import { WorkflowModelCatalog } from "@opencode-ai/schema/workflow-model-catalog"
@@ -65,14 +66,16 @@ export const layer = Layer.effect(
               catch: () => error("selection_required"),
             })
           : null
+        const durableRevision =
+          environment.reloadRevision ?? (environment.file ? `file:${path.resolve(environment.file)}` : undefined)
         const revision = WorkflowBusinessArtifact.hash({
           configurationRevision: config.configurationRevision,
-          reloadRevision: environment.reloadRevision ?? `ephemeral:${sessionRevision}`,
+          reloadRevision: durableRevision ?? `ephemeral:${sessionRevision}`,
           metadata: metadata ? { size: metadata.size, mtimeMs: metadata.mtimeMs, ctimeMs: metadata.ctimeMs } : null,
         })
         return {
           referenceID: environment.referenceID,
-          revision: environment.reloadRevision ? revision : `ephemeral:${revision}`,
+          revision: durableRevision ? revision : `ephemeral:${revision}`,
           origin: config.origin,
         }
       }
