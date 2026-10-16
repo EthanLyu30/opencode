@@ -1049,3 +1049,15 @@ Do not commit raw task outputs, API ledgers with sensitive metadata, hidden gold
 4. **Final evidence checkpoint:** Task24D reproduces the decision from frozen inputs and produces verified JSON/CSV/HTML/PDF without additional provider calls.
 
 The implementation session must stop at each authorization checkpoint. “按计划执行” authorizes the zero-credit implementation/Task24A work, but does not by itself authorize Task24B or Task24C spend.
+
+## 2026-10-16 continuation — pilot cardinality correction
+
+The user confirmed preserving the visual workflow, adding a separate nonvisual entry and evaluation support, and completing zero-credit verification before committing/pushing. Paid runs still require a later explicit provider-native budget approval.
+
+The pilot planner incorrectly inherited full-campaign repetitions, producing 24 cells for three tasks instead of one cell per task/arm (15). The narrowly scoped correction fixes pilot primary/upstream repetitions to one and leaves offline/full-campaign planning unchanged. The five new planner tests first reproduced the failure (24 and 39 cells for the two fixtures), then passed; focused planner/order/offline-broker tests passed 8/8. Fresh package suite: **238 passed, 10 skipped, 0 failed, 811 assertions, 59 files**; `bun --no-env-file run typecheck` exited 0. This is package-level zero-credit evidence, not a fresh exact-binary Task24A acceptance or model-quality result.
+
+The historical 24-cell pilot and cost proposals above are superseded for future planning; no old campaign seal, run DB, approval, report or deployment was rewritten. A persisted old plan must remain conflicting, not silently merged with the corrected matrix. New pricing and approval must be bound to the eventual new seal; reducing cell count is not an authorization to spend.
+
+The nonvisual production-entry design is now recorded in `docs/superpowers/specs/2026-10-16-opencode-coding-workflow-design.md`, pending written-spec review. Nonvisual entry implementation, shared library evaluators, live execution loop, new active seal/fresh Task24A and Tasks24.12–14 remain pending; their checkboxes above are intentionally unchanged.
+
+Planner correction commit: `a7cb74584419c72a761ea6c7149889763116118e`. A fresh read-only reviewer found no Critical/Important/Minor issues and independently ran planner/order tests (6 passed, 0 failed, 59 assertions). The reviewer excluded the pre-existing entry/evaluator/live-loop work and paid-provider execution; those remain explicit prerequisites, not evidence supplied by this fix. Existing 24-run plans are not migrated, and corrected seeded arm order may differ while repetition-zero run identities remain stable.
