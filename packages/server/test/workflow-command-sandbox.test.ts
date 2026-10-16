@@ -22,6 +22,12 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { Docker } from "../src/workflow/docker"
 import { WorkflowCommandSandboxServer } from "../src/workflow/command-sandbox"
+import { CodingHostPlan } from "@opencode-ai/core/workflow/coding/host-plan"
+import { CodingAuthority } from "@opencode-ai/core/workflow/coding/authority"
+import { CodingModelSelection } from "@opencode-ai/core/workflow/coding/model-selection"
+import { CodingRoleAgentProfiles } from "@opencode-ai/core/workflow/coding/role-agent-profiles"
+import { BuildRouting } from "@opencode-ai/core/workflow/execution/build-routing"
+import { fixtureAdmissionSnapshot } from "../../core/test/fixtures/workflow-model-catalog"
 
 const root = "D:\\OpenCode-Local\\tmp\\workflow-sandbox-tests"
 const image = `opencode/workflow-sandbox@sha256:${"a".repeat(64)}`
@@ -41,6 +47,55 @@ afterAll(async () => {
 })
 
 describe("WorkflowCommandSandboxServer", () => {
+  for (const coding of [true, false])
+    test(`uses the provider engine's version2 pending Bash intent (coding=${coding})`, async () => {
+      await using fixture = await setup("implement", { coding })
+      fixture.persisted.stage = {
+        ...fixture.persisted.stage,
+        checkpoint: { ...fixture.persisted.stage.checkpoint, version: 2 },
+      }
+      expect(await fixture.run({ command: "true" })).toEqual({ exit: 0, output: "sandbox output", truncated: false })
+      expect(fixture.engine.all("container", "start")).toHaveLength(1)
+      if (coding) expect(fixture.request.agent).toBe(CodingRoleAgentProfiles.agentForRole("implement"))
+    })
+  test("coding checks use their own frozen plan, sealed bytes and owned readonly Docker invocation", async () => {
+    const codingOutput = JSON.stringify({
+      kind: "opencode.coding-check.v1",
+      exitCode: 0,
+      timedOut: false,
+      log: "1 pass",
+      report: '<testsuites tests="1" failures="0"><testsuite><testcase name="sum"/></testsuite></testsuites>',
+    })
+    await using fixture = await setup("test", { coding: true, codingOutput })
+    const location = fixture.persisted.run.location!
+    await fs.writeFile(path.join(location.directory, "sum.test.ts"), 'import {test} from "bun:test";test("sum",()=>{})')
+    const plan = CodingHostPlan.freeze({ authority: "admission", location, checks: { cwd: ".", test: "bun-test" } })
+    fixture.persisted.run = { ...fixture.persisted.run, input: { [CodingHostPlan.RESERVED_INPUT_KEY]: plan } }
+    const result = await fixture.runCoding(plan)
+    expect(result.exitCode).toBe(0)
+    expect(result.report).toContain('<testcase name="sum"/>')
+    expect(result.ownerSha256).toMatch(/^[a-f0-9]{64}$/)
+    const create = fixture.engine.one("container", "create")
+    expect(valuesAfter(create.argv, "--mount")).toEqual([])
+    expect(valueAfter(create.argv, "--network")).toBe("none")
+    expect(create.argv).toContain("--no-env-file")
+    expect(create.argv).toContain("-e")
+    expect(create.argv.at(-1)).toContain("--reporter=junit")
+    expect(Buffer.from(fixture.engine.one("container", "cp").stdin!).includes(Buffer.from("sum.test.ts"))).toBe(true)
+    expect(fixture.engine.all("container", "rm")).toHaveLength(1)
+  })
+  test("coding check policy drift is rejected before creating a container", async () => {
+    await using fixture = await setup("test", { coding: true })
+    const location = fixture.persisted.run.location!
+    await fs.writeFile(path.join(location.directory, "sum.test.ts"), "export {}")
+    const plan = CodingHostPlan.freeze({ authority: "admission", location, checks: { cwd: ".", test: "bun-test" } })
+    fixture.persisted.run = { ...fixture.persisted.run, input: { [CodingHostPlan.RESERVED_INPUT_KEY]: plan } }
+    await fs.writeFile(path.join(location.directory, "package.json"), "{}")
+    expect(await fixture.runCoding(plan).catch((error: unknown) => error)).toBeInstanceOf(
+      WorkflowCommandSandbox.Rejected,
+    )
+    expect(fixture.engine.all("container", "create")).toEqual([])
+  })
   test("installs a separate trusted frozen-test runner instead of accepting model shell text", async () => {
     await using fixture = await setup("test")
     expect(await fixture.hasFrozenTestRunner()).toBe(true)
@@ -951,6 +1006,7 @@ class FakeEngine implements Docker.Engine {
     private readonly options: {
       readonly engineFailure?: "daemon" | "image"
       readonly startFailure?: "cancelled" | "timeout" | "engine" | "command"
+      readonly codingOutput?: string
       readonly inspectMismatch?: boolean
       readonly recoveryFailure?:
         | "list"
@@ -1035,7 +1091,7 @@ class FakeEngine implements Docker.Engine {
         return { exit: 1, stdout: "", stderr: "daemon disconnected", truncated: false }
       if (this.options.startFailure === "command")
         return { exit: 1, stdout: "", stderr: "command failed", truncated: false }
-      return { exit: 0, stdout: "sandbox output", stderr: "", truncated: false }
+      return { exit: 0, stdout: this.options.codingOutput ?? "sandbox output", stderr: "", truncated: false }
     }
     if (input.argv[0] === "container" && input.argv[1] === "ls") {
       if (this.options.recoveryFailure === "list") throw new Error("daemon unavailable")
@@ -1101,6 +1157,8 @@ async function setup(
       | "inspect-cancelled"
       | "late-timeout"
     readonly callInput?: { readonly command: string; readonly workdir?: string; readonly timeout?: number }
+    readonly coding?: boolean
+    readonly codingOutput?: string
   } = {},
 ) {
   await fs.mkdir(root, { recursive: true })
@@ -1115,16 +1173,21 @@ async function setup(
   const workflowID = WorkflowSchema.ID.make("wfl_server_command_sandbox")
   const stageID = WorkflowSchema.StageID.make("wfs_server_command_sandbox")
   const sessionID = SessionSchema.ID.make("ses_server_command_sandbox")
-  const agent = WorkflowRoleAgents.agentForRole(role)
+  const agent =
+    options.coding && role !== "visual_review"
+      ? CodingRoleAgentProfiles.agentForRole(role)
+      : WorkflowRoleAgents.agentForRole(role)
   const now = Date.now()
   const clock = { now }
   const location = Location.Ref.make({ directory: AbsolutePath.make(workspace) })
   const run: WorkflowSchema.Info = {
     id: workflowID,
-    type: "visual-build",
+    type: options.coding ? "coding-build" : "visual-build",
     status: "running",
     currentStageID: stageID,
-    input: {},
+    input: options.coding
+      ? { [CodingModelSelection.RESERVED_INPUT_KEY]: CodingModelSelection.freeze(fixtureAdmissionSnapshot(), location) }
+      : {},
     budget: {},
     usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
     location,
@@ -1238,18 +1301,36 @@ async function setup(
     toolCallID: "call-server-command-sandbox",
   }
   const authority = async () => {
-    const route = WorkflowRouting.resolve({
-      role,
-      budget: persisted.run.budget,
-      requested: WorkflowRouting.requestedFromStage(role, persisted.stage.input),
-    })
+    const resolved = options.coding
+      ? BuildRouting.resolve({ workflow: persisted.run, stage: persisted.stage })
+      : WorkflowRouting.resolve({
+          role,
+          budget: persisted.run.budget,
+          requested: WorkflowRouting.requestedFromStage(role, persisted.stage.input),
+        })
+    if (resolved.role !== role) throw new Error("Fixture executable role mismatch")
+    const route = { ...resolved, role }
     const policyDigest = await Effect.runPromise(
       WorkflowToolLineage.policyDigest({ workflow: persisted.run, stage: persisted.stage, route, agent }),
     )
     return { workflowID, stageID, route, policyDigest }
   }
   const initial = await authority()
-  const layer = WorkflowCommandSandboxServer.makeLayer({ engine, config, now: () => clock.now }).pipe(
+  const layer = WorkflowCommandSandboxServer.makeLayer({
+    engine,
+    config,
+    now: () => clock.now,
+    ...(options.coding
+      ? {
+          codingAuthority: CodingAuthority.Service.of({
+            require: (workflow) =>
+              workflow.id === workflowID && workflow.type === "coding-build"
+                ? Effect.void
+                : Effect.fail(new CodingAuthority.Invalid({ message: "Not the owned fixture" })),
+          }),
+        }
+      : {}),
+  }).pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(WorkflowStore.Service, workflowStore),
@@ -1277,6 +1358,39 @@ async function setup(
     lookups,
     request,
     authority: () => initial,
+    runCoding: async (plan: CodingHostPlan.Plan) => {
+      const bytes = await fs.readFile(path.join(workspace, "sum.test.ts"))
+      const entries = [
+        {
+          path: RelativePath.make("sum.test.ts"),
+          type: "file" as const,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          size: bytes.byteLength,
+        },
+      ]
+      const archive = await WorkflowWorkspaceMaterialization.seal(entries, async () => bytes)
+      const sealedSnapshot = WorkflowWorkspaceMaterialization.bind({
+        workflowID,
+        stageID,
+        revision: 0,
+        location,
+        snapshotRef: Snapshot.ID.make("coding-owned-fixture"),
+        manifestSha256: "b".repeat(64),
+        workspaceSha256: Snapshot.workspaceSha256(entries),
+        archive,
+      })
+      return Effect.flatMap(WorkflowCommandSandbox.Service, (sandbox) =>
+        sandbox.runFrozenCoding!({
+          workflowID,
+          stageID,
+          revision: 0,
+          commandID: "test",
+          planSha256: plan.sha256,
+          configSha256: plan.configSha256,
+          sealedSnapshot,
+        }),
+      ).pipe(Effect.provide(layer), Effect.runPromise)
+    },
     hasFrozenTestRunner: () =>
       Effect.runPromise(
         Effect.map(WorkflowCommandSandbox.Service, (sandbox) => typeof sandbox.runFrozenTest === "function").pipe(

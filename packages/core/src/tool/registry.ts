@@ -22,6 +22,9 @@ import { WorkflowToolLineage } from "../workflow/tool-lineage"
 import { WorkflowRoleAgentProfiles } from "../workflow/role-agent-profiles"
 import { CodingRoleAgentProfiles } from "../workflow/coding/role-agent-profiles"
 import { WorkflowRoleAgents } from "../workflow/role-agents"
+import { BuildRoleAgents } from "../workflow/execution/build-role-agents"
+import { BuildEvidence } from "../workflow/execution/build-evidence"
+import { CodingAuthority } from "../workflow/coding/authority"
 import type { BuildRouting } from "../workflow/execution/build-routing"
 import { WorkflowStore } from "../workflow/store"
 
@@ -264,6 +267,7 @@ const workflowAuthorityLayer = Layer.effect(
     const workflows = yield* WorkflowStore.Service
     const sessions = yield* SessionStore.Service
     const location = yield* Location.Service
+    const codingAuthority = yield* CodingAuthority.Service
     const fail = (code: WorkflowAuthorityError["code"], message: string) =>
       Effect.fail(new WorkflowAuthorityError({ code, message }))
 
@@ -285,9 +289,21 @@ const workflowAuthorityLayer = Layer.effect(
         if (session === undefined) return yield* fail("session_missing", "Persisted Session is required")
         if (!sameLocation(session.location, location) || !sameLocation(session.location, detail.run.location))
           return yield* fail("location_mismatch", "Persisted Session does not match the active Workflow Location")
-        if (!Schema.is(WorkflowRole.Role)(stage.type) || stage.type !== input.route.role)
+        if (detail.run.type === "coding-build")
+          yield* codingAuthority
+            .require(detail.run)
+            .pipe(
+              Effect.mapError(
+                () =>
+                  new WorkflowAuthorityError({
+                    code: "policy_mismatch",
+                    message: "Trusted coding admission is required",
+                  }),
+              ),
+            )
+        if (!BuildEvidence.isRole(detail.run, stage.type) || stage.type !== input.route.role)
           return yield* fail("role_mismatch", "Settlement route does not match the persisted Stage role")
-        const agent = WorkflowRoleAgents.agentForRole(stage.type)
+        const agent = BuildRoleAgents.agentForRole(detail.run, input.route.role)
         if (input.agent !== agent)
           return yield* fail("agent_mismatch", "Settlement agent does not match the persisted Stage role")
         const policyDigest = yield* WorkflowToolLineage.policyDigest({
@@ -311,7 +327,7 @@ const workflowAuthorityLayer = Layer.effect(
           stageID: stage.id,
           sessionID: input.sessionID,
           agent,
-          role: stage.type,
+          role: input.route.role,
           policyDigest,
         })
       }),
@@ -357,7 +373,7 @@ export const toolsNode = makeLocationNode({
 export const workflowAuthorityNode = makeLocationNode({
   service: WorkflowAuthorityService,
   layer: workflowAuthorityLayer,
-  deps: [node, WorkflowStore.node, SessionStore.node, Location.node],
+  deps: [node, WorkflowStore.node, SessionStore.node, Location.node, CodingAuthority.node],
 })
 
 function sameLocation(

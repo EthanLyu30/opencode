@@ -39,6 +39,10 @@ import { ProductionHostRuntime } from "./workflow/production-host-runtime"
 import { WorkflowModelCatalogRuntime } from "./workflow/model-catalog-runtime"
 import { ModelSelection } from "@opencode-ai/core/workflow/model-selection"
 import { ModelAvailability } from "@opencode-ai/core/workflow/model-availability"
+import { CodingAdmission } from "@opencode-ai/core/workflow/coding/admission"
+import { CodingAuthority } from "@opencode-ai/core/workflow/coding/authority"
+import { CodingChecks } from "@opencode-ai/core/workflow/coding/checks"
+import { CodingChecksServer } from "./workflow/coding-checks"
 
 const deterministicBenchmarkRoleEvidence = makeGlobalNode({
   service: WorkflowRoleExecution.Service,
@@ -55,6 +59,7 @@ const applicationServices = LayerNode.group([
   WorkflowV2.node,
   WorkflowExecution.node,
   WorkflowAdmission.node,
+  CodingAdmission.node,
   ResponsesV2.node,
   PermissionSaved.node,
   PtyTicket.node,
@@ -174,6 +179,8 @@ export function workflowReplacements(
     [WorkflowVisualHost.node, input.visualHost ?? production.visualHost],
     [WorkflowCommandSandbox.node, input.commandSandbox ?? WorkflowCommandSandboxServer.node],
     [WorkflowRoleExecution.node, roleEvidence],
+    [CodingAuthority.node, CodingAdmission.authorityNode],
+    [CodingChecks.node, CodingChecksServer.node],
   ] as const
 }
 

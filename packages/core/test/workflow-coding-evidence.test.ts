@@ -270,6 +270,31 @@ describe("Coding artifacts and evidence lineage", () => {
     fixture.pass(true)
     const tested = await fixture.run("test", 0, 3, { summary: "Tests pass" }, "pass")
     expect(tested.preparation.codingChecks?.checks[0]?.status).toBe("executed")
+    const retryStage = {
+      ...tested.stage,
+      attempt: 2,
+      leaseOwner: "recovered-worker",
+      checkpoint: { kind: "workflow.model.continuation", version: 2, codingChecks: tested.preparation.codingChecks },
+    }
+    expect(CodingArtifacts.checkpointChecks(retryStage)).toEqual(tested.preparation.codingChecks)
+    expect(() =>
+      CodingArtifacts.checkpointChecks({ ...retryStage, id: Workflow.StageID.make("wfs_foreign_test") }),
+    ).toThrow()
+    expect(() =>
+      CodingArtifacts.checkpointChecks({ ...retryStage, checkpoint: { ...retryStage.checkpoint, version: 1 } }),
+    ).toThrow()
+    const preparedRetry = await fixture.evidence
+      .prepare({
+        workflow: fixture.workflow,
+        stage: retryStage,
+        revision: 0,
+        location: fixture.workflow.location!,
+        priorArtifacts: fixture.artifacts.slice(0, -tested.durable.length),
+        admission: { workflowInput: fixture.workflow.input, stageInput: retryStage.input },
+      })
+      .pipe(Effect.runPromise)
+    expect(preparedRetry.codingChecks).toEqual(tested.preparation.codingChecks)
+    expect(JSON.stringify(preparedRetry.messages)).toBe(JSON.stringify(tested.preparation.messages))
     const review = await fixture.run("code_review", 0, 4, { verdict: "pass", findings: [] }, "pass")
     for (const change of [{ attempt: 2 }, { leaseOwner: "other-worker" }])
       expect(() =>

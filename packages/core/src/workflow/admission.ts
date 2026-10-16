@@ -32,6 +32,8 @@ import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowStore } from "./store"
 import { ModelSelection } from "./model-selection"
 import { WorkflowModelCatalog } from "@opencode-ai/schema/workflow-model-catalog"
+import { CodingModelSelection } from "./coding/model-selection"
+import { CodingHostPlan } from "./coding/host-plan"
 
 const CLAIM_DOMAIN = "opencode.workflow.visual-build.admission-claim.v1"
 const ID_DOMAIN = "opencode.workflow.visual-build.deterministic-id.v1"
@@ -94,10 +96,25 @@ export function prepare(
     readonly timestamp: DateTime.Utc
     readonly admission?: Pick<Workflow.AdmissionInput, "location" | "sessionID" | "agent">
     readonly modelSelection?: ModelSelection.FrozenSelection
+    readonly codingAdmission?: {
+      readonly selection: CodingModelSelection.FrozenSelection
+      readonly hostPlan: CodingHostPlan.Plan
+    }
   },
 ) {
   // Only the dedicated durable coding admission path may enable this profile.
-  if (input.type === "coding-build") throw new ConflictError({ workflowID: options.workflowID, operation: "create" })
+  if (input.type === "coding-build") {
+    if (
+      !options.codingAdmission ||
+      !options.admission?.location ||
+      CodingModelSelection.validate(input.input[CodingModelSelection.RESERVED_INPUT_KEY]).sha256 !==
+        options.codingAdmission.selection.sha256 ||
+      CodingHostPlan.decode(input.input[CodingHostPlan.RESERVED_INPUT_KEY], options.admission.location).sha256 !==
+        options.codingAdmission.hostPlan.sha256 ||
+      options.codingAdmission.selection.locationSha256 !== WorkflowBusinessArtifact.hash(options.admission.location)
+    )
+      throw new ConflictError({ workflowID: options.workflowID, operation: "create" })
+  }
   if (Object.hasOwn(input.input, ModelSelection.RESERVED_INPUT_KEY)) {
     if (
       !options.modelSelection ||

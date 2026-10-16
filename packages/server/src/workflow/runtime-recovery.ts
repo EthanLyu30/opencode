@@ -14,10 +14,16 @@ import { Docker } from "./docker"
 import { DockerConfig } from "./docker-config"
 import { ProductionHostRuntime } from "./production-host-runtime"
 import { WorkflowCommandSandboxServer } from "./command-sandbox"
+import { CodingAuthority } from "@opencode-ai/core/workflow/coding/authority"
+import { CodingRouting } from "@opencode-ai/core/workflow/coding/routing"
+import { CodingModelSelection } from "@opencode-ai/core/workflow/coding/model-selection"
+import { BuildRoleAgents } from "@opencode-ai/core/workflow/execution/build-role-agents"
 
 const EXPIRED_RUNTIME_BATCH_SIZE = 100
 
-function isExecutableRole(value: string): value is WorkflowCommandSandbox.Request["role"] {
+function isExecutableRole(
+  value: string,
+): value is Extract<WorkflowCommandSandbox.Request["role"], "implement" | "repair" | "test" | "deliver"> {
   return value === "implement" || value === "repair" || value === "test" || value === "deliver"
 }
 
@@ -42,6 +48,7 @@ export async function recoverExpired(input: {
   readonly store: WorkflowStore.Interface
   readonly now: () => number
   readonly recover: (input: RecoverInput) => Promise<number>
+  readonly codingAuthority?: CodingAuthority.Interface
 }): Promise<Result> {
   let recovered = 0
   let skipped = 0
@@ -59,7 +66,13 @@ export async function recoverExpired(input: {
   }))
   for (const { snapshot, leaseExpiresAtEpoch } of captured) {
     try {
-      const candidate = await currentAuthority(input.store, snapshot, leaseExpiresAtEpoch, input.now())
+      const candidate = await currentAuthority(
+        input.store,
+        snapshot,
+        leaseExpiresAtEpoch,
+        input.now(),
+        input.codingAuthority,
+      )
       if (candidate === undefined) {
         skipped++
         continue
@@ -68,7 +81,13 @@ export async function recoverExpired(input: {
       const count = await input.recover({
         authority: candidate.authority,
         finalGate: async () => {
-          const current = await currentAuthority(input.store, snapshot, leaseExpiresAtEpoch, input.now())
+          const current = await currentAuthority(
+            input.store,
+            snapshot,
+            leaseExpiresAtEpoch,
+            input.now(),
+            input.codingAuthority,
+          )
           const valid = current !== undefined && sameAuthority(current.authority, candidate.authority)
           if (!valid) fenced = true
           return valid
@@ -87,6 +106,7 @@ export function makeLayer(input: {
   readonly engine: Docker.Engine
   readonly config: DockerConfig.Config
   readonly now?: () => number
+  readonly codingAuthority?: CodingAuthority.Interface
 }) {
   return Layer.effect(
     Service,
@@ -103,6 +123,7 @@ export function makeLayer(input: {
         recoverExpired({
           store,
           now: input.now ?? Date.now,
+          codingAuthority: input.codingAuthority,
           recover: ({ authority, finalGate }) =>
             WorkflowCommandSandboxServer.recover({ engine: input.engine, config, authority, finalGate }),
         }),
@@ -112,12 +133,13 @@ export function makeLayer(input: {
   )
 }
 
-export const layer = makeLayer({
-  engine: Docker.production,
-  config: productionDockerConfig(process.env),
-})
+export const layer = Layer.unwrap(
+  Effect.map(CodingAuthority.Service, (codingAuthority) =>
+    makeLayer({ engine: Docker.production, config: productionDockerConfig(process.env), codingAuthority }),
+  ),
+)
 
-export const node = makeGlobalNode({ service: Service, layer, deps: [WorkflowStore.node] })
+export const node = makeGlobalNode({ service: Service, layer, deps: [WorkflowStore.node, CodingAuthority.node] })
 
 function productionDockerConfig(environment: Readonly<Record<string, string | undefined>>) {
   try {
@@ -136,6 +158,7 @@ async function currentAuthority(
   snapshot: Awaited<ReturnType<typeof loadExpired>>[number],
   snapshotLeaseExpiresAtEpoch: number | undefined,
   now: number,
+  codingAuthority?: CodingAuthority.Interface,
 ): Promise<{ readonly authority: WorkflowCommandSandboxServer.RecoveryAuthority } | undefined> {
   if (snapshotLeaseExpiresAtEpoch === undefined) return undefined
   const [detail, stage, expired] = await Promise.all([
@@ -175,20 +198,36 @@ async function currentAuthority(
     return undefined
   }
   const role = stage.type
+  if (
+    detail.run.type === "coding-build" &&
+    (!codingAuthority ||
+      !(await Effect.runPromise(
+        codingAuthority.require(detail.run).pipe(Effect.match({ onFailure: () => false, onSuccess: () => true })),
+      )))
+  )
+    return undefined
   const call = pendingBashCall(stage.checkpoint)
   if (call === undefined) return undefined
-  let route: ReturnType<typeof WorkflowRouting.resolve>
+  let route: WorkflowRouting.Route | CodingRouting.Route
   try {
-    route = WorkflowRouting.resolve({
-      role,
-      budget: detail.run.budget,
-      requested: WorkflowRouting.requestedFromStage(role, stage.input),
-      benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(detail.run, now),
-    })
+    // Cleanup reconstructs pinned ownership only; it never spends or reuses an expired broker grant.
+    route =
+      detail.run.type === "coding-build"
+        ? CodingRouting.resolve({
+            role,
+            budget: detail.run.budget,
+            selection: CodingModelSelection.fromWorkflow(detail.run),
+          })
+        : WorkflowRouting.resolve({
+            role,
+            budget: detail.run.budget,
+            requested: WorkflowRouting.requestedFromStage(role, stage.input),
+            benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(detail.run, now),
+          })
   } catch {
     return undefined
   }
-  const agent = WorkflowRoleAgents.agentForRole(role)
+  const agent = BuildRoleAgents.agentForRole(detail.run, role)
   const policyDigest = await Effect.runPromise(
     WorkflowToolLineage.policyDigest({ workflow: detail.run, stage, route, agent }),
   ).catch(() => undefined)
@@ -216,7 +255,8 @@ async function currentAuthority(
 function pendingBashCall(
   checkpoint: Readonly<Record<string, unknown>> | undefined,
 ): { readonly id: string; readonly digest: string } | undefined {
-  if (checkpoint?.kind !== "workflow.model.continuation" || checkpoint.version !== 1) return undefined
+  if (checkpoint?.kind !== "workflow.model.continuation" || (checkpoint.version !== 1 && checkpoint.version !== 2))
+    return undefined
   const activeTurn = checkpoint.activeTurn
   if (activeTurn === null || typeof activeTurn !== "object" || Array.isArray(activeTurn)) return undefined
   const pendingCallID = Reflect.get(activeTurn, "pendingCallID")

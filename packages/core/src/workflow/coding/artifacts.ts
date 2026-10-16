@@ -160,6 +160,23 @@ export function toCommit(artifact: Workflow.Artifact | Workflow.ArtifactCommit):
   })
 }
 
+/** Read only the exact host record already fenced with a coding provider continuation. */
+export function checkpointChecks(stage: Workflow.Stage): CheckRecord | undefined {
+  const checkpoint = stage.checkpoint
+  if (!checkpoint || !Object.hasOwn(checkpoint, "codingChecks")) return undefined
+  if (checkpoint.kind !== "workflow.model.continuation" || checkpoint.version !== 2 || stage.type !== "test")
+    throw new Error("Invalid coding check continuation")
+  const record = Schema.decodeUnknownSync(CheckRecord)(checkpoint.codingChecks)
+  if (
+    record.workflowID !== stage.workflowID ||
+    record.stageID !== stage.id ||
+    record.revision !== stage.input.revision ||
+    record.attempt > stage.attempt
+  )
+    throw new Error("Foreign coding check continuation")
+  return record
+}
+
 /** Delivery's graph slot is fixed; its semantic revision is the actual passing review, not the upper bound. */
 export function revisionOf(
   workflow: Workflow.Info,

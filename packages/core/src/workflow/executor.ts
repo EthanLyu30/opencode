@@ -390,8 +390,9 @@ const executeCoding = Effect.fn("WorkflowExecutor.executeCoding")(function* (
         result.responseSettlement,
       ),
     )
+  const contract = result.contract
   const semantic = yield* Effect.try({
-    try: () => CodingContract.decode(result.contract as CodingContract.Contract, result.semantic),
+    try: () => CodingContract.decode(contract, result.semantic),
     catch: () => invalidOutcome("Invalid coding semantic result", result.usage, result.responseSettlement),
   })
   const settlement = yield* evidence

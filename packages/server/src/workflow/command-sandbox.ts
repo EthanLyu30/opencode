@@ -21,6 +21,12 @@ import { Docker } from "./docker"
 import { DockerConfig } from "./docker-config"
 import { ProductionHostRuntime } from "./production-host-runtime"
 import { WorkflowRuntimeRecovery } from "./runtime-recovery"
+import { CodingAuthority } from "@opencode-ai/core/workflow/coding/authority"
+import { CodingHostPlan } from "@opencode-ai/core/workflow/coding/host-plan"
+import { CodingRoleAgentProfiles } from "@opencode-ai/core/workflow/coding/role-agent-profiles"
+import { CodingCheckLauncher } from "./coding-check-launcher"
+import { BuildRoleAgents } from "@opencode-ai/core/workflow/execution/build-role-agents"
+import { BuildRouting } from "@opencode-ai/core/workflow/execution/build-routing"
 
 const labelDomain = "io.opencode.workflow"
 const containerIDPattern = /^[a-f0-9]{64}$/
@@ -33,6 +39,7 @@ export interface Options {
   readonly config: Config
   readonly now?: () => number
   readonly recoveryReady?: () => boolean
+  readonly codingAuthority?: CodingAuthority.Interface
 }
 
 export interface RecoveryAuthority {
@@ -74,6 +81,72 @@ export function makeLayer(
       const sessions = yield* SessionStore.Service
       const location = yield* Location.Service
       return WorkflowCommandSandbox.Service.of({
+        runFrozenCoding: Effect.fn("WorkflowCommandSandboxServer.runFrozenCoding")(function* (request) {
+          if (options.recoveryReady?.() === false || !options.codingAuthority)
+            return yield* unavailable("Trusted coding sandbox admission or recovery is unavailable")
+          const reload = () =>
+            reloadCodingAuthority({
+              request,
+              workflows,
+              location,
+              authority: options.codingAuthority!,
+              now: options.now ?? Date.now,
+            })
+          const authority = yield* reload()
+          const config = yield* Effect.tryPromise({
+            try: () => validatedConfig(options.config),
+            catch: () => unavailable("Coding Docker configuration is unavailable"),
+          })
+          const ownership = ownershipFor({
+            workflowID: request.workflowID,
+            stageID: request.stageID,
+            toolCallID: `host-coding-${request.commandID}-${request.configSha256.slice(0, 16)}`,
+            role: "test",
+            policyDigest: request.planSha256,
+            sessionID: authority.sessionID,
+            agent: CodingRoleAgentProfiles.agentForRole("test"),
+            leaseOwner: authority.leaseOwner,
+            attempt: authority.attempt,
+          })
+          const source = CodingCheckLauncher.source({
+            argv: authority.command.argv,
+            id: request.commandID,
+            timeoutMs: Math.max(1, Math.floor(config.limits.timeoutMs * 0.8)),
+          })
+          const executed = yield* Effect.tryPromise({
+            try: (signal) =>
+              runOwned(
+                options.engine,
+                config,
+                { role: "test", argv: ["bun", "--no-env-file", "-e", source] },
+                {
+                  workspace: { canonical: "", device: 0, inode: 0 },
+                  workdir: { canonical: "", device: 0, inode: 0 },
+                  relativeWorkdir: authority.plan.cwd,
+                },
+                ownership,
+                signal,
+                async () => {
+                  const current = await Effect.runPromise(reload())
+                  if (current.leaseOwner !== authority.leaseOwner || current.attempt !== authority.attempt)
+                    throw rejected("Coding lease changed before launch")
+                },
+                request.sealedSnapshot.archive,
+              ),
+            catch: (cause) =>
+              cause instanceof WorkflowCommandSandbox.Rejected
+                ? cause
+                : unavailable("Coding owned command could not settle"),
+          })
+          return yield* Effect.try({
+            try: () => {
+              if (executed.truncated) throw new Error("Truncated trusted check envelope")
+              const result = CodingCheckLauncher.decode(executed.output, executed.exit)
+              return { ...result, ownerSha256: WorkflowBusinessArtifact.hash(ownership.labels) }
+            },
+            catch: () => unavailable("Coding check envelope is missing or contradicts the container"),
+          })
+        }),
         run: Effect.fn("WorkflowCommandSandboxServer.run")(function* (request) {
           if (!executableRoles.has(request.role))
             return yield* rejected(`Workflow role ${request.role} cannot use Bash`)
@@ -85,6 +158,7 @@ export function makeLayer(
             sessions,
             location,
             now: options.now ?? Date.now,
+            codingAuthority: options.codingAuthority,
           })
           const config = yield* Effect.tryPromise({
             try: () => validatedConfig(options.config),
@@ -127,6 +201,7 @@ export function makeLayer(
                       sessions,
                       location,
                       now: options.now ?? Date.now,
+                      codingAuthority: options.codingAuthority,
                     }),
                   )
                   if (current.leaseOwner !== authority.leaseOwner || current.attempt !== authority.attempt)
@@ -215,19 +290,78 @@ export function makeLayer(
 }
 
 export const layer = Layer.unwrap(
-  Effect.map(WorkflowRuntimeRecovery.Service, (recovery) =>
-    makeLayer({
+  Effect.gen(function* () {
+    const recovery = yield* WorkflowRuntimeRecovery.Service
+    const codingAuthority = yield* CodingAuthority.Service
+    return makeLayer({
       engine: Docker.production,
       config: productionDockerConfig(process.env),
       recoveryReady: () => recovery.ready,
-    }),
-  ),
+      codingAuthority,
+    })
+  }),
 )
 
 export const node = makeLocationNode({
   service: WorkflowCommandSandbox.Service,
   layer,
-  deps: [WorkflowStore.node, SessionStore.node, Location.node, WorkflowRuntimeRecovery.node],
+  deps: [WorkflowStore.node, SessionStore.node, Location.node, WorkflowRuntimeRecovery.node, CodingAuthority.node],
+})
+
+const reloadCodingAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadCodingAuthority")(function* (input: {
+  readonly request: WorkflowCommandSandbox.FrozenCodingRequest
+  readonly workflows: WorkflowStore.Interface
+  readonly location: Location.Interface
+  readonly authority: CodingAuthority.Interface
+  readonly now: () => number
+}) {
+  const detail = yield* input.workflows.get(input.request.workflowID)
+  const stage = yield* input.workflows.stage(input.request.stageID)
+  if (
+    !detail ||
+    detail.run.type !== "coding-build" ||
+    !detail.run.location ||
+    !sameLocation(detail.run.location, input.location) ||
+    !detail.run.sessionID ||
+    !stage ||
+    stage.workflowID !== detail.run.id ||
+    stage.id !== input.request.stageID ||
+    stage.type !== "test" ||
+    stage.input.revision !== input.request.revision ||
+    detail.run.status !== "running" ||
+    detail.run.currentStageID !== stage.id ||
+    detail.run.cancelRequestedAt !== undefined ||
+    (stage.status !== "leased" && stage.status !== "running") ||
+    !stage.leaseOwner ||
+    stage.attempt < 1 ||
+    !stage.leaseExpiresAt ||
+    DateTime.toEpochMillis(stage.leaseExpiresAt) < input.now()
+  )
+    return yield* rejected("Coding check lease and Location authority are not current")
+  yield* input.authority
+    .require(detail.run)
+    .pipe(Effect.mapError(() => rejected("Durable coding admission is invalid")))
+  const plan = yield* Effect.try({
+    try: () => {
+      const plan = CodingHostPlan.decode(detail.run.input[CodingHostPlan.RESERVED_INPUT_KEY], detail.run.location!)
+      CodingHostPlan.verifyCurrentConfiguration(plan)
+      if (input.request.planSha256 !== plan.sha256 || input.request.configSha256 !== plan.configSha256)
+        throw new Error("Coding policy mismatch")
+      const sealed = WorkflowWorkspaceMaterialization.validate(input.request.sealedSnapshot)
+      if (
+        sealed.workflowID !== detail.run.id ||
+        sealed.stageID !== stage.id ||
+        sealed.revision !== input.request.revision ||
+        !sameLocation(sealed.location, detail.run.location!)
+      )
+        throw new Error("Coding Snapshot mismatch")
+      return plan
+    },
+    catch: () => rejected("Coding frozen configuration or sealed Snapshot changed"),
+  })
+  const command = plan.commands.find((command) => command.id === input.request.commandID)
+  if (!command) return yield* rejected("Selected coding check is not admitted")
+  return { plan, command, sessionID: detail.run.sessionID, leaseOwner: stage.leaseOwner, attempt: stage.attempt }
 })
 
 function productionDockerConfig(environment: Readonly<Record<string, string | undefined>>) {
@@ -319,6 +453,7 @@ const reloadAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadAuthority"
   readonly sessions: SessionStore.Interface
   readonly location: Location.Interface
   readonly now: () => number
+  readonly codingAuthority?: CodingAuthority.Interface
 }) {
   const detail = yield* input.workflows.get(input.request.workflowID)
   if (detail === undefined || detail.run.id !== input.request.workflowID)
@@ -326,6 +461,12 @@ const reloadAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadAuthority"
   const stage = yield* input.workflows.stage(input.request.stageID)
   if (stage === undefined || stage.id !== input.request.stageID || stage.workflowID !== detail.run.id)
     return yield* rejected("Persisted Stage is required")
+  if (detail.run.type === "coding-build") {
+    if (!input.codingAuthority) return yield* unavailable("Trusted coding command authority is unavailable")
+    yield* input.codingAuthority
+      .require(detail.run)
+      .pipe(Effect.mapError(() => rejected("Durable coding command admission is invalid")))
+  }
   const session = yield* input.sessions.getWorkflow(input.request.sessionID)
   if (session === undefined || session.id !== input.request.sessionID)
     return yield* rejected("Persisted Session is required")
@@ -349,7 +490,7 @@ const reloadAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadAuthority"
   ) {
     return yield* rejected("Persisted Workflow Stage authority does not match the command request")
   }
-  if (input.request.agent !== WorkflowRoleAgents.agentForRole(input.request.role)) {
+  if (input.request.agent !== BuildRoleAgents.agentForRole(detail.run, input.request.role)) {
     return yield* rejected("Persisted workflow role agent does not match the command request")
   }
   if (
@@ -365,12 +506,14 @@ const reloadAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadAuthority"
   }
   const route = yield* Effect.try({
     try: () =>
-      WorkflowRouting.resolve({
-        role: input.request.role,
-        budget: detail.run.budget,
-        requested: WorkflowRouting.requestedFromStage(input.request.role, stage.input),
-        benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(detail.run, input.now()),
-      }),
+      detail.run.type === "coding-build"
+        ? BuildRouting.resolve({ workflow: detail.run, stage })
+        : WorkflowRouting.resolve({
+            role: input.request.role,
+            budget: detail.run.budget,
+            requested: WorkflowRouting.requestedFromStage(input.request.role, stage.input),
+            benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(detail.run, input.now()),
+          }),
     catch: () => rejected("Persisted Workflow route policy is invalid"),
   })
   const policyDigest = yield* WorkflowToolLineage.policyDigest({
@@ -798,7 +941,8 @@ function pendingCheckpointCall(
   checkpoint: Readonly<Record<string, unknown>> | undefined,
   request: WorkflowCommandSandbox.Request,
 ) {
-  if (checkpoint?.kind !== "workflow.model.continuation" || checkpoint.version !== 1) return false
+  if (checkpoint?.kind !== "workflow.model.continuation" || (checkpoint.version !== 1 && checkpoint.version !== 2))
+    return false
   const activeTurn = checkpoint.activeTurn
   if (activeTurn === null || typeof activeTurn !== "object" || Array.isArray(activeTurn)) return false
   const pendingCallID = Reflect.get(activeTurn, "pendingCallID")

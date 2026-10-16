@@ -25,8 +25,46 @@ import { DockerConfig } from "../src/workflow/docker-config"
 import { WorkflowRuntimeRecovery } from "../src/workflow/runtime-recovery"
 import { WorkflowVisualHostServer } from "../src/workflow/visual-host"
 import { WorkflowProductionEvidenceServer } from "../src/workflow/production-evidence"
+import { CodingAuthority } from "@opencode-ai/core/workflow/coding/authority"
+import { CodingModelSelection } from "@opencode-ai/core/workflow/coding/model-selection"
+import { CodingRoleAgentProfiles } from "@opencode-ai/core/workflow/coding/role-agent-profiles"
+import { fixtureAdmissionSnapshot } from "../../core/test/fixtures/workflow-model-catalog"
+import { CodingAdmission } from "@opencode-ai/core/workflow/coding/admission"
+import { CodingChecks } from "@opencode-ai/core/workflow/coding/checks"
+import { CodingChecksServer } from "../src/workflow/coding-checks"
 
 describe("Workflow runtime recovery", () => {
+  for (const coding of [true, false])
+    test(`recovers the actual version2 pending call with pinned role authority (coding=${coding})`, async () => {
+      const fixture = persistedFixture(coding)
+      fixture.checkpoint.version = 2
+      let recovered: WorkflowCommandSandboxServer.RecoveryAuthority | undefined
+      const result = await WorkflowRuntimeRecovery.recoverExpired({
+        store: fixture.store,
+        now: () => fixture.now,
+        ...(coding
+          ? {
+              codingAuthority: CodingAuthority.Service.of({
+                require: (workflow) =>
+                  workflow.id === fixture.run.id
+                    ? Effect.void
+                    : Effect.fail(new CodingAuthority.Invalid({ message: "Foreign fixture" })),
+              }),
+            }
+          : {}),
+        recover: async (input) => {
+          if (!(await input.finalGate())) return 0
+          recovered = input.authority
+          return 1
+        },
+      })
+      expect(result).toEqual({ healthy: true, recovered: 1, skipped: 0 })
+      expect(recovered?.agent).toBe(
+        coding ? CodingRoleAgentProfiles.agentForRole("implement") : WorkflowRoleAgents.agentForRole("implement"),
+      )
+      expect(recovered?.attempt).toBe(2)
+      expect(recovered?.callDigest).toMatch(/^[a-f0-9]{64}$/)
+    })
   test("starts unhealthy when Docker recovery configuration is unavailable", async () => {
     const fixture = persistedFixture()
     let executed = 0
@@ -219,6 +257,8 @@ describe("Workflow route composition", () => {
       [WorkflowVisualHost.node, production.visualHost],
       [WorkflowCommandSandbox.node, WorkflowCommandSandboxServer.node],
       [WorkflowRoleExecution.node, production.roleEvidence],
+      [CodingAuthority.node, CodingAdmission.authorityNode],
+      [CodingChecks.node, CodingChecksServer.node],
     ])
   })
 
@@ -375,7 +415,7 @@ describe("Workflow route composition", () => {
 type Stage = NonNullable<Effect.Success<ReturnType<WorkflowStore.Interface["stage"]>>>
 type MutableCheckpoint = {
   kind: "workflow.model.continuation"
-  version: 1
+  version: 1 | 2
   activeTurn: {
     calls: Array<Record<string, unknown>>
     results: Array<Record<string, unknown>>
@@ -383,7 +423,7 @@ type MutableCheckpoint = {
   }
 }
 
-function persistedFixture() {
+function persistedFixture(coding = false) {
   const now = 10_000
   const workflowID = WorkflowSchema.ID.make("wfl_runtime_recovery")
   const stageID = WorkflowSchema.StageID.make("wfs_runtime_recovery")
@@ -391,10 +431,12 @@ function persistedFixture() {
   const location = Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Local\\workspace") })
   const run: WorkflowSchema.Info = {
     id: workflowID,
-    type: "visual-build",
+    type: coding ? "coding-build" : "visual-build",
     status: "running",
     currentStageID: stageID,
-    input: {},
+    input: coding
+      ? { [CodingModelSelection.RESERVED_INPUT_KEY]: CodingModelSelection.freeze(fixtureAdmissionSnapshot(), location) }
+      : {},
     budget: {},
     usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 2 },
     location,

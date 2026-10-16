@@ -12,6 +12,8 @@ import { WorkflowRunTable, WorkflowStageTable } from "../workflow/sql"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { ConversationItemTable, ConversationTable, ResponseItemTable, ResponseTable } from "./sql"
 import { ResponsesAdmission } from "./admission"
+import { CodingAdmissionReceipt } from "../workflow/coding/admission-receipt"
+import { SessionTable } from "../session/sql"
 
 type DB = Database.Interface["db"]
 
@@ -245,6 +247,7 @@ const layer = Layer.effectDiscard(
         const data = event.data
         const admissionReceipt =
           data.context.length === 1 ? ResponsesAdmission.tryDecodeVisualBuildReceipt(data.context[0]) : undefined
+        const codingReceipt = data.context.length === 1 ? CodingAdmissionReceipt.tryDecode(data.context[0]) : undefined
         if (
           (data.previousResponseID && data.conversationID) ||
           (!data.store && (data.conversationID || data.background))
@@ -254,7 +257,13 @@ const layer = Layer.effectDiscard(
         if (!data.store && (data.context.length !== 0 || !isDeepStrictEqual(data.input, [{ type: "redacted" }]))) {
           throw new LifecycleConflict(data.responseID)
         }
-        if (!data.previousResponseID && !data.conversationID && data.context.length > 0 && !admissionReceipt) {
+        if (
+          !data.previousResponseID &&
+          !data.conversationID &&
+          data.context.length > 0 &&
+          !admissionReceipt &&
+          !codingReceipt
+        ) {
           throw new LifecycleConflict(data.responseID)
         }
         if (
@@ -272,6 +281,19 @@ const layer = Layer.effectDiscard(
         ) {
           throw new LifecycleConflict(data.responseID)
         }
+        if (
+          codingReceipt &&
+          (!data.store ||
+            data.previousResponseID !== undefined ||
+            data.conversationID !== undefined ||
+            codingReceipt.responseID !== data.responseID ||
+            codingReceipt.workflowID !== data.workflowID ||
+            codingReceipt.requestHash !== data.requestHash ||
+            codingReceipt.selection.routes.deliver.modelID !== data.model ||
+            data.background !== (codingReceipt.request.delivery === "background") ||
+            !isDeepStrictEqual(data.input, [{ type: "message", role: "user", content: codingReceipt.request.prompt }]))
+        )
+          throw new LifecycleConflict(data.responseID)
         if (!event.durable?.replay && data.previousResponseID) {
           const parent = yield* getResponse(db, data.previousResponseID)
           const parentContext = (yield* db
@@ -327,6 +349,57 @@ const layer = Layer.effectDiscard(
           throw new LifecycleConflict(data.responseID)
         }
         if (!event.durable?.replay) {
+          if (codingReceipt) {
+            const admitted = yield* db
+              .select()
+              .from(WorkflowRunTable)
+              .where(eq(WorkflowRunTable.id, data.workflowID))
+              .get()
+              .pipe(Effect.orDie)
+            const session = yield* db
+              .select()
+              .from(SessionTable)
+              .where(eq(SessionTable.id, codingReceipt.sessionID))
+              .get()
+              .pipe(Effect.orDie)
+            const stages = yield* db
+              .select()
+              .from(WorkflowStageTable)
+              .where(eq(WorkflowStageTable.workflow_id, data.workflowID))
+              .orderBy(asc(WorkflowStageTable.ordinal))
+              .all()
+              .pipe(Effect.orDie)
+            if (
+              !admitted ||
+              admitted.type !== "coding-build" ||
+              admitted.session_id !== codingReceipt.sessionID ||
+              admitted.agent !== codingReceipt.agent ||
+              admitted.directory !== codingReceipt.location.directory ||
+              (admitted.workspace_id ?? undefined) !== codingReceipt.location.workspaceID ||
+              !isDeepStrictEqual(admitted.input, CodingAdmissionReceipt.workflowInput(codingReceipt)) ||
+              !isDeepStrictEqual(admitted.budget, codingReceipt.request.budget) ||
+              !session ||
+              session.visibility !== "workflow" ||
+              session.agent !== codingReceipt.agent ||
+              session.directory !== codingReceipt.location.directory ||
+              (session.workspace_id ?? undefined) !== codingReceipt.location.workspaceID ||
+              stages.length !== codingReceipt.graph.length ||
+              codingReceipt.graph.some((expected, index) => {
+                const stage = stages[index]
+                return (
+                  !stage ||
+                  stage.id !== expected.id ||
+                  stage.stage_type !== expected.type ||
+                  stage.ordinal !== expected.ordinal ||
+                  stage.max_attempts !== expected.maxAttempts ||
+                  stage.recovery_policy !== expected.recoveryPolicy ||
+                  stage.idempotency_key !== expected.idempotencyKey ||
+                  !isDeepStrictEqual(stage.input, expected.input)
+                )
+              })
+            )
+              throw new LifecycleConflict(data.responseID)
+          }
           const deliver = yield* db
             .select({ input: WorkflowStageTable.input })
             .from(WorkflowStageTable)

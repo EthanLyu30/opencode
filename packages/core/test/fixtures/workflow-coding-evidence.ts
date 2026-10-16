@@ -40,7 +40,7 @@ export function codingEvidenceFixture(directory: string) {
     { path: RelativePath.make("sum.ts"), type: "file", sha256: Hash.sha256(source), size: Buffer.byteLength(source) },
   ]
   const capture = () => {
-    const id = Snapshot.ID.make(`coding_fixture_${snapshots.size}`)
+    const id = Snapshot.ID.make(Snapshot.workspaceSha256(entries()))
     snapshots.set(id, entries())
     return id
   }
@@ -57,39 +57,41 @@ export function codingEvidenceFixture(directory: string) {
           }),
         ),
       run: (input) =>
-        Effect.succeed({
-          schemaVersion: 1,
-          workflowID: workflow.id,
-          stageID: input.stage.id,
-          attempt: input.stage.attempt,
-          leaseOwner: input.stage.leaseOwner!,
-          revision: input.revision,
-          locationSha256: WorkflowBusinessArtifact.locationSha256(location),
-          planSha256: plan.sha256,
-          configSha256: plan.configSha256,
-          implementationSha256: input.sealedSnapshot.manifestSha256,
-          workspaceSha256: input.sealedSnapshot.workspaceSha256,
-          snapshotRef: input.sealedSnapshot.snapshotRef,
-          sealedAuthoritySha256: input.sealedSnapshot.authoritySha256,
-          checks: [
-            {
-              id: "test",
-              status: "executed",
-              argv: plan.commands[0]!.argv,
-              cwd: ".",
-              exitCode: pass ? 0 : 1,
-              timedOut: false,
-              observedTests: 1,
-              failedTests: pass ? 0 : 1,
-              reportSha256: "a".repeat(64),
-              log: pass ? "1 pass" : "1 fail",
-              logSha256: WorkflowBusinessArtifact.hash(pass ? "1 pass" : "1 fail"),
-              ownerSha256: "b".repeat(64),
-            },
-            { id: "build", status: "not-applicable" },
-            { id: "typecheck", status: "not-applicable" },
-          ],
-        }),
+        Effect.succeed(
+          CodingArtifacts.checkpointChecks(input.stage) ?? {
+            schemaVersion: 1,
+            workflowID: workflow.id,
+            stageID: input.stage.id,
+            attempt: input.stage.attempt,
+            leaseOwner: input.stage.leaseOwner!,
+            revision: input.revision,
+            locationSha256: WorkflowBusinessArtifact.locationSha256(location),
+            planSha256: plan.sha256,
+            configSha256: plan.configSha256,
+            implementationSha256: input.sealedSnapshot.manifestSha256,
+            workspaceSha256: input.sealedSnapshot.workspaceSha256,
+            snapshotRef: input.sealedSnapshot.snapshotRef,
+            sealedAuthoritySha256: input.sealedSnapshot.authoritySha256,
+            checks: [
+              {
+                id: "test",
+                status: "executed",
+                argv: plan.commands[0]!.argv,
+                cwd: ".",
+                exitCode: pass ? 0 : 1,
+                timedOut: false,
+                observedTests: 1,
+                failedTests: pass ? 0 : 1,
+                reportSha256: "a".repeat(64),
+                log: pass ? "1 pass" : "1 fail",
+                logSha256: WorkflowBusinessArtifact.hash(pass ? "1 pass" : "1 fail"),
+                ownerSha256: "b".repeat(64),
+              },
+              { id: "build", status: "not-applicable" },
+              { id: "typecheck", status: "not-applicable" },
+            ],
+          },
+        ),
     },
     { require: () => Effect.void },
   )

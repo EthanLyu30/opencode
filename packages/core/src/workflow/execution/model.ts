@@ -30,13 +30,16 @@ import { ModelSelection } from "../model-selection"
 import { ModelAvailability } from "../model-availability"
 import { WorkflowRoleContract } from "./contract"
 import { WorkflowRoleExecution } from "./role"
+import { CodingArtifacts } from "../coding/artifacts"
+import type { CodingEvidence } from "../coding/evidence"
+import { CodingAdmissionReceipt } from "../coding/admission-receipt"
 import * as WorkflowProviderRequest from "./provider-request"
 
 export { fingerprintProviderRequest } from "./provider-request"
 
 export interface Input extends ExecutionInput {
   readonly route: BuildRouting.Route
-  readonly preparation?: WorkflowRoleExecution.Preparation
+  readonly preparation?: WorkflowRoleExecution.Preparation | CodingEvidence.Preparation
 }
 
 export interface Output extends Omit<Result, "artifacts"> {
@@ -125,6 +128,7 @@ const ModelContinuation = Schema.Struct({
   responseOutput: Schema.Array(Responses.ItemPayload),
   artifacts: Schema.Array(Workflow.ArtifactCommit),
   preparation: Schema.optional(WorkflowRoleExecution.PreparationAuthority),
+  codingChecks: Schema.optional(CodingArtifacts.CheckRecord),
 })
 type ModelContinuation = typeof ModelContinuation.Type
 const TransientContinuation = Schema.Struct({
@@ -1010,6 +1014,8 @@ function decodeAndValidateContinuation(
         continuation.responseID !== responseID ||
         WorkflowBusinessArtifact.encode(continuation.preparation) !==
           WorkflowBusinessArtifact.encode(input.preparation?.authority) ||
+        WorkflowBusinessArtifact.encode(continuation.codingChecks) !==
+          WorkflowBusinessArtifact.encode(preparedCodingChecks(input)) ||
         continuation.completedTurns !== continuation.usage.turns ||
         continuation.completedTurns !== expectedTurns ||
         continuation.usage.toolCalls !== toolCalls + activeResults + pendingCalls ||
@@ -1105,8 +1111,10 @@ function saveContinuation(
   response: Responses.Resource | undefined,
   continuation: ModelContinuation,
 ) {
-  if (response?.store !== false || continuation.responseID === undefined) return input.saveCheckpoint(continuation)
-  return responses.saveTransientContinuation(continuation.responseID, continuation).pipe(
+  const codingChecks = preparedCodingChecks(input)
+  const stored = codingChecks === undefined ? continuation : { ...continuation, codingChecks }
+  if (response?.store !== false || continuation.responseID === undefined) return input.saveCheckpoint(stored)
+  return responses.saveTransientContinuation(continuation.responseID, stored).pipe(
     Effect.andThen(
       input.saveCheckpoint({
         kind: "workflow.model.continuation.transient",
@@ -1120,6 +1128,18 @@ function saveContinuation(
       }),
     ),
   )
+}
+
+function preparedCodingChecks(input: Input): CodingArtifacts.CheckRecord | undefined {
+  if (
+    input.workflow.type !== "coding-build" ||
+    input.stage.type !== "test" ||
+    !input.preparation ||
+    !("codingChecks" in input.preparation) ||
+    input.preparation.codingChecks === undefined
+  )
+    return undefined
+  return Schema.decodeUnknownSync(CodingArtifacts.CheckRecord)(input.preparation.codingChecks)
 }
 
 function decodeContinuation(checkpoint: unknown) {
@@ -1231,11 +1251,21 @@ function responseContext(responses: ResponsesV2.Interface, responseID: Responses
       )
     const transient = response.store ? undefined : yield* responses.transientInput(responseID)
     const items = transient ?? (yield* responses.contextItems(responseID).pipe(Effect.mapError(responseFailure)))
-    return yield* responseItemsToMessages(items.filter((item) => !ownedVisualBuildReceipt(item, response)))
+    return yield* responseItemsToMessages(items.filter((item) => !ownedBuildReceipt(item, response)))
   })
 }
 
-function ownedVisualBuildReceipt(item: Responses.ItemPayload, response: Responses.Resource): boolean {
+function ownedBuildReceipt(item: Responses.ItemPayload, response: Responses.Resource): boolean {
+  const coding = CodingAdmissionReceipt.tryDecode(item)
+  if (coding)
+    return (
+      coding.responseID === response.id &&
+      coding.workflowID === response.workflowID &&
+      coding.requestHash === response.requestHash &&
+      coding.selection.routes.deliver.modelID === response.model &&
+      response.store &&
+      (coding.request.delivery === "background") === response.background
+    )
   const receipt = ResponsesAdmission.tryDecodeVisualBuildReceipt(item)
   return (
     receipt !== undefined &&

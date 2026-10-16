@@ -48,6 +48,23 @@ export interface FrozenTestRequest {
   readonly sealedSnapshot: WorkflowWorkspaceMaterialization.Sealed
 }
 
+export interface FrozenCodingRequest {
+  readonly workflowID: Workflow.ID
+  readonly stageID: Workflow.StageID
+  readonly revision: number
+  readonly commandID: "test" | "build" | "typecheck"
+  readonly planSha256: string
+  readonly configSha256: string
+  readonly sealedSnapshot: WorkflowWorkspaceMaterialization.Sealed
+}
+export interface FrozenCodingResult {
+  readonly exitCode: number
+  readonly timedOut: boolean
+  readonly log: string
+  readonly report?: string
+  readonly ownerSha256: string
+}
+
 export class Unavailable extends Schema.TaggedErrorClass<Unavailable>()("WorkflowCommandSandbox.Unavailable", {
   message: Schema.String,
 }) {}
@@ -62,6 +79,7 @@ export interface Interface {
   readonly run: (input: Request) => Effect.Effect<Result, Error>
   /** Trusted host-selected test plan; no model-authored shell text is accepted. */
   readonly runFrozenTest?: (input: FrozenTestRequest) => Effect.Effect<Result, Error>
+  readonly runFrozenCoding?: (input: FrozenCodingRequest) => Effect.Effect<FrozenCodingResult, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/WorkflowCommandSandbox") {}

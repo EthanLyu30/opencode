@@ -25,6 +25,7 @@ import { Tool } from "@opencode-ai/core/tool/tool"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { Database } from "@opencode-ai/core/database/database"
 import { WorkflowModelExecution } from "@opencode-ai/core/workflow/execution/model"
+import { WorkflowExecutor } from "@opencode-ai/core/workflow/executor"
 import { WorkflowCommandSandbox } from "@opencode-ai/core/workflow/command-sandbox"
 import { WorkflowBenchmarkTransport } from "@opencode-ai/core/workflow/benchmark-transport"
 import { WorkflowToolLineage } from "@opencode-ai/core/workflow/tool-lineage"
@@ -45,6 +46,13 @@ import { fixtureAdmissionSnapshot, fixtureCatalogue } from "./fixtures/workflow-
 import { CodingModelSelection } from "../src/workflow/coding/model-selection"
 import { CodingRouting } from "../src/workflow/coding/routing"
 import { CodingRoleAgentProfiles } from "../src/workflow/coding/role-agent-profiles"
+import { CodingArtifacts } from "../src/workflow/coding/artifacts"
+import { WorkflowBusinessArtifact } from "../src/workflow/artifacts/business"
+import { CodingAuthority } from "../src/workflow/coding/authority"
+import { CodingPermissions } from "../src/workflow/coding/permissions"
+import { AppProcess } from "../src/process"
+import { CodingAdmission } from "../src/workflow/coding/admission"
+import { ResponsesV2 } from "../src/responses"
 
 const projects = Layer.succeed(
   ProjectV2.Service,
@@ -71,6 +79,55 @@ const it = testEffect(
     [
       [ProjectV2.node, projects],
       [SessionExecution.node, SessionExecution.noopLayer],
+    ],
+  ),
+)
+
+let codingHostShellCalls = 0
+const codingToolsIt = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      ApplicationTools.node,
+      Database.node,
+      EventV2.node,
+      SessionProjector.node,
+      SessionStore.node,
+      SessionV2.node,
+      WorkflowProjector.node,
+      WorkflowStore.node,
+      LocationServiceMap.node,
+    ]),
+    [
+      [ProjectV2.node, projects],
+      [SessionExecution.node, SessionExecution.noopLayer],
+      [
+        CodingAuthority.node,
+        Layer.succeed(CodingAuthority.Service, {
+          require: (workflow) =>
+            workflow.id === "wfl_owned_coding_tool_fixture"
+              ? Effect.void
+              : Effect.fail(new CodingAuthority.Invalid({ message: "Not the owned fixture" })),
+        }),
+      ],
+      [
+        AppProcess.node,
+        Layer.mock(AppProcess.Service, {
+          run: () =>
+            Effect.sync(() => {
+              codingHostShellCalls++
+              return {
+                command: "host-shell-probe",
+                exitCode: 0,
+                output: Buffer.from("host-shell-probe"),
+                stdout: Buffer.from("host-shell-probe"),
+                stderr: Buffer.alloc(0),
+                outputTruncated: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              }
+            }),
+        }),
+      ],
     ],
   ),
 )
@@ -127,11 +184,18 @@ const modelIt = testEffect(
       WorkflowStore.node,
       LocationServiceMap.node,
       WorkflowModelExecution.node,
+      CodingAdmission.node,
+      ResponsesV2.node,
     ]),
     [
       [ProjectV2.node, projects],
       [SessionExecution.node, SessionExecution.noopLayer],
       [Credential.node, credentials],
+      [
+        ModelSelection.node,
+        Layer.succeed(ModelSelection.Service, { snapshot: () => Effect.succeed(fixtureAdmissionSnapshot()) }),
+      ],
+      [CodingAuthority.node, CodingAdmission.authorityNode],
       [llmClient, modelClient],
       [
         ModelAvailability.node,
@@ -375,6 +439,133 @@ const expectedRules = (role: WorkflowRole.Role) => [
 ]
 
 describe("Workflow Location tools", () => {
+  modelIt.live(
+    "coding delivery consumes its genuine stored admission context without treating the receipt as provider input",
+    () =>
+      Effect.acquireUseRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) =>
+          Effect.gen(function* () {
+            modelRequests.length = 0
+            modelResponses.length = 0
+            modelCredentialMissing = false
+            pinnedAvailable = true
+            const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+            const admission = yield* CodingAdmission.Service
+            const admitted = yield* admission.admit(
+              {
+                prompt: "Deliver a fixed library",
+                delivery: "background",
+                budget: { maxTokens: 20000, maxTurns: 20, maxToolCalls: 40, maxAttempts: 18 },
+                coding: { maxRevisions: 0, maxTokens: 12000, maxTurns: 12, maxToolCalls: 24 },
+                checks: { cwd: ".", test: "bun-test" },
+              },
+              location,
+              "coding-model-delivery-context",
+            )
+            expect(modelRequests).toHaveLength(0)
+            const store = yield* WorkflowStore.Service
+            const detail = (yield* store.get(admitted.workflow.id))!
+            const declared = detail.stages.find((stage) => stage.type === "deliver")!
+            const stage = { ...declared, attempt: 1, status: "running" as const, leaseOwner: "worker" }
+            const route = CodingRouting.resolve({
+              role: "deliver",
+              budget: detail.run.budget,
+              selection: CodingModelSelection.fromWorkflow(detail.run),
+            })
+            modelResponses.push(
+              providerResponse({
+                contractVersion: 1,
+                outcome: { schemaVersion: 1, role: "deliver", revision: 0, verdict: "complete" },
+                payload: { summary: "Library delivered" },
+              })!,
+            )
+            const models = yield* WorkflowModelExecution.Service
+            const result = yield* models.execute({
+              workflow: detail.run,
+              stage,
+              stages: detail.stages,
+              artifacts: [],
+              route,
+              lease: { owner: "worker", attempt: 1, expiresAt: DateTime.makeUnsafe(Date.now() + 60000) },
+              saveCheckpoint: () => Effect.void,
+              preparation: { messages: [Message.user("Trusted same-revision coding delivery evidence")] },
+            })
+            expect(result.responseSettlement).toMatchObject({ type: "completed", responseID: admitted.response.id })
+            expect(modelRequests).toHaveLength(1)
+            expect(JSON.stringify(modelRequests[0]!.messages)).not.toContain(
+              "workflow.coding-build.admission-receipt.v1",
+            )
+          }),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      ),
+  )
+  codingToolsIt.live(
+    "coding internal Bash fails through the controlled sandbox and never the ordinary host shell",
+    () =>
+      Effect.acquireUseRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) =>
+          Effect.gen(function* () {
+            const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+            const sessionID = SessionV2.ID.make("ses_owned_coding_tools")
+            yield* createWorkflowSession(location, sessionID)
+            const base = modelInput(
+              location,
+              sessionID,
+              () => Effect.void,
+              {},
+              {
+                workflowID: Workflow.ID.make("wfl_owned_coding_tool_fixture"),
+                role: "implement",
+                stageInput: { revision: 0 },
+              },
+            )
+            const selection = CodingModelSelection.freeze(fixtureAdmissionSnapshot(), location)
+            const workflow = {
+              ...base.workflow,
+              type: "coding-build",
+              input: CodingModelSelection.withSelection({ brief: "Owned tool fixture" }, selection),
+            }
+            const route = CodingRouting.resolve({ role: "implement", budget: workflow.budget, selection })
+            yield* persistModelInput({ ...base, workflow, route })
+            yield* Effect.gen(function* () {
+              const registry = yield* ToolRegistry.Service
+              const authority = yield* ToolRegistry.WorkflowAuthorityService
+              const materialization = yield* registry.materialize(CodingPermissions.forRole("implement"))
+              for (const role of ["test", "code_review", "deliver"] as const)
+                expect(
+                  (yield* registry.materialize(CodingPermissions.forRole(role))).definitions
+                    .map((tool) => tool.name)
+                    .toSorted(),
+                ).toEqual(["glob", "grep", "read"])
+              const agent = CodingRoleAgentProfiles.agentForRole("implement")
+              const policyDigest = yield* WorkflowToolLineage.policyDigest({
+                workflow,
+                stage: base.stage,
+                route,
+                agent,
+              })
+              const before = codingHostShellCalls
+              const settled = yield* authority.settle({
+                materialization,
+                workflowID: workflow.id,
+                stageID: base.stage.id,
+                route,
+                policyDigest,
+                sessionID,
+                agent,
+                assistantMessageID: SessionMessage.ID.make("msg_owned_coding_bash"),
+                call: { type: "tool-call", id: "call-owned-coding-bash", name: "bash", input: { command: "true" } },
+              })
+              expect(settled.result).toMatchObject({ type: "error" })
+              expect(JSON.stringify(settled.result)).toContain("unavailable")
+              expect(codingHostShellCalls).toBe(before)
+            }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
+          }),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      ),
+  )
   it.live("coding internal agents cannot bypass public tool settlement", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -457,6 +648,101 @@ describe("Workflow Location tools", () => {
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
+  )
+  modelIt.live(
+    "coding test checkpoints retain exact host checks and replay a settled provider turn without another call",
+    () =>
+      Effect.acquireUseRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) =>
+          Effect.gen(function* () {
+            modelRequests.length = 0
+            modelResponses.length = 0
+            modelCredentialMissing = false
+            pinnedAvailable = true
+            const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+            const sessionID = SessionV2.ID.make("ses_coding_test_checkpoint")
+            yield* createWorkflowSession(location, sessionID)
+            const checkpoints: WorkflowExecutor.Checkpoint[] = []
+            const base = modelInput(location, sessionID, (checkpoint) =>
+              Effect.sync(() => {
+                checkpoints.push(checkpoint)
+              }),
+            )
+            const selection = CodingModelSelection.freeze(fixtureAdmissionSnapshot(), location)
+            const workflow = {
+              ...base.workflow,
+              type: "coding-build",
+              input: CodingModelSelection.withSelection({ brief: "Interpret trusted test results" }, selection),
+            }
+            const stage = { ...base.stage, type: "test", input: { revision: 0 }, leaseOwner: "worker" }
+            const record: CodingArtifacts.CheckRecord = {
+              schemaVersion: 1,
+              workflowID: workflow.id,
+              stageID: stage.id,
+              attempt: 1,
+              leaseOwner: "worker",
+              revision: 0,
+              locationSha256: WorkflowBusinessArtifact.locationSha256(location),
+              planSha256: "a".repeat(64),
+              configSha256: "b".repeat(64),
+              implementationSha256: "c".repeat(64),
+              workspaceSha256: "d".repeat(64),
+              snapshotRef: "exact-offline-snapshot",
+              sealedAuthoritySha256: "e".repeat(64),
+              checks: [
+                {
+                  id: "test",
+                  status: "executed",
+                  argv: ["bun", "--no-env-file", "test"],
+                  cwd: ".",
+                  exitCode: 0,
+                  timedOut: false,
+                  observedTests: 1,
+                  failedTests: 0,
+                  reportSha256: "f".repeat(64),
+                  log: "1 pass",
+                  logSha256: WorkflowBusinessArtifact.hash("1 pass"),
+                  ownerSha256: "a".repeat(64),
+                },
+                { id: "build", status: "not-applicable" },
+                { id: "typecheck", status: "not-applicable" },
+              ],
+            }
+            const preparation = { messages: [Message.user("Trusted host tests: 1 pass")], codingChecks: record }
+            const input = {
+              ...base,
+              workflow,
+              stage,
+              stages: [stage],
+              route: CodingRouting.resolve({ role: "test", budget: workflow.budget, selection }),
+              preparation,
+            }
+            modelResponses.push(
+              providerResponse({
+                contractVersion: 1,
+                outcome: { schemaVersion: 1, role: "test", revision: 0, verdict: "pass" },
+                payload: { summary: "Observed tests pass" },
+              })!,
+            )
+            const models = yield* WorkflowModelExecution.Service
+            yield* models.execute(input)
+            expect(checkpoints.length).toBeGreaterThan(0)
+            expect(
+              checkpoints.every(
+                (checkpoint) =>
+                  WorkflowBusinessArtifact.hash(checkpoint.codingChecks) === WorkflowBusinessArtifact.hash(record),
+              ),
+            ).toBe(true)
+            const checkpoint = checkpoints.at(-1)!
+            yield* models.execute({
+              ...input,
+              stage: { ...stage, attempt: 2, leaseOwner: "recovered-worker", recoveryAction: "retry", checkpoint },
+            })
+            expect(modelRequests).toHaveLength(1)
+          }),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      ),
   )
   for (const missingStoredCredential of [true, false])
     modelIt.live(

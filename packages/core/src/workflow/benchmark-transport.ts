@@ -178,8 +178,8 @@ export function withBinding(
 
 export function fromWorkflow(workflow: Workflow.Info, now = Date.now()): Binding | undefined {
   if (!Object.hasOwn(workflow.input, RESERVED_INPUT_KEY)) return undefined
-  if (workflow.type !== "visual-build")
-    throw invalid("invalid_binding", "Benchmark transport can only be attached to a visual-build workflow")
+  if (workflow.type !== "visual-build" && workflow.type !== "coding-build")
+    throw invalid("invalid_binding", "Benchmark transport requires an admitted visual-build or coding-build workflow")
   return validateBinding(workflow.input[RESERVED_INPUT_KEY], now)
 }
 

@@ -152,6 +152,11 @@ export function make(checks: CodingChecks.Interface, authority: CodingAuthority.
         const record = yield* checks
           .run({ workflow: input.workflow, stage: input.stage, revision, sealedSnapshot, plan })
           .pipe(Effect.mapError(() => fail("coding_checks_unavailable")))
+        if (
+          record.snapshotRef !== sealedSnapshot.snapshotRef ||
+          record.sealedAuthoritySha256 !== sealedSnapshot.authoritySha256
+        )
+          return yield* fail("coding_snapshot_mismatch")
         yield* checked(() => validateRecord(record, input.workflow, input.stage, implementation))
         yield* current(input.workflow, implementation.workspaceSha256)
         return {
@@ -595,11 +600,14 @@ function validateRecord(
   const value = Schema.decodeUnknownSync(CodingArtifacts.CheckRecord)(record)
   const plan = hostPlan(workflow)
   CodingArtifacts.validateChecks(value.checks, plan)
+  const cached = CodingArtifacts.checkpointChecks(stage)
+  const measuredLease =
+    (value.attempt === stage.attempt && value.leaseOwner === stage.leaseOwner) ||
+    (cached !== undefined && WorkflowBusinessArtifact.hash(cached) === WorkflowBusinessArtifact.hash(value))
   if (
     value.workflowID !== workflow.id ||
     value.stageID !== stage.id ||
-    value.attempt !== stage.attempt ||
-    value.leaseOwner !== stage.leaseOwner ||
+    !measuredLease ||
     value.revision !== implementation.revision ||
     value.locationSha256 !== WorkflowBusinessArtifact.locationSha256(workflow.location!) ||
     value.planSha256 !== plan.sha256 ||

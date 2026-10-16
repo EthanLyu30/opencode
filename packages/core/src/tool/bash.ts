@@ -13,6 +13,7 @@ import { PermissionV2 } from "../permission"
 import { PositiveInt } from "../schema"
 import { WorkflowCommandSandbox } from "../workflow/command-sandbox"
 import { WorkflowRoleAgents } from "../workflow/role-agents"
+import { CodingRoleAgentProfiles } from "../workflow/coding/role-agent-profiles"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { ToolCatalogVersion } from "./catalog-version"
@@ -131,7 +132,10 @@ const layer = Layer.effectDiscard(
                   messageID: context.assistantMessageID,
                   callID: context.toolCallID,
                 }
-                const workflowRole = WorkflowRoleAgents.roleForAgent(context.agent)
+                const workflowRole =
+                  CodingRoleAgentProfiles.roleForAgent(context.agent) ?? WorkflowRoleAgents.roleForAgent(context.agent)
+                if (workflowRole === "code_review")
+                  return yield* new ToolFailure({ message: "Coding code review cannot execute Bash" })
                 if (workflowRole !== undefined) {
                   const lineage = context.workflowLineage
                   if (
