@@ -15,7 +15,10 @@ export interface CampaignPlanSource {
 }
 
 export function planCampaignRuns(campaign: CampaignPlanSource, stage: CampaignStage) {
-  const maximumRepeats = Math.max(campaign.preregistration.primaryRepeats, campaign.preregistration.upstreamRepeats)
+  // The pilot calibrates each task/arm once; full-campaign repetitions are not pilot spend authority.
+  const primaryRepeats = stage === "pilot" ? 1 : campaign.preregistration.primaryRepeats
+  const upstreamRepeats = stage === "pilot" ? 1 : campaign.preregistration.upstreamRepeats
+  const maximumRepeats = Math.max(primaryRepeats, upstreamRepeats)
   const pilotTaskIDs = campaign.preregistration.pilotTaskIDs
   if (stage === "pilot" && pilotTaskIDs === undefined) throw new TypeError("TASK24_PILOT_TASKS_NOT_SEALED")
   const taskIDs = stage === "pilot" && pilotTaskIDs !== undefined ? pilotTaskIDs : campaign.tasks.map((task) => task.id)
@@ -28,9 +31,7 @@ export function planCampaignRuns(campaign: CampaignPlanSource, stage: CampaignSt
     tasks: [...taskIDs],
     repetitions: maximumRepeats,
   }).filter((entry) =>
-    entry.armID === "D" || entry.armID === "E"
-      ? entry.repetition < campaign.preregistration.upstreamRepeats
-      : entry.repetition < campaign.preregistration.primaryRepeats,
+    entry.armID === "D" || entry.armID === "E" ? entry.repetition < upstreamRepeats : entry.repetition < primaryRepeats,
   )
   return ordered.map((entry, orderIndex) => ({
     runID: `run-${sha256Text(`${campaign.id}/${stage}/${entry.taskID}/${entry.armID}/${entry.repetition}`).slice(0, 24)}`,
