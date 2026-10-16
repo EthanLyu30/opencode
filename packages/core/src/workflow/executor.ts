@@ -17,6 +17,14 @@ import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowStageMachine } from "./stage-machine"
 import { WorkflowGraph } from "./graph"
 import { ModelSelection } from "./model-selection"
+import { CodingArtifacts } from "./coding/artifacts"
+import { CodingEvidence } from "./coding/evidence"
+import { CodingModelSelection } from "./coding/model-selection"
+import { CodingRouting } from "./coding/routing"
+import { CodingStageMachine } from "./coding/stage-machine"
+import { CodingGraph } from "./coding/graph"
+import { BuildEvidence } from "./execution/build-evidence"
+import { CodingContract } from "./coding/contract"
 
 export interface ExecutionInput {
   readonly workflow: Workflow.Info
@@ -57,7 +65,7 @@ export interface Result {
   readonly artifacts?: ReadonlyArray<Workflow.ArtifactCommit>
   readonly usage: Workflow.Usage
   readonly responseSettlement?: Extract<ResponseSettlement, { readonly type: "completed" }>
-  readonly roleReceipt?: WorkflowRoleExecution.Receipt
+  readonly roleReceipt?: BuildEvidence.Receipt
   /** Ephemeral trusted media/text used to rebuild the exact contract at Local's settlement gate. */
   readonly trustedMessages?: readonly Message[]
   /** Ephemeral exact prior-stage dependencies used by Local's final authority gate. */
@@ -122,11 +130,11 @@ const injectedRoleLayer = Layer.effect(
   Effect.gen(function* () {
     const models = yield* WorkflowModelExecution.Service
     const evidence = yield* WorkflowRoleExecution.Service
+    const coding = yield* CodingEvidence.Service
     return Service.of({
       execute: (input) =>
         Effect.gen(function* () {
-          // Coding execution remains closed until its own fenced settlement profile is installed.
-          if (input.workflow.type === "coding-build") return yield* Effect.fail(unsupportedRole(input.stage.type))
+          if (input.workflow.type === "coding-build") return yield* executeCoding(input, models, coding)
           const role = yield* Schema.decodeUnknownEffect(WorkflowRole.Role)(input.stage.type).pipe(
             Effect.mapError(() => unsupportedRole(input.stage.type)),
           )
@@ -319,10 +327,125 @@ const injectedRoleLayer = Layer.effect(
   }),
 )
 
-export const roleLayer = injectedRoleLayer.pipe(Layer.provide(WorkflowRoleExecution.failClosedLayer))
+export const roleLayer = injectedRoleLayer.pipe(
+  Layer.provide(WorkflowRoleExecution.failClosedLayer),
+  Layer.provide(CodingEvidence.failClosedLayer),
+)
 
-export const roleLayerWith = (evidence: Layer.Layer<WorkflowRoleExecution.Service>) =>
-  injectedRoleLayer.pipe(Layer.provide(evidence))
+export const roleLayerWith = (
+  evidence: Layer.Layer<WorkflowRoleExecution.Service>,
+  coding: Layer.Layer<CodingEvidence.Service> = CodingEvidence.failClosedLayer,
+) => injectedRoleLayer.pipe(Layer.provide(evidence), Layer.provide(coding))
+
+const executeCoding = Effect.fn("WorkflowExecutor.executeCoding")(function* (
+  input: ExecutionInput,
+  models: WorkflowModelExecution.Interface,
+  evidence: CodingEvidence.Interface,
+) {
+  // Preparation verifies durable admission before resolving or dispatching a provider.
+  const revision = yield* Effect.try({
+    try: () => CodingArtifacts.revisionOf(input.workflow, input.stage, input.artifacts),
+    catch: () => invalidOutcome("Invalid coding revision", zeroUsage),
+  })
+  const preparation = yield* evidence
+    .prepare({
+      workflow: input.workflow,
+      stage: input.stage,
+      revision,
+      location: input.workflow.location!,
+      priorArtifacts: input.artifacts,
+      admission: { workflowInput: input.workflow.input, stageInput: input.stage.input },
+      checkpoint: input.stage.checkpoint,
+    })
+    .pipe(Effect.mapError((error) => codingFailure(error, zeroUsage)))
+  const state = yield* CodingStageMachine.replay({
+    stages: input.stages,
+    artifacts: input.artifacts,
+    beforeOrdinal: input.stage.ordinal,
+  }).pipe(Effect.mapError((error) => invalidOutcome(`Coding state rejected stage: ${error.code}`, zeroUsage)))
+  if (state.status !== "active" || state.role !== input.stage.type || state.revision !== revision)
+    return yield* Effect.fail(invalidOutcome("Coding stage does not match semantic state", zeroUsage))
+  const route = yield* Effect.try({
+    try: () =>
+      CodingRouting.resolve({
+        role: state.role,
+        budget: input.workflow.budget,
+        selection: CodingModelSelection.fromWorkflow(input.workflow),
+        benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(input.workflow),
+      }),
+    catch: routeFailure,
+  })
+  const result = yield* models.execute({ ...input, route, preparation }).pipe(Effect.mapError(modelFailure))
+  if (
+    !result.contract ||
+    !("kind" in result.contract) ||
+    !result.semantic ||
+    !result.providerUsage ||
+    result.artifacts?.some((artifact) => artifact.kind !== "tool-continuation")
+  )
+    return yield* Effect.fail(
+      invalidOutcome(
+        "Coding requires a strict host-bound result and measured usage",
+        result.usage,
+        result.responseSettlement,
+      ),
+    )
+  const semantic = yield* Effect.try({
+    try: () => CodingContract.decode(result.contract as CodingContract.Contract, result.semantic),
+    catch: () => invalidOutcome("Invalid coding semantic result", result.usage, result.responseSettlement),
+  })
+  const settlement = yield* evidence
+    .settle({
+      workflow: input.workflow,
+      stage: input.stage,
+      contract: result.contract,
+      semantic,
+      priorArtifacts: input.artifacts,
+      settledToolEvidence: result.artifacts ?? [],
+      executionUsage: result.usage,
+      providerUsage: result.providerUsage,
+      preparation,
+    })
+    .pipe(Effect.mapError((error) => codingFailure(error, result.usage, result.responseSettlement)))
+  const artifact = settlement.artifacts.find((artifact) => artifact.kind === CodingStageMachine.OUTCOME_ARTIFACT_KIND)
+  if (!artifact)
+    return yield* Effect.fail(
+      invalidOutcome("Coding settlement omitted outcome", result.usage, result.responseSettlement),
+    )
+  const next = yield* CodingStageMachine.advance(state, artifact).pipe(
+    Effect.mapError(() => invalidOutcome("Coding outcome violates state", result.usage, result.responseSettlement)),
+  )
+  const skipped = new Set(
+    CodingGraph.unreachableAfter({ stages: input.stages, stageID: input.stage.id, outcome: semantic.outcome }),
+  )
+  const nextStage = input.stages
+    .filter((stage) => stage.ordinal > input.stage.ordinal && stage.status !== "skipped" && !skipped.has(stage.id))
+    .toSorted((a, b) => a.ordinal - b.ordinal)[0]
+  if (
+    (next.status === "active" && nextStage?.type !== next.role) ||
+    (next.status === "completed" && nextStage !== undefined)
+  )
+    return yield* Effect.fail(
+      incompleteRoleWorkflow(next.status === "active" ? next.role : "deliver", result.usage, result.responseSettlement),
+    )
+  const trustedMessages = result.trustedMessages ?? preparation.messages
+  return {
+    checkpoint: result.checkpoint,
+    usage: result.usage,
+    artifacts: [...(result.artifacts ?? []), ...settlement.artifacts],
+    roleReceipt: settlement.receipt,
+    ...(trustedMessages === undefined ? {} : { trustedMessages }),
+    responseSettlement: result.responseSettlement,
+  }
+})
+
+function codingFailure(
+  error: CodingEvidence.EvidenceFailure,
+  usage: Workflow.Usage,
+  settlement?: Result["responseSettlement"],
+): ExecutionFailure {
+  return failedOutcome({ category: "schema", code: error.code, message: error.message }, usage, settlement)
+}
 
 function revisionOf(stage: Workflow.Stage): number {
   const revision = stage.input.revision ?? 0
@@ -459,7 +582,7 @@ function roleEvidenceFailure(
 }
 
 function incompleteRoleWorkflow(
-  nextRole: WorkflowRole.Role,
+  nextRole: string,
   usage: Workflow.Usage,
   settlement?: Result["responseSettlement"],
 ): ExecutionFailure {
@@ -512,5 +635,5 @@ const zeroUsage: Workflow.Usage = { tokens: 0, turns: 0, toolCalls: 0, attempts:
 export const node = makeGlobalNode({
   service: Service,
   layer: injectedRoleLayer,
-  deps: [WorkflowModelExecution.node, WorkflowRoleExecution.node],
+  deps: [WorkflowModelExecution.node, WorkflowRoleExecution.node, CodingEvidence.node],
 })

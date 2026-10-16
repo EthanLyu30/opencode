@@ -96,6 +96,8 @@ export function prepare(
     readonly modelSelection?: ModelSelection.FrozenSelection
   },
 ) {
+  // Only the dedicated durable coding admission path may enable this profile.
+  if (input.type === "coding-build") throw new ConflictError({ workflowID: options.workflowID, operation: "create" })
   if (Object.hasOwn(input.input, ModelSelection.RESERVED_INPUT_KEY)) {
     if (
       !options.modelSelection ||

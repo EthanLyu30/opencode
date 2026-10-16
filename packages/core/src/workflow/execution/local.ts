@@ -31,14 +31,12 @@ import { WorkflowRetry } from "../retry"
 import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowRunTable } from "../sql"
 import { WorkflowState } from "../state"
-import { WorkflowStageMachine } from "../stage-machine"
-import { WorkflowGraph } from "../graph"
 import { WorkflowStore } from "../store"
-import { WorkflowRoleExecution } from "./role"
 import { WorkflowVisualHost } from "../visual-host"
 import { WorkflowVisualReviewArtifact } from "../artifacts/visual-review"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
 import { WorkflowBenchmarkTransport } from "../benchmark-transport"
+import { BuildEvidence } from "./build-evidence"
 
 class CancelRequested extends Data.TaggedError("CancelRequested")<{
   readonly workflowID: Workflow.ID
@@ -714,7 +712,7 @@ export const layerWith = (options: Options) =>
                 artifacts: [...storedCompletionCandidate.artifacts, ...committedArtifacts],
               }
         const outcomeArtifacts = committedArtifacts.filter(
-          (artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND,
+          (artifact) => artifact.kind === BuildEvidence.outcomeKind(initial.run),
         )
         const failRoleSettlement = Effect.fnUntraced(function* (failure: Workflow.Failure) {
           const failedAt = yield* DateTime.now
@@ -784,11 +782,11 @@ export const layerWith = (options: Options) =>
             }),
           )
         })
-        const roleStage = Schema.is(WorkflowRole.Role)(stage.type)
+        const roleStage = BuildEvidence.isRole(initial.run, stage.type)
         if (roleStage) {
           const evidenceValidation = yield* Effect.try({
             try: () =>
-              WorkflowRoleExecution.validateSettlement({
+              BuildEvidence.validateSettlement({
                 workflow: initial.run,
                 stage,
                 priorArtifacts: initial.artifacts,
@@ -822,7 +820,7 @@ export const layerWith = (options: Options) =>
         // present, however, the complete role history and branch semantics are
         // enforced independently of the workflow's descriptive type string.
         const roleGraphWorkflow = initial.stages.some(
-          (item) => item.type !== "deliver" && Schema.is(WorkflowRole.Role)(item.type),
+          (item) => item.type !== "deliver" && BuildEvidence.isRole(initial.run, item.type),
         )
         const roleStateMachine = roleStage && roleGraphWorkflow
         const branchValidation = !roleStateMachine
@@ -837,16 +835,12 @@ export const layerWith = (options: Options) =>
                 },
               } as const)
             : yield* Effect.gen(function* () {
-                const state = yield* WorkflowStageMachine.replay({
+                const stageIDs = yield* BuildEvidence.branch({
+                  workflow: initial.run,
                   stages: initial.stages,
+                  stage,
                   artifacts: initial.artifacts,
-                  beforeOrdinal: stage.ordinal,
-                })
-                yield* WorkflowStageMachine.advance(state, outcomeArtifacts[0])
-                const outcome = yield* WorkflowStageMachine.decodeOutcome(outcomeArtifacts[0])
-                const stageIDs = yield* Effect.try({
-                  try: () => WorkflowGraph.unreachableAfter({ stages: initial.stages, stageID: stage.id, outcome }),
-                  catch: () => undefined,
+                  outcome: outcomeArtifacts[0],
                 })
                 return {
                   type: "branch" as const,
@@ -878,9 +872,9 @@ export const layerWith = (options: Options) =>
           completionCandidate.stages.every(
             (item) => item.id === stage.id || item.status === "succeeded" || item.status === "skipped",
           ) &&
-          completionCandidate.artifacts.some((artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND)
+          completionCandidate.artifacts.some((artifact) => artifact.kind === BuildEvidence.outcomeKind(initial.run))
         ) {
-          const completion = yield* WorkflowStageMachine.replay({
+          const completion = yield* BuildEvidence.replay(initial.run, {
             stages: completionCandidate.stages,
             artifacts: completionCandidate.artifacts,
           }).pipe(

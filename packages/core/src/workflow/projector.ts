@@ -11,8 +11,7 @@ import { ResponseEvent } from "@opencode-ai/schema/response-event"
 import { WorkflowBudget } from "./budget"
 import { WorkflowSecretGuard } from "./secret-guard"
 import { WorkflowState } from "./state"
-import { WorkflowStageMachine } from "./stage-machine"
-import { WorkflowGraph } from "./graph"
+import { BuildEvidence } from "./execution/build-evidence"
 import { WorkflowRunTable, WorkflowStageTable, WorkflowArtifactTable } from "./sql"
 import { ResponseTable } from "../responses/sql"
 
@@ -585,6 +584,8 @@ const layer = Layer.effectDiscard(
         if (source.status !== "succeeded" || source.id === data.stageID) {
           throw new LifecycleConflict(data.workflowID, data.stageID)
         }
+        const workflow = yield* getRun(db, data.workflowID)
+        if (!workflow) throw new LifecycleConflict(data.workflowID, data.stageID)
         const artifact = yield* db
           .select()
           .from(WorkflowArtifactTable)
@@ -592,26 +593,20 @@ const layer = Layer.effectDiscard(
             and(
               eq(WorkflowArtifactTable.workflow_id, data.workflowID),
               eq(WorkflowArtifactTable.stage_id, data.sourceStageID),
-              eq(WorkflowArtifactTable.kind, WorkflowStageMachine.OUTCOME_ARTIFACT_KIND),
+              eq(WorkflowArtifactTable.kind, BuildEvidence.outcomeKind(workflow)),
               eq(WorkflowArtifactTable.sha256, data.outcomeSha256),
             ),
           )
           .get()
           .pipe(Effect.orDie)
         if (!artifact) throw new LifecycleConflict(data.workflowID, data.stageID)
-        const outcome = yield* WorkflowStageMachine.decodeOutcome({
+        const outcomeArtifact = {
           kind: artifact.kind,
           uri: artifact.uri,
           mime: artifact.mime,
           sha256: artifact.sha256,
           size: artifact.size,
           metadata: artifact.metadata,
-        }).pipe(Effect.orDie)
-        if (
-          outcome.role !== source.stage_type ||
-          (typeof source.input.revision === "number" && outcome.revision !== source.input.revision)
-        ) {
-          throw new LifecycleConflict(data.workflowID, data.stageID)
         }
         const stages = yield* db
           .select()
@@ -620,11 +615,12 @@ const layer = Layer.effectDiscard(
           .all()
           .pipe(Effect.orDie)
         const authorizedTargets = new Set(
-          WorkflowGraph.unreachableAfter({
+          yield* BuildEvidence.unreachableAfter({
+            workflow,
             stages: stages.map(stageFromRow),
             stageID: data.sourceStageID,
-            outcome,
-          }),
+            artifact: outcomeArtifact,
+          }).pipe(Effect.orDie),
         )
         const declaredTargets = related.flatMap((item) => {
           if (item.type !== WorkflowEvent.Stage.Skipped.type || typeof item.data !== "object" || item.data === null) {

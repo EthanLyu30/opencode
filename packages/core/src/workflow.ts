@@ -144,6 +144,7 @@ const layer = Layer.effect(
       yield* guardSafe(input)
 
       const workflowID = input.id ?? Workflow.ID.create()
+      if (input.type === "coding-build") return yield* new ConflictError({ workflowID, operation: "create" })
       if (Object.hasOwn(input.input, ModelSelection.RESERVED_INPUT_KEY))
         return yield* new ConflictError({ workflowID, operation: "create" })
       const stages = [

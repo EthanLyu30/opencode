@@ -14,6 +14,7 @@ import { CodingPermissions } from "./permissions"
 import { CodingModelSelection } from "./model-selection"
 import { CodingRouting } from "./routing"
 import { WorkflowBenchmarkTransport } from "../benchmark-transport"
+import { CodingArtifacts } from "./artifacts"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 const Summary = Schema.NonEmptyString.check(Schema.isMaxLength(4096))
@@ -139,7 +140,7 @@ export function build(input: BuildInput): Contract {
     WorkflowBusinessArtifact.encode(input.route.budget) !== WorkflowBusinessArtifact.encode(input.workflow.budget)
   )
     throw new Error("Coding contract route differs from frozen admission")
-  const revision = input.stage.input.revision ?? 0
+  const revision = CodingArtifacts.revisionOf(input.workflow, input.stage, input.priorArtifacts)
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
     throw new Error("Invalid coding revision")
   const promptVersion = `coding-build/${role}@1`
