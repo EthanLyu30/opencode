@@ -23,6 +23,57 @@ const value = make({ service: Value, layer: valueLayer, deps: [] })
 const greeting = make({ service: Greeting, layer: greetingLayer, deps: [value] })
 
 describe("layer node", () => {
+  test("does not merge shared-source clones carrying different dependency implementations", () => {
+    const scoped = LayerNode.tags({ global: [], location: ["global"] })
+    const global = scoped.make("global")
+    const original = global({ service: Value, layer: valueLayer, deps: [] })
+    const shared = global({ service: Greeting, layer: greetingLayer, deps: [original] })
+    const previous = LayerNode.hoist(LayerNode.group([shared]), scoped.values.global, [
+      [original, Layer.succeed(Value, { value: "different" })],
+    ])
+    expect(() =>
+      LayerNode.hoist(LayerNode.group([shared, previous.hoisted.dependencies[0]!]), scoped.values.global),
+    ).toThrow("conflicting implementations")
+  })
+
+  test("hoists one shared global source through multiple replacement dependency clones", async () => {
+    const scoped = LayerNode.tags({ global: [], location: ["global"] })
+    const global = scoped.make("global")
+    const local = scoped.make("location")
+    const original = global({ service: Value, layer: valueLayer, deps: [] })
+    const shared = global({ service: Greeting, layer: greetingLayer, deps: [original] })
+    const oldLeft = local({ service: Left, layer: Layer.succeed(Left, { value: "old" }), deps: [] })
+    const replacementLeft = local({
+      service: Left,
+      layer: Layer.effect(
+        Left,
+        Effect.map(Greeting, (item) => ({ value: item.value })),
+      ),
+      deps: [shared],
+    })
+    const consumer = local({
+      service: Right,
+      layer: Layer.effect(
+        Right,
+        Effect.gen(function* () {
+          return { value: `${(yield* Greeting).value}/${(yield* Left).value}` }
+        }),
+      ),
+      deps: [shared, oldLeft],
+    })
+    const result = LayerNode.hoist(LayerNode.group([consumer]), scoped.values.global, [
+      [oldLeft, replacementLeft],
+      [original, Layer.succeed(Value, { value: "replacement" })],
+    ])
+    expect(
+      await Effect.runPromise(
+        Effect.map(Right, (item) => item.value).pipe(
+          Effect.provide(LayerNode.compile(result.node).pipe(Layer.provide(LayerNode.compile(result.hoisted)))),
+        ),
+      ),
+    ).toBe("hello replacement/hello replacement")
+  })
+
   test("builds an untagged graph", async () => {
     const value = LayerNode.make({ service: Value, layer: valueLayer, deps: [] })
     const greeting = LayerNode.make({ service: Greeting, layer: greetingLayer, deps: [value] })

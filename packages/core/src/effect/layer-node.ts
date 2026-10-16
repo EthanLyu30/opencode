@@ -226,11 +226,12 @@ export function hoist<A, E, T extends Tag, const Items extends Replacements = re
         return { ...node, dependencies: node.dependencies.map(context.visit) }
       }
       if (node.tag === tag) {
+        const candidate = rewriteReplacementDependencies(node, replacementMap)
         const existing = hoisted.get(node.name)
-        if (existing && existing !== node) {
+        if (existing && !sameImplementation(existing, candidate)) {
           throw new Error(`Tag ${tag} has conflicting implementations for ${node.name}`)
         }
-        hoisted.set(node.name, rewriteReplacementDependencies(node, replacementMap))
+        hoisted.set(node.name, candidate)
         return group([])
       }
       if (node.kind === "unbound") {
@@ -316,6 +317,20 @@ function rewriteReplacementDependencies(root: AnyNode, replacements: ReadonlyMap
   }
 
   return recur(root, true)
+}
+
+// Compare the actual normalized graph, not clone identity or provenance alone.
+function sameImplementation(left: AnyNode, right: AnyNode): boolean {
+  return (
+    left === right ||
+    (left.name === right.name &&
+      left.kind === right.kind &&
+      left.tag === right.tag &&
+      left.service === right.service &&
+      left.implementation === right.implementation &&
+      left.dependencies.length === right.dependencies.length &&
+      left.dependencies.every((dependency, index) => sameImplementation(dependency, right.dependencies[index]!)))
+  )
 }
 
 export function hasUnbound(root: Node<unknown, unknown, any>, source: AnyNode): boolean {

@@ -71,6 +71,7 @@ import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { WorkflowExecution } from "@opencode-ai/core/workflow/execution"
 import { WorkflowExecutionLocal } from "@opencode-ai/core/workflow/execution/local"
 import { WorkflowAdmission } from "@opencode-ai/core/workflow/admission"
+import { CodingAdmission } from "@opencode-ai/core/workflow/coding/admission"
 import { lazy } from "@/util/lazy"
 import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@opencode-ai/server/cors"
 import { serveUIEffect } from "@/server/shared/ui"
@@ -285,6 +286,7 @@ const app = LayerNode.group([
   ResponsesV2.node,
   WorkflowExecution.node,
   WorkflowAdmission.node,
+  CodingAdmission.node,
   WorkflowModelCatalogRuntime.node,
 ])
 
@@ -294,7 +296,15 @@ export function createRoutes(
     readonly workflowExecution?: LayerNode.Node<WorkflowExecution.Service, any, any>
   } = {},
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
-  const locationServiceMapV2 = buildLocationServiceMap()
+  const workflowRuntime = [
+    [SessionExecution.node, SessionExecutionLocal.node],
+    [WorkflowBenchmarkTransport.node, ProductionHostRuntime.benchmarkTransportNode],
+    [WorkflowExecution.node, composition.workflowExecution ?? WorkflowExecutionLocal.node],
+    [ModelSelection.node, WorkflowModelCatalogRuntime.selectionNode],
+    [ModelAvailability.node, WorkflowModelCatalogRuntime.availabilityNode],
+    ...workflowReplacements(),
+  ] as const
+  const locationServiceMapV2 = buildLocationServiceMap(workflowRuntime)
 
   return Layer.mergeAll(
     rootApiRoutes,
@@ -325,17 +335,7 @@ export function createRoutes(
       ]),
     ),
     Layer.provide(locationServiceMapV2),
-    Layer.provide(
-      AppNodeBuilderV1.build(app, [
-        [LocationServiceMap.node, locationServiceMapV2],
-        [SessionExecution.node, SessionExecutionLocal.node],
-        [WorkflowBenchmarkTransport.node, ProductionHostRuntime.benchmarkTransportNode],
-        [WorkflowExecution.node, composition.workflowExecution ?? WorkflowExecutionLocal.node],
-        [ModelSelection.node, WorkflowModelCatalogRuntime.selectionNode],
-        [ModelAvailability.node, WorkflowModelCatalogRuntime.availabilityNode],
-        ...workflowReplacements(),
-      ]),
-    ),
+    Layer.provide(AppNodeBuilderV1.build(app, [[LocationServiceMap.node, locationServiceMapV2], ...workflowRuntime])),
     // Must stay last: layers provided later in this pipe build beneath earlier ones,
     // so Observability must come after every service graph. Otherwise eagerly forked
     // fibers (e.g. the ModelsDev background refresh) capture Effect's default stdout

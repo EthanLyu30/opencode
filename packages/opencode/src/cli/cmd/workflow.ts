@@ -1,6 +1,7 @@
 import { ClientError, isInvalidRequestError, isWorkflowConflictError, OpenCode } from "@opencode-ai/client"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { WorkflowVisualBuild } from "@opencode-ai/schema/workflow-visual-build"
+import { WorkflowCodingBuild } from "@opencode-ai/schema/workflow-coding-build"
 import type { Argv } from "yargs"
 import { Effect, Schema } from "effect"
 import { writeSync } from "node:fs"
@@ -22,6 +23,7 @@ const DEFAULT_VISUAL = Object.freeze({
   maxTurns: 12,
   maxToolCalls: 24,
 })
+const DEFAULT_CODING = Object.freeze({ maxRevisions: 1, maxTokens: 12_000, maxTurns: 12, maxToolCalls: 24 })
 const HISTORY_PAGE_SIZE = 100
 const RECONNECT_DELAYS = [50, 100, 250, 500, 1_000] as const
 const ADMISSION_DELAYS = [50, 100] as const
@@ -36,10 +38,22 @@ export function workflowRunLimits(budget?: string, visual?: string) {
   return { budget: request.budget, visual: request.visual }
 }
 
+export function workflowCodingRunLimits(budget?: string, coding?: string) {
+  const request = Schema.decodeUnknownSync(WorkflowCodingBuild.CreateInput)({
+    prompt: "CLI limits validation",
+    budget: budget === undefined ? { ...DEFAULT_BUDGET, maxAttempts: 27 } : JSON.parse(budget),
+    coding: coding === undefined ? DEFAULT_CODING : JSON.parse(coding),
+    checks: { cwd: ".", test: "bun-test" },
+    delivery: "background",
+  })
+  return { budget: request.budget, coding: request.coding }
+}
+
 const roles = {
   design: "Kimi K3",
   decompose: "Kimi K3",
   visual_review: "Kimi K3",
+  code_review: "Kimi K3",
   implement: "DeepSeek V4 Pro",
   repair: "DeepSeek V4 Pro",
   deliver: "DeepSeek V4 Pro",
@@ -78,6 +92,7 @@ type ParsedEvent = {
 }
 
 type Stage = {
+  readonly coding?: true
   readonly modelLabel?: string
   readonly role: Role
   readonly revision: number
@@ -184,7 +199,7 @@ export async function observeWorkflow(input: {
 
 export const WorkflowRunCommand = effectCmd({
   command: "run <prompt>",
-  describe: "run a production visual workflow",
+  describe: "run a production workflow (visual by default)",
   builder: (yargs: Argv) =>
     yargs
       .positional("prompt", {
@@ -199,7 +214,15 @@ export const WorkflowRunCommand = effectCmd({
         default: "default" as const,
       })
       .option("budget", { describe: "workflow budget as validated JSON", type: "string" })
-      .option("visual-budget", { describe: "visual workflow budget as validated JSON", type: "string" }),
+      .option("visual-budget", { describe: "visual workflow budget as validated JSON", type: "string" })
+      .option("kind", {
+        describe: "workflow kind",
+        type: "string",
+        choices: ["visual", "coding"] as const,
+        default: "visual" as const,
+      })
+      .option("checks", { describe: "coding check selection as validated JSON", type: "string" })
+      .option("coding-budget", { describe: "coding workflow budget as validated JSON", type: "string" }),
   handler: Effect.fn("Cli.workflow.run")(function* (args) {
     yield* Effect.promise(async () => {
       const prompt = typeof args.prompt === "string" ? args.prompt.trim() : ""
@@ -289,13 +312,35 @@ export const WorkflowRunCommand = effectCmd({
       process.on("SIGINT", sigint)
 
       try {
+        if (args.kind === "coding" && args["visual-budget"] !== undefined)
+          throw new ObservationError("Coding workflows cannot use --visual-budget")
+        if (args.kind !== "coding" && (args.checks !== undefined || args["coding-budget"] !== undefined))
+          throw new ObservationError("Coding options require --kind coding")
+        const request: AdmissionRequest =
+          args.kind === "coding"
+            ? {
+                kind: "coding",
+                request: {
+                  ...Schema.decodeUnknownSync(WorkflowCodingBuild.CreateInput)({
+                    prompt,
+                    ...workflowCodingRunLimits(args.budget, args["coding-budget"]),
+                    checks: args.checks === undefined ? { cwd: ".", test: "bun-test" } : JSON.parse(args.checks),
+                    delivery: "background",
+                  }),
+                  "idempotency-key": idempotencyKey,
+                },
+              }
+            : {
+                kind: "visual",
+                request: {
+                  prompt,
+                  ...workflowRunLimits(args.budget, args["visual-budget"]),
+                  delivery: "background",
+                  "idempotency-key": idempotencyKey,
+                },
+              }
         client = await localClient()
-        const admitted = await admit(client, {
-          prompt,
-          ...workflowRunLimits(args.budget, args["visual-budget"]),
-          delivery: "background",
-          "idempotency-key": idempotencyKey,
-        })
+        const admitted = await admit(client, request)
         admittedWorkflow = admitted.workflow
         admittedResponse = admitted.response
         workflowID = requireID(admitted.workflow, "workflow")
@@ -404,13 +449,22 @@ async function localClient() {
   })
 }
 
-async function admit(
-  client: ReturnType<typeof OpenCode.make>,
-  request: Parameters<typeof client.workflows.visualBuildCreate>[0],
-) {
+type AdmissionRequest =
+  | {
+      readonly kind: "visual"
+      readonly request: Parameters<ReturnType<typeof OpenCode.make>["workflows"]["visualBuildCreate"]>[0]
+    }
+  | {
+      readonly kind: "coding"
+      readonly request: Parameters<ReturnType<typeof OpenCode.make>["workflows"]["codingBuildCreate"]>[0]
+    }
+
+async function admit(client: ReturnType<typeof OpenCode.make>, input: AdmissionRequest) {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await client.workflows.visualBuildCreate(request)
+      return await (input.kind === "coding"
+        ? client.workflows.codingBuildCreate(input.request)
+        : client.workflows.visualBuildCreate(input.request))
     } catch (error) {
       if (!(error instanceof ClientError) || error.reason !== "Transport" || attempt >= ADMISSION_DELAYS.length)
         throw error
@@ -447,6 +501,13 @@ function parseHistory(input: unknown, workflowID: string) {
 }
 
 function recordStages(data: Record<string, unknown>, stages: Map<string, Stage>) {
+  const codingSelection =
+    data.type === "coding-build" && isRecord(data.input) ? data.input["workflow.coding-model-selection.v1"] : undefined
+  const codingRoutes = isRecord(codingSelection)
+    ? Schema.decodeUnknownSync(Schema.Record(WorkflowCodingBuild.Role, WorkflowModelCatalog.RouteSelection))(
+        codingSelection.routes,
+      )
+    : undefined
   const selection = isRecord(data.input) ? data.input["workflow.model-selection.v1"] : undefined
   const snapshot =
     selection === undefined
@@ -459,12 +520,14 @@ function recordStages(data: Record<string, unknown>, stages: Map<string, Stage>)
     if (!isRecord(input) || !isRecord(input.input) || typeof input.id !== "string" || !isRole(input.type)) continue
     const revision = input.input.revision
     if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) continue
+    const route =
+      (input.type === "visual_review" ? undefined : codingRoutes?.[input.type]) ??
+      snapshot?.routes[input.type === "code_review" ? "design" : input.type]
     stages.set(input.id, {
       role: input.type,
       revision,
-      ...(snapshot
-        ? { modelLabel: `${snapshot.routes[input.type].providerID}/${snapshot.routes[input.type].modelID}` }
-        : {}),
+      ...(data.type === "coding-build" ? { coding: true as const } : {}),
+      ...(route ? { modelLabel: `${route.providerID}/${route.modelID}` } : {}),
     })
   }
 }
@@ -490,6 +553,8 @@ function progressLine(event: ParsedEvent, stages: Map<string, Stage>): string | 
     const stage = typeof event.data.stageID === "string" ? stages.get(event.data.stageID) : undefined
     if (stage?.role === "test") return `Test evidence recorded for r${stage.revision}`
     if (stage?.role === "visual_review") return `Visual evidence recorded for r${stage.revision}`
+    if (stage?.role === "code_review") return `Code review recorded for r${stage.revision}`
+    if (stage?.coding && stage.role === "design") return `Engineering plan recorded for r${stage.revision}`
     return undefined
   }
   if (event.type === "workflow.budget.threshold_reached") {
@@ -597,6 +662,11 @@ const artifactKinds = new Set([
   "workflow.visual-review",
   "workflow.delivery",
   "workflow.role.outcome",
+  "workflow.coding.plan",
+  "workflow.coding.checks",
+  "workflow.coding.review",
+  "workflow.coding.delivery",
+  "workflow.coding.outcome",
 ])
 const artifactMimes = new Set([
   "application/json",
@@ -608,6 +678,10 @@ const artifactMimes = new Set([
   "application/vnd.opencode.visual-review+json",
   "application/vnd.opencode.workflow-delivery+json",
   "application/vnd.opencode.workflow-role-outcome+json",
+  "application/vnd.opencode.workflow-coding-plan+json",
+  "application/vnd.opencode.workflow-coding-checks+json",
+  "application/vnd.opencode.workflow-coding-review+json",
+  "application/vnd.opencode.workflow-coding-delivery+json",
   "text/markdown",
   "text/plain",
   "text/plain; charset=utf-8",

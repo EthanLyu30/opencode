@@ -3972,6 +3972,184 @@ export type WorkflowsVisualBuildCreateOutput = {
   }
 }["data"]
 
+export type WorkflowsCodingBuildCreateInput = {
+  readonly "idempotency-key"?: { readonly "idempotency-key"?: string | undefined }["idempotency-key"]
+  readonly prompt: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly coding: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly checks: {
+      readonly cwd: "." | string
+      readonly test: "bun-test" | "bun-run-test"
+      readonly build?: "bun-run-build"
+      readonly typecheck?: "bun-run-typecheck"
+    }
+    readonly delivery: "foreground" | "background"
+  }["prompt"]
+  readonly budget: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly coding: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly checks: {
+      readonly cwd: "." | string
+      readonly test: "bun-test" | "bun-run-test"
+      readonly build?: "bun-run-build"
+      readonly typecheck?: "bun-run-typecheck"
+    }
+    readonly delivery: "foreground" | "background"
+  }["budget"]
+  readonly coding: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly coding: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly checks: {
+      readonly cwd: "." | string
+      readonly test: "bun-test" | "bun-run-test"
+      readonly build?: "bun-run-build"
+      readonly typecheck?: "bun-run-typecheck"
+    }
+    readonly delivery: "foreground" | "background"
+  }["coding"]
+  readonly checks: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly coding: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly checks: {
+      readonly cwd: "." | string
+      readonly test: "bun-test" | "bun-run-test"
+      readonly build?: "bun-run-build"
+      readonly typecheck?: "bun-run-typecheck"
+    }
+    readonly delivery: "foreground" | "background"
+  }["checks"]
+  readonly delivery: {
+    readonly prompt: string
+    readonly budget: {
+      readonly maxTokens?: number
+      readonly maxTurns?: number
+      readonly maxToolCalls?: number
+      readonly maxAttempts?: number
+      readonly maxDurationMs?: number
+    }
+    readonly coding: {
+      readonly maxRevisions: number
+      readonly maxTokens: number
+      readonly maxTurns: number
+      readonly maxToolCalls: number
+    }
+    readonly checks: {
+      readonly cwd: "." | string
+      readonly test: "bun-test" | "bun-run-test"
+      readonly build?: "bun-run-build"
+      readonly typecheck?: "bun-run-typecheck"
+    }
+    readonly delivery: "foreground" | "background"
+  }["delivery"]
+}
+
+export type WorkflowsCodingBuildCreateOutput = {
+  readonly data: {
+    readonly workflow: {
+      readonly id: string
+      readonly type: string
+      readonly status: "queued" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"
+      readonly currentStageID?: string
+      readonly input: { readonly [x: string]: JsonValue }
+      readonly budget: {
+        readonly maxTokens?: number
+        readonly maxTurns?: number
+        readonly maxToolCalls?: number
+        readonly maxAttempts?: number
+        readonly maxDurationMs?: number
+      }
+      readonly usage: {
+        readonly tokens: number
+        readonly turns: number
+        readonly toolCalls: number
+        readonly attempts: number
+      }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly sessionID?: string
+      readonly agent?: string
+      readonly cancelRequestedAt?: number
+      readonly version: number
+      readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+    }
+    readonly response: {
+      readonly id: string
+      readonly workflowID: string
+      readonly model: string
+      readonly status: "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled"
+      readonly background: boolean
+      readonly store: boolean
+      readonly previousResponseID?: string
+      readonly conversationID?: string
+      readonly requestHash: string
+      readonly output: ReadonlyArray<{ readonly [x: string]: JsonValue }>
+      readonly error?: {
+        readonly code: string
+        readonly message: string
+        readonly type?: string
+        readonly param?: string
+      }
+      readonly usage?: {
+        readonly inputTokens: number
+        readonly outputTokens: number
+        readonly totalTokens: number
+        readonly inputTokensDetails?: { readonly cachedTokens: number }
+        readonly outputTokensDetails?: { readonly reasoningTokens: number }
+      }
+      readonly createdAt: number
+      readonly completedAt?: number
+      readonly deletedAt?: number
+    }
+  }
+}["data"]
+
 export type ResponsesCreateInput = {
   readonly id?: {
     readonly id?: string

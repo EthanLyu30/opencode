@@ -256,7 +256,9 @@ test("runs the frozen production visual workflow offline through the generated S
   expect(result.stages.every((stage) => stage.attempt === (stage.status === "skipped" ? 0 : 1))).toBe(true)
   expect(result.counters).toEqual({
     providerCalls: 14,
-    credentialReads: 15,
+    credentialReads: 18,
+    metadataCredentialReads: 4,
+    providerCredentialReads: 14,
     outboundCalls: 0,
     browserCaptures: 3,
     browserCloses: 1,
@@ -687,7 +689,9 @@ test("recovers a durable preview start intent through its authenticated owner be
   expect(result.responseStatus).toBe("completed")
   expect(result.counters).toEqual({
     providerCalls: 6,
-    credentialReads: 9,
+    credentialReads: 10,
+    metadataCredentialReads: 4,
+    providerCredentialReads: 6,
     outboundCalls: 0,
     browserCaptures: 3,
     browserCloses: 1,

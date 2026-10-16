@@ -1,6 +1,7 @@
 import { Workflow } from "@opencode-ai/schema/workflow"
 import { WorkflowEvent } from "@opencode-ai/schema/workflow-event"
 import { WorkflowVisualBuild } from "@opencode-ai/schema/workflow-visual-build"
+import { WorkflowCodingBuild } from "@opencode-ai/schema/workflow-coding-build"
 import { NonNegativeInt, PositiveInt } from "@opencode-ai/schema/schema"
 import { Context, Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
@@ -146,6 +147,21 @@ export const makeWorkflowGroup = <LocationId extends HttpApiMiddleware.AnyId, Lo
           identifier: "workflow.visualBuildCreate",
           summary: "Admit a visual build",
           description: "Durably admit one location-scoped visual-build Workflow and its Response.",
+        }),
+      ),
+  ).add(
+    HttpApiEndpoint.post("workflow.codingBuildCreate", "/api/workflow/coding-build", {
+      headers: VisualBuildHeaders,
+      payload: WorkflowCodingBuild.CreateInput,
+      success: Schema.Struct({ data: WorkflowCodingBuild.Admission }),
+      error: [InvalidRequestError, WorkflowConflictError],
+    })
+      .middleware(locationMiddleware)
+      .annotateMerge(
+        OpenApi.annotations({
+          identifier: "workflow.codingBuildCreate",
+          summary: "Admit a coding build",
+          description: "Durably admit one explicitly location-scoped nonvisual coding-build Workflow and its Response.",
         }),
       ),
   )

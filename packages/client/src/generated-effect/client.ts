@@ -356,6 +356,30 @@ const Endpoint4_9 = (raw: RawClient["server.workflow"]) => (input: Endpoint4_9In
     Effect.map((value) => value.data),
   )
 
+type Endpoint4_10Request = Parameters<RawClient["server.workflow"]["workflow.codingBuildCreate"]>[0]
+type Endpoint4_10Input = {
+  readonly "idempotency-key"?: Endpoint4_10Request["headers"]["idempotency-key"]
+  readonly prompt: Endpoint4_10Request["payload"]["prompt"]
+  readonly budget: Endpoint4_10Request["payload"]["budget"]
+  readonly coding: Endpoint4_10Request["payload"]["coding"]
+  readonly checks: Endpoint4_10Request["payload"]["checks"]
+  readonly delivery: Endpoint4_10Request["payload"]["delivery"]
+}
+const Endpoint4_10 = (raw: RawClient["server.workflow"]) => (input: Endpoint4_10Input) =>
+  raw["workflow.codingBuildCreate"]({
+    headers: { "idempotency-key": input["idempotency-key"] },
+    payload: {
+      prompt: input["prompt"],
+      budget: input["budget"],
+      coding: input["coding"],
+      checks: input["checks"],
+      delivery: input["delivery"],
+    },
+  }).pipe(
+    Effect.mapError(mapClientError),
+    Effect.map((value) => value.data),
+  )
+
 const adaptGroup4 = (raw: RawClient["server.workflow"]) => ({
   create: Endpoint4_0(raw),
   list: Endpoint4_1(raw),
@@ -367,6 +391,7 @@ const adaptGroup4 = (raw: RawClient["server.workflow"]) => ({
   updateBudget: Endpoint4_7(raw),
   resolveRecovery: Endpoint4_8(raw),
   visualBuildCreate: Endpoint4_9(raw),
+  codingBuildCreate: Endpoint4_10(raw),
 })
 
 type Endpoint5_0Request = Parameters<RawClient["server.responses"]["responses.create"]>[0]

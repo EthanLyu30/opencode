@@ -1,10 +1,12 @@
 import { WorkflowV2 } from "@opencode-ai/core/workflow"
 import { WorkflowAdmission } from "@opencode-ai/core/workflow/admission"
+import { CodingAdmission } from "@opencode-ai/core/workflow/coding/admission"
 import { ResponsesV2 } from "@opencode-ai/core/responses"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Location } from "@opencode-ai/core/location"
 import { DateTime, Effect, Stream } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/unstable/httpapi"
+import { HttpServerRequest } from "effect/unstable/http"
 import { Api } from "../api"
 import {
   InvalidRequestError,
@@ -65,6 +67,7 @@ export const WorkflowHandler = HttpApiBuilder.group(Api, "server.workflow", (han
   Effect.gen(function* () {
     const workflow = yield* WorkflowV2.Service
     const admission = yield* WorkflowAdmission.Service
+    const codingAdmission = yield* CodingAdmission.Service
     const responses = yield* ResponsesV2.Service
     const events = yield* EventV2.Service
 
@@ -106,6 +109,34 @@ export const WorkflowHandler = HttpApiBuilder.group(Api, "server.workflow", (han
           return {
             data: ctx.payload.delivery === "foreground" ? yield* followResponse(admitted) : admitted,
           }
+        }),
+      )
+      .handle(
+        "workflow.codingBuildCreate",
+        Effect.fn(function* (ctx) {
+          const request = yield* HttpServerRequest.HttpServerRequest
+          if (
+            !request.headers["x-opencode-directory"] &&
+            !new URL(request.url, "http://localhost").searchParams.get("location[directory]")
+          ) {
+            return yield* new InvalidRequestError({
+              message: "Coding admission requires an explicit Location",
+              kind: "location_required",
+            })
+          }
+          const current = yield* Location.Service
+          const location = Location.Ref.make({
+            directory: current.directory,
+            ...(current.workspaceID === undefined ? {} : { workspaceID: current.workspaceID }),
+          })
+          const admitted = yield* codingAdmission.admit(ctx.payload, location, ctx.headers["idempotency-key"]).pipe(
+            Effect.catchTag("Workflow.ConflictError", conflict),
+            Effect.catchTag(
+              "CodingAdmission.Invalid",
+              (error) => new InvalidRequestError({ message: error.message, kind: error.code }),
+            ),
+          )
+          return { data: ctx.payload.delivery === "foreground" ? yield* followResponse(admitted) : admitted }
         }),
       )
       .handle(

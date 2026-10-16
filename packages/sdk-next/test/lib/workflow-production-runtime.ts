@@ -4,6 +4,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { Database as BunDatabase } from "bun:sqlite"
 import { Credential } from "@opencode-ai/core/credential"
+import { Integration } from "@opencode-ai/core/integration"
 import { Database } from "@opencode-ai/core/database/database"
 import { makeGlobalNode, makeLocationNode } from "@opencode-ai/core/effect/app-node"
 import { llmClient, httpClient } from "@opencode-ai/core/effect/app-node-platform"
@@ -65,6 +66,11 @@ export type {
 } from "./workflow-production-types"
 export { loadRecording, recordingPath } from "./workflow-production-recording"
 
+// Fixture-only purpose tagging follows the actual metadata service boundary, not stack inspection.
+const credentialReadPurpose = Context.Reference<"metadata" | "provider">("test/production-credential-read-purpose", {
+  defaultValue: () => "provider",
+})
+
 export function runProductionScenario(caseRoot: string, crash?: ProductionCrashOptions): Promise<RuntimeObservation>
 export function runProductionScenario(
   caseRoot: string,
@@ -87,6 +93,8 @@ export async function runProductionScenario(
   const counters: RuntimeCounters = {
     providerCalls: 0,
     credentialReads: 0,
+    metadataCredentialReads: 0,
+    providerCredentialReads: 0,
     outboundCalls: 0,
     browserCaptures: 0,
     browserCloses: 0,
@@ -365,8 +373,11 @@ function applicationFactory(input: {
     service: Credential.Service,
     layer: Layer.mock(Credential.Service, {
       list: (integrationID) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          const purpose = yield* credentialReadPurpose
           input.counters.credentialReads++
+          if (purpose === "metadata") input.counters.metadataCredentialReads++
+          else input.counters.providerCredentialReads++
           return [
             new Credential.Info({
               id: Credential.ID.create(),
@@ -378,6 +389,21 @@ function applicationFactory(input: {
         }),
     }),
     deps: [],
+  })
+  const integrationNode = makeLocationNode({
+    service: Integration.Service,
+    layer: Layer.effect(
+      Integration.Service,
+      Effect.map(Integration.Service, (integration) => ({
+        ...integration,
+        connection: {
+          ...integration.connection,
+          active: (id) =>
+            integration.connection.active(id).pipe(Effect.provideService(credentialReadPurpose, "metadata")),
+        },
+      })),
+    ).pipe(Layer.provide(Integration.locationLayer)),
+    deps: [Credential.node, EventV2.node],
   })
   const modelNode = makeGlobalNode({ service: LLMClient.Service, layer: input.model, deps: [] })
   const outboundNode = makeGlobalNode({
@@ -437,6 +463,7 @@ function applicationFactory(input: {
       [ToolOutputStore.cleanupNode, cleanupNode],
       [WorkflowRuntimeRecovery.node, recoveryNode],
       [Credential.node, credentialNode],
+      [Integration.node, integrationNode],
       [llmClient, modelNode],
       [httpClient, outboundNode],
       ...(eventNode === undefined ? [] : ([[EventV2.node, eventNode]] as const)),

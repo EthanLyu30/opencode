@@ -85,6 +85,8 @@ export interface ProductionRecording {
 export interface RuntimeCounters {
   providerCalls: number
   credentialReads: number
+  metadataCredentialReads: number
+  providerCredentialReads: number
   outboundCalls: number
   browserCaptures: number
   browserCloses: number

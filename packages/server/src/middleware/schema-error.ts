@@ -16,6 +16,8 @@ export const schemaErrorLayer = HttpApiMiddleware.layerSchemaErrorTransform(Sche
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
     const pathname = new URL(request.url, "http://localhost").pathname
+    if (pathname === "/api/workflow/coding-build")
+      return yield* new InvalidRequestError({ message: "Invalid coding workflow request", kind: error.kind })
     if (["/api/workflow-models", "/api/workflow-models/refresh", "/api/workflow-models/activate"].includes(pathname))
       return yield* new InvalidRequestError({ message: "Invalid workflow model request", kind: error.kind })
     const reason = truncateReason(error.cause.message)
