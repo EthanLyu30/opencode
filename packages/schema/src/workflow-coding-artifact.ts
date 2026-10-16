@@ -27,13 +27,14 @@ export const Plan = PlanShape.annotate({ identifier: "WorkflowCodingArtifact.Pla
 )
 export interface Plan extends Schema.Schema.Type<typeof Plan> {}
 
-const Finding = Schema.Struct({
+export const Finding = Schema.Struct({
   id: DesignArtifact.SafeIdentifier,
   path: DesignArtifact.SourcePath,
   severity: Schema.Literals(["critical", "important", "minor"]),
   blocking: Schema.Boolean,
   summary: Summary,
 }).annotate({ identifier: "WorkflowCodingArtifact.Finding", ...exact })
+export interface Finding extends Schema.Schema.Type<typeof Finding> {}
 const ReviewShape = Schema.Struct({
   ...identity,
   implementationSha256: DesignArtifact.Sha256,

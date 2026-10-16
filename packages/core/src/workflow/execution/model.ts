@@ -19,8 +19,9 @@ import { Hash } from "../../util/hash"
 import { LocationServiceMap } from "../../location-service-map"
 import type { Checkpoint, ExecutionFailure, ExecutionInput, Result } from "../executor"
 import { WorkflowRetry } from "../retry"
-import { WorkflowRoleAgents } from "../role-agents"
-import { WorkflowRouting } from "../routing"
+import { BuildRoleAgents } from "./build-role-agents"
+import { BuildRouting } from "./build-routing"
+import { BuildContract } from "./build-contract"
 import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowToolLineage } from "../tool-lineage"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
@@ -34,14 +35,14 @@ import * as WorkflowProviderRequest from "./provider-request"
 export { fingerprintProviderRequest } from "./provider-request"
 
 export interface Input extends ExecutionInput {
-  readonly route: WorkflowRouting.Route
+  readonly route: BuildRouting.Route
   readonly preparation?: WorkflowRoleExecution.Preparation
 }
 
 export interface Output extends Omit<Result, "artifacts"> {
   readonly outcome?: unknown
-  readonly contract?: WorkflowRoleContract.Contract
-  readonly semantic?: WorkflowRoleContract.RoleResult
+  readonly contract?: BuildContract.Contract
+  readonly semantic?: BuildContract.RoleResult
   readonly artifacts?: Result["artifacts"]
   readonly providerUsage?: Responses.Usage
 }
@@ -284,7 +285,7 @@ const productionLayer = Layer.effect(
               response === undefined
                 ? input.route
                 : yield* Effect.try({
-                    try: () => WorkflowRouting.forResponseModel(input.route, response.model),
+                    try: () => BuildRouting.forResponseModel(input.route, response.model),
                     catch: () =>
                       executionFailure(
                         "invalid_request",
@@ -296,7 +297,7 @@ const productionLayer = Layer.effect(
               workflow: input.workflow,
               stage: input.stage,
               route,
-              agent: WorkflowRoleAgents.agentForRole(route.role),
+              agent: BuildRoleAgents.agentForRole(input.workflow, route.role),
             }).pipe(
               Effect.mapError((error) =>
                 executionFailure("invalid_request", "workflow_tool_lineage_invalid", error.message),
@@ -318,7 +319,7 @@ const productionLayer = Layer.effect(
                 )
             }
             const trustedMessages = input.preparation?.messages ?? context
-            const contract = WorkflowRoleContract.build({
+            const contract = BuildContract.build({
               workflow: input.workflow,
               stage: input.stage,
               route,
@@ -350,7 +351,7 @@ const productionLayer = Layer.effect(
               recoveredContinuation?.catalogFingerprint === undefined
                 ? undefined
                 : yield* Effect.gen(function* () {
-                    yield* WorkflowRoleAgents.reassert(route.role)
+                    yield* BuildRoleAgents.reassert(input.workflow, route.role)
                     const materialization = yield* registry.materialize(contract.permissions)
                     if (materialization.fingerprint !== recoveredContinuation.catalogFingerprint && !recoveryRetry) {
                       return yield* Effect.fail(
@@ -445,7 +446,7 @@ const productionLayer = Layer.effect(
                     return yield* Effect.fail(
                       budgetFailure("token", WorkflowRetry.usageDelta(usage, checkpointedUsage)),
                     )
-                  const selection = ModelSelection.optionalFromWorkflow(input.workflow)
+                  const selection = BuildRouting.sourceSelection(input.workflow)
                   if (selection)
                     yield* availability.check(selection).pipe(
                       Effect.mapError(() => ({
@@ -460,7 +461,7 @@ const productionLayer = Layer.effect(
                   const model = yield* credentialedModel(credentials, route, availability, selection).pipe(
                     Effect.mapError((error) => settleExecutionFailure(response, error)),
                   )
-                  yield* WorkflowRoleAgents.reassert(route.role)
+                  yield* BuildRoleAgents.reassert(input.workflow, route.role)
                   materialization = yield* registry.materialize(contract.permissions)
                   catalogFingerprint = materialization.fingerprint
                   const sequence = usage.turns + 1
@@ -659,7 +660,7 @@ const productionLayer = Layer.effect(
               const remainingCalls = activeTurn.calls.slice(activeTurn.results.length)
               const settledResults = [...activeTurn.results]
               if (remainingCalls.length > 0 && materialization === undefined) {
-                yield* WorkflowRoleAgents.reassert(route.role)
+                yield* BuildRoleAgents.reassert(input.workflow, route.role)
                 materialization = yield* registry.materialize(contract.permissions)
                 if (catalogFingerprint === undefined || materialization.fingerprint !== catalogFingerprint) {
                   return yield* Effect.fail(
@@ -714,7 +715,7 @@ const productionLayer = Layer.effect(
                     route,
                     policyDigest: requestedPolicyDigest,
                     sessionID,
-                    agent: WorkflowRoleAgents.agentForRole(route.role),
+                    agent: BuildRoleAgents.agentForRole(input.workflow, route.role),
                     assistantMessageID: workflowMessageID(input.stage.id, call.id),
                     call: { type: "tool-call", ...call },
                   })
@@ -797,7 +798,7 @@ const productionLayer = Layer.effect(
             }
             if (generated === undefined) return yield* Effect.die("Workflow model turn completed without a response")
             const semantic = yield* Effect.try({
-              try: () => WorkflowRoleContract.decodeJson(contract, generated.text),
+              try: () => BuildContract.decodeJson(contract, generated.text),
               catch: () => {
                 const failure = executionFailure(
                   "schema",
@@ -873,8 +874,8 @@ function continuationFromStage(
   input: Input,
   responseID: Responses.ID | undefined,
   responses: ResponsesV2.Interface,
-  route: WorkflowRouting.Route,
-  contract: WorkflowRoleContract.Contract,
+  route: BuildRouting.Route,
+  contract: BuildContract.Contract,
 ) {
   const checkpoint = input.stage.checkpoint
   if (checkpoint?.kind === "workflow.model.continuation.transient") {
@@ -949,8 +950,8 @@ function decodeAndValidateContinuation(
   checkpoint: unknown,
   input: Input,
   responseID: Responses.ID | undefined,
-  route: WorkflowRouting.Route,
-  contract: WorkflowRoleContract.Contract,
+  route: BuildRouting.Route,
+  contract: BuildContract.Contract,
 ) {
   return decodeContinuation(checkpoint).pipe(
     Effect.flatMap((continuation) => {
@@ -1163,7 +1164,7 @@ function continuationMessages(turn: typeof ContinuationTurn.Type): Message[] {
 
 function credentialedModel(
   credentials: Credential.Interface,
-  route: WorkflowRouting.Route,
+  route: BuildRouting.Route,
   availability: ModelAvailability.Service["Service"],
   selection?: ModelSelection.FrozenSelection,
 ) {
@@ -1217,7 +1218,7 @@ function credentialedModel(
   )
 }
 
-function responseContext(responses: ResponsesV2.Interface, responseID: Responses.ID, route: WorkflowRouting.Route) {
+function responseContext(responses: ResponsesV2.Interface, responseID: Responses.ID, route: BuildRouting.Route) {
   return Effect.gen(function* () {
     const response = yield* responses.get(responseID).pipe(Effect.mapError(responseFailure))
     if (response.model !== route.modelID)
@@ -1517,7 +1518,7 @@ function workflowMessageID(stageID: Workflow.StageID, callID: string) {
   return SessionMessage.ID.make(`msg_workflow_${stageID.slice(4)}_${Hash.sha256(callID).slice(0, 16)}`)
 }
 
-function remainingTokenBudget(input: Input, route: WorkflowRouting.Route, usage: Workflow.Usage): number | undefined {
+function remainingTokenBudget(input: Input, route: BuildRouting.Route, usage: Workflow.Usage): number | undefined {
   return route.budget.maxTokens === undefined
     ? undefined
     : Math.max(0, route.budget.maxTokens - input.workflow.usage.tokens - usage.tokens)

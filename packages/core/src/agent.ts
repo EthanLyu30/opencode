@@ -5,6 +5,7 @@ import { Array, Context, Effect, Layer, Schema, Types } from "effect"
 import { Agent } from "@opencode-ai/schema/agent"
 import { State } from "./state"
 import { WorkflowRoleAgentProfiles } from "./workflow/role-agent-profiles"
+import { CodingRoleAgentProfiles } from "./workflow/coding/role-agent-profiles"
 
 export const ID = Agent.ID
 export type ID = typeof ID.Type
@@ -73,7 +74,11 @@ const layer = Layer.effect(
           draft.agents.delete(id)
         },
       }),
-      finalize: (draft) => Effect.sync(() => WorkflowRoleAgentProfiles.install(draft)),
+      finalize: (draft) =>
+        Effect.sync(() => {
+          WorkflowRoleAgentProfiles.install(draft)
+          CodingRoleAgentProfiles.install(draft)
+        }),
     })
     yield* state.reload()
     const selectable = (agent: Info | undefined) =>
@@ -114,7 +119,7 @@ const layer = Layer.effect(
       }),
       all: Effect.fn("AgentV2.all")(function* () {
         return Array.fromIterable(state.get().agents.values()).filter(
-          (agent) => !WorkflowRoleAgentProfiles.isRoleAgent(agent.id),
+          (agent) => !WorkflowRoleAgentProfiles.isRoleAgent(agent.id) && !CodingRoleAgentProfiles.isRoleAgent(agent.id),
         )
       }),
     })
@@ -127,7 +132,7 @@ export const node = makeLocationNode({ service: Service, layer, deps: [] })
 
 export function requirePublicID(id: ID | string) {
   const selected = ID.make(id)
-  return WorkflowRoleAgentProfiles.isRoleAgent(selected)
+  return WorkflowRoleAgentProfiles.isRoleAgent(selected) || CodingRoleAgentProfiles.isRoleAgent(selected)
     ? Effect.fail(new ReservedSelectionError({ agent: selected }))
     : Effect.void
 }

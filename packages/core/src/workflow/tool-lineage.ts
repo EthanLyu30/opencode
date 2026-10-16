@@ -1,12 +1,11 @@
 export * as WorkflowToolLineage from "./tool-lineage"
 
 import { Workflow } from "@opencode-ai/schema/workflow"
-import { WorkflowRole } from "@opencode-ai/schema/workflow-role"
 import { Effect, Schema } from "effect"
 import { AgentV2 } from "../agent"
 import { SessionSchema } from "../session/schema"
 import { Hash } from "../util/hash"
-import { WorkflowRouting } from "./routing"
+import { BuildRouting } from "./execution/build-routing"
 
 const domain = "opencode.workflow.tool-policy"
 const version = 1 as const
@@ -16,7 +15,7 @@ export interface Descriptor {
   readonly stageID: Workflow.StageID
   readonly sessionID: SessionSchema.ID
   readonly agent: AgentV2.ID
-  readonly role: WorkflowRole.Role
+  readonly role: BuildRouting.Role
   readonly policyDigest: string
 }
 
@@ -27,7 +26,7 @@ export class Invalid extends Schema.TaggedErrorClass<Invalid>()("WorkflowToolLin
 export interface PolicyInput {
   readonly workflow: Workflow.Info
   readonly stage: Workflow.Stage
-  readonly route: WorkflowRouting.Route
+  readonly route: BuildRouting.Route
   readonly agent: AgentV2.ID
 }
 

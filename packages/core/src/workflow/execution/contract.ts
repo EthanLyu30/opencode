@@ -11,6 +11,7 @@ import { WorkflowBenchmarkTransport } from "../benchmark-transport"
 import { WorkflowPermissions } from "../permissions"
 import { WorkflowRouting } from "../routing"
 import { ModelSelection } from "../model-selection"
+import type { BuildRouting } from "./build-routing"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 const Summary = Schema.NonEmptyString.check(
@@ -233,7 +234,7 @@ export interface Contract {
 export interface BuildInput {
   readonly workflow: Workflow.Info
   readonly stage: Workflow.Stage
-  readonly route: WorkflowRouting.Route
+  readonly route: BuildRouting.Route
   readonly priorArtifacts: ReadonlyArray<Workflow.Artifact | Workflow.ArtifactCommit>
   readonly messages?: readonly Message[]
 }
@@ -521,14 +522,15 @@ function isBinaryValue(value: unknown): boolean {
 }
 
 function defaultMessages(input: BuildInput, artifacts: readonly ArtifactDigest[]): readonly Message[] {
+  const role = Schema.decodeUnknownSync(WorkflowRole.Role)(input.route.role)
   return [
     Message.user(
       JSON.stringify({
-        template: promptVersions[input.route.role],
+        template: promptVersions[role],
         workflow: { id: input.workflow.id, type: input.workflow.type, input: input.workflow.input },
         stage: {
           id: input.stage.id,
-          role: input.route.role,
+          role,
           revision: revisionOf(input.stage),
           input: input.stage.input,
         },

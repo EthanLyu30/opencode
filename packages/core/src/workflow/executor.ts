@@ -125,6 +125,8 @@ const injectedRoleLayer = Layer.effect(
     return Service.of({
       execute: (input) =>
         Effect.gen(function* () {
+          // Coding execution remains closed until its own fenced settlement profile is installed.
+          if (input.workflow.type === "coding-build") return yield* Effect.fail(unsupportedRole(input.stage.type))
           const role = yield* Schema.decodeUnknownEffect(WorkflowRole.Role)(input.stage.type).pipe(
             Effect.mapError(() => unsupportedRole(input.stage.type)),
           )
@@ -171,6 +173,16 @@ const injectedRoleLayer = Layer.effect(
                   Effect.mapError((error) => roleEvidenceFailure(error, zeroUsage)),
                 )
           const result = yield* models.execute({ ...input, route, preparation }).pipe(Effect.mapError(modelFailure))
+          const legacyContract =
+            result.contract !== undefined && !("kind" in result.contract) ? result.contract : undefined
+          if (result.contract !== undefined && legacyContract === undefined)
+            return yield* Effect.fail(
+              invalidOutcome(
+                "Coding contract cannot settle through the legacy executor",
+                result.usage,
+                result.responseSettlement,
+              ),
+            )
           if (result.artifacts?.some((artifact) => artifact.kind === WorkflowStageMachine.OUTCOME_ARTIFACT_KIND))
             return yield* Effect.fail(
               invalidOutcome(
@@ -198,7 +210,7 @@ const injectedRoleLayer = Layer.effect(
             )
           const strictSemantic = strict
             ? yield* Effect.try({
-                try: () => WorkflowRoleContract.decode(result.contract!, result.semantic),
+                try: () => WorkflowRoleContract.decode(legacyContract!, result.semantic),
                 catch: () =>
                   invalidOutcome(
                     "Model output did not match the strict role contract",
@@ -220,7 +232,7 @@ const injectedRoleLayer = Layer.effect(
               ? yield* WorkflowRoleExecution.settle({
                   workflow: input.workflow,
                   stage: input.stage,
-                  contract: result.contract!,
+                  contract: legacyContract!,
                   semantic: strictSemantic!,
                   priorArtifacts: input.artifacts,
                   settledToolEvidence: result.artifacts ?? [],

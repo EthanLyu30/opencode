@@ -1,5 +1,6 @@
 import { LLM, LLMRequest, Model, type Message, type ToolDefinition } from "@opencode-ai/llm"
-import { WorkflowRouting } from "../routing"
+import { BuildRouting } from "./build-routing"
+import { BuildContract } from "./build-contract"
 import { WorkflowSecretGuard } from "../secret-guard"
 import { WorkflowBusinessArtifact } from "../artifacts/business"
 import { Hash } from "../../util/hash"
@@ -9,8 +10,8 @@ const MAX_DESCRIPTOR_BYTES = 256 * 1024
 
 export interface BuildInput {
   readonly model: Model
-  readonly route: WorkflowRouting.Route
-  readonly contract: WorkflowRoleContract.Contract
+  readonly route: BuildRouting.Route
+  readonly contract: BuildContract.Contract
   readonly sequence: number
   readonly catalogFingerprint: string
   readonly messages: readonly Message[]
@@ -20,7 +21,7 @@ export interface BuildInput {
 
 export interface FingerprintInput {
   readonly request: LLMRequest
-  readonly route: WorkflowRouting.Route
+  readonly route: BuildRouting.Route
   readonly contractFingerprint: string
   readonly sequence: number
   readonly catalogFingerprint: string

@@ -20,8 +20,9 @@ import { Tools } from "./tools"
 import { makeLocationNode } from "../effect/app-node"
 import { WorkflowToolLineage } from "../workflow/tool-lineage"
 import { WorkflowRoleAgentProfiles } from "../workflow/role-agent-profiles"
+import { CodingRoleAgentProfiles } from "../workflow/coding/role-agent-profiles"
 import { WorkflowRoleAgents } from "../workflow/role-agents"
-import { WorkflowRouting } from "../workflow/routing"
+import type { BuildRouting } from "../workflow/execution/build-routing"
 import { WorkflowStore } from "../workflow/store"
 
 export type ExecuteInput = {
@@ -66,7 +67,7 @@ export interface WorkflowAuthorityInput extends ExecuteInput {
   readonly materialization: Materialization
   readonly workflowID: Workflow.ID
   readonly stageID: Workflow.StageID
-  readonly route: WorkflowRouting.Route
+  readonly route: BuildRouting.Route
   readonly policyDigest: string
 }
 
@@ -223,7 +224,7 @@ const registryLayer = Layer.effect(
           ),
           definitions: executable.map((item) => item.definition),
           settle: (input) => {
-            if (WorkflowRoleAgentProfiles.isRoleAgent(input.agent))
+            if (WorkflowRoleAgentProfiles.isRoleAgent(input.agent) || CodingRoleAgentProfiles.isRoleAgent(input.agent))
               return Effect.succeed({
                 result: {
                   type: "error" as const,

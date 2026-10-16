@@ -42,6 +42,9 @@ import { testEffect } from "./lib/effect"
 import { ModelSelection } from "../src/workflow/model-selection"
 import { ModelAvailability } from "../src/workflow/model-availability"
 import { fixtureAdmissionSnapshot, fixtureCatalogue } from "./fixtures/workflow-model-catalog"
+import { CodingModelSelection } from "../src/workflow/coding/model-selection"
+import { CodingRouting } from "../src/workflow/coding/routing"
+import { CodingRoleAgentProfiles } from "../src/workflow/coding/role-agent-profiles"
 
 const projects = Layer.succeed(
   ProjectV2.Service,
@@ -372,6 +375,89 @@ const expectedRules = (role: WorkflowRole.Role) => [
 ]
 
 describe("Workflow Location tools", () => {
+  it.live("coding internal agents cannot bypass public tool settlement", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_coding_public_boundary")
+          yield* createWorkflowSession(location, sessionID)
+          yield* Effect.gen(function* () {
+            const registry = yield* ToolRegistry.Service
+            let calls = 0
+            yield* registry.register({
+              coding_boundary_probe: Tool.make({
+                description: "Owned side effect to verify the real registry boundary",
+                input: Schema.Struct({}),
+                output: Schema.String,
+                execute: () =>
+                  Effect.sync(() => {
+                    calls++
+                    return "executed"
+                  }),
+              }),
+            })
+            const materialization = yield* registry.materialize()
+            const result = yield* materialization.settle({
+              sessionID,
+              agent: CodingRoleAgentProfiles.agentForRole("implement"),
+              assistantMessageID: SessionMessage.ID.make("msg_coding_public_boundary"),
+              call: { type: "tool-call", id: "call-coding-boundary", name: "coding_boundary_probe", input: {} },
+            })
+            expect(result.result).toMatchObject({ type: "error" })
+            expect(calls).toBe(0)
+          }).pipe(Effect.scoped, Effect.provide(LocationServiceMap.Service.get(location)))
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+  modelIt.live("coding code-review uses the existing provider engine and only read-only tools", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          modelRequests.length = 0
+          modelResponses.length = 0
+          availabilityChecks = 0
+          pinnedAvailable = true
+          const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })
+          const sessionID = SessionV2.ID.make("ses_coding_role_engine")
+          yield* createWorkflowSession(location, sessionID)
+          const selection = CodingModelSelection.freeze(fixtureAdmissionSnapshot(), location)
+          const base = modelInput(location, sessionID, () => Effect.void)
+          const workflow = Workflow.Info.make({
+            ...base.workflow,
+            type: "coding-build",
+            input: CodingModelSelection.withSelection({ brief: "Review the library fix" }, selection),
+          })
+          const stage = Workflow.Stage.make({ ...base.stage, type: "code_review", input: { revision: 0 } })
+          modelResponses.push(
+            providerResponse({
+              contractVersion: 1,
+              outcome: { schemaVersion: 1, role: "code_review", revision: 0, verdict: "pass" },
+              payload: { verdict: "pass", findings: [] },
+            })!,
+          )
+          const result = yield* WorkflowModelExecution.Service.use((models) =>
+            models.execute({
+              ...base,
+              workflow,
+              stage,
+              stages: [stage],
+              route: CodingRouting.resolve({ role: "code_review", budget: workflow.budget, selection }),
+            }),
+          )
+          expect(result.semantic?.outcome).toMatchObject({ role: "code_review", verdict: "pass", revision: 0 })
+          expect(modelRequests).toHaveLength(1)
+          expect(availabilityChecks).toBe(1)
+          expect(modelRequests[0]!.tools?.map((tool) => tool.name).toSorted()).toEqual(["glob", "grep", "read"])
+          expect(String(modelRequests[0]!.model.id)).toBe("kimi-k3")
+          expect(result.contract?.outputIdentifier).toBe("CodingContract.code_review.Envelope@1")
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
   for (const missingStoredCredential of [true, false])
     modelIt.live(
       `pinned generation uses trusted discovery credentials (stored missing=${missingStoredCredential})`,
