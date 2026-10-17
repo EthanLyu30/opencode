@@ -1,6 +1,6 @@
 # Coding-build zero-credit verification
 
-Status: **All final source package gates pass:6365tests,0failures, all10package typechecks. The five Important review findings, approved ownership safety fixes and original21CLI failures are resolved. Task6 still requires the clean pushed-source build and exact-binary proof; source checkpoint preparation is in progress.** This report records engineering acceptance, not model-quality benchmark results, a new Task24 campaign seal, or paid-run authorization.
+Status: **All final source package gates pass:6366tests,0failures, all10package typechecks. The five Important review findings, approved ownership safety fixes, original21CLI failures and recovery-first startup regression are resolved in source. Task6 still requires the new clean pushed-source build and exact-binary proof.** This report records engineering acceptance, not model-quality benchmark results, a new Task24 campaign seal, or paid-run authorization.
 
 ## Scope
 
@@ -35,23 +35,23 @@ Git for Windows rejected the original deeply nested temporary Snapshot path even
 
 ## Final source package matrix
 
-All final package files remained unchanged throughout the sequential gates. The Server/CLI matrix is `20261017T010245108Z`; the other eight packages were freshly rerun under `20261017T012733815Z`. Every native argv list was proven before any test discovery.
+All30frozen package files remained unchanged throughout the final affected gates. Server, SDK Next and CLI were fully rerun after the startup fix under `20261017T014642607Z`; the other seven packages are unchanged from their passing `20261017T012733815Z` gates. Every native argv list was proven before any test discovery.
 
 | Package                                   | Passed | Existing skips | Failed | Assertions | Typecheck   |
 | ----------------------------------------- | -----: | -------------: | -----: | ---------: | ----------- |
 | Schema                                    |     59 |              0 |      0 |        176 | Passed      |
 | Core                                      |   1784 |              7 |      0 |       5707 | Passed      |
 | Protocol                                  |     24 |              0 |      0 |         72 | Passed      |
-| Server                                    |    487 |              0 |      0 |       1900 | Passed      |
+| Server                                    |    488 |              0 |      0 |       1903 | Passed      |
 | Client                                    |     24 |              0 |      0 |        127 | Passed      |
 | SDK Next, all7files in separate processes |     54 |              0 |      0 |        516 | Passed      |
 | Legacy JS SDK                             |      3 |              0 |      0 |          6 | Passed      |
-| CLI                                       |   3330 |             58 |      0 |       9002 | Passed      |
+| CLI                                       |   3330 |             58 |      0 |       9004 | Passed      |
 | Benchmark                                 |    238 |             10 |      0 |        811 | Passed      |
 | LLM                                       |    362 |             30 |      0 |        957 | Passed      |
-| Total                                     |   6365 |            105 |      0 |      19274 | All10passed |
+| Total                                     |   6366 |            105 |      0 |      19279 | All10passed |
 
-CLI also retains its existing1todo and passes54snapshots, across255files in1109.71seconds. Final coverage totals590package test files; the isolated launcher/network helper suite separately passes21tests. All failure/skip/todo names are retained in the diagnostics report. No assertion, timeout or existing skip was relaxed for this fix pass. SDK assertion totals formerly recorded as616were an arithmetic error:20+3+225+21+227+3+17=516; no test or assertion was removed.
+CLI also retains its existing1todo and passes54snapshots, across255files in1143.24seconds. Final coverage totals591package test files; the isolated launcher/network helper suite separately passes21tests. The preceding green CLI round had9002assertions; the final round reports9004without a CLI source/test change. All failure/skip/todo names are retained in the diagnostics report. No assertion, timeout or existing skip was relaxed for this fix pass. SDK assertion totals formerly recorded as616were an arithmetic error:20+3+225+21+227+3+17=516; no test or assertion was removed.
 
 ## Previous complete package matrix (before review fixes)
 
@@ -103,6 +103,14 @@ The user approved the bounded coding-only safety fixes on October17. The single 
 No production HTTP/SDK fix was needed for CLI failures: the local offline guard incorrectly rejected `data:` and wildcard-bound local test servers; it now canonicalizes0.0.0.0 to loopback and prevents native automatic redirect escape (four guard regressions passed). One old logging test used nonexistent `/status` and hit the remote UI proxy; only its URL now targets existing `/global/health`. The expected help snapshots now include Task5's coding options and visual-by-default description (only6added/3removed lines); an ordinary non-update run passes all38snapshots/44assertions. The other three affected CLI files also pass individually. The complete255-file CLI suite remains a separate hard gate.
 
 Docker metadata diagnostics found the Linux daemon unavailable; it was not started. Unit/build/transport evidence must not be represented as Linux-engine acceptance. The prepared isolated build has not run, and no exact-binary or deployment claim is made.
+
+### Exact-binary startup regression
+
+Source checkpoint `7d2925882ee1f7f6ebf9abadcb18b8ab123b6985` was committed and normally pushed to `fork/dev`, with31successful pre-push typecheck tasks. Its compiler and version smoke passed in the new D-only r1 output. The wrapper then rejected that untracked output; adding only its exact local `.git/info/exclude` entry allowed independent source/version/hash checks to finalize the build receipt. No tracked ignore policy or existing deployment changed.
+
+The r1 executable passed ordinary help/version, visual-default/coding help and all private-grant rejection checks, but failed all10coding cases before emitting a fixture result. It is **not** an accepted deliverable. Owned diagnostic-only builds exposed the mutual eager imports of runtime recovery and the command sandbox: recovery-first loading captured an undefined sandbox dependency in the compiled graph. A retained fresh-process regression first failed with `ReferenceError: Cannot access 'node' before initialization` at `command-sandbox.ts:319`.
+
+The narrow fix keeps the sandbox import type-only and loads its implementation inside the existing recovery callback. Recovery authority, lease/retry algorithms and visual semantics are unchanged. The new startup case plus runtime-composition tests pass24tests/74assertions; the full Server rerun passes488tests/1903assertions across23files in338.57seconds, with typecheck passed. SDK Next passes54tests/516assertions with typecheck passed; CLI passes3330tests/9004assertions with typecheck passed. A new clean pushed-source build/exact-binary proof remains a hard gate. Temporary diagnostic binaries are not acceptance results or deployment replacements.
 
 ### Validation-script incident
 

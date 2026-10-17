@@ -13,7 +13,7 @@ import { createHash } from "node:crypto"
 import { Docker } from "./docker"
 import { DockerConfig } from "./docker-config"
 import { ProductionHostRuntime } from "./production-host-runtime"
-import { WorkflowCommandSandboxServer } from "./command-sandbox"
+import type { WorkflowCommandSandboxServer } from "./command-sandbox"
 import { CodingAuthority } from "@opencode-ai/core/workflow/coding/authority"
 import { CodingRouting } from "@opencode-ai/core/workflow/coding/routing"
 import { CodingModelSelection } from "@opencode-ai/core/workflow/coding/model-selection"
@@ -129,8 +129,11 @@ export function makeLayer(input: {
           store,
           now: input.now ?? Date.now,
           codingAuthority: input.codingAuthority,
-          recover: ({ authority, finalGate }) =>
-            WorkflowCommandSandboxServer.recover({ engine: input.engine, config, authority, finalGate }),
+          recover: async ({ authority, finalGate }) => {
+            // The sandbox node depends on this recovery node; load its implementation only after initialization.
+            const { WorkflowCommandSandboxServer } = await import("./command-sandbox")
+            return WorkflowCommandSandboxServer.recover({ engine: input.engine, config, authority, finalGate })
+          },
         }),
       )
       return Service.of({ ...result, ready: result.healthy })

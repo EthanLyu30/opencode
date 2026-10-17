@@ -2,6 +2,10 @@
 
 These names describe completed pre-fix and intermediate runs, not a passing final gate. No paid provider requests were enabled. No test was removed or newly skipped by this plan. Suite-specific conditional skips are retained; the single CLI todo is pre-existing. The final verification report separately records the final gate.
 
+Final source gates after the binary-startup fix: Server488pass/0fail/1903assertions,23files; SDK Next54pass/0fail/516assertions in7isolated files; CLI3330pass/58existing skips/1existing todo/0fail/9004assertions in255files. All three typechecks pass. Together with the unchanged seven package gates:6366pass/105existing skips/1existing todo/0fail/19279assertions,591files, all10package typechecks passed.
+
+The r1 exact executable previously failed all10recorded scenarios before a result: `repair`, `review`, `review-budget`, `exhaust`, `forged-pass`, `config-drift`, `source-drift`, `ignored-config`, `crash-settled`, `crash-write`. Ordinary help/version and private-grant rejection passed. The new retained recovery-first startup test reproduced the eager recovery/sandbox import cycle with `ReferenceError: Cannot access 'node' before initialization`; it is now green and included in the final full Server result. The r1 binary is not an acceptance artifact; a new clean-source build/proof remains required.
+
 CLI full: 3309 pass / 58 skip / 1 todo / 21 fail; 3389 tests, 255 files, 8926 assertions, 1551.19s. All four failed files were rerun unchanged in isolated processes and remained red. The image case is blocked by the local offline guard treating a local data: URI as outbound; this is not evidence of a live provider attempt. The help snapshot exposes line-wrapping of the unusually long task temporary path. The other19HTTP failures are not classified as baseline without further evidence.
 
 ## Core
