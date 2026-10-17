@@ -2,6 +2,9 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { sha256Text } from "../../src/hash"
 import type { DockerInvocation, HostManifest, HostRequest, StorageProof } from "../../src/sandbox/contracts"
+import { decodeHostManifest } from "../../src/sandbox/contracts"
+import { inspectLinuxHost, openLinuxSession } from "../../src/sandbox/preflight"
+import { canonicalJson } from "../../src/campaign/canonical"
 
 export async function hostFixture() {
   const parent = process.env.TMPDIR!
@@ -90,4 +93,114 @@ export async function hostFixture() {
       await fs.rm(root, { recursive: true, force: true })
     },
   }
+}
+
+export async function sessionFixture() {
+  const f = await hostFixture()
+  const image = "example.invalid/task24@sha256:" + "a".repeat(64)
+  const manifest = decodeHostManifest({
+    ...f.manifest,
+    phase: "accept",
+    artifacts: [
+      ...["modified", "upstream", "browser", "fonts"].map((id) => ({
+        id,
+        kind: id === "fonts" ? "font" : id === "browser" ? "browser" : "binary",
+        path: f.cli.path,
+        sha256: f.cli.sha256,
+      })),
+      { id: "linux-runtime", kind: "image", sha256: "a".repeat(64), image },
+    ],
+  })
+  const inventory = await inspectLinuxHost({
+    request: f.request,
+    runner: f.runner,
+    storageProbe: async () => f.storage,
+  })
+  const opened = openLinuxSession({
+    manifest,
+    inventory,
+    approval: {
+      schemaVersion: 2,
+      acceptanceID: manifest.acceptanceID,
+      planSha256: manifest.planSha256,
+      scope: "accept",
+      contextFingerprint: inventory.contextFingerprint,
+      artifactManifestSha256: manifest.artifactManifestSha256,
+      manifestSha256: sha256Text(canonicalJson(manifest)),
+      allowedOperations: [
+        "container-create",
+        "container-start",
+        "container-exec",
+        "container-stop",
+        "container-remove",
+      ],
+      storageRoots: Object.values(manifest.roots),
+      maxDiskBytes: 67108864,
+      expiresAt: Date.now() + 60000,
+    },
+  })
+  if (opened.kind !== "ready") throw Error("FIXTURE_SESSION")
+  const calls: DockerInvocation[] = []
+  const state = { running: false, removed: false, foreign: false, readOnly: true }
+  const labels: Record<string, string> = {}
+  const id = "b".repeat(64)
+  const inspect = () => ({
+    Id: id,
+    Config: {
+      Labels: state.foreign ? { ...labels, "opencode.task24.nonce": "other" } : labels,
+      User: "65532:65532",
+      Image: image,
+    },
+    HostConfig: {
+      NetworkMode: "none",
+      ReadonlyRootfs: state.readOnly,
+      Privileged: false,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges=true"],
+      PidsLimit: 64,
+      Memory: 1073741824,
+      NanoCpus: 1500000000,
+      Tmpfs: {
+        "/tmp": "rw,nosuid,nodev,noexec,size=67108864,mode=1777",
+        "/home/sandbox": "rw,nosuid,nodev,noexec,size=16777216,mode=700,uid=65532,gid=65532",
+      },
+    },
+    Mounts: [],
+    State: { Running: state.running },
+  })
+  const runner = {
+    async execute(input: DockerInvocation) {
+      calls.push(input)
+      const argv = input.argv
+      if (argv.includes("create")) {
+        argv.forEach((v, i) => {
+          if (v === "--label") {
+            const s = argv[i + 1]!.indexOf("=")
+            labels[argv[i + 1]!.slice(0, s)] = argv[i + 1]!.slice(s + 1)
+          }
+        })
+        return { started: true, exitCode: 0, stdout: Buffer.from(id), stderr: new Uint8Array(), truncated: false }
+      }
+      if (argv.includes("start")) state.running = true
+      if (argv.includes("stop") || argv.includes("kill")) state.running = false
+      if (argv.includes("rm")) state.removed = true
+      return {
+        started: true,
+        exitCode: 0,
+        stdout: Buffer.from(argv.includes("inspect") ? JSON.stringify([inspect()]) : ""),
+        stderr: new Uint8Array(),
+        truncated: false,
+      }
+    },
+  }
+  const owner = {
+    acceptanceID: manifest.acceptanceID,
+    runID: "fixture-run",
+    attemptID: "fixture-attempt",
+    leaseGeneration: 1,
+    operationID: "fixture-operation",
+    nonce: "c".repeat(32),
+    daemonFingerprint: inventory.contextFingerprint,
+  }
+  return { ...f, manifest, session: opened.value, image, owner, runner, calls, state, inspect, id }
 }
