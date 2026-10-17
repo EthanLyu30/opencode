@@ -23,24 +23,43 @@ test("bundle_hashes_bind_both_sides and public export excludes private answers",
     await fs.writeFile(path.join(f.bundleRoot, "profile.json"), JSON.stringify(f.profile))
     const third = await loadEvaluationBundle(f.bundleRoot)
     expect(third.publicFixtureSha256).not.toBe(first.publicFixtureSha256)
-  } finally { await f.dispose() }
+  } finally {
+    await f.dispose()
+  }
 })
 
 test("public_reference_is_not_a_gold_leak", async () => {
   const f = await independentFixture("reference")
   try {
     const body = "synthetic public reference bytes"
-    const file = { path: "public/reference.png", sha256: sha256Text(body), size: Buffer.byteLength(body), purpose: "reference", origin: "task-public" }
+    const file = {
+      path: "public/reference.png",
+      sha256: sha256Text(body),
+      size: Buffer.byteLength(body),
+      purpose: "reference",
+      origin: "task-public",
+    }
     const profile = { ...f.profile, publicInputs: [...f.profile.publicInputs, file] }
     await fs.mkdir(path.join(f.bundleRoot, "private"))
     await fs.writeFile(path.join(f.bundleRoot, "public/reference.png"), body)
     await fs.writeFile(path.join(f.bundleRoot, "private/reference.png"), body)
     await fs.writeFile(path.join(f.bundleRoot, "profile.json"), JSON.stringify(profile))
-    await fs.writeFile(path.join(f.bundleRoot, "oracle.json"), JSON.stringify({ ...f.oracle, privateFiles: [{ ...file, path: "private/reference.png", purpose: undefined, origin: undefined }] }))
+    await fs.writeFile(
+      path.join(f.bundleRoot, "oracle.json"),
+      JSON.stringify({
+        ...f.oracle,
+        privateFiles: [{ ...file, path: "private/reference.png", purpose: undefined, origin: undefined }],
+      }),
+    )
     expect(exportPublicTask(await loadEvaluationBundle(f.bundleRoot)).files).toHaveLength(2)
-    await fs.writeFile(path.join(f.bundleRoot, "profile.json"), JSON.stringify({ ...profile, publicInputs: [...f.profile.publicInputs, { ...file, purpose: "starter" }] }))
+    await fs.writeFile(
+      path.join(f.bundleRoot, "profile.json"),
+      JSON.stringify({ ...profile, publicInputs: [...f.profile.publicInputs, { ...file, purpose: "starter" }] }),
+    )
     await expect(loadEvaluationBundle(f.bundleRoot)).rejects.toThrow(/LEAK/)
-  } finally { await f.dispose() }
+  } finally {
+    await f.dispose()
+  }
 })
 
 test("rejects undeclared files and real links without changing external sentinel", async () => {
@@ -55,5 +74,7 @@ test("rejects undeclared files and real links without changing external sentinel
     await fs.unlink(link)
     await fs.writeFile(link, "undeclared")
     await expect(loadEvaluationBundle(f.bundleRoot)).rejects.toThrow(/UNDECLARED/)
-  } finally { await f.dispose() }
+  } finally {
+    await f.dispose()
+  }
 })
