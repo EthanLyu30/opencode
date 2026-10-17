@@ -99,6 +99,7 @@
       "name": "@opencode-ai/benchmark",
       "version": "0.0.0",
       "dependencies": {
+        "@modelcontextprotocol/sdk": "1.29.0",
         "axe-core": "catalog:",
         "effect": "catalog:",
         "playwright": "catalog:",
