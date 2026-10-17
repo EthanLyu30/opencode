@@ -10,7 +10,7 @@
 
 **Spec:** [2026-10-17-opencode-task24b-readiness-design.md](../specs/2026-10-17-opencode-task24b-readiness-design.md)，用户已确认。重点实现第3–4节及第7节的评测前置条件；不实现 B-Prep2/3/4。
 
-**Status:** 2026-10-17 用户选择保持原范围补齐后再push。Task1–4框架及审查修复已验证；Task5真实私有编写已补齐：16题、65个功能cases、104个内容绑定校准候选、72项交互/页面健康断言、4个可加载的严格guardrail bundle。Task6正在最终全包验证、清理与push。这里只完成本计划的软件/材料编写验收，不将未运行的Linux/真实三视口校准记为通过。付费、Docker准备和部署替换仍不授权。
+**Status:** 2026-10-17 用户选择保持原范围补齐后再push。Task1–6软件与材料验收已完成：16题、65个功能cases、104个内容绑定校准候选、72项交互/页面健康断言、4个可加载的严格guardrail bundle；完整benchmark为272通过、10项原有skip、0失败，类型检查通过。一次审查的6项Important均已修复，1项Minor记录延期。中间文件清理遭环境删除策略拦截，保留路径详见验证报告；正常push与远端ref核验在最终交接确认。这里只完成本计划的软件/材料编写验收，不将未运行的Linux/真实三视口校准记为通过。付费、Docker准备和部署替换仍不授权。
 
 ## Global Constraints
 
