@@ -163,6 +163,7 @@ export async function createOwnedContainer(input: {
   spec: ContainerSpec
   guard: AuthorityGuard
   signal: AbortSignal
+  start?: false
 }): Promise<Owner> {
   const state = await requireOperation(input.session, "container-create", input.guard),
     labels = ownerLabels(input.owner),
@@ -289,6 +290,7 @@ export async function createOwnedContainer(input: {
   const owner = freeze({ ...input.owner, containerID })
   try {
     await inspectOwnedContainer({ ...input, owner })
+    if (input.start === false) return owner
     await requireOperation(input.session, "container-start", input.guard)
     const started = await input.runner.execute(invocation(["container", "start", containerID], input.signal))
     if (!started.started || started.exitCode !== 0 || started.truncated)

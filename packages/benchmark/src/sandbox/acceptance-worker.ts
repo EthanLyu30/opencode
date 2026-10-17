@@ -1,0 +1,16 @@
+/** Only own canaries. This program receives no candidate module, oracle or credential. */
+export function linuxSafetyWorkerSource() {
+  return `import fs from 'node:fs/promises';import os from 'node:os';import {spawn,spawnSync} from 'node:child_process';
+let raw='';for await(const b of process.stdin){raw+=b;if(raw.length>65536)throw Error('input')};const input=JSON.parse(raw);if(process.platform!=='linux')throw Error('linux');
+const read=async p=>await fs.readFile(p,'utf8').catch(()=>'');const denied=async p=>{try{await fs.writeFile(p,'probe',{flag:'wx'});await fs.unlink(p);return false}catch(e){return ['EACCES','EPERM','EROFS','ENOENT'].includes(e.code)}};
+const status=await read('/proc/self/status'),facts={uid:process.getuid(),gid:process.getgid(),capEff:/CapEff:\\s*(\\w+)/.exec(status)?.[1],noNewPrivs:Number(/NoNewPrivs:\\s*(\\d+)/.exec(status)?.[1]),rootWriteDenied:await denied('/etc/task24-owned-probe'),forbiddenAbsent:true,interfaces:Object.keys(os.networkInterfaces()),routes:await read('/proc/net/route'),canaryBlocked:false,readonlyDenied:await denied('/workspace/readonly-write-probe'),nodeWorks:spawnSync('/usr/local/bin/node',['-e','process.exit(0)']).status===0};
+for(const p of ['/var/run/docker.sock','/dev/kvm','/host']){try{await fs.access(p);facts.forbiddenAbsent=false}catch{}}
+try{await fetch(input.canary,{signal:AbortSignal.timeout(1500)});}catch{facts.canaryBlocked=true}
+await fs.writeFile('/tmp/task24-own-exec','#!/bin/sh\\nexit 0\\n',{mode:0o755});const direct=spawnSync('/tmp/task24-own-exec',[],{timeout:1000});facts.noexecDenied=direct.error?.code==='EACCES';await fs.unlink('/tmp/task24-own-exec');
+const envDir='/tmp/dotenv-'+input.nonce;await fs.mkdir(envDir);await fs.writeFile(envDir+'/.env','TASK24_OWN_DOTENV=must-not-load');const nested=spawnSync('/usr/local/bin/bun',['--no-env-file','-e','process.stdout.write(String(process.env.TASK24_OWN_DOTENV??"absent"))'],{cwd:envDir,env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:'/home/sandbox',BUN_OPTIONS:'--no-env-file'},timeout:5000});facts.dotenvAbsent=nested.stdout?.toString()==='absent';await fs.unlink(envDir+'/.env');await fs.rmdir(envDir);
+facts.wrongExit=spawnSync('/usr/local/bin/node',['-e','if(2-3!==5)process.exit(1)']).status;facts.correctExit=spawnSync('/usr/local/bin/node',['-e','if(2+3!==5)process.exit(1)']).status;
+facts.memoryMax=(await read('/sys/fs/cgroup/memory.max')).trim();facts.pidsMax=(await read('/sys/fs/cgroup/pids.max')).trim();facts.cpuMax=(await read('/sys/fs/cgroup/cpu.max')).trim();
+if(input.pressure){const children=[];let rejected=false;for(let i=0;i<66;i++){const child=spawn('/bin/sleep',['4'],{stdio:'ignore'});children.push(child);await new Promise(r=>{child.once('spawn',r);child.once('error',()=>{rejected=true;r()})});if(rejected)break}for(const child of children)child.kill('SIGKILL');await Promise.all(children.map(c=>new Promise(r=>{if(c.exitCode!==null||c.signalCode!==null){r();return}c.once('close',r)})));facts.pidRejected=rejected;
+const memory=spawnSync('/usr/local/bin/node',['-e','Buffer.alloc(1200*1024*1024,1);process.exit(0)'],{timeout:5000,stdio:'ignore'});facts.memoryRejected=memory.signal==='SIGKILL'||memory.status===137;}
+process.stdout.write(JSON.stringify(facts));`
+}
