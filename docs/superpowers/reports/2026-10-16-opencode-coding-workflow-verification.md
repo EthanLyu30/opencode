@@ -1,18 +1,18 @@
 # Coding-build zero-credit verification
 
-Status: **All final source package gates pass:6366tests,0failures, all10package typechecks. The five Important review findings, approved ownership safety fixes, original21CLI failures and recovery-first startup regression are resolved in source. Task6 still requires the new clean pushed-source build and exact-binary proof.** This report records engineering acceptance, not model-quality benchmark results, a new Task24 campaign seal, or paid-run authorization.
+Status: **All final source package gates pass:6366tests,0failures, all10package typechecks. The exact clean pushed-source r2 executable also passes all10coding scenarios/60assertions and runtime guard/help/version checks. The five Important review findings, approved ownership safety fixes, original21CLI failures and recovery-first startup regression are resolved.** This report records engineering acceptance, not model-quality benchmark results, a new Task24 campaign seal, or paid-run authorization.
 
 ## Scope
 
 The approved six-task plan adds a separate Location-bound `coding-build` entry. Kimi handles engineering planning, decomposition and code review; DeepSeek Pro handles implementation/repair/delivery, and DeepSeek Flash interprets real host test evidence. The existing visual entry and historical seven-role snapshots remain separate.
 
-Tasks1–5 have been committed and pushed through `5c6c37bb226b428204cd67d1ba40ef9284d94be6`. Final Task6 source identity, review and exact-binary identity will be added only after verification.
+Tasks1–5 were committed and pushed through `5c6c37bb226b428204cd67d1ba40ef9284d94be6`. Task6's verified source checkpoints are `7d2925882ee1f7f6ebf9abadcb18b8ab123b6985` and final binary source `1724911a15226f6d413fa77cfc43b68d1dae5edb`, both normally pushed to `fork/dev`. Subsequent closing documentation does not change that binary's source identity.
 
 ## Recorded acceptance
 
 The retained test is `packages/server/test/workflow-coding-e2e.test.ts`; its executable driver is `workflow-coding-probe.ts`. `OPENCODE_CODING_ACCEPTANCE_EXE` selects an exact binary for the same assertions; omission runs the source entry using the current Bun executable. This is test-only selection, not a production model/URL/credential override.
 
-Initial source acceptance: **8 passed, 0 failed, 48 assertions** (123.43 seconds). The expanded final acceptance has10cases, adding the smaller-budget pause and Git-ignored frozen configuration checks. All10passed in the intermediate Server run; the complete final package matrix remains the gate.
+Initial source acceptance: **8 passed, 0 failed, 48 assertions** (123.43 seconds). The expanded final acceptance has10cases, adding the smaller-budget pause and Git-ignored frozen configuration checks. All10passed in the final full Server run and again through the exact r2 executable: **10passed/0failed/60assertions,113.06seconds**.
 
 | Scenario                    | Observed behavior                                                                                                                                                                                                                                  |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -76,11 +76,11 @@ The complete CLI run covered exactly255repository files and took1,551.19seconds.
 
 ## Review and regression history
 
-The final source matrix has passed Schema59, Core1784(7unchanged platform skips,5707assertions) and Protocol24, with their typechecks. An intermediate Server run passed481tests but failed the then-unmodified legacy pending-rollback/retirement identity case (482tests,22files,357.88s). A separate59-test legacy visual-claim file passed58but failed same-key cross-process acquisition; an owned strict-D probe reproduced `database is locked` in one of three rounds. Neither historical failure is relabelled green. After the user's narrow safety-fix approval, the two exact new regression cases first failed, then the61-case claim file passed. Three additional foreign/third/replaced-link rejections pass in the final full Server run: **487passed,0failed,1900assertions,22files,336.60s; typecheck passed**. All10coding cases and64claim cases are included. No old assertion/timeout, visual flow, lease or retry algorithm changed. CLI/binary remain hard gates before Task6 completion.
+An earlier source matrix passed Schema59, Core1784(7unchanged platform skips,5707assertions) and Protocol24, with their typechecks. An intermediate Server run passed481tests but failed the then-unmodified legacy pending-rollback/retirement identity case (482tests,22files,357.88s). A separate59-test legacy visual-claim file passed58but failed same-key cross-process acquisition; an owned strict-D probe reproduced `database is locked` in one of three rounds. Neither historical failure is relabelled green. After the user's narrow safety-fix approval, the two exact new regression cases first failed, then the61-case claim file passed. Three additional foreign/third/replaced-link rejections passed in the following full Server run: **487passed,0failed,1900assertions,22files,336.60s; typecheck passed**. All10coding cases and64claim cases are included. No old assertion/timeout, visual flow, lease or retry algorithm changed. CLI/binary still gated completion at that checkpoint; their final passing results are recorded above and below.
 
 Intermediate gates passed Client24, SDK Next54, legacy SDK3, Benchmark238and LLM362with their typechecks. The intermediate255-file CLI run finished3293passed/58skipped/1todo/37failed(8848assertions,1214.88s). Multiple failures exposed the owned offline guard reusing an already-consumed request stream, not a production HTTP failure. Two new streamed POST/307 regressions first failed; the guard now passes the constructed Request once and replays its body only across independently validated local redirects. All7guard regressions and the later full3330-test CLI run pass. Two invalid temporary relocated diagnostic worker copies were removed; original source, results, incident evidence and uncertain directories were preserved.
 
-The user subsequently confirmed the narrow legacy safety-race fix. Two added real-filesystem/SQLite tests reproduce the precise failures: COMMIT encounters `SQLITE_BUSY` after the mirror was already linked; a recovery publisher links the owner's exact pending inode to `retire.json` before the owner does. The fixes retain the existing30-second SQLite admission deadline, finish only that already-started transaction (never replay its callback), and accept two links only when the other is the canonical retirement target with the exact same inode. File identity/content/extra-link rejection and workflow lease/retry algorithms remain unchanged. Whole-file and full Server verification are still required.
+The user subsequently confirmed the narrow legacy safety-race fix. Two added real-filesystem/SQLite tests reproduce the precise failures: COMMIT encounters `SQLITE_BUSY` after the mirror was already linked; a recovery publisher links the owner's exact pending inode to `retire.json` before the owner does. The fixes retain the existing30-second SQLite admission deadline, finish only that already-started transaction (never replay its callback), and accept two links only when the other is the canonical retirement target with the exact same inode. File identity/content/extra-link rejection and workflow lease/retry algorithms remain unchanged. Whole-file and full Server gates subsequently passed, including the later488-case startup-fix rerun.
 
 One read-only independent whole-source review checked85candidate files against their SHA256 manifest with no source drift. It found no Critical or Minor issues and5Important issues:
 
@@ -90,7 +90,7 @@ One read-only independent whole-source review checked85candidate files against t
 4. Read-only container `/workspace` provides no output location for accepted builds or emitting checks.
 5. Pre-provider host-check containers are not represented by the pending-Bash-only expired-runtime recovery path.
 
-The user approved the bounded coding-only safety fixes on October17. The single planned TDD fix pass now has these results; whole-package results below are not yet superseded:
+The user approved the bounded coding-only safety fixes on October17. The single planned TDD fix pass has these targeted results; the final complete package results are recorded above:
 
 | Finding                     | Fix and observed regression evidence                                                                                                                                                                                                                                                                                                                                                                      |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -100,9 +100,9 @@ The user approved the bounded coding-only safety fixes on October17. The single 
 | Writable check outputs      | Hash/length-bound stdin carries only the validated archive into a fresh disposable `/tmp` workspace. Real Bun build emits there while host source stays unchanged; tampered stdin cannot launch. No host mount or Docker copy is used for this coding path. Container root remains readonly, networknone, user65532, and `/tmp` remains64MiB/noexec. Launcher+sandbox files95passed/364assertions.        |
 | Pre-provider check recovery | Reconstruct up to three admitted host-check identities from the frozen plan even before Bash/provider lineage exists. Existing full expired-lease/authority fences and exact-label Docker cleanup remain mandatory. Four missing-cleanup/fence tests first failed, then runtime file23passed/71assertions. Running/stopped orphan transport integration plus existing sandbox file87passed/329assertions. |
 
-No production HTTP/SDK fix was needed for CLI failures: the local offline guard incorrectly rejected `data:` and wildcard-bound local test servers; it now canonicalizes0.0.0.0 to loopback and prevents native automatic redirect escape (four guard regressions passed). One old logging test used nonexistent `/status` and hit the remote UI proxy; only its URL now targets existing `/global/health`. The expected help snapshots now include Task5's coding options and visual-by-default description (only6added/3removed lines); an ordinary non-update run passes all38snapshots/44assertions. The other three affected CLI files also pass individually. The complete255-file CLI suite remains a separate hard gate.
+No production HTTP/SDK fix was needed for CLI failures: the local offline guard incorrectly rejected `data:` and wildcard-bound local test servers; it now canonicalizes0.0.0.0 to loopback and prevents native automatic redirect escape (four guard regressions passed). One old logging test used nonexistent `/status` and hit the remote UI proxy; only its URL now targets existing `/global/health`. The expected help snapshots now include Task5's coding options and visual-by-default description (only6added/3removed lines); an ordinary non-update run passes all38snapshots/44assertions. The other three affected CLI files also pass individually. The complete255-file CLI suite subsequently passed3330tests with0failures, without a snapshot-update run.
 
-Docker metadata diagnostics found the Linux daemon unavailable; it was not started. Unit/build/transport evidence must not be represented as Linux-engine acceptance. The prepared isolated build has not run, and no exact-binary or deployment claim is made.
+Docker metadata diagnostics found the Linux daemon unavailable; it was not started. Unit/build/transport and exact-binary evidence must not be represented as Linux-engine acceptance. The isolated verified build below is not a deployment replacement.
 
 ### Exact-binary startup regression
 
@@ -110,7 +110,7 @@ Source checkpoint `7d2925882ee1f7f6ebf9abadcb18b8ab123b6985` was committed and n
 
 The r1 executable passed ordinary help/version, visual-default/coding help and all private-grant rejection checks, but failed all10coding cases before emitting a fixture result. It is **not** an accepted deliverable. Owned diagnostic-only builds exposed the mutual eager imports of runtime recovery and the command sandbox: recovery-first loading captured an undefined sandbox dependency in the compiled graph. A retained fresh-process regression first failed with `ReferenceError: Cannot access 'node' before initialization` at `command-sandbox.ts:319`.
 
-The narrow fix keeps the sandbox import type-only and loads its implementation inside the existing recovery callback. Recovery authority, lease/retry algorithms and visual semantics are unchanged. The new startup case plus runtime-composition tests pass24tests/74assertions; the full Server rerun passes488tests/1903assertions across23files in338.57seconds, with typecheck passed. SDK Next passes54tests/516assertions with typecheck passed; CLI passes3330tests/9004assertions with typecheck passed. A new clean pushed-source build/exact-binary proof remains a hard gate. Temporary diagnostic binaries are not acceptance results or deployment replacements.
+The narrow fix keeps the sandbox import type-only and loads its implementation inside the existing recovery callback. Recovery authority, lease/retry algorithms and visual semantics are unchanged. The new startup case plus runtime-composition tests pass24tests/74assertions; the full Server rerun passes488tests/1903assertions across23files in338.57seconds, with typecheck passed. SDK Next passes54tests/516assertions with typecheck passed; CLI passes3330tests/9004assertions with typecheck passed. The new clean pushed-source r2 build and exact-binary proof below also pass. Temporary diagnostic binaries are not acceptance results or deployment replacements.
 
 ### Validation-script incident
 
@@ -124,11 +124,32 @@ The [read-only audit](2026-10-16-task6-misrun-readonly-audit.md) covers all thre
 
 ## Exact isolated executable
 
-Not yet built or verified. The current deployment and old `dist`, rollback artifacts and historical Task24 seal have not been replaced.
+The r2 build completed successfully from clean `dev == fork/dev == 1724911a15226f6d413fa77cfc43b68d1dae5edb`; an independent `ls-remote` check confirmed the same remote SHA before compilation. The normal pre-push hook passed31tasks (30cached/1fresh) without bypass.
 
-## Remaining Task24 work
+- Path: `D:\OpenCode-Audit\.superpowers\coding-task6-output-20261017-r2\opencode-windows-x64\bin\opencode.exe`.
+- Version: `0.0.0-dev-20261017-coding-1724911a-r2`.
+- Size:148204032bytes; SHA256:`57b6e96533c0874fbb223bff1dbdfc72aec3b69d8d95a58d39c4f432c68f5dad`.
+- Pinned Bun1.3.14 SHA256:`0187f68d843f825a72ada4a7eca60db896ed753759a7f8252edcd31ac1bf1b9c`.
+- Frozen models metadata SHA256:`9e1aac3d4f84a8ba2f00fa80979aff76f6f637e8773c8f0941c6d66bc4eb2fbb`.
+- New safe D `--outdir`, `--single --skip-install --skip-embed-web-ui`, explicit no-dotenv/offline settings; no old `dist` or `packages/app/dist` rewrite.
+- The same retained10coding cases pass through this exact executable:10passed/0failed/60assertions,113.06seconds. Its SHA/source/deployed-file hash were checked again after execution.
+- Ordinary help/version and visual-default/coding help pass. Runtime production-mode, wrong nonce, recording enabled, model-fetch enabled, discovery enabled, missing grant and wrong ownership-marker grant are rejected. Runtime checks use the actual environment, not an inlined build-time `NODE_ENV`.
+
+The adjacent `verification.json` retains the sanitized artifact identity and acceptance summary. This is an isolated CLI proof artifact without embedded Web UI, **not** a deployment replacement or a launcher configured for normal interactive use. The current `D:\OpenCode-Local\bin\opencode-local.exe` remains SHA256`ff814205889f709c3374aaa855f3f17be1974bac9e86893e8c62d5e7de4fe9ce`; old `dist`, rollback artifacts and historical Task24 seal are untouched. No real provider key or `.env.local` was read; no paid provider call was made.
+
+## Final closure and cleanup
+
+The final task-done command reran both retained source files (`workflow-coding-e2e.test.ts` and `workflow-runtime-import.test.ts`): **11passed/0failed/63assertions,2files,132.59seconds**. It recorded Task6complete for `5c6c37b..1724911` before cleanup. No package source changed after the verified r2 build; closing commits change documentation only.
+
+After confirming no matching owned worker remained, cleanup validated exact canonical roots, the D temporary-root ownership nonce, failed-r1 executable hash, final-r2 proof/hash and unchanged deployment hash. Each deletion rechecked an ordinary single-link file's identity or an empty directory; no blanket recursive delete was used. It removed **98585temporary files and8008directories,2428584763bytes** (about2.43GB), including failed-r1 output, diagnostic executables, helper scripts, test state, and intermediate logs. The owned `D:\OC-T6-f3186ab4` and failed `coding-task6-output-20261016-r1` roots were removed. These disposable outputs are not retained backups; binaries/tests can be rebuilt or rerun from committed source.
+
+The only remaining files in this plan's ignored SDD directory are the three original incident logs and four audit metadata/observed-input JSON files. Their hashes were retained and the files were not deleted, altered or published. This forensic-preservation boundary intentionally prevents removal of that final directory; it is not an unreported cleanup failure. Other plans, uncertain/user inputs, protected toolchains/wrapper, old `dist`, rollback/seal and the shared `D:\OpenCode-Benchmark\Task24\tmp\pilot-fix-20261016-34b1abc050f241d99d800e649d1acaf3` state remain untouched because their ownership is broader or uncertain. The r2 executable/package metadata and adjacent sanitized `verification.json` are retained deliverables.
+
+## Decision record
 
 The complete implementation rulings and their cost-if-wrong are retained below so the ignored working ledger is not the only record. Historical provisional decisions are superseded by the explicitly recorded later fixes (in particular, the former child-Bun shim has been removed).
+
+The Task5 WeakMap provenance proposal was likewise superseded during the reviewed fix pass by exact normalized implementation/dependency-graph comparison; the final code does not rely on the earlier proposal. Historical pending-gate statements in the ledger excerpts below describe those decisions at the time; the current results above govern completion.
 
 ## Rulings I made (complete plan ledger)
 
@@ -164,9 +185,9 @@ The complete implementation rulings and their cost-if-wrong are retained below s
 - Final: Ruling: reviewer declined paid quality/hidden evaluators/provisioning beyond this workflow — keep separately approved future Task24B readiness and paid gates, unchanged15cell pilot — cost if wrong: engineering acceptance would be misrepresented as quality benchmark proof.
 - Final: Ruling: reviewer declined historical external incident effects — rely only on bounded read-only audit; preserve rawlogs/uncertainexternalfiles and no deletion/restoration — cost if wrong: historical deletion/network/credential effects without baseline remain unknown, not silently repaired or disproved.
 
-Deferred minors: none. The one fresh review reported zero Minor findings.
-
 - Task6 Ruling: retain production DEFAULT_CODING maxTurns12 and immutable admission caps; full-success recorded review fixture requests20 explicitly, separate12turn fixture provespause — changing production spend defaults is not authorized by a test correction — cost if wrong: a complex user workflow may exhaust its admitted coding limit and require a new admission with a deliberately larger coding budget, rather than silently spending more.
+
+Deferred minors: none. The one fresh review reported zero Minor findings.
 
 ## Subsequent benchmark scope
 
