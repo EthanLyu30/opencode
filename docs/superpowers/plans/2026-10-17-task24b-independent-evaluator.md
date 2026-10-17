@@ -10,7 +10,7 @@
 
 **Spec:** [2026-10-17-opencode-task24b-readiness-design.md](../specs/2026-10-17-opencode-task24b-readiness-design.md)，用户已确认。重点实现第3–4节及第7节的评测前置条件；不实现 B-Prep2/3/4。
 
-**Status:** 2026-10-17 用户已确认并授权本计划实施；实施基线 `19ae30d1469caa3f140b381c2caac232f7898a57`。Task1–4框架已实施并通过回归；Task5的真实独立oracle/实际校准候选编写仍未完成（材料准备不等于完成），Task6最终收尾/push保持开放。一次独立审查的五项框架问题已补RED→GREEN修复；不得将本轮记为B-Prep1全部完成。付费、Docker准备和部署替换仍不授权。
+**Status:** 2026-10-17 用户选择保持原范围补齐后再push。Task1–4框架及审查修复已验证；Task5真实私有编写已补齐：16题、65个功能cases、104个内容绑定校准候选、72项交互/页面健康断言、4个可加载的严格guardrail bundle。Task6正在最终全包验证、清理与push。这里只完成本计划的软件/材料编写验收，不将未运行的Linux/真实三视口校准记为通过。付费、Docker准备和部署替换仍不授权。
 
 ## Global Constraints
 
@@ -69,6 +69,8 @@ B-Prep1完成的是评测软件、严格档案、公共适配夹具和校准输�
 | `docs/superpowers/reports/2026-10-17-task24b-independent-evaluator-verification.md`                                           | 任务结果、范围、阻断项和后续交接；Task6新增，不能提前写成功    |
 
 重用：`campaign/canonical.ts`、`hash.ts`、`corpus/manifest.ts`的已有安全数据工具、`evaluator/{evidence,functional,visual,requirements,quality,accessibility,policy,score}.ts`、`browser-runtime.ts`及`offline/atomic.ts`的不可变发布。发现安全语义不满足时只在新模块做更严格校验，不静默改变v1实现。
+
+Task5审查修复另新增 `src/corpus/evaluation-authoring.ts` / `evaluation-controls.ts`，分别负责私有数据解码/内容绑定控制样本及纯文本控制构造；实际私有输入不进Git。准备命令增加显式 `--authoring-root` 和只读 `--verify-root`，不自动查找任意目录。`oracleFormat:authored-v2` 与 `strict-v2` 明确区分，前者绝不能直接当作评测身份；引擎缺失项仍保持blocked。
 
 ## 共用类型与安全默认值
 

@@ -2,8 +2,10 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { canonicalJson } from "../campaign/canonical"
 import { sha256Bytes, sha256Text } from "../hash"
-import { directRoot, ordinaryFiles } from "./evaluation-bundle"
-import { freeze, safePath } from "./evaluation-profile"
+import { directRoot, ordinaryFiles, loadEvaluationBundle } from "./evaluation-bundle"
+import { freeze, safePath, decodeEvaluationOracle, decodeTaskExecutionProfile } from "./evaluation-profile"
+import { authorIndependentTask, decodeOracleAuthoring } from "./evaluation-authoring"
+import { decodeTaskManifest } from "./manifest"
 import { evaluationCatalogue, type TaskAdapterDefinition } from "./evaluation-catalogue"
 import { validateTaskBundle } from "./validate"
 import { privateFixture } from "./evaluation-fixtures/private"
@@ -20,6 +22,9 @@ export type CorpusPreparationItem = Readonly<{
   oracleSha256: string | null
   missing: readonly string[]
   status: "prepared" | "blocked"
+  authoringReady?: boolean
+  oracleFormat?: "strict-v2" | "authored-v2"
+  controls?: number
 }>
 export type CorpusPreparationReport = Readonly<{
   schemaVersion: 2
@@ -74,6 +79,7 @@ export async function prepareTaskMaterials(input: {
   sourceFiles: Readonly<Record<string, Uint8Array>>
   sourceRevision: string
   sourceSha256: string
+  authoring?: unknown
 }): Promise<CorpusPreparationItem> {
   const { task, sourceFiles } = input
   await directRoot(path.dirname(input.outputRoot))
@@ -90,6 +96,10 @@ export async function prepareTaskMaterials(input: {
   for (const [file, text] of Object.entries(publicFixture(task))) {
     if (publicFiles[file]) throw new TypeError("TASK24_AUTHOR_FIXTURE_COLLISION")
     publicFiles[file] = Buffer.from(text)
+  }
+  if (task.stratum === "design2code" && sourceFiles["gold/rick.jpg"]) {
+    publicFiles["rick.jpg"] = sourceFiles["gold/rick.jpg"]
+    delete privateFiles["legacy/rick.jpg"]
   }
   if (task.publicFixtureTemplate === "private" || task.publicFixtureTemplate === "guardrail") {
     const packageBytes = publicFiles["package.json"]
@@ -117,10 +127,15 @@ export async function prepareTaskMaterials(input: {
       origin: "task-public",
     }))
   const missing = [
-    "independent-oracle-cases",
-    "calibration-candidates",
+    ...(input.authoring === undefined ? ["independent-oracle-cases", "calibration-candidates"] : []),
     "linux-host-attestation",
-    ...(task.kind === "primary" ? ["three-viewport-engine-reference", "browser-font-lock", "interaction-oracle"] : []),
+    ...(task.kind === "primary"
+      ? [
+          "three-viewport-engine-reference",
+          "browser-font-lock",
+          ...(input.authoring === undefined ? ["interaction-oracle"] : []),
+        ]
+      : []),
     ...(task.stratum === "swebench-multimodal"
       ? [
           "resolved-dependency-image",
@@ -140,7 +155,6 @@ export async function prepareTaskMaterials(input: {
     publicInputs: publicEntries,
     sourceEntry: task.sourceEntry,
     probeModules: task.probeModules,
-    requiredOracleCases: task.requiredOracleCases,
     requiredCapabilities: task.requiredCapabilities,
     checks:
       task.stratum === "swebench-multimodal"
@@ -171,6 +185,136 @@ export async function prepareTaskMaterials(input: {
   }
   await write("public", publicFiles)
   await write("private", privateFiles)
+  if (input.authoring !== undefined) {
+    await fs.mkdir(path.join(input.outputRoot, "private"), { recursive: true })
+    const original = sourceFiles["task.json"]
+      ? decodeTaskManifest(JSON.parse(Buffer.from(sourceFiles["task.json"]).toString("utf8")))
+      : null
+    const sourceManifest = Buffer.from(
+      canonicalJson({
+        schemaVersion: 1,
+        id: task.taskID,
+        kind: task.kind,
+        stratum: task.stratum,
+        family: task.adapterID,
+        prompt: original?.prompt ?? "Synthetic public fixture",
+        normalizationVersion: "independent-public-v2",
+        source: original?.source ?? {
+          id: "synthetic",
+          url: "https://example.com/fixture",
+          revision: input.sourceRevision,
+          license: "synthetic fixture",
+        },
+        licensesSha256: original?.licensesSha256 ?? sha256Text("[]"),
+        workspaceFiles: publicEntries.map((f) => ({ path: f.path.slice(7), sha256: f.sha256, size: f.size })),
+        publicAssets: original?.publicAssets ?? [],
+        goldFiles: [],
+      }),
+    )
+    await write("private", { "public-source.json": sourceManifest })
+    const publicReferenceManifest = {
+      path: "private/public-source.json",
+      sha256: sha256Bytes(sourceManifest),
+      size: sourceManifest.length,
+    }
+    const authored = await authorIndependentTask({
+      task,
+      sourceFiles,
+      publicFiles,
+      outputRoot: path.join(input.outputRoot, "private", "authoring"),
+      authoring: input.authoring,
+      protectedPaths: draft.protectedPaths,
+    })
+    // These are source reference candidates, not same-engine captures or attestation.
+    const visualSources =
+      task.kind === "guardrail"
+        ? null
+        : Object.entries(sourceFiles)
+            .filter(([name]) =>
+              /^gold\/(?:reference-|responsive-|evidence-|dom-style|masks|requirements|accessibility)/.test(name),
+            )
+            .map(([name, bytes]) => ({
+              path: `private/legacy/${name.slice(5)}`,
+              sha256: sha256Bytes(bytes),
+              size: bytes.byteLength,
+            }))
+    await write("private", {
+      "oracle-visual-sources.json": Buffer.from(
+        canonicalJson({ schemaVersion: 2, taskID: task.taskID, files: visualSources, engineBinding: null }),
+      ),
+    })
+    if (task.kind === "guardrail") {
+      const data = decodeOracleAuthoring(
+        JSON.parse(await fs.readFile(path.join(input.outputRoot, "private/authoring/oracle-authored.json"), "utf8")),
+        task,
+      )
+      const privateEntries = (await ordinaryFiles(path.join(input.outputRoot, "private"))).map((f) => ({
+        ...f,
+        path: `private/${f.path}`,
+      }))
+      const oracle = decodeEvaluationOracle({
+        schemaVersion: 2,
+        taskID: task.taskID,
+        kind: task.kind,
+        privateFiles: privateEntries,
+        publicReferenceManifest,
+        cases: data.cases,
+        requirements: data.requirements,
+        quality: data.quality,
+        policy: data.policy,
+        visual: null,
+        calibration: authored.controls.map((c) => ({
+          id: c.kind,
+          kind: c.kind,
+          path: `private/authoring/controls/${c.kind}.json`,
+        })),
+        note: "Authored data and immutable controls; real Linux execution not yet verified.",
+      })
+      const profile = decodeTaskExecutionProfile({
+        schemaVersion: 2,
+        taskID: task.taskID,
+        kind: task.kind,
+        stratum: task.stratum,
+        executionKind: task.executionKind,
+        seedSha256: sha256Text(canonicalJson(authored.seed)),
+        publicFixtureSha256: sha256Text(canonicalJson(publicEntries)),
+        publicInputs: publicEntries,
+        sourceEntry: task.sourceEntry,
+        probeModules: [...new Set(data.cases.map((c) => c.module))],
+        protectedPaths: draft.protectedPaths,
+        mutablePaths: Object.keys(publicFiles).filter((p) => !draft.protectedPaths.includes(p)),
+        checks: draft.checks,
+        dependency: { kind: "none" },
+        preview: null,
+      })
+      // Public seed bytes legitimately recur in private control blobs. Only source-proven
+      // public paths get this exception; repaired/new answer bytes do not.
+      await fs.writeFile(path.join(input.outputRoot, "profile.json"), canonicalJson(profile), { flag: "wx" })
+      await fs.writeFile(path.join(input.outputRoot, "oracle.json"), canonicalJson(oracle), { flag: "wx" })
+      const bundle = await loadEvaluationBundle(input.outputRoot)
+      return freeze({
+        taskID: task.taskID,
+        profileSha256: bundle.profileSha256,
+        oracleSha256: bundle.oracleSha256,
+        oracleFormat: "strict-v2",
+        authoringReady: true,
+        controls: authored.controls.length,
+        missing,
+        status: "blocked",
+      })
+    }
+    await fs.writeFile(path.join(input.outputRoot, "preparation-profile.json"), canonicalJson(draft), { flag: "wx" })
+    return freeze({
+      taskID: task.taskID,
+      profileSha256: sha256Text(canonicalJson(draft)),
+      oracleSha256: authored.oracleSha256,
+      oracleFormat: "authored-v2",
+      authoringReady: true,
+      controls: authored.controls.length,
+      missing,
+      status: "blocked",
+    })
+  }
   const controls = {
     required: [
       "correct",
@@ -196,8 +340,17 @@ export async function prepareTaskMaterials(input: {
 export async function prepareEvaluationCorpus(input: {
   sourceRoot: string
   outputRoot: string
+  authoringRoot?: string
 }): Promise<CorpusPreparationReport> {
   await validatePreparationRoots(input)
+  if (input.authoringRoot) {
+    const directory = await directRoot(input.authoringRoot)
+    if (!directory.toLowerCase().startsWith("d:\\opencode-benchmark\\task24\\tmp\\bprep1-20261017-19ae30d14\\"))
+      throw new TypeError("TASK24_AUTHORING_ROOT")
+    if (!disjoint(directory, input.outputRoot) || !disjoint(directory, input.sourceRoot))
+      throw new TypeError("TASK24_AUTHORING_ROOT_OVERLAP")
+    await ordinaryFiles(directory)
+  }
   const tasks = evaluationCatalogue(),
     names = (await fs.readdir(input.sourceRoot)).sort()
   if (canonicalJson(names) !== canonicalJson(tasks.map((t) => t.taskID).sort()))
@@ -223,6 +376,9 @@ export async function prepareEvaluationCorpus(input: {
         sourceFiles,
         sourceRevision: bundle.manifest.source.revision,
         sourceSha256: bundle.bundleSha256,
+        ...(input.authoringRoot
+          ? { authoring: JSON.parse(await fs.readFile(path.join(input.authoringRoot, `${task.taskID}.json`), "utf8")) }
+          : {}),
       }),
     )
     if (canonicalJson(before) !== canonicalJson(await ordinaryFiles(root)))

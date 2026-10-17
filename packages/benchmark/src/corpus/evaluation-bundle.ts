@@ -95,7 +95,8 @@ export async function loadEvaluationBundle(root: string): Promise<ValidatedEvalu
     if (!actual.some((a) => a.path === f.path && a.sha256 === f.sha256 && a.size === f.size))
       throw new TypeError("TASK24_BUNDLE_HASH")
   const files = []
-  let authorizedReferences: readonly FileEntry[] = []
+  let authorizedReferences: readonly FileEntry[] = [],
+    authorizedSeed: readonly FileEntry[] = []
   if (oracle.publicReferenceManifest) {
     const declaration = oracle.publicReferenceManifest
     if (!oracle.privateFiles.some((f) => canonicalJson(f) === canonicalJson(declaration)))
@@ -105,6 +106,7 @@ export async function loadEvaluationBundle(root: string): Promise<ValidatedEvalu
     const source = decodeTaskManifest(JSON.parse(bytes.toString("utf8")))
     if (source.id !== profile.taskID) throw new TypeError("TASK24_PUBLIC_SOURCE_IDENTITY")
     authorizedReferences = source.publicAssets
+    authorizedSeed = source.workspaceFiles
   }
   for (const f of profile.publicInputs) {
     if (f.purpose === "reference") {
@@ -119,7 +121,11 @@ export async function loadEvaluationBundle(root: string): Promise<ValidatedEvalu
       if (!["png", "jpeg", "webp"].includes(meta.format ?? "") || !meta.width || !meta.height)
         throw new TypeError("TASK24_PUBLIC_REFERENCE_INVALID")
     }
-    if (f.purpose !== "reference" && oracle.privateFiles.some((v) => v.sha256 === f.sha256))
+    if (
+      f.purpose !== "reference" &&
+      oracle.privateFiles.some((v) => v.sha256 === f.sha256) &&
+      !authorizedSeed.some((s) => `public/${s.path}` === f.path && s.sha256 === f.sha256 && s.size === f.size)
+    )
       throw new TypeError("TASK24_PUBLIC_LEAK")
     const bytes = await fs.readFile(path.join(root, f.path))
     if (sha256Bytes(bytes) !== f.sha256) throw new TypeError("TASK24_BUNDLE_DRIFT")
