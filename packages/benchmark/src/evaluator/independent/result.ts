@@ -11,6 +11,13 @@ import { aggregateVisualViewports, composeVisualScore } from "../visual"
 import type { FunctionalFacts } from "./functional"
 import { requireFixtureObservation, type BuildManifest, type BuildObservation } from "./host"
 import type { VisualFacts } from "./visual"
+import {
+  requireLinuxFacts,
+  requireLinuxObservation,
+  linuxFactsProof,
+  bindLinuxResult,
+  type LinuxResultProof,
+} from "../../sandbox/evaluation-host"
 
 export type EvaluationFacts = Readonly<{
   kind: "primary" | "guardrail"
@@ -33,7 +40,6 @@ export type EvaluationFacts = Readonly<{
 type CommonResult = Readonly<{
   schemaVersion: 2
   identity: EvaluationIdentityV2
-  assurance: "fixture"
   semanticSha256: string
   evidenceHashes: readonly string[]
   evidence: readonly EvidenceReference[]
@@ -42,7 +48,8 @@ type CommonResult = Readonly<{
   quality: number
   qualityChecks: EvaluationFacts["quality"]["checks"]
   disqualifications: readonly string[]
-}>
+}> &
+  ({ assurance: "fixture" } | { assurance: "linux-attested"; linuxProof: LinuxResultProof })
 type Primary = CommonResult &
   Readonly<{
     kind: "primary"
@@ -65,6 +72,7 @@ type Guardrail = CommonResult &
     diagnosticTotal: null
   }>
 export type IndependentResult = Primary | Guardrail
+type WithoutSemantic<T> = T extends unknown ? Omit<T, "semanticSha256"> : never
 const issuedResults = new WeakSet<object>()
 export function requireIndependentResult(result: IndependentResult): void {
   if (!issuedResults.has(result)) throw new TypeError("TASK24_RESULT_UNVALIDATED")
@@ -73,12 +81,13 @@ export function scoreIndependentEvaluation(facts: EvaluationFacts): IndependentR
   const identity = decodeEvaluationIdentity(facts.identity)
   if (
     !["primary", "guardrail"].includes(facts.kind) ||
-    facts.assurance !== "fixture" ||
+    !["fixture", "linux-attested"].includes(facts.assurance) ||
     facts.source.candidateSha256 !== identity.candidateSha256 ||
     typeof facts.runtime.ceilingsPassed !== "boolean" ||
     typeof facts.runtime.humanEdited !== "boolean"
   )
     throw new TypeError("TASK24_FACTS_INVALID")
+  if (facts.assurance === "linux-attested") requireLinuxFacts(facts)
   const requirements = scoreRequirements(facts.requirements),
     quality = scoreQuality({
       checks: facts.quality.checks.map((c) => {
@@ -109,7 +118,9 @@ export function scoreIndependentEvaluation(facts: EvaluationFacts): IndependentR
   const common = {
     schemaVersion: 2 as const,
     identity,
-    assurance: "fixture" as const,
+    ...(facts.assurance === "fixture"
+      ? { assurance: "fixture" as const }
+      : { assurance: "linux-attested" as const, linuxProof: linuxFactsProof(facts) }),
     evidenceHashes: evidenceHashes([evidence]),
     evidence,
     requirements: requirements.points,
@@ -117,10 +128,11 @@ export function scoreIndependentEvaluation(facts: EvaluationFacts): IndependentR
     qualityChecks: facts.quality.checks,
     disqualifications: policy.disqualifications,
   }
-  let body: Omit<Primary, "semanticSha256"> | Omit<Guardrail, "semanticSha256">
+  let body: WithoutSemantic<IndependentResult>
   if (facts.build.status === "candidate_failure") {
     const proof = facts.build.proof
-    requireFixtureObservation(proof)
+    if (facts.assurance === "linux-attested") requireLinuxObservation(proof)
+    else requireFixtureObservation(proof)
     if (
       proof.kind !== "candidate_failure" ||
       canonicalJson(proof.identity) !== canonicalJson(identity) ||
@@ -251,5 +263,6 @@ export function scoreIndependentEvaluation(facts: EvaluationFacts): IndependentR
   }
   const result = freeze({ ...body, semanticSha256: sha256Text(canonicalJson(body)) })
   issuedResults.add(result)
+  if (facts.assurance === "linux-attested") bindLinuxResult(result, facts)
   return result
 }

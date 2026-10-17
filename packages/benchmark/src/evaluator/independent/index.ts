@@ -24,6 +24,8 @@ import {
 import { scoreIndependentEvaluation, type EvaluationFacts, type IndependentResult } from "./result"
 import { disjoint, verifyCandidate, type CandidateSnapshot } from "./snapshot"
 import { evaluateVisual, type IndependentBrowser } from "./visual"
+import { evaluateLinux, type LinuxEvaluateInput } from "../../sandbox/linux-evaluator"
+import type { ControllerFactsObserver } from "../../sandbox/controller-facts"
 
 export type EvaluateInput = Readonly<{
   bundle: ValidatedEvaluationBundle
@@ -36,24 +38,33 @@ export type EvaluationOutcome =
   | Readonly<{ kind: "evaluated"; result: IndependentResult }>
   | Readonly<{ kind: "blocked"; reason: string }>
   | Readonly<{ kind: "harness_error"; code: string }>
-const contexts = new WeakMap<object, EvaluateInput>()
-export function evaluationContext(outcome: EvaluationOutcome): EvaluateInput {
+const contexts = new WeakMap<object, EvaluateInput | LinuxEvaluateInput>()
+export function evaluationContext(outcome: EvaluationOutcome): EvaluateInput | LinuxEvaluateInput {
   const context = contexts.get(outcome)
   if (outcome.kind !== "evaluated" || !context) throw new TypeError("TASK24_OUTCOME_UNVALIDATED")
   return context
 }
-export async function verifyEvaluationContext(input: EvaluateInput): Promise<void> {
+export async function verifyEvaluationContext(input: Omit<EvaluateInput, "facts">): Promise<void> {
   exportPublicTask(input.bundle)
   await verifyCandidate(input.snapshot)
   const current = await loadEvaluationBundle(input.bundle.root)
   if (current.bundleSha256 !== input.bundle.bundleSha256) throw new TypeError("TASK24_BUNDLE_DRIFT")
   await ordinaryFiles(input.evidenceRoot)
 }
-export function makeIndependentEvaluator(options: { host?: EvaluationHost; browser?: IndependentBrowser }): {
-  evaluate(input: EvaluateInput): Promise<EvaluationOutcome>
+export function makeIndependentEvaluator(options: {
+  host?: EvaluationHost
+  browser?: IndependentBrowser
+  controllerFactsObserver?: ControllerFactsObserver
+}): {
+  evaluate(input: EvaluateInput | LinuxEvaluateInput): Promise<EvaluationOutcome>
 } {
   return {
     async evaluate(input) {
+      if ("dependency" in input) {
+        const outcome = await evaluateLinux(input, options)
+        if (outcome.kind === "evaluated") contexts.set(outcome, input)
+        return outcome
+      }
       try {
         if (Object.keys(input).some((k) => !["bundle", "snapshot", "identity", "evidenceRoot", "facts"].includes(k)))
           throw new TypeError("TASK24_EVALUATE_INPUT_INVALID")

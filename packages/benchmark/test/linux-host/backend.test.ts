@@ -57,6 +57,7 @@ test("backend binds commands and immutable source, produces raw receipts and alw
     expect(raw.receipt.assurance).toBe("fixture")
     expect(raw.receipt.binding?.candidateSha256).toBe(c.input.identity.candidateSha256)
     expect(raw).not.toHaveProperty("assurance")
+    expect(backend.probeMode({ ...request, module: "src/math.js" })).toBe("node")
     await expect(
       backend.previewSource({
         ...request,

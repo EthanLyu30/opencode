@@ -24,7 +24,8 @@ import { sessionState } from "./preflight"
 import { requireOperation } from "./docker"
 import { createOwnedContainer, cleanupOwnedContainer, inspectOwnedContainer, type Owner } from "./ownership"
 import { recordOperationReceipt, type OperationReceipt } from "./receipt"
-import type { ResolvedImages, ResolvedTask } from "./dependencies"
+import { resolveTaskDependency, type ResolvedImages, type ResolvedTask } from "./dependencies"
+import type { DependencyResolution } from "../corpus/evaluation-profile"
 import type { EngineSession, DockerRunner, AuthorityGuard } from "./contracts"
 import { relayWorkerSource } from "./relay-worker"
 import {
@@ -38,7 +39,37 @@ import {
 import type { PreviewSource } from "./preview"
 import { safePath } from "../corpus/evaluation-profile"
 
-export type BackendImage = Pick<ResolvedTask, "taskID" | "image" | "volumes" | "receiptSha256">
+export type BackendImage = Pick<ResolvedTask, "taskID" | "image" | "volumes" | "receiptSha256"> & Partial<ResolvedTask>
+export function validateTaskResolution(
+  profile: Pick<TaskExecutionProfile, "dependency">,
+  resolution: DependencyResolution,
+  image: BackendImage,
+) {
+  if (profile.dependency.kind === "none") {
+    if (resolution.kind !== "none") throw new TypeError("TASK24_DEPENDENCY_BINDING")
+    return
+  }
+  if (!image.recipe || !image.platform || !image.tools || !image.imageID || !image.artifactID || !image.assurance)
+    throw new TypeError("TASK24_DEPENDENCY_UNRESOLVED")
+  const resolved = resolveTaskDependency({
+    profile,
+    images: {
+      tasks: [
+        {
+          ...image,
+          recipe: image.recipe,
+          platform: image.platform,
+          tools: image.tools,
+          imageID: image.imageID,
+          artifactID: image.artifactID,
+          assurance: image.assurance,
+        },
+      ],
+    },
+  })
+  if (resolved.kind !== "ready" || canonicalJson(resolved.value) !== canonicalJson(resolution))
+    throw new TypeError("TASK24_DEPENDENCY_BINDING")
+}
 export type RawBuild = Readonly<{ payload: BuildPayload | FailurePayload; receipt: OperationReceipt }>
 export type RawProbe = Readonly<{ payload: ProbePayload | FailurePayload; receipt: OperationReceipt }>
 const BuildReply = Schema.Struct({ commands: Schema.Array(Schema.Struct({ id: Schema.String, exitCode: Schema.Int })) })
@@ -50,6 +81,7 @@ export function makeLinuxBackend(input: {
   profiles: readonly {
     profile: TaskExecutionProfile
     outputs: readonly string[]
+    probeModes?: Readonly<Record<string, "node" | "browser" | "pdf">>
     service?: { entry: string; port: number; policy: RelayPolicy }
   }[]
   signal?: AbortSignal
@@ -72,7 +104,12 @@ export function makeLinuxBackend(input: {
       )
         throw new TypeError("TASK24_LINUX_SERVICE_POLICY")
     }
-    return freeze({ profile, outputs: [...p.outputs], ...(p.service ? { service: structuredClone(p.service) } : {}) })
+    return freeze({
+      profile,
+      outputs: [...p.outputs],
+      probeModes: structuredClone(p.probeModes ?? {}),
+      ...(p.service ? { service: structuredClone(p.service) } : {}),
+    })
   })
   const workspaces = new Map<string, string>(),
     builds = new Map<string, BuildManifest>(),
@@ -178,8 +215,19 @@ export function makeLinuxBackend(input: {
   }
   return {
     session: input.session,
+    describe(request: CommonRequest) {
+      return policy(request).profile
+    },
+    probeMode(request: CommonRequest & { module: string }) {
+      const p = policy(request)
+      if (!p.profile.probeModules.includes(request.module)) throw new TypeError("TASK24_LINUX_PROBE_MODULE")
+      const mode = p.probeModes[request.module] ?? (p.profile.kind === "guardrail" ? "node" : undefined)
+      if (!mode) throw new TypeError("TASK24_LINUX_PROBE_MAPPING")
+      return mode
+    },
     async build(request: BuildRequest): Promise<RawBuild> {
       const p = policy(request)
+      validateTaskResolution(p.profile, request.dependency, p.image)
       if (
         request.timeoutMs !== 300000 ||
         canonicalJson(request.commands) !== canonicalJson(p.profile.checks) ||

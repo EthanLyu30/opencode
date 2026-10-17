@@ -8,6 +8,21 @@ import { loadEvaluationBundle } from "../../src/corpus/evaluation-bundle"
 import { identity } from "./fixture"
 import { bindEvidenceFile } from "../../src/evaluator/evidence"
 
+test("Linux branch rejects a fixture host before dispatch even with caller supplied observer", async () => {
+  const f = await orchestratorFixture()
+  try {
+    const { facts, ...base } = f.input
+    const outcome = await makeIndependentEvaluator({
+      host: f.host,
+      controllerFactsObserver: { observe: async () => facts },
+    }).evaluate({ ...base, dependency: { kind: "none" } })
+    expect(outcome).toEqual({ kind: "harness_error", code: "TASK24_LINUX_HOST_AUTHORITY" })
+    expect(f.calls).toEqual([])
+  } finally {
+    await f.dispose()
+  }
+})
+
 test("review: loader identity rejects substituted oracle/profile before any host call", async () => {
   const f = await orchestratorFixture(6)
   try {

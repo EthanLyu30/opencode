@@ -18,6 +18,7 @@ import { bindEvidenceFile, type EvidenceReference } from "../evidence"
 import { aggregateVisualViewports, evaluateVisualViewport, type VisualResult } from "../visual"
 import type { BuildManifest, PreviewObservation } from "./host"
 import { requireFixtureObservation } from "./host"
+import { requireLinuxObservation } from "../../sandbox/evaluation-host"
 
 export type IndependentBrowser = Readonly<{
   runtime: Pick<BrowserRuntime, "capture">
@@ -45,7 +46,12 @@ export async function evaluateVisual(input: {
   browser: IndependentBrowser
 }): Promise<VisualFacts> {
   const { identity, profile, oracle, build, preview, browser } = input
-  requireFixtureObservation(preview)
+  if (preview.assurance === "linux-attested") requireLinuxObservation(preview)
+  else requireFixtureObservation(preview)
+  const previewID =
+    preview.assurance === "linux-attested" && preview.kind === "ok" ? preview.previewID : identity.attemptID
+  if (!previewID || (preview.assurance === "linux-attested" && !/^[a-f0-9]{64}$/.test(previewID)))
+    throw new TypeError("TASK24_VISUAL_PREVIEW_ID")
   if (
     !profile.preview ||
     !oracle.visual ||
@@ -89,7 +95,7 @@ export async function evaluateVisual(input: {
     const viewport = { id, ...FIXED_VIEWPORTS[id] }
     const captured = await browser.runtime.capture({
       runID: identity.runID,
-      previewID: identity.attemptID,
+      previewID,
       previewURL: preview.handle,
       viewportID: viewport.id,
       readySelector: "body",
@@ -109,7 +115,7 @@ export async function evaluateVisual(input: {
     const data = JSON.parse(await fs.readFile(captured.evidence, "utf8")) as Record<string, unknown>
     if (
       data.runID !== identity.runID ||
-      data.previewID !== identity.attemptID ||
+      data.previewID !== previewID ||
       data.viewportID !== viewport.id ||
       data.screenshotSha256 !== pngRef.sha256 ||
       !Array.isArray(data.dom) ||

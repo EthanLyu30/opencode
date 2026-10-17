@@ -9,11 +9,12 @@ import { publishImmutable } from "../../offline/atomic"
 import { verifyEvidenceFile, type EvidenceReference } from "../evidence"
 import { evaluationContext, verifyEvaluationContext, type EvaluationOutcome } from "./index"
 import { requireIndependentResult, type IndependentResult } from "./result"
+import { linuxResultAuthority, verifyLinuxResultProof, type LinuxAuthority } from "../../sandbox/evaluation-host"
 
 export type IndependentManifest = Readonly<{
   schemaVersion: 2
   identity: EvaluationIdentityV2
-  assurance: "fixture"
+  assurance: "fixture" | "linux-attested"
   result: { path: "independent-result.json"; sha256: string; bytes: number }
   evidence: readonly EvidenceReference[]
 }>
@@ -27,7 +28,7 @@ const Evidence = Schema.Struct({
 const Manifest = Schema.Struct({
   schemaVersion: Schema.Literal(2),
   identity: Schema.Unknown,
-  assurance: Schema.Literal("fixture"),
+  assurance: Schema.Literals(["fixture", "linux-attested"]),
   result: Schema.Struct({ path: Schema.Literal("independent-result.json"), sha256: Schema.String, bytes: Schema.Int }),
   evidence: Schema.NonEmptyArray(Evidence),
 })
@@ -46,7 +47,7 @@ export async function publishIndependentEvaluation(input: {
     manifest = freeze({
       schemaVersion: 2 as const,
       identity: input.outcome.result.identity,
-      assurance: "fixture" as const,
+      assurance: input.outcome.result.assurance,
       result: { path: "independent-result.json" as const, sha256: sha256Bytes(bytes), bytes: bytes.length },
       evidence: input.outcome.result.evidence,
     })
@@ -61,12 +62,19 @@ export async function publishIndependentEvaluation(input: {
   await publishImmutable(path.join(root, "independent-result.json"), bytes)
   await verifyEvaluationContext(context)
   await publishImmutable(path.join(root, "independent-manifest.json"), canonicalJson(manifest))
-  await verifyIndependentEvaluation({ root, manifest })
+  await verifyIndependentEvaluation({
+    root,
+    manifest,
+    ...(input.outcome.result.assurance === "linux-attested"
+      ? { authority: linuxResultAuthority(input.outcome.result) }
+      : {}),
+  })
   return freeze({ root, manifest })
 }
 export async function verifyIndependentEvaluation(input: {
   root: string
   manifest: IndependentManifest
+  authority?: LinuxAuthority
 }): Promise<IndependentResult> {
   const root = await directRoot(input.root)
   await ordinaryFiles(root)
@@ -83,11 +91,13 @@ export async function verifyIndependentEvaluation(input: {
   const result = JSON.parse(bytes.toString("utf8")) as IndependentResult
   if (
     result.schemaVersion !== 2 ||
-    result.assurance !== "fixture" ||
+    result.assurance !== raw.assurance ||
     canonicalJson(result.identity) !== canonicalJson(identity) ||
     canonicalJson(result.evidence) !== canonicalJson(raw.evidence)
   )
     throw new TypeError("TASK24_PUBLICATION_IDENTITY_INVALID")
+  if (result.assurance === "linux-attested") verifyLinuxResultProof(result.linuxProof, input.authority, identity)
+  else if ("linuxProof" in result) throw new TypeError("TASK24_PUBLICATION_IDENTITY_INVALID")
   const { semanticSha256, ...body } = result
   if (sha256Text(canonicalJson(body)) !== semanticSha256) throw new TypeError("TASK24_PUBLICATION_SEMANTIC_INVALID")
   for (const ref of raw.evidence) verifyEvidenceFile(root, ref)

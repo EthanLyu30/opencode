@@ -10,6 +10,7 @@ import type { FileEntry } from "../../corpus/manifest"
 import { sha256Text } from "../../hash"
 import { decodeProbeResponse, type ProbeResponse } from "./probe"
 import { validateCandidateEntries } from "./snapshot"
+import { requireLinuxObservation } from "../../sandbox/evaluation-host"
 
 export type CandidateReference = Readonly<{
   archiveFile: string
@@ -61,6 +62,7 @@ export type PreviewPayload = Readonly<{
   buildSha256: string
   browserSha256: string
   fontSha256: string
+  previewID?: string
 }>
 export type FailurePayload =
   | Readonly<{ kind: "candidate_failure"; reason: string }>
@@ -105,7 +107,8 @@ export function validateObservation(
   request: CommonRequest,
   observation: BuildObservation | ProbeObservation | PreviewObservation,
 ): void {
-  if (!issued.has(observation) || observation.assurance !== "fixture")
+  if (observation.assurance === "linux-attested") requireLinuxObservation(observation)
+  else if (!issued.has(observation) || observation.assurance !== "fixture")
     throw new TypeError("TASK24_HOST_AUTHORITY_INVALID")
   if (
     canonicalJson(observation.identity) !== canonicalJson(request.identity) ||

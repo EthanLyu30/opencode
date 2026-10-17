@@ -9,6 +9,7 @@ import { sha256Text } from "../../src/hash"
 import { hostFixture, sessionFixture } from "./fixture"
 import { inspectLinuxHost, openLinuxSession, sessionState } from "../../src/sandbox/preflight"
 import { canonicalJson } from "../../src/campaign/canonical"
+import { validateTaskResolution } from "../../src/sandbox/linux-backend"
 
 test("artifact preparation never admits user credential/config paths as build or load input", async () => {
   const f = await hostFixture()
@@ -101,6 +102,32 @@ test("library recipes bind the real lockfile, family capabilities and fixed no-h
     },
   })
   expect(resolution.kind).toBe("ready")
+  if (resolution.kind === "ready" && resolution.value.kind === "resolved") {
+    const image = {
+      artifactID: "chart",
+      taskID: chart.taskID,
+      recipe: chart,
+      image: chart.image,
+      imageID: "sha256:" + "d".repeat(64),
+      platform: chart.platform,
+      volumes: [],
+      tools: ["node", "bun"],
+      receiptSha256: resolution.value.receiptSha256,
+      assurance: "fixture" as const,
+    }
+    const profile = {
+      dependency: {
+        kind: "locked" as const,
+        sourceCommit: chart.sourceCommit,
+        lockfiles: [chart.lockfiles[0]!],
+        recipeSha256: chart.recipeSha256,
+        requiredCapabilities: ["locked-build", "canvas-probe"],
+      },
+    }
+    validateTaskResolution(profile, resolution.value, image)
+    for (const key of ["image", "platform", "receiptSha256"])
+      expect(() => validateTaskResolution(profile, { ...resolution.value, [key]: "wrong" }, image)).toThrow()
+  }
   expect(() =>
     makeImageRecipe({
       task: catalogue[8]!,
