@@ -24,7 +24,36 @@ import { recordOperationReceipt } from "./receipt"
 import { fileIdentity } from "./storage"
 import type { FileIdentity } from "./contracts"
 
-export type DependencyVolume = Readonly<{ name: string; target: string; treeSha256: string; receiptSha256: string }>
+export type DependencyVolume = Readonly<{
+  name: string
+  target: string
+  treeSha256: string
+  receiptSha256: string
+  fileID: string
+  metadataSha256: string
+}>
+export function volumeMetadataIdentity(raw: unknown) {
+  const value = Schema.decodeUnknownSync(
+    Schema.Struct({
+      Name: Schema.String,
+      Driver: Schema.Literal("local"),
+      Scope: Schema.Literal("local"),
+      Mountpoint: Schema.String,
+      CreatedAt: Schema.String,
+      Labels: Schema.Record(Schema.String, Schema.String),
+      Options: Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Schema.String))),
+    }),
+  )(raw)
+  if (
+    !/^task24-dep-[a-f0-9]{64}$/.test(value.Name) ||
+    value.Labels["opencode.task24.tree"] !== value.Name.slice("task24-dep-".length) ||
+    Object.keys(value.Options ?? {}).length ||
+    !value.CreatedAt ||
+    !value.Mountpoint.startsWith("/")
+  )
+    throw new TypeError("TASK24_LINUX_VOLUME_IDENTITY")
+  return sha256Text(canonicalJson(value))
+}
 export type ResolvedTask = Readonly<{
   artifactID: string
   taskID: string
@@ -276,7 +305,7 @@ export async function prepareLinuxArtifacts(input: {
         platform: Schema.String,
         workerSha256: Schema.String,
         tools: Schema.Array(Schema.NonEmptyString),
-        volumes: Schema.Array(Schema.Struct({ name: Schema.String, treeSha256: Schema.String })),
+        volumes: Schema.Array(Schema.Struct({ name: Schema.String, treeSha256: Schema.String, fileID: Schema.String })),
       })
       const audit = Schema.decodeUnknownSync(Audit)(JSON.parse(Buffer.from(audited.stdout).toString("utf8")), {
         onExcessProperty: "error",
@@ -303,6 +332,19 @@ export async function prepareLinuxArtifacts(input: {
         execution: audited,
         evidenceRoot: state.manifest.roots.evidence,
       })
+      const volumes = await Promise.all(
+        artifact.volumes.map(async (v) => {
+          const observed = await execute(["volume", "inspect", v.name, "--format", "{{json .}}"])
+          if (!observed.started || observed.exitCode || observed.truncated)
+            throw new TypeError("TASK24_LINUX_VOLUME_IDENTITY")
+          return {
+            ...v,
+            receiptSha256: receipt.receiptSha256,
+            fileID: audit.volumes.find((a) => a.name === v.name)!.fileID,
+            metadataSha256: volumeMetadataIdentity(JSON.parse(Buffer.from(observed.stdout).toString("utf8"))),
+          }
+        }),
+      )
       tasks.push(
         freeze({
           artifactID: artifact.id,
@@ -311,7 +353,7 @@ export async function prepareLinuxArtifacts(input: {
           image: recipe.image,
           imageID: image.Id,
           platform: recipe.platform,
-          volumes: artifact.volumes.map((v) => ({ ...v, receiptSha256: receipt.receiptSha256 })),
+          volumes,
           tools: audit.tools,
           receiptSha256: receipt.receiptSha256,
           assurance: receipt.assurance,

@@ -16,12 +16,47 @@ import { sha256Bytes, sha256Text } from "../hash"
 
 const realRunners = new WeakSet<object>()
 const executions = new WeakMap<object, { runner: DockerRunner; argv: string; bytes: string }>()
+export function isReadonlyDockerInvocation(args: readonly string[], hasSession: boolean) {
+  if (
+    hasSession &&
+    args[0] === "volume" &&
+    args[1] === "inspect" &&
+    args.length === 5 &&
+    /^task24-dep-[a-f0-9]{64}$/.test(args[2]!) &&
+    args[3] === "--format" &&
+    args[4] === "{{json .}}"
+  )
+    return true
+  if (
+    (args[0] === "version" || args[0] === "info") &&
+    args.length === 3 &&
+    args[1] === "--format" &&
+    /^\{\{json \.(?:Server)?\}\}$/.test(args[2]!)
+  )
+    return true
+  if (
+    args[0] === "context" &&
+    args[1] === "inspect" &&
+    args.length === 5 &&
+    /^[a-z0-9][a-z0-9._-]{0,127}$/.test(args[2]!) &&
+    args[3] === "--format" &&
+    args[4] === "{{json .}}"
+  )
+    return true
+  if (!hasSession || args[0] !== "image" || args[1] !== "inspect" || args.length !== 5) return false
+  const digest = /^[a-z0-9./:_-]+@sha256:[a-f0-9]{64}$/
+  return (
+    (digest.test(args[2]!) && args[3] === "--format" && args[4] === "{{json .}}") ||
+    (args[2] === "--format" && args[3] === "{{json .}}" && digest.test(args[4]!))
+  )
+}
 function executionBytes(value: DockerExecution) {
   return sha256Text(
     canonicalJson({
       started: value.started,
       exitCode: value.exitCode,
       truncated: value.truncated,
+      cleanupUncertain: value.cleanupUncertain === true,
       stdout: sha256Bytes(value.stdout),
       stderr: sha256Bytes(value.stderr),
     }),
@@ -85,11 +120,27 @@ export function makeProcessRunner(options: {
       if (!proc)
         return { started: false, exitCode: 127, stdout: new Uint8Array(), stderr: new Uint8Array(), truncated: false }
       let truncated = false,
-        timedOut = false
+        timedOut = false,
+        cleanupUncertain = false
+      let drainTimer: ReturnType<typeof setTimeout> | undefined,
+        finishDrain: () => void = () => {}
+      const drainExpired = new Promise<null>((resolve) => {
+        finishDrain = () => resolve(null)
+      })
+      const readers: ReadableStreamDefaultReader<Uint8Array>[] = []
+      const collected: Uint8Array[][] = []
       const stop = () => {
+        cleanupUncertain = true
+        truncated = true
         try {
           proc.kill()
         } catch {}
+        drainTimer ??= setTimeout(() => {
+          cleanupUncertain = true
+          truncated = true
+          for (const reader of readers) void reader.cancel().catch(() => {})
+          finishDrain()
+        }, 250)
       }
       const timer = setTimeout(() => {
         timedOut = true
@@ -99,6 +150,8 @@ export function makeProcessRunner(options: {
       async function collect(stream: ReadableStream<Uint8Array>, limit: number) {
         const reader = stream.getReader(),
           chunks: Uint8Array[] = []
+        readers.push(reader)
+        collected.push(chunks)
         let length = 0
         while (true) {
           const next = await reader.read()
@@ -127,12 +180,21 @@ export function makeProcessRunner(options: {
             }
           }
         }
-        const [stdout, stderr, exitCode] = await Promise.all([
+        const completed = Promise.all([
           collect(proc.stdout, input.maxStdoutBytes),
           collect(proc.stderr, input.maxStderrBytes),
           proc.exited,
           write(),
-        ])
+        ]).catch(() => null)
+        const result = await Promise.race([completed, drainExpired])
+        if (!result) {
+          cleanupUncertain = true
+          truncated = true
+          stop()
+        }
+        const stdout = result?.[0] ?? new Uint8Array(Buffer.concat(collected[0] ?? [])),
+          stderr = result?.[1] ?? new Uint8Array(Buffer.concat(collected[1] ?? [])),
+          exitCode = result?.[2] ?? (timedOut ? 124 : input.signal.aborted ? 130 : 125)
         if (
           input.stdinFile &&
           canonicalJson(await fileIdentity(input.stdinFile.path)) !== canonicalJson(input.stdinFile)
@@ -144,9 +206,11 @@ export function makeProcessRunner(options: {
           stdout,
           stderr,
           truncated,
+          ...(cleanupUncertain ? { cleanupUncertain: true as const } : {}),
         }
       } finally {
         clearTimeout(timer)
+        if (drainTimer) clearTimeout(drainTimer)
         input.signal.removeEventListener("abort", stop)
       }
     },
@@ -190,14 +254,7 @@ export function makeDockerRunner(options: {
       const args = input.argv[0] === "--context" ? input.argv.slice(2) : input.argv
       const context = input.argv[0] === "--context" ? input.argv[1] : request.context
       if (context !== request.context && context !== "default") throw new TypeError("TASK24_LINUX_OPERATION_DENIED")
-      const readonly =
-        args[0] === "version" ||
-        args[0] === "info" ||
-        (args[0] === "context" && args[1] === "inspect") ||
-        (!!options.session &&
-          args[0] === "image" &&
-          args[1] === "inspect" &&
-          /^[a-z0-9./:_-]+@sha256:[a-f0-9]{64}$/.test(args[2] ?? ""))
+      const readonly = isReadonlyDockerInvocation(args, !!options.session)
       if (!readonly) {
         const map: Record<string, EngineApproval["allowedOperations"][number]> = {
           "container/create": "container-create",

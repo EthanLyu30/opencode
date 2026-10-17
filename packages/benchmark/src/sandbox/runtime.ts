@@ -11,9 +11,8 @@ import { revalidateSession } from "./preflight"
 import { makeDockerRunner } from "./docker"
 import { readControllerJson, type ReadinessIndex } from "./readiness"
 import { makeLinuxBackend } from "./linux-backend"
-import { makeLinuxBrowser, validateBrowserProbe } from "./browser"
+import { makeLinuxBrowser, validateBrowserProbe, loadLinuxBrowserRelease } from "./browser"
 import { startLinuxPreview } from "./preview"
-import { loadBrowserRelease } from "../evaluator/browser-runtime"
 import {
   decodeTaskExecutionProfile,
   decodeEvaluationIdentity,
@@ -42,6 +41,8 @@ import {
   verifyBinaryCapabilities,
   type CapabilityReceipt,
   type PublicMcpConnection,
+  type HostIsolationAdapter,
+  makeBrowserIsolationRunner,
 } from "./capability"
 import { makePublicToolHost } from "./public-tools"
 import { startPublicToolPipe } from "./mcp-server"
@@ -50,8 +51,23 @@ import { bindEvidenceFile } from "../evaluator/evidence"
 import { FixtureReply } from "./fixture-provider"
 import { Sha256 } from "../schema"
 import { verifyControllerIdentity } from "./controller-identity"
+import {
+  createDependencyAuditors,
+  auditDependencySet,
+  stopDependencyAuditors,
+  type DependencyAuditSet,
+} from "./dependency-auditors"
+import { verifyBinaryBuildRecords } from "./binary-build"
+import { observeBrowserFonts } from "./fonts"
 
 type Profiles = Parameters<typeof makeLinuxBackend>[0]["profiles"]
+export async function dispatchAcceptanceProbe<T>(input: {
+  mode: "node" | "pdf" | "browser"
+  browser: () => Promise<T>
+  linux: () => Promise<T>
+}) {
+  return input.mode === "browser" ? input.browser() : input.linux()
+}
 const Strings = Schema.Array(Schema.String)
 const Modes = Schema.Record(Schema.String, Schema.Literals(["node", "browser", "pdf"]))
 const Build = Schema.Struct({
@@ -102,7 +118,12 @@ const Arm = Schema.Struct({
 // This is preparation data, not executable adapters or a source of expected scores.
 const Config = Schema.Struct({
   schemaVersion: Schema.Literal(2),
-  browser: Schema.Struct({ root: Schema.String, helper: FileIdentity, fonts: Schema.NonEmptyArray(FileIdentity) }),
+  browser: Schema.Struct({
+    root: Schema.String,
+    helper: FileIdentity,
+    fonts: Schema.NonEmptyArray(FileIdentity),
+    fontRegistrySha256: Sha256,
+  }),
   profiles: Schema.Array(
     Schema.Struct({
       profile: Schema.Unknown,
@@ -216,6 +237,13 @@ export async function openLinuxRuntime(session: EngineSession) {
   if ((await fileIdentity(configArtifact.path!)).sha256 !== configArtifact.sha256)
     throw new TypeError("TASK24_RUNTIME_CONFIG_STALE")
   const config = decodeLinuxRuntimeConfig(await readControllerJson(configArtifact.path!))
+  let isolation: HostIsolationAdapter | undefined
+  async function ensureIsolation() {
+    return (isolation ??= await loadHostIsolationAdapter({
+      session,
+      file: await fileIdentity(artifact("host-isolation").path!),
+    }))
+  }
   const dependencies = artifact("dependencies"),
     original = (await readControllerJson(dependencies.path!)) as ResolvedImages
   if (
@@ -232,10 +260,19 @@ export async function openLinuxRuntime(session: EngineSession) {
     throw new TypeError("TASK24_RUNTIME_DEPENDENCIES")
   // The accept manifest freezes the original prepare metadata. Rebinding is local, never persisted over it.
   const images = { ...original, manifestSha256: session.manifestSha256 }
-  const guard = async () => {
+  const auditorFile = path.join(manifest.roots.evidence, "linux-dependency-auditors.json")
+  let auditors: DependencyAuditSet | undefined = (await fs.lstat(auditorFile).catch(() => null))
+    ? ((await readControllerJson(auditorFile)) as DependencyAuditSet)
+    : undefined
+  const identityGuard = async () => {
     await revalidateSession(session)
     await verifyControllerIdentity(manifest)
     await verifyRuntimeFiles()
+  }
+  const guard = async () => {
+    await identityGuard()
+    if (!auditors) throw new TypeError("TASK24_DEPENDENCY_AUDITORS_REQUIRED")
+    await auditDependencySet({ session, runner, guard: identityGuard, images, set: auditors })
   }
   const runner = makeDockerRunner({
     request: state.inspection.request,
@@ -245,17 +282,19 @@ export async function openLinuxRuntime(session: EngineSession) {
     },
   })
   async function verifyRuntimeFiles() {
+    await verifyBinaryBuildRecords({ manifest })
+    loadLinuxBrowserRelease(config.browser.root, manifest.artifacts.find((a) => a.id === "browser")!.sha256)
     if ((await fileIdentity(configArtifact.path!)).sha256 !== configArtifact.sha256)
       throw new TypeError("TASK24_RUNTIME_CONFIG_STALE")
     if ((await fileIdentity(dependencies.path!)).sha256 !== dependencies.sha256)
       throw new TypeError("TASK24_RUNTIME_DEPENDENCIES_STALE")
-    const fontFiles = []
-    for (const f of config.browser.fonts) {
-      const current = await fileIdentity(f.path)
-      if (canonicalJson(current) !== canonicalJson(f)) throw new TypeError("TASK24_RUNTIME_FONTS_STALE")
-      fontFiles.push(current)
-    }
-    if (sha256Text(canonicalJson(fontFiles)) !== manifest.artifacts.find((a) => a.id === "fonts")?.sha256)
+    const fonts = await observeBrowserFonts(manifest)
+    if (
+      canonicalJson(fonts.files) !== canonicalJson(config.browser.fonts) ||
+      fonts.registrySha256 !== config.browser.fontRegistrySha256
+    )
+      throw new TypeError("TASK24_RUNTIME_FONTS_STALE")
+    if (fonts.fontSha256 !== manifest.artifacts.find((a) => a.id === "fonts")?.sha256)
       throw new TypeError("TASK24_RUNTIME_FONT_BINDING")
     if (
       canonicalJson(await fileIdentity(config.browser.helper.path)) !== canonicalJson(config.browser.helper) ||
@@ -265,9 +304,10 @@ export async function openLinuxRuntime(session: EngineSession) {
   }
   await verifyRuntimeFiles()
   function browser(evidenceRoot: string, references: string) {
-    const base = loadBrowserRelease(config.browser.root)
-    if (base.buildSha256 !== manifest.artifacts.find((a) => a.id === "browser")?.sha256)
-      throw new TypeError("TASK24_RUNTIME_BROWSER")
+    const base = loadLinuxBrowserRelease(
+      config.browser.root,
+      manifest.artifacts.find((a) => a.id === "browser")!.sha256,
+    )
     return makeLinuxBrowser({
       release: {
         base,
@@ -289,10 +329,45 @@ export async function openLinuxRuntime(session: EngineSession) {
         XDG_CONFIG_HOME: manifest.roots.config,
       },
       requirementPlans: config.corpus.requirementPlans,
+      async runner(lease) {
+        if (!isolation) throw new TypeError("TASK24_BROWSER_OS_ISOLATION_REQUIRED")
+        return makeBrowserIsolationRunner({
+          session,
+          adapter: isolation,
+          helper: config.browser.helper,
+          browser: await fileIdentity(base.browserExecutable),
+          node: await fileIdentity(base.nodeExecutable),
+          cwd: manifest.roots.temp,
+          env: {
+            SystemRoot: "C:\\Windows",
+            PATH: "C:\\Windows\\System32",
+            HOME: manifest.roots.config,
+            USERPROFILE: manifest.roots.config,
+            APPDATA: manifest.roots.config,
+            LOCALAPPDATA: manifest.roots.temp,
+            TEMP: manifest.roots.temp,
+            TMP: manifest.roots.temp,
+            NODE_DISABLE_COMPILE_CACHE: "1",
+          },
+          previewID: lease.previewID,
+          previewURL: lease.url,
+        })
+      },
     })
   }
   function backend(profiles: Profiles, evidenceRoot = manifest.roots.evidence) {
-    return makeLinuxBackend({ session, runner, guard, images, profiles, evidenceRoot })
+    return makeLinuxBackend({
+      session,
+      runner,
+      guard: identityGuard,
+      images,
+      profiles,
+      evidenceRoot,
+      async taskGuard(taskID) {
+        if (!auditors) throw new TypeError("TASK24_DEPENDENCY_AUDITORS_REQUIRED")
+        await auditDependencySet({ session, runner, guard: identityGuard, images, set: auditors, taskID })
+      },
+    })
   }
   async function captureReference(
     profile: TaskExecutionProfile,
@@ -363,10 +438,7 @@ export async function openLinuxRuntime(session: EngineSession) {
         .join("") !== "ABCDE"
     )
       throw new TypeError("TASK24_RUNTIME_CAPABILITY_COVERAGE")
-    const isolation = await loadHostIsolationAdapter({
-      session,
-      file: await fileIdentity(artifact("host-isolation").path!),
-    })
+    const isolation = await ensureIsolation()
     for (const c of config.capabilities) {
       const result = await verifyBinaryCapabilities({
         binary: c.binary,
@@ -469,7 +541,17 @@ export async function openLinuxRuntime(session: EngineSession) {
                     timeoutMs: 30000,
                     signal: new AbortController().signal,
                   })
-                  return { screenshotSha256: result.screenshotSha256, evidenceSha256: result.evidenceSha256 }
+                  return {
+                    screenshotSha256: result.screenshotSha256,
+                    evidenceSha256: result.evidenceSha256,
+                    identity: { previewID, viewportID: viewport, candidateSha256: current.identity.candidateSha256 },
+                    image: {
+                      mimeType: "image/png",
+                      data: (await fs.readFile(result.screenshot)).toString("base64"),
+                      sha256: result.screenshotSha256,
+                      bytes: result.screenshotBytes,
+                    },
+                  }
                 },
               },
             })
@@ -526,8 +608,7 @@ export async function openLinuxRuntime(session: EngineSession) {
         web = browser(manifest.roots.evidence, manifest.roots.temp)
       let lease: Awaited<ReturnType<typeof startLinuxPreview>> | undefined
       try {
-        const build = await raw.build(p.build),
-          probe = await raw.probe(p.probe)
+        const build = await raw.build(p.build)
         if (build.payload.kind !== "ok") throw new TypeError("TASK24_RUNTIME_PROJECT_BUILD")
         const profile = raw.describe(p.build)
         if (!profile.preview) throw new TypeError("TASK24_RUNTIME_PROJECT_PREVIEW")
@@ -539,6 +620,11 @@ export async function openLinuxRuntime(session: EngineSession) {
           signal: new AbortController().signal,
         })
         web.register(p.build.identity, lease)
+        const probe = await dispatchAcceptanceProbe<ProjectAcceptanceEvidence["probe"]>({
+          mode: raw.probeMode(p.probe),
+          linux: () => raw.probe(p.probe),
+          browser: async () => ({ payload: { kind: "ok", response: await web.probe(p.probe) }, browser: true }),
+        })
         const captures = []
         for (const viewportID of ["mobile", "tablet", "desktop"] as const)
           captures.push(
@@ -601,7 +687,10 @@ export async function openLinuxRuntime(session: EngineSession) {
     guard,
     runner,
     async accept() {
-      await guard()
+      await ensureIsolation()
+      await identityGuard()
+      const created = !auditors
+      auditors ??= await createDependencyAuditors({ session, runner, guard: identityGuard, images })
       const result = await acceptLinuxEngine({
         session,
         manifest,
@@ -610,7 +699,15 @@ export async function openLinuxRuntime(session: EngineSession) {
         guard,
         projectVerifier: verifyProjects,
         capabilityVerifier: verifyCapabilities,
+        dependencyVerifier: () => auditDependencySet({ session, runner, guard: identityGuard, images, set: auditors! }),
       })
+      if (result.status !== "passed" && created) {
+        await stopDependencyAuditors({ session, runner, guard: identityGuard, images, set: auditors })
+        if (canonicalJson(await readControllerJson(auditorFile)) !== canonicalJson(auditors))
+          throw new TypeError("TASK24_DEPENDENCY_AUDITOR_CLEANUP_IDENTITY")
+        await fs.unlink(auditorFile)
+        auditors = undefined
+      }
       if (result.status === "passed")
         await publishImmutable(
           path.join(manifest.roots.evidence, "linux-acceptance-input.json"),
@@ -624,6 +721,7 @@ export async function openLinuxRuntime(session: EngineSession) {
       return result
     },
     async calibrate() {
+      await ensureIsolation()
       const anchor = Schema.decodeUnknownSync(
         Schema.Struct({
           schemaVersion: Schema.Literal(2),

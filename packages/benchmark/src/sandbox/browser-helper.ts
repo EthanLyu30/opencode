@@ -8,7 +8,12 @@ import { canonicalJson } from "../campaign/canonical"
 import { sha256Bytes } from "../hash"
 import { FIXED_VIEWPORTS, type BrowserCaptureRequest } from "../evaluator/browser-protocol"
 import { directRoot } from "../corpus/evaluation-bundle"
-import { isAdmittedLinuxBrowserURL, validateBrowserProbe, validateBrowserAdmission } from "./browser"
+import {
+  isAdmittedLinuxBrowserURL,
+  validateBrowserProbe,
+  validateBrowserAdmission,
+  dataFrameWasBlocked,
+} from "./browser"
 import type { ProbeRequest } from "../evaluator/independent/host"
 import { decodeRequirementPlans } from "./controller-facts"
 import { decodeEvaluationIdentity } from "../corpus/evaluation-profile"
@@ -34,6 +39,20 @@ const Request = Schema.Struct({
   plans: Schema.Array(Schema.Unknown),
   data: Schema.Unknown,
 })
+export function browserLaunchPolicy() {
+  return {
+    chromiumSandbox: true,
+    args: [
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-sync",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--font-render-hinting=none",
+      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    ],
+  }
+}
 export async function browserHelperMain() {
   let size = 0
   const chunks: Buffer[] = []
@@ -58,6 +77,7 @@ export async function browserHelperMain() {
   const profile = path.join(request.temp, "browser-" + crypto.randomUUID())
   await fs.mkdir(profile)
   const context = await chromium.launchPersistentContext(profile, {
+    ...browserLaunchPolicy(),
     executablePath: request.browser,
     headless: true,
     viewport:
@@ -72,14 +92,6 @@ export async function browserHelperMain() {
     acceptDownloads: false,
     serviceWorkers: "block",
     permissions: [],
-    args: [
-      "--disable-background-networking",
-      "--disable-component-update",
-      "--disable-sync",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--font-render-hinting=none",
-    ],
   })
   const timer = setTimeout(() => {
     abort.abort()
@@ -217,19 +229,40 @@ export async function browserHelperMain() {
           input.fileURL,
         )
         .catch(() => page.isClosed())
-      const dataAttempt = page
+      const dataObservation = await page
         .evaluate(
           () =>
-            new Promise<boolean>((resolve) => {
-              const f = document.createElement("iframe")
-              f.onload = () => resolve(false)
-              f.src = "data:text/html,<p>own-data-canary</p>"
+            new Promise<{ executed: boolean; closed: boolean; frameURL: string; cspDenied: boolean }>((resolve) => {
+              const f = document.createElement("iframe"),
+                nonce = crypto.randomUUID()
+              let executed = false,
+                cspDenied = false
+              const message = (event: MessageEvent) => {
+                if (event.source === f.contentWindow && event.data === nonce) executed = true
+              }
+              const violation = (event: SecurityPolicyViolationEvent) => {
+                if (event.effectiveDirective === "frame-src" && event.blockedURI === "data") cspDenied = true
+              }
+              window.addEventListener("message", message)
+              document.addEventListener("securitypolicyviolation", violation)
+              f.src =
+                "data:text/html," +
+                encodeURIComponent("<script>parent.postMessage(" + JSON.stringify(nonce) + ',"*")</script>')
               document.body.append(f)
-              setTimeout(() => resolve(false), 1000)
+              setTimeout(() => {
+                let frameURL = "opaque"
+                try {
+                  frameURL = f.contentWindow?.location.href ?? ""
+                } catch {}
+                f.remove()
+                window.removeEventListener("message", message)
+                document.removeEventListener("securitypolicyviolation", violation)
+                resolve({ executed, closed: false, frameURL, cspDenied })
+              }, 500)
             }),
         )
-        .catch(() => page.isClosed())
-      const dataBlocked = await dataAttempt
+        .catch(() => ({ executed: false, closed: page.isClosed(), frameURL: "", cspDenied: false }))
+      const dataBlocked = dataFrameWasBlocked(dataObservation)
       result = {
         networkBlocked,
         websocketBlocked,

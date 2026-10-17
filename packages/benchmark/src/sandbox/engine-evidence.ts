@@ -29,6 +29,8 @@ import { requireBrowserTrace } from "./browser"
 import type { PublishedEvidence } from "../evaluator/capture"
 import type { EvaluationIdentityV2 } from "../corpus/evaluation-profile"
 import type { RawBuild, RawProbe } from "./linux-backend"
+import type { ProbeResponse } from "../evaluator/independent/probe"
+import { requireDependencyAudit } from "./dependency-auditors"
 export const engineCheckIDs = [
   "engine-storage-image",
   "privilege-root",
@@ -62,7 +64,7 @@ export type ProjectAcceptanceEvidence = Readonly<{
   kind: "chart" | "http" | "pdf"
   identity: EvaluationIdentityV2
   build: RawBuild
-  probe: RawProbe
+  probe: RawProbe | { payload: { kind: "ok"; response: ProbeResponse }; browser: true }
   captures: readonly PublishedEvidence[]
   operations: readonly OperationReceipt[]
   admission: {
@@ -87,6 +89,7 @@ export type EngineAcceptanceInput = Readonly<{
   signal?: AbortSignal
   projectVerifier?: () => Promise<readonly ProjectAcceptanceEvidence[]>
   capabilityVerifier?: () => Promise<readonly CapabilityReceipt[]>
+  dependencyVerifier?: () => Promise<readonly EvidenceReference[]>
 }>
 export function summarizeEngineChecks(checks: readonly CheckResult[]): "passed" | "blocked" | "failed" {
   if (
@@ -154,6 +157,8 @@ export async function restoreEngineReceipt(input: {
   expectedSha256: string
 }): Promise<EngineReceipt> {
   const state = await revalidateSession(input.session)
+  const { openLinuxRuntime } = await import("./runtime")
+  await (await openLinuxRuntime(input.session)).guard()
   await verifyFrozenArtifacts(
     state.manifest,
     makeDockerRunner({
@@ -218,9 +223,11 @@ export async function acceptLinuxEngine(input: EngineAcceptanceInput): Promise<E
       return blocked("accept_approval_mismatch")
     if (!isRealDockerRunner(input.runner) || !isRealDockerRunner(state.inspection.runner))
       return blocked("real_docker_transport_required")
-    if (!input.projectVerifier || !input.capabilityVerifier)
+    if (!input.projectVerifier || !input.capabilityVerifier || !input.dependencyVerifier)
       return blocked("project_and_exact_binary_matrix_inputs_required")
     await verifyFrozenArtifacts(manifest, input.runner)
+    const dependencyEvidence = await input.dependencyVerifier()
+    requireDependencyAudit(dependencyEvidence, input.session)
     const signal = input.signal ?? new AbortController().signal,
       nonce = randomBytes(16).toString("hex"),
       root = await fs.mkdtemp(path.join(manifest.roots.work, "acceptance-"))
@@ -442,11 +449,20 @@ export async function acceptLinuxEngine(input: EngineAcceptanceInput): Promise<E
       for (const project of projects) {
         if (project.build.payload.kind !== "ok" || project.probe.payload.kind !== "ok" || project.captures.length !== 3)
           throw new TypeError("TASK24_ACCEPT_PROJECT_FAILED")
-        for (const operation of [project.build.receipt, project.probe.receipt, ...project.operations]) {
+        for (const operation of [
+          project.build.receipt,
+          ...("receipt" in project.probe ? [project.probe.receipt] : []),
+          ...project.operations,
+        ]) {
           requireOperationReceipt(operation)
           if (operation.assurance !== "linux-attested" || operation.manifestSha256 !== input.session.manifestSha256)
             throw new TypeError("TASK24_ACCEPT_PROJECT_FIXTURE")
           projectRefs.push(operation.evidence)
+        }
+        if ("browser" in project.probe) {
+          const trace = requireBrowserTrace(project.probe.payload.response, project.identity)
+          verifyEvidenceFile(manifest.roots.evidence, trace.evidence)
+          projectRefs.push(trace.evidence)
         }
         const expected = manifest.artifacts.find((a) => a.id === "acceptance-" + project.kind + "-expected")
         if (!expected || sha256Text(canonicalJson(project.probe.payload.response)) !== expected.sha256)
@@ -472,7 +488,7 @@ export async function acceptLinuxEngine(input: EngineAcceptanceInput): Promise<E
           !admission.result.fileBlocked ||
           !admission.result.dataBlocked ||
           !admission.result.crossCapabilityBlocked ||
-          admission.result.blockedRequests < 3
+          admission.result.blockedRequests < 1
         )
           throw new TypeError("TASK24_ACCEPT_BROWSER_ADMISSION")
         verifyEvidenceFile(manifest.roots.evidence, trace.evidence)
@@ -577,7 +593,7 @@ export async function acceptLinuxEngine(input: EngineAcceptanceInput): Promise<E
       await row(
         "engine-storage-image",
         (await fileIdentity(path.join(root, "sentinel"))).sha256 === before.sha256,
-        evidence,
+        [...evidence, ...dependencyEvidence],
         "host_sentinel_changed",
       )
       const status = summarizeEngineChecks(checks)

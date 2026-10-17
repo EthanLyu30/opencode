@@ -7,6 +7,45 @@ import type { PublicToolHost } from "./public-tools"
 import { createServer, createConnection } from "node:net"
 import { randomBytes } from "node:crypto"
 import { Schema } from "effect"
+import { sha256Bytes } from "../hash"
+export function publicCaptureContent(raw: unknown) {
+  const value = Schema.decodeUnknownSync(
+    Schema.Struct({
+      screenshotSha256: Schema.String,
+      evidenceSha256: Schema.String,
+      identity: Schema.Struct({
+        previewID: Schema.String,
+        viewportID: Schema.Literals(["mobile", "tablet", "desktop"]),
+        candidateSha256: Schema.String,
+      }),
+      image: Schema.Struct({
+        mimeType: Schema.Literal("image/png"),
+        data: Schema.String,
+        bytes: Schema.Int,
+        sha256: Schema.String,
+      }),
+    }),
+  )(raw, { onExcessProperty: "error" })
+  const bytes = Buffer.from(value.image.data, "base64")
+  if (
+    bytes.length !== value.image.bytes ||
+    bytes.length < 8 ||
+    bytes.length > 8388608 ||
+    bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" ||
+    bytes.toString("base64") !== value.image.data ||
+    sha256Bytes(bytes) !== value.image.sha256 ||
+    value.image.sha256 !== value.screenshotSha256 ||
+    ![value.identity.previewID, value.identity.candidateSha256, value.screenshotSha256, value.evidenceSha256].every(
+      (v) => /^[a-f0-9]{64}$/.test(v),
+    )
+  )
+    throw new TypeError("TASK24_PUBLIC_IMAGE_BINDING")
+  const { image, ...metadata } = value
+  return [
+    { type: "image" as const, data: image.data, mimeType: image.mimeType },
+    { type: "text" as const, text: canonicalJson(metadata) },
+  ]
+}
 
 const PipeCall = Schema.Struct({
   capability: Schema.String,
@@ -36,7 +75,11 @@ export async function startPublicToolPipe(input: {
       void (async () => {
         try {
           const call = Schema.decodeUnknownSync(PipeCall)(JSON.parse(text), { onExcessProperty: "error" })
-          if (call.capability !== capability) throw Error("cap")
+          if (
+            !/^[a-f0-9]{64}$/.test(call.capability) ||
+            !timingSafeEqual(Buffer.from(call.capability), Buffer.from(capability))
+          )
+            throw Error("cap")
           const value = await input.host[call.name](call.parameters)
           const out = canonicalJson({ ok: true, value }) + "\n"
           if (Buffer.byteLength(out) > maxFrame) throw Error("size")
@@ -118,26 +161,19 @@ export async function servePublicMcp(input: {
       name,
       inputSchema: {
         type: "object" as const,
-        properties: { ...properties, capability: { type: "string" } },
-        required: [...Object.keys(properties), "capability"],
+        properties,
+        required: Object.keys(properties),
         additionalProperties: false,
       },
     })),
   }))
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
-      const args = request.params.arguments ?? {},
-        cap = args.capability
-      if (
-        typeof cap !== "string" ||
-        !/^[a-f0-9]{64}$/.test(cap) ||
-        !timingSafeEqual(Buffer.from(cap), Buffer.from(input.capability))
-      )
-        throw Error("cap")
+      const parameters = request.params.arguments ?? {}
       if (!Object.hasOwn(specs, request.params.name)) throw Error("tool")
-      const { capability, ...parameters } = args
       const name = request.params.name as keyof typeof specs
       const result = await input.host[name](parameters)
+      if (name === "capture") return { content: publicCaptureContent(result) }
       return { content: [{ type: "text" as const, text: canonicalJson(result) }] }
     } catch {
       return { isError: true, content: [{ type: "text" as const, text: "TASK24_PUBLIC_TOOL_DENIED" }] }

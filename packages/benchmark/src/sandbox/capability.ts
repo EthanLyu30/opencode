@@ -11,10 +11,11 @@ import { prepareWorkflowArm } from "../arms/workflow"
 import { prepareDirectArm } from "../arms/direct"
 import { fileIdentity } from "./storage"
 import { sessionState, revalidateSession } from "./preflight"
-import type { FileIdentity, EngineSession, Gate } from "./contracts"
+import type { FileIdentity, EngineSession, Gate, DockerRunner, DockerInvocation, DockerExecution } from "./contracts"
 import { requireRealDockerRunner } from "./docker"
 import { Schema } from "effect"
 import { startFixtureCapabilityProvider, type FixtureReply } from "./fixture-provider"
+import { verifyBinaryBuildRecords } from "./binary-build"
 export type PublicMcpConnection = Readonly<{ pipe: string; capability: string; bun: FileIdentity; entry: FileIdentity }>
 export async function configurePublicMcp(
   launch: DirectArmLaunch,
@@ -63,6 +64,20 @@ export async function configurePublicMcp(
   )
 }
 export type HostIsolationAdapter = Readonly<{
+  browser?(input: {
+    invocation: DockerInvocation
+    executable: string
+    helper: FileIdentity
+    browser: FileIdentity
+    node: FileIdentity
+    cwd: string
+    env: Readonly<Record<string, string>>
+    manifestSha256: string
+    previewID: string
+    previewURL: string
+    chromiumSandboxRequired: true
+    denyNonPreviewNetwork: true
+  }): Promise<{ execution: DockerExecution; observation: unknown }>
   verify(): Promise<Gate<{ evidence: readonly EvidenceReference[] }>>
   launch(input: { launch: ArmLaunch; kind: "visual" | "coding"; readonly: boolean; signal: AbortSignal }): Promise<{
     ended: boolean
@@ -77,6 +92,96 @@ export type HostIsolationAdapter = Readonly<{
     evidence: readonly EvidenceReference[]
   }>
 }>
+const browserRunners = new WeakSet<object>()
+export function requireBrowserIsolationRunner(runner: DockerRunner) {
+  if (!browserRunners.has(runner)) throw new TypeError("TASK24_BROWSER_OS_ISOLATION_REQUIRED")
+}
+export async function makeBrowserIsolationRunner(input: {
+  session: EngineSession
+  adapter: HostIsolationAdapter
+  helper: FileIdentity
+  browser: FileIdentity
+  node: FileIdentity
+  cwd: string
+  env: Readonly<Record<string, string>>
+  previewID: string
+  previewURL: string
+}): Promise<DockerRunner> {
+  if (!adapters.has(input.adapter) || !input.adapter.browser)
+    throw new TypeError("TASK24_BROWSER_OS_ISOLATION_REQUIRED")
+  const state = await revalidateSession(input.session)
+  const runner: DockerRunner = {
+    async execute(invocation) {
+      await revalidateSession(input.session)
+      for (const file of [input.helper, input.browser, input.node])
+        if (canonicalJson(await fileIdentity(file.path)) !== canonicalJson(file))
+          throw new TypeError("TASK24_BROWSER_ISOLATION_ARTIFACT_STALE")
+      if (canonicalJson(invocation.argv) !== canonicalJson([input.helper.path]))
+        throw new TypeError("TASK24_BROWSER_ISOLATION_ARGUMENTS")
+      const result = await input.adapter.browser!({
+        ...input,
+        invocation,
+        executable: input.node.path,
+        manifestSha256: input.session.manifestSha256,
+        chromiumSandboxRequired: true,
+        denyNonPreviewNetwork: true,
+      })
+      const value = Schema.decodeUnknownSync(
+        Schema.Struct({
+          manifestSha256: Schema.String,
+          previewID: Schema.String,
+          helperSha256: Schema.String,
+          nodeSha256: Schema.String,
+          browserSha256: Schema.String,
+          ended: Schema.Literal(true),
+          processTreeEnded: Schema.Literal(true),
+          sandboxEnabled: Schema.Literal(true),
+          nonPreviewNetworkBlocked: Schema.Literal(true),
+          canaryHealthy: Schema.Literal(true),
+          deniedCanaryAttempts: Schema.Int,
+          canaryHits: Schema.Literal(0),
+          evidence: Schema.Array(
+            Schema.Struct({
+              kind: Schema.String,
+              relativePath: Schema.String,
+              sha256: Schema.String,
+              bytes: Schema.Int,
+            }),
+          ),
+        }),
+      )(result.observation, { onExcessProperty: "error" })
+      if (
+        value.manifestSha256 !== input.session.manifestSha256 ||
+        value.previewID !== input.previewID ||
+        value.helperSha256 !== input.helper.sha256 ||
+        value.nodeSha256 !== input.node.sha256 ||
+        value.browserSha256 !== input.browser.sha256 ||
+        value.deniedCanaryAttempts < 1 ||
+        !value.evidence.length ||
+        result.execution.cleanupUncertain
+      )
+        throw new TypeError("TASK24_BROWSER_OS_ISOLATION_UNOBSERVED")
+      const { evidence, ...body } = value
+      for (const ref of evidence) {
+        verifyEvidenceFile(state.manifest.roots.evidence, ref)
+        if (
+          canonicalJson(
+            JSON.parse(await fs.readFile(path.join(state.manifest.roots.evidence, ref.relativePath), "utf8")),
+          ) !==
+          canonicalJson({
+            ...body,
+            stdoutSha256: sha256Text(Buffer.from(result.execution.stdout).toString("base64")),
+            exitCode: result.execution.exitCode,
+          })
+        )
+          throw new TypeError("TASK24_BROWSER_OS_ISOLATION_EVIDENCE")
+      }
+      return result.execution
+    },
+  }
+  browserRunners.add(runner)
+  return runner
+}
 const adapters = new WeakSet<object>(),
   issued = new WeakSet<object>()
 export type CapabilityReceipt = Readonly<{
@@ -144,6 +249,7 @@ export async function verifyBinaryCapabilities(input: {
   if (!input.isolation || !adapters.has(input.isolation)) return blocked("verified_os_isolation_adapter")
   const state = await revalidateSession(input.session),
     proof = await input.isolation.verify()
+  await verifyBinaryBuildRecords({ manifest: state.manifest })
   if (proof.kind !== "ready" || !proof.value.evidence.length) return blocked("os_isolation_evidence")
   if (
     !input.cases ||

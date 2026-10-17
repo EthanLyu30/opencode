@@ -119,3 +119,52 @@ test("owned named pipe forwards only admitted public methods and rejects a forei
     await pipe.close()
   }
 })
+test("R7/R14 real MCP transport authorizes via launcher, not model args, and returns inspectable PNG content", async () => {
+  const f = await sessionFixture()
+  try {
+    const child = Bun.spawn(
+      [process.execPath, "--no-env-file", "run", path.resolve("test/linux-host/mcp-fixture.ts")],
+      { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: process.env },
+    )
+    for (const request of [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "own", version: "1" } },
+      },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "read", arguments: { path: "src/own", offset: 0, length: 3 } },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "capture", arguments: { previewID: "b".repeat(64), viewportID: "desktop" } },
+      },
+    ])
+      child.stdin.write(JSON.stringify(request) + "\n")
+    child.stdin.end()
+    const lines = (await new Response(child.stdout).text())
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l))
+    expect(await child.exited).toBe(0)
+    expect(
+      lines
+        .find((l) => l.id === 2)
+        .result.tools.every(
+          (t: { inputSchema: { required: string[] } }) => !t.inputSchema.required.includes("capability"),
+        ),
+    ).toBe(true)
+    expect(lines.find((l) => l.id === 3).result.content[0].text).toBe('{"text":"own"}')
+    expect(lines.find((l) => l.id === 4).result.content[0]).toMatchObject({ type: "image", mimeType: "image/png" })
+  } finally {
+    await f.dispose()
+  }
+})

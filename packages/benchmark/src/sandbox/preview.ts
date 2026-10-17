@@ -31,6 +31,22 @@ export type PreviewLease = Readonly<{
   assets: readonly FileEntry[]
   stop(): Promise<void>
 }>
+export async function reuseLinuxPreview(
+  cache: Map<string, PreviewLease>,
+  key: string,
+  buildSha256: string,
+  create: () => Promise<PreviewLease>,
+) {
+  const prior = cache.get(key)
+  if (prior?.buildSha256 === buildSha256) return prior
+  if (prior) {
+    await prior.stop()
+    cache.delete(key)
+  }
+  const next = await create()
+  cache.set(key, next)
+  return next
+}
 const leases = new WeakMap<
   PreviewLease,
   { source: PreviewSource; policy: RelayPolicy; guard: AuthorityGuard; controller: AbortController }
@@ -140,7 +156,7 @@ export async function startLinuxPreview(input: {
           "x-content-type-options": "nosniff",
           "referrer-policy": "no-referrer",
           "content-security-policy":
-            "default-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'self'",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'self'",
         },
       })
     },

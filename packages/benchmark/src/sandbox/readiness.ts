@@ -70,6 +70,8 @@ export async function verifyLinuxReadiness(input: {
       input.index ?? (await readControllerJson(path.join(input.root, "linux-readiness-input.json"))),
     )
     if (index.manifestSha256 !== input.session.manifestSha256) throw new TypeError("TASK24_READINESS_STALE")
+    const { openLinuxRuntime } = await import("./runtime")
+    await (await openLinuxRuntime(session)).guard()
     const engine = await restoreEngineReceipt({
       session: input.session,
       receipt: (await readControllerJson(path.join(input.root, `engine-${index.engineSha256}.json`))) as EngineReceipt,
@@ -191,9 +193,9 @@ export async function publishLinuxReadiness(input: Parameters<typeof verifyLinux
   if (result.kind !== "ready") return result
   const body = {
     schemaVersion: 2,
-    software_complete: true,
+    software_verified: true,
     engine_verified: true,
-    capabilities_verified: true,
+    tool_capability_verified: true,
     corpus_engine_ready: true,
     manifestSha256: input.session!.manifestSha256,
     engineSha256: result.value.engine.receiptSha256,

@@ -115,8 +115,8 @@ export function browserBuildSha256(input: Omit<BrowserReleaseManifest, "buildSha
   return createHash("sha256").update(canonicalJson(input)).digest("hex")
 }
 
-export function loadBrowserRelease(releaseRoot: string): BrowserRelease {
-  const layout = Task24Root.ensure()
+export function loadBrowserRelease(releaseRoot: string, options: { readOnly?: true } = {}): BrowserRelease {
+  const layout = options.readOnly ? Task24Root.make(Task24Root.fixed) : Task24Root.ensure()
   const browserRoot = path.join(layout.toolchain, "browser")
   const root = exactDirectory(browserRoot, releaseRoot, "TASK24_BROWSER_RELEASE_ROOT_INVALID")
   if (!/^[a-f0-9]{64}$/.test(path.basename(root))) throw new TypeError("TASK24_BROWSER_RELEASE_ROOT_INVALID")

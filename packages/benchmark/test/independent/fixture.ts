@@ -9,6 +9,7 @@ import { loadEvaluationBundle } from "../../src/corpus/evaluation-bundle"
 import { captureCandidate } from "../../src/evaluator/independent/snapshot"
 import { fixtureObservation, buildManifest, type EvaluationHost } from "../../src/evaluator/independent/host"
 import { bindEvidenceFile } from "../../src/evaluator/evidence"
+import { decodeProbeResponse } from "../../src/evaluator/independent/probe"
 
 export function identity(overrides: Record<string, unknown> = {}) {
   return decodeEvaluationIdentity({
@@ -168,12 +169,16 @@ export async function orchestratorFixture(value = 5) {
       requests.push(r)
       return fixtureObservation(r, {
         kind: "ok",
-        response: {
-          cases: r.operations.map((c) => ({
-            id: c.id,
-            outputs: c.steps.map(() => ({ kind: "value" as const, value })),
-          })),
-        },
+        response: decodeProbeResponse(
+          Buffer.from(
+            JSON.stringify({
+              cases: r.operations.map((c) => ({
+                id: c.id,
+                outputs: c.steps.map(() => ({ kind: "value" as const, value })),
+              })),
+            }),
+          ),
+        ),
       })
     },
     async preview() {

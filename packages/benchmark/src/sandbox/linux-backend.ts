@@ -78,6 +78,7 @@ export function makeLinuxBackend(input: {
   images: Omit<ResolvedImages, "tasks"> & { tasks: readonly BackendImage[] }
   runner: DockerRunner
   guard: AuthorityGuard
+  taskGuard?: (taskID: string) => Promise<void>
   profiles: readonly {
     profile: TaskExecutionProfile
     outputs: readonly string[]
@@ -151,6 +152,10 @@ export function makeLinuxBackend(input: {
     workspace: string,
   ) {
     const p = policy(request)
+    if (p.image.volumes.length) {
+      if (!input.taskGuard) throw new TypeError("TASK24_DEPENDENCY_AUDITORS_REQUIRED")
+      await input.taskGuard(p.profile.taskID)
+    }
     await input.guard()
     const owner = await createOwnedContainer({
       ...input,

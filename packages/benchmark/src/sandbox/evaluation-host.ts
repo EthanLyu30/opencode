@@ -6,7 +6,7 @@ import { verifyOperationReceipt, requireOperationReceipt, type OperationReceipt 
 import { sha256Text } from "../hash"
 import type { LinuxBackend, RawBuild, RawProbe } from "./linux-backend"
 import { requireBrowserTrace, type BrowserTrace, type LinuxBrowser } from "./browser"
-import { startLinuxPreview, type PreviewLease } from "./preview"
+import { startLinuxPreview, reuseLinuxPreview, type PreviewLease } from "./preview"
 import type {
   EvaluationHost,
   BuildObservation,
@@ -171,16 +171,22 @@ export function makeLinuxEvaluationHost(input: {
       return bind(request, raw.payload, [raw.receipt])
     },
     async preview(request: Parameters<EvaluationHost["preview"]>[0]): Promise<PreviewObservation> {
-      const source = await input.backend.previewSource(request),
-        lease = await startLinuxPreview({
-          source,
-          policy: { methods: ["GET", "HEAD", "POST"], paths: source.files.map((f) => "/" + f.path) },
-          guard: async () => {
-            requireLinuxAuthority(input.authority)
-          },
-          signal: new AbortController().signal,
-        })
-      leases.set(canonicalJson(request.identity), lease)
+      const lease = await reuseLinuxPreview(
+        leases,
+        canonicalJson(request.identity),
+        request.build.buildSha256,
+        async () => {
+          const source = await input.backend.previewSource(request)
+          return startLinuxPreview({
+            source,
+            policy: { methods: ["GET", "HEAD", "POST"], paths: source.files.map((f) => "/" + f.path) },
+            guard: async () => {
+              requireLinuxAuthority(input.authority)
+            },
+            signal: new AbortController().signal,
+          })
+        },
+      )
       input.browser.register(request.identity, lease)
       return bind(
         request,

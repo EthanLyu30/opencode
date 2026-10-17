@@ -5,15 +5,15 @@ import { canonicalJson } from "../campaign/canonical"
 import { sha256Text, sha256Bytes } from "../hash"
 import { decodeEvaluationIdentity, safePath, EvaluationIdentityV2 } from "../corpus/evaluation-profile"
 import { directRoot } from "../corpus/evaluation-bundle"
-import type { BrowserRelease, BrowserRuntimeCaptureInput } from "../evaluator/browser-runtime"
+import { loadBrowserRelease, type BrowserRelease, type BrowserRuntimeCaptureInput } from "../evaluator/browser-runtime"
 import type { PublishedEvidence } from "../evaluator/capture"
 import type { ProbeRequest } from "../evaluator/independent/host"
 import { decodeProbeResponse } from "../evaluator/independent/probe"
 import { safeRelayPath } from "./relay-protocol"
 import type { PreviewLease } from "./preview"
-import { makeProcessRunner } from "./docker"
+import { requireBrowserIsolationRunner } from "./capability"
 import { fileIdentity } from "./storage"
-import type { FileIdentity } from "./contracts"
+import type { FileIdentity, DockerRunner } from "./contracts"
 import type { RequirementProbePlan, RequirementObservations } from "./controller-facts"
 import { publishImmutable } from "../offline/atomic"
 import { bindEvidenceFile, type EvidenceReference } from "../evaluator/evidence"
@@ -27,6 +27,24 @@ export type BrowserTrace = Readonly<{
   evidence: EvidenceReference
 }>
 const traces = new WeakMap<object, BrowserTrace>()
+export function loadLinuxBrowserRelease(root: string, expectedSha256: string) {
+  const release = loadBrowserRelease(root, { readOnly: true })
+  if (release.buildSha256 !== expectedSha256) throw new TypeError("TASK24_RUNTIME_BROWSER")
+  return release
+}
+export async function verifyBrowserFileInventory(files: readonly FileIdentity[]) {
+  for (const file of files)
+    if (canonicalJson(await fileIdentity(file.path)) !== canonicalJson(file))
+      throw new TypeError("TASK24_BROWSER_FILE_DRIFT")
+}
+export function dataFrameWasBlocked(value: {
+  executed: boolean
+  closed: boolean
+  frameURL: string
+  cspDenied: boolean
+}) {
+  return !value.executed && (value.cspDenied || value.frameURL === "about:blank")
+}
 export function requireBrowserTrace(value: object, identity: EvaluationIdentityV2) {
   const trace = traces.get(value)
   if (!trace || canonicalJson(trace.identity) !== canonicalJson(identity))
@@ -161,6 +179,7 @@ export function makeLinuxBrowser(input: {
   roots: { temp: string; evidence: string; references: string }
   env: Readonly<Record<string, string>>
   requirementPlans: Readonly<Record<string, readonly RequirementProbePlan[]>>
+  runner?: (lease: PreviewLease) => Promise<DockerRunner>
 }) {
   const observations = new Map<string, Omit<RequirementObservations, "cases" | "files">>()
   const registered = new Map<string, PreviewLease>(),
@@ -180,12 +199,9 @@ export function makeLinuxBrowser(input: {
       paths = lease.assets.map((f) => "/" + f.path)
     await directRoot(input.roots.temp)
     await directRoot(input.roots.evidence)
-    const runner = makeProcessRunner({
-      executable: input.release.base.nodeExecutable,
-      argvPrefix: [],
-      cwd: input.roots.temp,
-      env: { ...input.env, TEMP: input.roots.temp, TMP: input.roots.temp, NODE_DISABLE_COMPILE_CACHE: "1" },
-    })
+    if (!input.runner) throw new TypeError("TASK24_BROWSER_OS_ISOLATION_REQUIRED")
+    const runner = await input.runner(lease)
+    requireBrowserIsolationRunner(runner)
     const result = await runner.execute({
       argv: [input.release.helper.path],
       stdin: Buffer.from(

@@ -55,3 +55,40 @@ test("capability provider is a closed finite local script, rejects wrong routes 
     await provider.stop()
   }
 })
+test("R7 actual finite Responses fixture binds a returned preview ID without any provider lookup", async () => {
+  const provider = startFixtureCapabilityProvider([
+    {
+      protocol: "responses",
+      model: "deepseek-v4-pro",
+      events: [
+        {
+          event: "response.function_call_arguments.done",
+          data: { arguments: '{"previewID":"{{tool:own-preview:previewID}}"}' },
+        },
+      ],
+    },
+  ])
+  try {
+    const r = await fetch(provider.origin + "/v1/deepseek/responses", {
+      method: "POST",
+      headers: { authorization: "Bearer " + provider.grant, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "deepseek-v4-pro",
+        input: [
+          {
+            type: "function_call_output",
+            call_id: "own-preview",
+            output: JSON.stringify({
+              content: [{ type: "text", text: JSON.stringify({ previewID: "d".repeat(64) }) }],
+            }),
+          },
+        ],
+      }),
+    })
+    expect(r.status).toBe(200)
+    expect(await r.text()).toContain("d".repeat(64))
+    expect(provider.observation()).toEqual({ calls: 1, rejected: 0, complete: true })
+  } finally {
+    await provider.stop()
+  }
+})

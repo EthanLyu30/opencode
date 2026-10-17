@@ -78,6 +78,8 @@ const Approval = Schema.Struct({
       "image-load",
       "image-build",
       "volume-prepare",
+      "binary-build",
+      "dependency-auditor-retain",
       "container-create",
       "container-start",
       "container-exec",
@@ -113,6 +115,7 @@ export type DockerExecution = Readonly<{
   stdout: Uint8Array
   stderr: Uint8Array
   truncated: boolean
+  cleanupUncertain?: true
 }>
 export interface DockerRunner {
   execute(input: DockerInvocation): Promise<DockerExecution>

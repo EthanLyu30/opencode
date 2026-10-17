@@ -9,6 +9,45 @@ import { makeLinuxBackend } from "../../src/sandbox/linux-backend"
 import { buildWorkerSource } from "../../src/sandbox/worker"
 import { makeProcessRunner } from "../../src/sandbox/docker"
 import { linuxProbeWorkerSource } from "../../src/sandbox/worker"
+test("R1 forged valid IPC coverage is only candidate return data, never private oracle authority", async () => {
+  const f = await sessionFixture(),
+    c = await orchestratorFixture()
+  try {
+    const value = { cases: [{ id: "literal", outputs: [{ kind: "value", value: 5 }] }] },
+      source = `process.on('message',r=>process.send(r.kind==='begin'?{seq:r.seq,kind:'reset'}:{seq:r.seq,kind:'value',value:${JSON.stringify(value)}}));process.send({kind:'ready'});await new Promise(()=>{})`
+    await fs.writeFile(path.join(f.root, "own.mjs"), source)
+    const request = makeProbeRequest({
+      identity: c.input.identity,
+      profile: { ...c.input.bundle.profile, probeModules: ["own.mjs"] },
+      inputs: {
+        candidate: c.input.snapshot,
+        module: "own.mjs",
+        cases: [{ id: "literal", operations: [{ kind: "call", target: "add", args: [2, 3] }] }],
+      },
+    })
+    const runner = makeProcessRunner({
+        executable: process.execPath,
+        argvPrefix: ["--no-env-file"],
+        cwd: f.root,
+        env: { BUN_OPTIONS: "--no-env-file" },
+      }),
+      result = await runner.execute({
+        argv: ["-e", linuxProbeWorkerSource(process.execPath), f.root],
+        stdin: Buffer.from(canonicalJson(request)),
+        timeoutMs: 5000,
+        maxStdoutBytes: 1048576,
+        maxStderrBytes: 65536,
+        signal: new AbortController().signal,
+      })
+    expect(result.exitCode).toBe(0)
+    const actual = decodeProbeResponse(result.stdout).cases[0]!.outputs[0]!
+    expect(actual).toEqual({ kind: "value", value })
+    expect(actual.kind === "value" && actual.value === 5).toBe(false)
+  } finally {
+    await f.dispose()
+    await c.dispose()
+  }
+})
 test("Linux probe control is separate from candidate stdout, including a valid JSON forgery followed by exit", async () => {
   const f = await sessionFixture(),
     c = await orchestratorFixture()

@@ -20,9 +20,9 @@ export { verifyLinuxReadiness } from "./readiness"
 const modes = ["inspect", "plan-preparation", "prepare", "accept", "calibrate", "verify"] as const
 const flags = ["root", "request", "manifest", "approval", "storage-source", "artifacts", "plan"] as const
 const initial = {
-  software_complete: true,
+  software_verified: true,
   engine_verified: false,
-  capabilities_verified: false,
+  tool_capability_verified: false,
   corpus_engine_ready: false,
 }
 export async function runLinuxHostCommand(argv: readonly string[]): Promise<{ exitCode: 0 | 1 | 2; output: unknown }> {
@@ -104,17 +104,16 @@ export async function runLinuxHostCommand(argv: readonly string[]): Promise<{ ex
     const session = opened.value
     await verifyControllerIdentity(manifest)
     if (mode === "verify") {
-      // Dynamic runtime inspection verifies browser/font/config/dependency identities without executing them.
-      const { openLinuxRuntime } = await import("./runtime")
-      const runtime = await openLinuxRuntime(session)
-      await runtime.guard()
+      // Rehashes artifacts and execs only the fixed read-only auditor in already-owned keepers; never creates/pulls.
       const result = await verifyLinuxReadiness({ root: args.root!, manifest, session })
       return result.kind === "ready"
-        ? response(0, "ready", { engine_verified: true, capabilities_verified: true, corpus_engine_ready: true })
+        ? response(0, "ready", { engine_verified: true, tool_capability_verified: true, corpus_engine_ready: true })
         : response(2, result.code, { missing: result.missing })
     }
     if (mode === "prepare") {
       if (manifest.phase !== "prepare") return response(2, "prepare_manifest_required")
+      const { prepareBinaryBuildRecords } = await import("./binary-build")
+      const binaries = await prepareBinaryBuildRecords(session)
       const plan = (await readControllerJson(args.plan!)) as PreparationPlan
       const runner = makeDockerRunner({
         request,
@@ -137,7 +136,10 @@ export async function runLinuxHostCommand(argv: readonly string[]): Promise<{ ex
         path.join(args.root!, `dependencies-${sha256Text(canonicalJson(images))}.json`),
         canonicalJson(images),
       )
-      return response(2, "artifacts_prepared_acceptance_not_run", { taskCount: images.tasks.length })
+      return response(2, "artifacts_prepared_acceptance_not_run", {
+        taskCount: images.tasks.length,
+        binaryRecordsSha256: binaries.sha256,
+      })
     }
     if (manifest.phase !== "accept") return response(2, "accept_manifest_required")
     const { openLinuxRuntime } = await import("./runtime"),
@@ -145,9 +147,9 @@ export async function runLinuxHostCommand(argv: readonly string[]): Promise<{ ex
     if (mode === "accept") {
       const result = await runtime.accept()
       return result.status === "passed"
-        ? response(2, "engine_and_capabilities_verified_calibration_not_run", {
+        ? response(0, "engine_and_capabilities_verified_calibration_not_run", {
             engine_verified: true,
-            capabilities_verified: true,
+            tool_capability_verified: true,
           })
         : response(result.status === "failed" ? 1 : 2, "acceptance_" + result.status, {
             checks: result.checks.map((c) => ({ id: c.id, status: c.status, code: c.code })),
@@ -163,7 +165,7 @@ export async function runLinuxHostCommand(argv: readonly string[]): Promise<{ ex
     return result.kind === "ready"
       ? response(0, "ready", {
           engine_verified: true,
-          capabilities_verified: true,
+          tool_capability_verified: true,
           corpus_engine_ready: true,
           realEvaluations: 120,
         })

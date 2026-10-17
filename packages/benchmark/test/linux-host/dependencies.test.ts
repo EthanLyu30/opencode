@@ -79,7 +79,7 @@ test("library recipes bind the real lockfile, family capabilities and fixed no-h
       dependency: {
         kind: "locked",
         sourceCommit: chart.sourceCommit,
-        lockfiles: [chart.lockfiles[0]!],
+        lockfiles: [chart.lockfiles[0]!] as const,
         recipeSha256: chart.recipeSha256,
         requiredCapabilities: ["locked-build", "canvas-probe"],
       },
@@ -119,7 +119,7 @@ test("library recipes bind the real lockfile, family capabilities and fixed no-h
       dependency: {
         kind: "locked" as const,
         sourceCommit: chart.sourceCommit,
-        lockfiles: [chart.lockfiles[0]!],
+        lockfiles: [chart.lockfiles[0]!] as const,
         recipeSha256: chart.recipeSha256,
         requiredCapabilities: ["locked-build", "canvas-probe"],
       },
@@ -328,7 +328,7 @@ test("preparation plans report missing artifacts without downloading and deny al
           dependency: {
             kind: "locked",
             sourceCommit: "a".repeat(40),
-            lockfiles: [],
+            lockfiles: [] as never,
             recipeSha256: sha256Text("recipe"),
             requiredCapabilities: ["pdf-raster"],
           },

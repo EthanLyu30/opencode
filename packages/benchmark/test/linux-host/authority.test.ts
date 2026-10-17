@@ -31,6 +31,7 @@ test("fixture receipts and JSON lookalikes never authorize a Linux evaluator", a
           engineReceiptSha256: "a".repeat(64),
           operations: [],
           browserOperations: [],
+          evidenceRoot: f.manifest.roots.evidence,
         },
         undefined,
         identity(),
