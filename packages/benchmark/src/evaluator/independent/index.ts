@@ -5,6 +5,7 @@ import {
   directRoot,
   loadEvaluationBundle,
   ordinaryFiles,
+  exportPublicTask,
   type ValidatedEvaluationBundle,
 } from "../../corpus/evaluation-bundle"
 import { decodeEvaluationIdentity, freeze, type EvaluationIdentityV2 } from "../../corpus/evaluation-profile"
@@ -42,6 +43,7 @@ export function evaluationContext(outcome: EvaluationOutcome): EvaluateInput {
   return context
 }
 export async function verifyEvaluationContext(input: EvaluateInput): Promise<void> {
+  exportPublicTask(input.bundle)
   await verifyCandidate(input.snapshot)
   const current = await loadEvaluationBundle(input.bundle.root)
   if (current.bundleSha256 !== input.bundle.bundleSha256) throw new TypeError("TASK24_BUNDLE_DRIFT")
@@ -69,18 +71,50 @@ export function makeIndependentEvaluator(options: { host?: EvaluationHost; brows
         for (const root of [snapshot.sourceRoot, snapshot.workRoot, bundle.root])
           if (!disjoint(input.evidenceRoot, root)) throw new TypeError("TASK24_EVIDENCE_ROOT_OVERLAP")
         await verifyEvaluationContext(input)
+        const required = bundle.oracle.requirements
+        if (
+          input.facts.requirements.artifacts.length ||
+          required.length !== input.facts.requirements.assertions.length ||
+          required.some((r, i) => {
+            const observed = input.facts.requirements.assertions[i]
+            return (
+              !observed || r.id !== observed.id || r.mandatory !== observed.mandatory || r.weight !== observed.weight
+            )
+          })
+        )
+          throw new TypeError("TASK24_REQUIREMENT_COVERAGE_INVALID")
+        if (bundle.oracle.quality.some((id) => !input.facts.quality.checks.some((c) => c.id === id)))
+          throw new TypeError("TASK24_QUALITY_COVERAGE_INVALID")
+        const policyChecks =
+          (input.facts.policy as typeof input.facts.policy & { checks?: readonly { id: string; observed: boolean }[] })
+            .checks ?? []
+        if (
+          bundle.oracle.policy.length !== policyChecks.length ||
+          bundle.oracle.policy.some((id, i) => policyChecks[i]?.id !== id || policyChecks[i]?.observed !== true)
+        )
+          throw new TypeError("TASK24_POLICY_COVERAGE_INVALID")
         for (const protectedPath of bundle.profile.protectedPaths) {
           const publicFile = bundle.profile.publicInputs.find((f) => f.path === `public/${protectedPath}`),
             file = snapshot.entries.find((f) => f.path === protectedPath)
           if (!publicFile || file?.sha256 !== publicFile.sha256) throw new TypeError("TASK24_PROTECTED_FILE_DRIFT")
         }
-        for (const group of [
-          input.facts.requirements.evidence,
-          input.facts.quality.evidence,
-          input.facts.policy.evidence,
-          input.facts.runtime.evidence,
-        ])
-          for (const ref of group) verifyEvidenceFile(input.evidenceRoot, ref)
+        for (const name of ["requirements", "quality", "policy", "runtime"] as const) {
+          const { evidence, ...observed } = input.facts[name]
+          if (!evidence.length) throw new TypeError("TASK24_CONTROLLER_EVIDENCE_REQUIRED")
+          for (const ref of evidence) {
+            verifyEvidenceFile(input.evidenceRoot, ref)
+            const record = JSON.parse(
+              await fs.readFile(path.join(input.evidenceRoot, ref.relativePath), "utf8"),
+            ) as Record<string, unknown>
+            if (
+              record.schemaVersion !== 2 ||
+              record.kind !== "controller-facts" ||
+              canonicalJson(record.identity) !== canonicalJson(identity) ||
+              canonicalJson(record[name]) !== canonicalJson(observed)
+            )
+              throw new TypeError("TASK24_CONTROLLER_EVIDENCE_IDENTITY_INVALID")
+          }
+        }
         if (bundle.profile.dependency.kind !== "none") return { kind: "blocked", reason: "DEPENDENCY_UNRESOLVED" }
         if (!options.host) return { kind: "blocked", reason: "EVALUATION_HOST_UNAVAILABLE" }
         const host = options.host ?? makeUnavailableEvaluationHost()
@@ -151,7 +185,15 @@ export function makeIndependentEvaluator(options: { host?: EvaluationHost; brows
             const probe = makeProbeRequest({
               identity,
               profile: bundle.profile,
-              inputs: { candidate, module, cases: cases.map((c) => ({ id: c.id, operations: c.operations })) },
+              inputs: {
+                candidate,
+                module,
+                cases: cases.map((c) => ({
+                  id: c.id,
+                  operations: c.operations,
+                  ...(c.fixtures ? { fixtures: c.fixtures } : {}),
+                })),
+              },
             })
             const observed = await host.probe(probe)
             validateObservation(probe, observed)

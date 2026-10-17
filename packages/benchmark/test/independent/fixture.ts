@@ -114,6 +114,7 @@ export async function orchestratorFixture(value = 5) {
   const bundle = await loadEvaluationBundle(f.bundleRoot)
   const snapshot = await captureCandidate({ sourceRoot: f.sourceRoot, workRoot: f.workRoot, profile: bundle.profile })
   const id = identity({
+    runID: `run-${path.basename(f.root).split("-").at(-1)!.toLowerCase()}`,
     taskID: bundle.profile.taskID,
     profileSha256: bundle.profileSha256,
     oracleSha256: bundle.oracleSha256,
@@ -121,9 +122,18 @@ export async function orchestratorFixture(value = 5) {
     candidateSha256: snapshot.candidateSha256,
   })
   await fs.mkdir(f.resultRoot)
-  await fs.writeFile(path.join(f.resultRoot, "runtime.json"), JSON.stringify({ assurance: "fixture", calls: 0 }))
-  const evidence = [bindEvidenceFile(f.resultRoot, path.join(f.resultRoot, "runtime.json"), "runtime")]
   const facts = evaluationFactsFixture({ kind: "guardrail" })
+  const record = Object.fromEntries(
+    (["requirements", "quality", "policy", "runtime"] as const).map((k) => {
+      const { evidence, ...value } = facts[k]
+      return [k, value]
+    }),
+  )
+  await fs.writeFile(
+    path.join(f.resultRoot, "runtime.json"),
+    JSON.stringify({ schemaVersion: 2, kind: "controller-facts", identity: id, ...record }),
+  )
+  const evidence = [bindEvidenceFile(f.resultRoot, path.join(f.resultRoot, "runtime.json"), "runtime")]
   const input = {
     bundle,
     snapshot,
@@ -208,6 +218,7 @@ export async function independentFixture(label: string) {
     taskID: "fixture-add",
     kind: "guardrail",
     privateFiles: [],
+    publicReferenceManifest: null,
     cases: [
       {
         id: "sum",
@@ -218,7 +229,7 @@ export async function independentFixture(label: string) {
         weight: 1,
       },
     ],
-    requirements: [],
+    requirements: [{ id: "public", mandatory: true, weight: 1 }],
     quality: [],
     policy: [],
     visual: null,

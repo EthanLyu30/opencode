@@ -10,7 +10,7 @@
 
 **Spec:** [2026-10-17-opencode-task24b-readiness-design.md](../specs/2026-10-17-opencode-task24b-readiness-design.md)，用户已确认。重点实现第3–4节及第7节的评测前置条件；不实现 B-Prep2/3/4。
 
-**Status:** 2026-10-17 用户已确认并授权本计划实施；实施基线 `19ae30d1469caa3f140b381c2caac232f7898a57`。付费、Docker准备和部署替换仍不授权。
+**Status:** 2026-10-17 用户已确认并授权本计划实施；实施基线 `19ae30d1469caa3f140b381c2caac232f7898a57`。Task1–4框架已实施并通过回归；Task5的真实独立oracle/实际校准候选编写仍未完成（材料准备不等于完成），Task6最终收尾/push保持开放。一次独立审查的五项框架问题已补RED→GREEN修复；不得将本轮记为B-Prep1全部完成。付费、Docker准备和部署替换仍不授权。
 
 ## Global Constraints
 

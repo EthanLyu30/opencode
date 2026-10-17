@@ -10,7 +10,8 @@ import {
   type EvaluationOracle,
   type TaskExecutionProfile,
 } from "./evaluation-profile"
-import type { FileEntry } from "./manifest"
+import { decodeTaskManifest, type FileEntry } from "./manifest"
+import sharp from "sharp"
 
 export type ValidatedEvaluationBundle = Readonly<{
   root: string
@@ -94,7 +95,30 @@ export async function loadEvaluationBundle(root: string): Promise<ValidatedEvalu
     if (!actual.some((a) => a.path === f.path && a.sha256 === f.sha256 && a.size === f.size))
       throw new TypeError("TASK24_BUNDLE_HASH")
   const files = []
+  let authorizedReferences: readonly FileEntry[] = []
+  if (oracle.publicReferenceManifest) {
+    const declaration = oracle.publicReferenceManifest
+    if (!oracle.privateFiles.some((f) => canonicalJson(f) === canonicalJson(declaration)))
+      throw new TypeError("TASK24_PUBLIC_SOURCE_UNDECLARED")
+    const bytes = await fs.readFile(path.join(root, declaration.path))
+    if (sha256Bytes(bytes) !== declaration.sha256) throw new TypeError("TASK24_PUBLIC_SOURCE_DRIFT")
+    const source = decodeTaskManifest(JSON.parse(bytes.toString("utf8")))
+    if (source.id !== profile.taskID) throw new TypeError("TASK24_PUBLIC_SOURCE_IDENTITY")
+    authorizedReferences = source.publicAssets
+  }
   for (const f of profile.publicInputs) {
+    if (f.purpose === "reference") {
+      if (
+        !/^public\/assets\/[A-Za-z0-9._/-]+\.(png|jpe?g|webp)$/i.test(f.path) ||
+        !authorizedReferences.some(
+          (a) => `public/assets/${a.path}` === f.path && a.sha256 === f.sha256 && a.size === f.size,
+        )
+      )
+        throw new TypeError("TASK24_PUBLIC_REFERENCE_UNAUTHORIZED")
+      const meta = await sharp(path.join(root, f.path)).metadata()
+      if (!["png", "jpeg", "webp"].includes(meta.format ?? "") || !meta.width || !meta.height)
+        throw new TypeError("TASK24_PUBLIC_REFERENCE_INVALID")
+    }
     if (f.purpose !== "reference" && oracle.privateFiles.some((v) => v.sha256 === f.sha256))
       throw new TypeError("TASK24_PUBLIC_LEAK")
     const bytes = await fs.readFile(path.join(root, f.path))

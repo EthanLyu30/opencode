@@ -5,6 +5,23 @@ import { captureCandidate, verifyCandidate, validateCandidateEntries } from "../
 import { decodeTaskExecutionProfile } from "../../src/corpus/evaluation-profile"
 import { independentFixture } from "./fixture"
 
+test("review: a valid seven MiB file is not charged twice against source limits", async () => {
+  const f = await independentFixture("snapshot-large")
+  try {
+    await fs.writeFile(path.join(f.sourceRoot, "large.txt"), Buffer.alloc(7 * 1024 * 1024, 65))
+    const s = await captureCandidate({
+      sourceRoot: f.sourceRoot,
+      workRoot: f.workRoot,
+      profile: decodeTaskExecutionProfile(f.profile),
+    })
+    await verifyCandidate(s)
+    expect(s.entries).toHaveLength(2)
+    expect((await fs.stat(s.archiveFile)).size).toBeGreaterThan(8 * 1024 * 1024)
+  } finally {
+    await f.dispose()
+  }
+})
+
 test("drift_after_capture_is_not_evaluated and original is preserved", async () => {
   const f = await independentFixture("snapshot")
   try {

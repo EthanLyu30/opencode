@@ -28,8 +28,11 @@ export type BuildRequest = CommonRequest &
 export type ProbeRequest = CommonRequest &
   Readonly<{
     module: string
-    inputs: readonly { id: string }[]
-    operations: readonly { id: string; steps: readonly { kind: string; target: string; args: readonly unknown[] }[] }[]
+    inputs: readonly { id: string; fixtures?: Readonly<Record<string, unknown>> }[]
+    operations: readonly {
+      id: string
+      steps: readonly { kind: string; target: string; args: readonly unknown[]; store?: string }[]
+    }[]
   }>
 export type BuildManifest = Readonly<{
   candidateSha256: string

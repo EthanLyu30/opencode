@@ -4,7 +4,7 @@ Date: 2026-10-17. Implementation baseline: `19ae30d1469caa3f140b381c2caac232f789
 
 ## Status and limits
 
-The new evaluator framework has zero-provider-cost regression coverage. This is **not** a completed acceptance of the 16 real tasks, Linux isolation, a paid pilot, or evidence of model-quality improvement.
+The new evaluator framework has zero-provider-cost regression coverage. **B-Prep1 remains in progress: Task 5 real oracle/control authoring is open, and Task 6 final handoff/push is not complete.** This is not a completed acceptance of the 16 real tasks, Linux isolation, a paid pilot, or evidence of model-quality improvement.
 
 The corpus preparation software materialized all 16 fixed tasks into a new owned D-drive directory and reverified every source bundle. All 16 remain blocked: independent data-only oracle cases and actual calibration candidates still need authoring. The copied legacy test scripts and calibration requirement lists are preparation material, not completed independent oracles or executed controls. This outstanding B-Prep1 work must not silently be counted as B-Prep2 completion.
 
@@ -31,7 +31,7 @@ Commands ran only from `D:\OpenCode-Audit\packages\benchmark`, with pinned Bun 1
 - Full package: `bun --no-env-file test --timeout 30000 --only-failures` → 262 pass, 10 existing skips, 0 fail, 992 assertions, 70 files. `bun --no-env-file run typecheck` → exit 0.
 - Fresh whole-range review and any resulting corrections are recorded below once actually performed.
 
-All 10 full-package skips predate this work and depend on separately enabled browser/binary release integration. They are not new permissive Docker skips; no old assertion or timeout was changed.
+All 10 full-package skips predate this work: five browser release capture/interaction tests, one browser PDF test, one exact-binary security test, one exact offline recovery-matrix test and two Docker vector-isolation tests. Their opt-in gates were left disabled under the user's current constraints. No skip, old assertion or timeout was added/changed by this work.
 
 ## Real corpus preparation
 
@@ -58,4 +58,22 @@ Prepared profiles are named `preparation-profile.json`, not `profile.json`; they
 
 ## Review / final validation / cleanup
 
-Pending at this checkpoint; this section must be updated with actual results before final handoff. Only this plan's owned intermediates may be cleaned. The new private corpus material is an intended deliverable and is retained.
+One fresh read-only whole-range review covered `19ae30d1469caa3f140b381c2caac232f7898a57..13e6a381ed55bc52777fe0009407465ebdbb68e2`. It found no Critical issue, six Important issues and one Minor. There is no second review.
+
+Five framework defects were reproduced RED and corrected GREEN in one fix pass:
+
+1. Require loader-issued bundle identity before using its profile/oracle; substituted objects cannot retain old hashes.
+2. Match oracle requirement IDs, mandatory flags, weights and quality/policy coverage; require identity-bound controller evidence, not just arbitrary intact evidence bytes.
+3. Retain bounded per-case result handles/fixture references for stateful APIs. The actual worker was exercised only against a newly authored, known synthetic factory module, never real corpus candidates. Returned snapshots stay defensive copies.
+4. Validate copied source and encoded archive separately; a valid seven-MiB source file with an archive larger than eight MiB now succeeds.
+5. Allow same-byte reference exports only for actual image files matched to a private hash-bound source manifest's public-assets records. Relabeling a repaired source file fails.
+
+After fixes: full package **267 pass, 10 existing skips, 0 fail, 1,006 assertions, 70 files**; package typecheck exit 0.
+
+The sixth Important finding is unfinished Task 5 authoring. Its earlier software-only completion ledger marker was reopened. **No acceptance or push as a complete B-Prep1 deliverable is claimed.** The user has been asked whether to continue original-scope authoring before push, or explicitly accept a partial framework milestone; absent that choice, keep the original scope open.
+
+Deferred Minor: the first visual negative-test loop repeats an identical invalid input rather than mutating each named field. Later tests cover some actual paths; the loop is not counted as independent coverage of those four cases.
+
+Review boundaries: no actual Linux/PDF/relay/provider/deployment assurance is claimed. Ordinary content hashes do not authenticate a manifest against an attacker who can replace the trusted manifest and all files; that requires an external trust anchor. Private legacy material semantics remain unverified.
+
+This plan's workspace and owned temporary root remain necessary while the task is unfinished. The private `corpus-v2` material is an intended deliverable. Do not delete or re-purpose any prior plan's artifacts.

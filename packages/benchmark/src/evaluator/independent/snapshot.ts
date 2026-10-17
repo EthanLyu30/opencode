@@ -110,16 +110,21 @@ export async function verifyCandidate(snapshot: CandidateSnapshot): Promise<void
       configHash(profile, entries) !== snapshot.configSha256
     )
       throw Error("drift")
-    const work = await ordinaryFiles(snapshot.workRoot)
-    const expected = [
-      ...entries.map((f) => ({ ...f, path: `source/${f.path}` })),
-      { path: "candidate.json", sha256: snapshot.archiveSha256 },
-    ]
+    await directRoot(snapshot.workRoot)
+    if (canonicalJson((await fs.readdir(snapshot.workRoot)).sort()) !== canonicalJson(["candidate.json", "source"]))
+      throw Error("drift")
+    const copied = await ordinaryFiles(path.join(snapshot.workRoot, "source"))
+    if (canonicalJson(copied) !== canonicalJson(entries)) throw Error("drift")
+    const stat = await fs.lstat(snapshot.archiveFile)
     if (
-      work.length !== expected.length ||
-      expected.some((e) => !work.some((f) => f.path === e.path && f.sha256 === e.sha256))
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      stat.nlink !== 1 ||
+      stat.size > 96 * 1024 * 1024 ||
+      (await fs.realpath(snapshot.archiveFile)).toLowerCase() !== snapshot.archiveFile.toLowerCase()
     )
       throw Error("drift")
+    if (sha256Bytes(await fs.readFile(snapshot.archiveFile)) !== snapshot.archiveSha256) throw Error("drift")
   } catch {
     throw new TypeError("TASK24_CANDIDATE_DRIFT")
   }

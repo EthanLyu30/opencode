@@ -12,6 +12,7 @@ const Operation = Schema.Struct({
   kind: Schema.Literals(["call", "method", "get"]),
   target: Text,
   args: Schema.Array(Schema.Unknown),
+  store: Schema.optionalKey(Text),
 })
 const Expected = Schema.Union([
   Schema.Struct({ comparator: Schema.Literals(["equal", "deep-equal"]), value: Schema.Unknown }),
@@ -85,10 +86,12 @@ const Oracle = Schema.Struct({
   taskID: TaskID,
   kind: Kind,
   privateFiles: Schema.Array(FileEntry),
+  publicReferenceManifest: Schema.NullOr(FileEntry),
   cases: Schema.NonEmptyArray(
     Schema.Struct({
       ...Assertion.fields,
       module: Text,
+      fixtures: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
       operations: Schema.NonEmptyArray(Operation),
       expected: Schema.NonEmptyArray(Expected),
     }),
