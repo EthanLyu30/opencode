@@ -6,6 +6,7 @@ import { LLM, MediaPart, Message, ToolCallPart } from "../src"
 import { DeepSeek, Kimi } from "../src/providers"
 import { authorizeTask21RecordedRequest } from "./recorded-golden"
 import { it } from "./lib/effect"
+import { spawnWithoutDotenv } from "./lib/subprocess"
 
 test("Task21 dry-run prints the complete hard budget without credentials or network", async () => {
   const env = Object.fromEntries(
@@ -18,11 +19,9 @@ test("Task21 dry-run prints the complete hard budget without credentials or netw
         entry[0] !== "TASK21_LIVE_TOKEN_CEILING",
     ),
   )
-  const child = Bun.spawn([process.execPath, "run", "script/setup-recording-env.ts", "--task21-dry-run"], {
+  const child = spawnWithoutDotenv(["run", "script/setup-recording-env.ts", "--task21-dry-run"], {
     cwd: path.resolve(import.meta.dir, ".."),
     env,
-    stdout: "pipe",
-    stderr: "pipe",
   })
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited,
@@ -58,11 +57,9 @@ test("Task21 golden file registers the two filtered live-contract scenarios offl
         entry[0] !== "TASK21_LIVE_TOKEN_CEILING",
     ),
   )
-  const child = Bun.spawn([process.execPath, "test", "test/provider/golden.recorded.test.ts"], {
+  const child = spawnWithoutDotenv(["test", "test/provider/golden.recorded.test.ts"], {
     cwd: path.resolve(import.meta.dir, ".."),
     env: { ...env, RECORDED_PREFIX: "kimi-k3,deepseek-responses" },
-    stdout: "pipe",
-    stderr: "pipe",
   })
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited,
@@ -84,9 +81,8 @@ test("recording env check exposes Kimi without reading or printing the credentia
       (entry): entry is [string, string] => entry[1] !== undefined && entry[0] !== "MOONSHOT_API_KEY",
     ),
   )
-  const child = Bun.spawn(
+  const child = spawnWithoutDotenv(
     [
-      process.execPath,
       "run",
       path.join(packageDir, "script/setup-recording-env.ts"),
       "--check",
@@ -98,8 +94,6 @@ test("recording env check exposes Kimi without reading or printing the credentia
     {
       cwd: path.resolve(packageDir, "../.."),
       env,
-      stdout: "pipe",
-      stderr: "pipe",
     },
   )
   const [exitCode, stdout, stderr] = await Promise.all([

@@ -16,7 +16,11 @@ export function codingFixture(role = "design", revision = 0) {
     id: Workflow.ID.make("wfl_coding_contract"),
     type: "coding-build",
     status: "running",
-    input: { brief: "Fix the library function", [CodingModelSelection.RESERVED_INPUT_KEY]: selection },
+    input: {
+      brief: "Fix the library function",
+      coding: { maxRevisions: 1, maxTokens: 20000, maxTurns: 20, maxToolCalls: 40 },
+      [CodingModelSelection.RESERVED_INPUT_KEY]: selection,
+    },
     budget: codingBudget,
     usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
     location: codingLocation,

@@ -66,6 +66,7 @@ const phases = [
   "gate",
   "gate-restart",
   "fences",
+  "coding",
 ] as const
 const ownerCodec = Schema.Struct({ nonce: Schema.String })
 const identity = (providerID: WorkflowModelCatalog.ProviderID) => ({
@@ -151,6 +152,11 @@ export async function runPrivateCatalogueWorker(args: readonly string[]) {
   const phase = Schema.decodeUnknownSync(Schema.Literals(phases))(phaseInput)
   // The deployed launcher may load its normal environment. No fixture service is permitted to obtain it.
   for (const name of ["MOONSHOT_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"]) delete process.env[name]
+  if (phase === "coding") {
+    const { runPrivateCodingWorker } = await import("./workflow-coding-worker")
+    await runPrivateCodingWorker(root, nonce, expectedHead)
+    return
+  }
   const catalogueRoot = path.join(root, "catalogue")
   const workspace = path.join(root, "workspace")
   await fs.mkdir(workspace, { recursive: true })

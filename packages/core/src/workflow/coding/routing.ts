@@ -19,6 +19,16 @@ export interface Input {
   readonly benchmarkTransport?: WorkflowBenchmarkTransport.Binding
   readonly now?: number
 }
+export function budget(workflow: Workflow.Info): Workflow.Budget {
+  if (workflow.type !== "coding-build") throw new Error("Coding budget requires coding admission")
+  const limits = Schema.decodeUnknownSync(WorkflowCodingBuild.Limits)(workflow.input.coding)
+  return Object.freeze({
+    ...workflow.budget,
+    maxTokens: Math.min(workflow.budget.maxTokens ?? limits.maxTokens, limits.maxTokens),
+    maxTurns: Math.min(workflow.budget.maxTurns ?? limits.maxTurns, limits.maxTurns),
+    maxToolCalls: Math.min(workflow.budget.maxToolCalls ?? limits.maxToolCalls, limits.maxToolCalls),
+  })
+}
 export function resolve(input: Input): Route {
   const role = Schema.decodeUnknownSync(WorkflowCodingBuild.Role)(input.role)
   const selection = CodingModelSelection.validate(input.selection)

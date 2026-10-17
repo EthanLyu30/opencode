@@ -28,6 +28,7 @@ export function codingEvidenceFixture(directory: string) {
     location,
     input: {
       brief: "Fix sum",
+      coding: original.workflow.input.coding,
       [CodingModelSelection.RESERVED_INPUT_KEY]: selection,
       [CodingHostPlan.RESERVED_INPUT_KEY]: plan,
     },

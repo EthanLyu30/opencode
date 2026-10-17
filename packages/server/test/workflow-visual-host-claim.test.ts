@@ -58,6 +58,41 @@ describe("VisualHostClaim generation registry", () => {
     expect(new Set(results.map((result) => result.claim.body.generation)).size).toBe(1)
   })
 
+  test("commits an already-published mirror once after a concurrent registry reader releases its lock", async () => {
+    await using root = await caseRoot("claim-registry-commit-reader")
+    let reader: Database | undefined
+    let release: ReturnType<typeof setTimeout> | undefined
+    let publications = 0
+    try {
+      const acquired = await VisualHostClaim.acquire(root.path, body("reference", 0), {
+        afterMirrorLinked: async () => {
+          publications++
+          reader = new Database(`\\\\?\\${path.join(root.path, ".claims", "claims.sqlite")}`, {
+            create: false,
+            readonly: true,
+            strict: true,
+          })
+          reader.exec("BEGIN")
+          reader.query("SELECT * FROM visual_host_claim").all()
+          release = setTimeout(() => {
+            reader!.exec("ROLLBACK")
+            reader!.close()
+            reader = undefined
+          }, 50)
+        },
+      })
+      expect(publications).toBe(1)
+      expect(acquired.status).toBe("acquired")
+      expect((await VisualHostClaim.list(root.path)).map((claim) => claim.state)).toEqual(["active"])
+    } finally {
+      if (release !== undefined) clearTimeout(release)
+      if (reader !== undefined) {
+        reader.exec("ROLLBACK")
+        reader.close()
+      }
+    }
+  })
+
   test("publishes a fully readable registry before the creation owner resumes", async () => {
     await using root = await caseRoot("claim-registry-publish-interleave")
     let markPublished!: () => void
@@ -748,6 +783,63 @@ describe("VisualHostClaim generation registry", () => {
     expect(await fs.readFile(path.join(lockDirectory, first))).toEqual(before)
     expect(await fs.readFile(path.join(lockDirectory, second))).toEqual(before)
   })
+
+  test("accepts its exact pending marker already linked by a concurrent retirement recovery", async () => {
+    await using root = await caseRoot("claim-cleanup-retirement-recovered-link")
+    const acquired = await VisualHostClaim.acquire(root.path, body("reference", 0))
+    if (acquired.status !== "acquired") throw new TypeError("claim did not acquire")
+    const releasing = await VisualHostClaim.beginRelease(root.path, acquired.claim)
+    let cleanups = 0
+    const finished = await VisualHostClaim.finishRelease(
+      root.path,
+      releasing,
+      async () => {
+        cleanups++
+      },
+      {
+        afterCleanupRetirementPendingCreated: async (file) => {
+          await fs.link(file, path.join(path.dirname(file), "retire.json"))
+        },
+      },
+    )
+    expect(finished).toBe(true)
+    expect(cleanups).toBe(1)
+    expect(await VisualHostClaim.list(root.path)).toEqual([])
+    expect(await fs.exists(path.join(root.path, ".claims", ".cleanup"))).toBe(false)
+  })
+
+  test.each(["foreign-link", "third-link", "replaced-pending"] as const)(
+    "preserves foreign retirement state instead of accepting %s as a recovered publication",
+    async (variant) => {
+      await using root = await caseRoot(`claim-cleanup-retirement-${variant}`)
+      const acquired = await VisualHostClaim.acquire(root.path, body("reference", 0))
+      if (acquired.status !== "acquired") throw new TypeError("claim did not acquire")
+      const releasing = await VisualHostClaim.beginRelease(root.path, acquired.claim)
+      const outside = path.join(root.path, "preserved-marker.json")
+      let pending = ""
+      let contents = ""
+      await expect(
+        VisualHostClaim.finishRelease(root.path, releasing, async () => undefined, {
+          afterCleanupRetirementPendingCreated: async (file) => {
+            pending = file
+            contents = await fs.readFile(file, "utf8")
+            const target = path.join(path.dirname(file), "retire.json")
+            if (variant === "replaced-pending") {
+              await fs.rename(file, outside)
+              await fs.writeFile(file, contents, { flag: "wx" })
+              await fs.link(file, target)
+              return
+            }
+            await fs.link(file, outside)
+            if (variant === "third-link") await fs.link(file, target)
+            if (variant === "foreign-link") await fs.writeFile(target, contents, { flag: "wx" })
+          },
+        }),
+      ).rejects.toThrow("pending identity changed")
+      expect(await fs.readFile(outside, "utf8")).toBe(contents)
+      expect(await fs.exists(pending)).toBe(true)
+    },
+  )
 
   test("preserves an unknown cleanup retirement pending marker without deleting authority", async () => {
     await using root = await caseRoot("claim-cleanup-retirement-foreign-pending")

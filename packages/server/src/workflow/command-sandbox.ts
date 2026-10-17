@@ -108,17 +108,28 @@ export function makeLayer(
             leaseOwner: authority.leaseOwner,
             attempt: authority.attempt,
           })
+          const payload = JSON.stringify(WorkflowWorkspaceMaterialization.validate(request.sealedSnapshot).archive)
           const source = CodingCheckLauncher.source({
             argv: authority.command.argv,
             id: request.commandID,
             timeoutMs: Math.max(1, Math.floor(config.limits.timeoutMs * 0.8)),
+            workspace: {
+              cwd: authority.plan.cwd,
+              inputBytes: Buffer.byteLength(payload),
+              inputSha256: createHash("sha256").update(payload).digest("hex"),
+            },
           })
           const executed = yield* Effect.tryPromise({
             try: (signal) =>
               runOwned(
                 options.engine,
                 config,
-                { role: "test", argv: ["bun", "--no-env-file", "-e", source] },
+                {
+                  role: "test",
+                  argv: ["bun", "--no-env-file", "-e", source],
+                  stdin: payload,
+                  disposableCodingWorkspace: true,
+                },
                 {
                   workspace: { canonical: "", device: 0, inode: 0 },
                   workdir: { canonical: "", device: 0, inode: 0 },
@@ -348,6 +359,7 @@ const reloadCodingAuthority = Effect.fn("WorkflowCommandSandboxServer.reloadCodi
       if (input.request.planSha256 !== plan.sha256 || input.request.configSha256 !== plan.configSha256)
         throw new Error("Coding policy mismatch")
       const sealed = WorkflowWorkspaceMaterialization.validate(input.request.sealedSnapshot)
+      CodingHostPlan.verifySealedConfiguration(plan, sealed.archive.entries)
       if (
         sealed.workflowID !== detail.run.id ||
         sealed.stageID !== stage.id ||
@@ -611,6 +623,7 @@ async function runOwned(
     readonly timeout?: number
     readonly argv: readonly string[]
     readonly stdin?: string
+    readonly disposableCodingWorkspace?: true
   },
   paths: { readonly workspace: PathIdentity; readonly workdir: PathIdentity; readonly relativeWorkdir: string },
   ownership: ReturnType<typeof ownershipFor>,
@@ -627,6 +640,7 @@ async function runOwned(
       argv: [
         "container",
         "create",
+        ...(request.disposableCodingWorkspace ? ["--interactive"] : []),
         "--name",
         ownership.name,
         ...Object.entries(ownership.labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
@@ -659,7 +673,11 @@ async function runOwned(
         "LANG=C.UTF-8",
         ...(archive === undefined ? ["--mount", mount] : []),
         "--workdir",
-        paths.relativeWorkdir === "." ? "/workspace" : `/workspace/${paths.relativeWorkdir}`,
+        request.disposableCodingWorkspace
+          ? "/"
+          : paths.relativeWorkdir === "."
+            ? "/workspace"
+            : `/workspace/${paths.relativeWorkdir}`,
         config.image,
         ...request.argv,
       ],
@@ -679,7 +697,7 @@ async function runOwned(
       signal,
     )
     if (!owned) throw unavailable("Docker container ownership verification failed")
-    if (archive !== undefined) {
+    if (archive !== undefined && !request.disposableCodingWorkspace) {
       const imported = await execute(engine, config, {
         argv: ["container", "cp", "-", `${owned.id}:/`],
         stdin: WorkflowWorkspaceMaterialization.tarBytes(archive),

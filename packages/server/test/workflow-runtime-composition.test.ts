@@ -32,8 +32,81 @@ import { fixtureAdmissionSnapshot } from "../../core/test/fixtures/workflow-mode
 import { CodingAdmission } from "@opencode-ai/core/workflow/coding/admission"
 import { CodingChecks } from "@opencode-ai/core/workflow/coding/checks"
 import { CodingChecksServer } from "../src/workflow/coding-checks"
+import { CodingHostPlan } from "@opencode-ai/core/workflow/coding/host-plan"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 
 describe("Workflow runtime recovery", () => {
+  for (const mutation of ["none", "lease", "authority", "plan"] as const)
+    test(`recovers pre-provider coding checks without Bash lineage and fences ${mutation}`, async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "coding-recovery-"))
+      try {
+        const fixture = persistedFixture(true, root)
+        await fs.writeFile(
+          path.join(root, "package.json"),
+          JSON.stringify({ scripts: { build: "bun build sum.ts --outdir dist", typecheck: "bun check.ts" } }),
+        )
+        const plan = CodingHostPlan.freeze({
+          authority: "admission",
+          location: fixture.run.location!,
+          checks: { cwd: ".", test: "bun-test", build: "bun-run-build", typecheck: "bun-run-typecheck" },
+        })
+        Reflect.set(fixture.run, "input", { ...fixture.run.input, [CodingHostPlan.RESERVED_INPUT_KEY]: plan })
+        fixture.stage = { ...fixture.stage, type: "test", checkpoint: undefined }
+        let allowed = true
+        let visited = 0
+        const recovered: WorkflowCommandSandboxServer.RecoveryAuthority[] = []
+        const result = await WorkflowRuntimeRecovery.recoverExpired({
+          store: fixture.store,
+          now: () => fixture.now,
+          codingAuthority: CodingAuthority.Service.of({
+            require: () =>
+              allowed ? Effect.void : Effect.fail(new CodingAuthority.Invalid({ message: "Revoked fixture" })),
+          }),
+          recover: async (input) => {
+            visited++
+            if (mutation === "lease") fixture.stage = { ...fixture.stage, leaseOwner: "new-owner", attempt: 3 }
+            if (mutation === "authority") allowed = false
+            if (mutation === "plan")
+              Reflect.set(fixture.run, "input", {
+                ...fixture.run.input,
+                [CodingHostPlan.RESERVED_INPUT_KEY]: { ...plan, sha256: "f".repeat(64) },
+              })
+            if (!(await input.finalGate())) return 0
+            recovered.push(input.authority)
+            return 1
+          },
+        })
+        expect(result.healthy).toBe(true)
+        expect(visited).toBe(3)
+        expect(result.skipped).toBe(mutation === "none" ? 0 : 3)
+        expect(result.recovered).toBe(mutation === "none" ? 3 : 0)
+        expect(recovered.map((value) => value.toolCallID)).toEqual(
+          mutation === "none"
+            ? ["test", "build", "typecheck"].map((id) => `host-coding-${id}-${plan.configSha256.slice(0, 16)}`)
+            : [],
+        )
+        for (const authority of recovered)
+          expect(authority).toMatchObject({
+            role: "test",
+            agent: CodingRoleAgentProfiles.agentForRole("test"),
+            policyDigest: plan.sha256,
+            leaseOwner: "worker-expired",
+            attempt: 2,
+            sessionID: fixture.run.sessionID,
+          })
+      } finally {
+        const resolved = await fs.realpath(root)
+        if (
+          resolved !== path.resolve(root) ||
+          path.dirname(resolved) !== path.resolve(os.tmpdir()) ||
+          !path.basename(resolved).startsWith("coding-recovery-")
+        )
+          throw new Error("Unsafe coding recovery fixture cleanup")
+        await fs.rm(resolved, { recursive: true, force: true })
+      }
+    })
   for (const coding of [true, false])
     test(`recovers the actual version2 pending call with pinned role authority (coding=${coding})`, async () => {
       const fixture = persistedFixture(coding)
@@ -423,19 +496,22 @@ type MutableCheckpoint = {
   }
 }
 
-function persistedFixture(coding = false) {
+function persistedFixture(coding = false, directory = "D:\\OpenCode-Local\\workspace") {
   const now = 10_000
   const workflowID = WorkflowSchema.ID.make("wfl_runtime_recovery")
   const stageID = WorkflowSchema.StageID.make("wfs_runtime_recovery")
   const sessionID = SessionSchema.ID.make("ses_runtime_recovery")
-  const location = Location.Ref.make({ directory: AbsolutePath.make("D:\\OpenCode-Local\\workspace") })
+  const location = Location.Ref.make({ directory: AbsolutePath.make(directory) })
   const run: WorkflowSchema.Info = {
     id: workflowID,
     type: coding ? "coding-build" : "visual-build",
     status: "running",
     currentStageID: stageID,
     input: coding
-      ? { [CodingModelSelection.RESERVED_INPUT_KEY]: CodingModelSelection.freeze(fixtureAdmissionSnapshot(), location) }
+      ? {
+          [CodingModelSelection.RESERVED_INPUT_KEY]: CodingModelSelection.freeze(fixtureAdmissionSnapshot(), location),
+          coding: { maxRevisions: 1, maxTokens: 20000, maxTurns: 20, maxToolCalls: 40 },
+        }
       : {},
     budget: {},
     usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 2 },

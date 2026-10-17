@@ -113,7 +113,7 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 run production workflows
 
 Commands:
-  opencode workflow run <prompt>  run a production visual workflow
+  opencode workflow run <prompt>  run a production workflow (visual by default)
   opencode workflow models        list and confirm workflow model choices
 
 Options:
@@ -601,7 +601,7 @@ Options:
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode workflow run --help 1`] = `
 "opencode workflow run <prompt>
 
-run a production visual workflow
+run a production workflow (visual by default)
 
 Positionals:
   prompt  workflow prompt                                                        [string] [required]
@@ -614,7 +614,10 @@ Options:
       --pure           run without external plugins                                        [boolean]
       --format         output format      [string] [choices: "default", "json"] [default: "default"]
       --budget         workflow budget as validated JSON                                    [string]
-      --visual-budget  visual workflow budget as validated JSON                             [string]"
+      --visual-budget  visual workflow budget as validated JSON                             [string]
+      --kind           workflow kind      [string] [choices: "visual", "coding"] [default: "visual"]
+      --checks         coding check selection as validated JSON                             [string]
+      --coding-budget  coding workflow budget as validated JSON                             [string]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode workflow models --help 1`] = `

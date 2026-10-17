@@ -17,12 +17,18 @@ export function source(input: {
   readonly id: "test" | "build" | "typecheck"
   readonly timeoutMs: number
   readonly scratchRoot?: string
+  readonly workspace?: { readonly cwd: string; readonly inputBytes: number; readonly inputSha256: string }
 }): string {
   if (
     !Number.isSafeInteger(input.timeoutMs) ||
     input.timeoutMs < 1 ||
     input.argv[0] !== "bun" ||
-    input.argv[1] !== "--no-env-file"
+    input.argv[1] !== "--no-env-file" ||
+    (input.workspace !== undefined &&
+      (!Number.isSafeInteger(input.workspace.inputBytes) ||
+        input.workspace.inputBytes < 1 ||
+        input.workspace.inputBytes > 96 * 1024 * 1024 ||
+        !/^[a-f0-9]{64}$/.test(input.workspace.inputSha256)))
   )
     throw new Error("Invalid trusted coding invocation")
   return `
@@ -31,16 +37,39 @@ const path = await import("node:path");
 const fs = await import("node:fs/promises");
 const root = input.scratchRoot ?? "/tmp/opencode-coding-check";
 await fs.mkdir(root, { recursive: true });
-const bin = path.join(root, "bin");
-await fs.mkdir(bin, { recursive: true });
-const wrapper = path.join(bin, process.platform === "win32" ? "bun.cmd" : "bun");
-if (/[\\r\\n\"]/u.test(process.execPath)) throw new Error("Invalid pinned Bun path");
-await Bun.write(wrapper, process.platform === "win32" ? '@"' + process.execPath + '" --no-env-file %*\\r\\n' : '#!/bin/sh\\nexec "' + process.execPath + '" --no-env-file "$@"\\n');
-if (process.platform !== "win32") await fs.chmod(wrapper, 0o700);
+if (input.workspace) {
+  // stdin is the host-validated archive, bound to this literal launcher; never a live host mount.
+  const chunks = []; let used = 0;
+  for await (const chunk of Bun.stdin.stream()) {
+    used += chunk.byteLength;
+    if (used > input.workspace.inputBytes) throw new Error("Coding sealed input overflow");
+    chunks.push(Buffer.from(chunk));
+  }
+  const bytes = Buffer.concat(chunks);
+  if (used !== input.workspace.inputBytes || new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== input.workspace.inputSha256)
+    throw new Error("Coding sealed input mismatch");
+  const archive = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  const workspace = path.resolve(root, "workspace");
+  await fs.mkdir(workspace, { recursive: false });
+  function inside(relative) {
+    const resolved = path.resolve(workspace, relative);
+    if (resolved !== workspace && !resolved.startsWith(workspace + path.sep)) throw new Error("Coding sealed path escape");
+    return resolved;
+  }
+  for (const entry of archive.entries) {
+    const file = inside(entry.path);
+    const content = Buffer.from(entry.contentBase64, "base64");
+    if (content.byteLength !== entry.size || new Bun.CryptoHasher("sha256").update(content).digest("hex") !== entry.sha256)
+      throw new Error("Coding sealed file mismatch");
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, content, { flag: "wx", mode: entry.type === "executable" ? 0o755 : 0o644 });
+  }
+  process.chdir(inside(input.workspace.cwd));
+}
 const reportPath = path.join(root, "report.xml");
 await fs.rm(reportPath, { force: true });
 const argv = [process.execPath, ...input.argv.slice(1), ...(input.id === "test" ? ["--reporter=junit", "--reporter-outfile=" + reportPath] : [])];
-const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, PATH: bin + path.delimiter + (process.env.PATH ?? "") }, windowsHide: true });
+const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, BUN_OPTIONS: "--no-env-file" }, windowsHide: true });
 let timedOut = false;
 const timer = setTimeout(() => { timedOut = true; child.kill(); }, input.timeoutMs);
 async function bounded(stream) {

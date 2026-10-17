@@ -18,6 +18,8 @@ import { CodingAuthority } from "@opencode-ai/core/workflow/coding/authority"
 import { CodingRouting } from "@opencode-ai/core/workflow/coding/routing"
 import { CodingModelSelection } from "@opencode-ai/core/workflow/coding/model-selection"
 import { BuildRoleAgents } from "@opencode-ai/core/workflow/execution/build-role-agents"
+import { CodingHostPlan } from "@opencode-ai/core/workflow/coding/host-plan"
+import { CodingRoleAgentProfiles } from "@opencode-ai/core/workflow/coding/role-agent-profiles"
 
 const EXPIRED_RUNTIME_BATCH_SIZE = 100
 
@@ -66,35 +68,38 @@ export async function recoverExpired(input: {
   }))
   for (const { snapshot, leaseExpiresAtEpoch } of captured) {
     try {
-      const candidate = await currentAuthority(
+      const candidates = await currentAuthority(
         input.store,
         snapshot,
         leaseExpiresAtEpoch,
         input.now(),
         input.codingAuthority,
       )
-      if (candidate === undefined) {
+      if (candidates === undefined) {
         skipped++
         continue
       }
-      let fenced = false
-      const count = await input.recover({
-        authority: candidate.authority,
-        finalGate: async () => {
-          const current = await currentAuthority(
-            input.store,
-            snapshot,
-            leaseExpiresAtEpoch,
-            input.now(),
-            input.codingAuthority,
-          )
-          const valid = current !== undefined && sameAuthority(current.authority, candidate.authority)
-          if (!valid) fenced = true
-          return valid
-        },
-      })
-      if (fenced) skipped++
-      else recovered += count
+      for (const candidate of candidates) {
+        let fenced = false
+        const count = await input.recover({
+          authority: candidate.authority,
+          finalGate: async () => {
+            const current = await currentAuthority(
+              input.store,
+              snapshot,
+              leaseExpiresAtEpoch,
+              input.now(),
+              input.codingAuthority,
+            )
+            const valid =
+              current !== undefined && current.some((value) => sameAuthority(value.authority, candidate.authority))
+            if (!valid) fenced = true
+            return valid
+          },
+        })
+        if (fenced) skipped++
+        else recovered += count
+      }
     } catch {
       healthy = false
     }
@@ -159,7 +164,7 @@ async function currentAuthority(
   snapshotLeaseExpiresAtEpoch: number | undefined,
   now: number,
   codingAuthority?: CodingAuthority.Interface,
-): Promise<{ readonly authority: WorkflowCommandSandboxServer.RecoveryAuthority } | undefined> {
+): Promise<readonly { readonly authority: WorkflowCommandSandboxServer.RecoveryAuthority }[] | undefined> {
   if (snapshotLeaseExpiresAtEpoch === undefined) return undefined
   const [detail, stage, expired] = await Promise.all([
     Effect.runPromise(store.get(snapshot.workflowID)),
@@ -206,6 +211,29 @@ async function currentAuthority(
       )))
   )
     return undefined
+  if (detail.run.type === "coding-build" && role === "test") {
+    try {
+      if (detail.run.location === undefined) return undefined
+      const plan = CodingHostPlan.decode(detail.run.input?.[CodingHostPlan.RESERVED_INPUT_KEY], detail.run.location)
+      // These bounded host checks run before a provider turn exists. Reconstruct only
+      // their admitted ownership; the same expired-lease fence still gates every removal.
+      return plan.commands.map((command) => ({
+        authority: {
+          workflowID: detail.run.id,
+          stageID: stage.id,
+          toolCallID: `host-coding-${command.id}-${plan.configSha256.slice(0, 16)}`,
+          role: "test" as const,
+          policyDigest: plan.sha256,
+          sessionID: detail.run.sessionID!,
+          agent: CodingRoleAgentProfiles.agentForRole("test"),
+          leaseOwner: stage.leaseOwner!,
+          attempt: stage.attempt,
+        },
+      }))
+    } catch {
+      return undefined
+    }
+  }
   const call = pendingBashCall(stage.checkpoint)
   if (call === undefined) return undefined
   let route: WorkflowRouting.Route | CodingRouting.Route
@@ -215,7 +243,7 @@ async function currentAuthority(
       detail.run.type === "coding-build"
         ? CodingRouting.resolve({
             role,
-            budget: detail.run.budget,
+            budget: CodingRouting.budget(detail.run),
             selection: CodingModelSelection.fromWorkflow(detail.run),
           })
         : WorkflowRouting.resolve({
@@ -235,21 +263,23 @@ async function currentAuthority(
   const assistantMessageID = SessionMessage.ID.make(
     `msg_workflow_${stage.id.slice(4)}_${createHash("sha256").update(call.id).digest("hex").slice(0, 16)}`,
   )
-  return {
-    authority: {
-      workflowID: detail.run.id,
-      stageID: stage.id,
-      toolCallID: call.id,
-      role,
-      policyDigest,
-      sessionID: detail.run.sessionID,
-      agent,
-      leaseOwner: stage.leaseOwner,
-      attempt: stage.attempt,
-      assistantMessageID,
-      callDigest: call.digest,
+  return [
+    {
+      authority: {
+        workflowID: detail.run.id,
+        stageID: stage.id,
+        toolCallID: call.id,
+        role,
+        policyDigest,
+        sessionID: detail.run.sessionID,
+        agent,
+        leaseOwner: stage.leaseOwner,
+        attempt: stage.attempt,
+        assistantMessageID,
+        callDigest: call.digest,
+      },
     },
-  }
+  ]
 }
 
 function pendingBashCall(

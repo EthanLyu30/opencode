@@ -369,7 +369,7 @@ const executeCoding = Effect.fn("WorkflowExecutor.executeCoding")(function* (
     try: () =>
       CodingRouting.resolve({
         role: state.role,
-        budget: input.workflow.budget,
+        budget: CodingRouting.budget(input.workflow),
         selection: CodingModelSelection.fromWorkflow(input.workflow),
         benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(input.workflow),
       }),

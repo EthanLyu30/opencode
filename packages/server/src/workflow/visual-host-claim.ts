@@ -409,7 +409,7 @@ async function withRegistry<A>(
   const deadline = Date.now() + 30_000
   for (;;) {
     try {
-      return await withRegistryAttempt(directory, run, hooks)
+      return await withRegistryAttempt(directory, run, hooks, deadline)
     } catch (cause) {
       if (!(cause instanceof RetryableRegistryBusy) || Date.now() >= deadline) {
         throw cause instanceof RetryableRegistryBusy ? cause.original : cause
@@ -430,6 +430,7 @@ async function withRegistryAttempt<A>(
     readonly afterPublished?: (file: string) => Promise<void>
     readonly afterPendingRemoved?: (file: string) => Promise<void>
   },
+  deadline: number,
 ): Promise<A> {
   const file = path.join(directory, "claims.sqlite")
   const authority = await prepareRegistryAuthority(directory, file, hooks)
@@ -452,7 +453,17 @@ async function withRegistryAttempt<A>(
     runStarted = true
     const result = await run(database)
     guardSqliteAuthority(authority)
-    sqlite(database, () => database!.exec("COMMIT"))
+    // A reader can delay COMMIT after the callback has already published files.
+    // Finish this transaction only; replaying the callback could repeat side effects.
+    for (;;) {
+      try {
+        sqlite(database, () => database!.exec("COMMIT"))
+        break
+      } catch (cause) {
+        if (!isSqliteBusy(cause) || Date.now() >= deadline) throw cause
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+    }
     transaction = false
     return result
   } catch (cause) {
@@ -987,13 +998,14 @@ async function ensureCleanupRetirement(
     })
   } catch (cause) {
     if (!(await fs.exists(target))) throw cause
-    await removeCreatedRetirementPending(pending, created, encoded)
+    await removeCreatedRetirementPending(pending, target, created, encoded)
   }
   return (await readCleanupRetirement(directory, key, generation)) ?? body
 }
 
 async function removeCreatedRetirementPending(
   file: string,
+  target: string,
   created: Awaited<ReturnType<typeof fs.lstat>>,
   encoded: string,
 ): Promise<void> {
@@ -1003,11 +1015,22 @@ async function removeCreatedRetirementPending(
   if (!(await fs.exists(file))) return
   const canonical = await fs.realpath(file)
   const stat = await fs.lstat(file)
+  // Recovery may have published this exact pending inode before its owner links it.
+  // Two links are legitimate only when the second is the canonical retirement target.
+  const published = stat.nlink === 2 ? await fs.lstat(target) : undefined
+  const linksOwned =
+    stat.nlink === 1 ||
+    (published !== undefined &&
+      (await fs.realpath(target)) === target &&
+      published.isFile() &&
+      !published.isSymbolicLink() &&
+      published.nlink === 2 &&
+      sameRegistryIdentity(published, stat))
   if (
     canonical !== file ||
     !stat.isFile() ||
     stat.isSymbolicLink() ||
-    stat.nlink !== 1 ||
+    !linksOwned ||
     stat.dev !== created.dev ||
     stat.ino !== created.ino ||
     stat.birthtimeMs !== created.birthtimeMs ||

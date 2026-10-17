@@ -8,7 +8,7 @@ import { CodingChecksServer } from "../src/workflow/coding-checks"
 import { CodingHostPlan } from "@opencode-ai/core/workflow/coding/host-plan"
 import { CodingArtifacts } from "@opencode-ai/core/workflow/coding/artifacts"
 import { Location } from "@opencode-ai/core/location"
-import { AbsolutePath } from "@opencode-ai/core/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { codingFixture } from "../../core/test/fixtures/workflow-coding"
@@ -199,6 +199,65 @@ describe("Coding trusted check reporting", () => {
       expect(result.log).not.toContain("must-not-load")
     })
   })
+  test("nested Bun inherits the pinned no-dotenv option without an executable temporary shim", async () => {
+    await fixture(async (root) => {
+      await fs.writeFile(path.join(root, ".env"), "CODING_FIXTURE_DOTENV=must-not-load\n")
+      await fs.writeFile(
+        path.join(root, "nested.ts"),
+        'console.log(JSON.stringify({ options: process.env.BUN_OPTIONS, canary: process.env.CODING_FIXTURE_DOTENV ?? "clean", executable: process.execPath }))',
+      )
+      await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ scripts: { build: "bun ./nested.ts" } }))
+      const result = await launch(root, ["bun", "--no-env-file", "run", "build"], "build")
+      expect(result.exitCode).toBe(0)
+      expect(result.log).toContain('"options":"--no-env-file"')
+      expect(result.log).toContain('"canary":"clean"')
+      expect(result.log).not.toContain("must-not-load")
+      expect(await fs.readdir(path.join(root, "owned-host"))).not.toContain("bin")
+    })
+  })
+  test("sealed source builds in a disposable writable copy without changing host files", async () => {
+    await fixture(async (root) => {
+      const bytes = Buffer.from("export const sum = (a:number,b:number) => a+b")
+      const archive = await WorkflowWorkspaceMaterialization.seal(
+        [
+          {
+            path: RelativePath.make("sum.ts"),
+            type: "file",
+            sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+            size: bytes.length,
+          },
+        ],
+        async () => bytes,
+      )
+      await fs.writeFile(path.join(root, "sum.ts"), "host file must not be built or changed")
+      const result = await launch(
+        root,
+        ["bun", "--no-env-file", "build", "./sum.ts", "--outdir", "./dist"],
+        "build",
+        10000,
+        JSON.stringify(archive),
+      )
+      expect(result.exitCode).toBe(0)
+      expect(await fs.readFile(path.join(root, "sum.ts"), "utf8")).toBe("host file must not be built or changed")
+      expect(await Bun.file(path.join(root, "dist", "sum.js")).exists()).toBe(false)
+      expect(await fs.readFile(path.join(root, "owned-host", "workspace", "dist", "sum.js"), "utf8")).toContain("a + b")
+    })
+  })
+  test("tampered sealed stdin is rejected before a selected command can write", async () => {
+    await fixture(async (root) => {
+      await expect(
+        launch(
+          root,
+          ["bun", "--no-env-file", "-e", 'await Bun.write("unexpected", "bad")'],
+          "build",
+          10000,
+          "{}",
+          "wrong bytes",
+        ),
+      ).rejects.toThrow()
+      expect(await Bun.file(path.join(root, "unexpected")).exists()).toBe(false)
+    })
+  })
 })
 
 async function fixture(run: (root: string) => Promise<void>) {
@@ -216,8 +275,29 @@ async function fixture(run: (root: string) => Promise<void>) {
     await fs.rm(resolved, { recursive: true, force: true })
   }
 }
-async function launch(root: string, argv: readonly string[], id: "test" | "build", timeoutMs = 10000) {
-  const source = CodingCheckLauncher.source({ argv, id, timeoutMs, scratchRoot: path.join(root, "owned-host") })
+async function launch(
+  root: string,
+  argv: readonly string[],
+  id: "test" | "build",
+  timeoutMs = 10000,
+  payload?: string,
+  stdin = payload,
+) {
+  const source = CodingCheckLauncher.source({
+    argv,
+    id,
+    timeoutMs,
+    scratchRoot: path.join(root, "owned-host"),
+    ...(payload === undefined
+      ? {}
+      : {
+          workspace: {
+            cwd: ".",
+            inputBytes: Buffer.byteLength(payload),
+            inputSha256: new Bun.CryptoHasher("sha256").update(payload).digest("hex"),
+          },
+        }),
+  })
   const child = Bun.spawn([process.execPath, "--no-env-file", "-e", source], {
     cwd: root,
     env: {
@@ -233,7 +313,7 @@ async function launch(root: string, argv: readonly string[], id: "test" | "build
       HOME: path.join(root, "owned-host", "home"),
       SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
     },
-    stdin: "ignore",
+    stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
     stdout: "pipe",
     stderr: "pipe",
     windowsHide: true,

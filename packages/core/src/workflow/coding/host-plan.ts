@@ -197,6 +197,22 @@ export function verifyCurrentConfiguration(plan: Plan): void {
   if (current.sha256 !== value.sha256) throw invalid()
 }
 
+/** Entries must come from an already validated, byte-sealed Snapshot archive. */
+export function verifySealedConfiguration(
+  plan: Plan,
+  entries: readonly { readonly path: string; readonly sha256: string; readonly size: number }[],
+): void {
+  const value = decode(plan, plan.location)
+  for (const file of value.configFiles) {
+    const matches = entries.filter((entry) => entry.path === file.path)
+    if (file.state === "absent") {
+      if (matches.length !== 0) throw invalid()
+      continue
+    }
+    if (matches.length !== 1 || matches[0]!.sha256 !== file.sha256 || matches[0]!.size !== file.size) throw invalid()
+  }
+}
+
 function directory(input: string): string {
   const absolute = path.resolve(input)
   for (let cursor = absolute; ; cursor = path.dirname(cursor)) {

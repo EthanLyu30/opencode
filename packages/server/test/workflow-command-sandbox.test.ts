@@ -28,6 +28,7 @@ import { CodingModelSelection } from "@opencode-ai/core/workflow/coding/model-se
 import { CodingRoleAgentProfiles } from "@opencode-ai/core/workflow/coding/role-agent-profiles"
 import { BuildRouting } from "@opencode-ai/core/workflow/execution/build-routing"
 import { fixtureAdmissionSnapshot } from "../../core/test/fixtures/workflow-model-catalog"
+import { WorkflowRuntimeRecovery } from "../src/workflow/runtime-recovery"
 
 const root = "D:\\OpenCode-Local\\tmp\\workflow-sandbox-tests"
 const image = `opencode/workflow-sandbox@sha256:${"a".repeat(64)}`
@@ -81,7 +82,15 @@ describe("WorkflowCommandSandboxServer", () => {
     expect(create.argv).toContain("--no-env-file")
     expect(create.argv).toContain("-e")
     expect(create.argv.at(-1)).toContain("--reporter=junit")
-    expect(Buffer.from(fixture.engine.one("container", "cp").stdin!).includes(Buffer.from("sum.test.ts"))).toBe(true)
+    expect(fixture.engine.all("container", "cp")).toEqual([])
+    expect(create.argv).toContain("--interactive")
+    expect(valueAfter(create.argv, "--workdir")).toBe("/")
+    expect(valuesAfter(create.argv, "--tmpfs")).toContain("/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=1777")
+    const payload = JSON.parse(String(fixture.engine.one("container", "start").stdin))
+    expect(payload.entries[0].path).toBe("sum.test.ts")
+    expect(Buffer.from(payload.entries[0].contentBase64, "base64").toString()).toBe(
+      'import {test} from "bun:test";test("sum",()=>{})',
+    )
     expect(fixture.engine.all("container", "rm")).toHaveLength(1)
   })
   test("coding check policy drift is rejected before creating a container", async () => {
@@ -96,6 +105,54 @@ describe("WorkflowCommandSandboxServer", () => {
     )
     expect(fixture.engine.all("container", "create")).toEqual([])
   })
+  for (const running of [true, false])
+    test(`startup removes only a pre-provider coding check orphan (running=${running})`, async () => {
+      await using fixture = await setup("test", {
+        coding: true,
+        codingOutput: JSON.stringify({
+          kind: "opencode.coding-check.v1",
+          exitCode: 0,
+          timedOut: false,
+          log: "checked",
+        }),
+      })
+      const plan = CodingHostPlan.freeze({
+        authority: "admission",
+        location: fixture.persisted.run.location!,
+        checks: { cwd: ".", test: "bun-test" },
+      })
+      fixture.persisted.run = {
+        ...fixture.persisted.run,
+        input: { ...fixture.persisted.run.input, [CodingHostPlan.RESERVED_INPUT_KEY]: plan },
+      }
+      await fs.writeFile(path.join(fixture.workspace, "sum.test.ts"), "export {}")
+      await fixture.runCoding(plan)
+      // Model the independently surviving Docker state after its parent is gone.
+      fixture.engine.invocations.splice(0)
+      fixture.engine.recoveryIDs = [fixture.engine.containerID]
+      fixture.engine.recoveryRunning = running
+      fixture.persisted.stage = {
+        ...fixture.persisted.stage,
+        checkpoint: undefined,
+        sessionID: fixture.persisted.run.sessionID,
+        leaseExpiresAt: DateTime.makeUnsafe(fixture.clock.now - 1),
+      }
+      const result = await WorkflowRuntimeRecovery.recoverExpired({
+        store: fixture.recoveryStore,
+        now: () => fixture.clock.now,
+        codingAuthority: CodingAuthority.Service.of({ require: () => Effect.void }),
+        recover: (input) =>
+          WorkflowCommandSandboxServer.recover({ engine: fixture.engine, config: fixture.config, ...input }),
+      })
+      expect(result).toEqual({ healthy: true, recovered: 1, skipped: 0 })
+      expect(fixture.engine.recoveryIDs).toEqual([])
+      expect(fixture.engine.all("container", "kill")).toHaveLength(running ? 1 : 0)
+      expect(fixture.engine.one("container", "rm").argv.at(-1)).toBe(fixture.engine.containerID)
+      expect(fixture.engine.all("container", "create")).toEqual([])
+      expect(fixture.engine.all("container", "start")).toEqual([])
+      expect(fixture.persisted.stage.attempt).toBe(1)
+      expect(fixture.persisted.stage.leaseOwner).toBe("server-worker-1")
+    })
   test("installs a separate trusted frozen-test runner instead of accepting model shell text", async () => {
     await using fixture = await setup("test")
     expect(await fixture.hasFrozenTestRunner()).toBe(true)
@@ -1186,7 +1243,10 @@ async function setup(
     status: "running",
     currentStageID: stageID,
     input: options.coding
-      ? { [CodingModelSelection.RESERVED_INPUT_KEY]: CodingModelSelection.freeze(fixtureAdmissionSnapshot(), location) }
+      ? {
+          [CodingModelSelection.RESERVED_INPUT_KEY]: CodingModelSelection.freeze(fixtureAdmissionSnapshot(), location),
+          coding: { maxRevisions: 1, maxTokens: 20000, maxTurns: 20, maxToolCalls: 40 },
+        }
       : {},
     budget: {},
     usage: { tokens: 0, turns: 0, toolCalls: 0, attempts: 1 },
@@ -1355,6 +1415,7 @@ async function setup(
     hooks,
     config,
     persisted,
+    recoveryStore: WorkflowStore.Service.of({ ...workflowStore, expired: () => Effect.succeed([persisted.stage]) }),
     lookups,
     request,
     authority: () => initial,

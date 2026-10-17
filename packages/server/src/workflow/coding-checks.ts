@@ -189,6 +189,8 @@ export const layer = Layer.effect(
                 if (!content) throw failure()
                 return content
               })
+              const plan = CodingHostPlan.decode(detail.run.input[CodingHostPlan.RESERVED_INPUT_KEY], input.location)
+              CodingHostPlan.verifySealedConfiguration(plan, archive.entries)
               return WorkflowWorkspaceMaterialization.bind({ ...input, snapshotRef, archive })
             },
             catch: () => failure("coding_snapshot_unavailable"),
@@ -220,6 +222,7 @@ export const layer = Layer.effect(
                 manifestSha256: input.sealedSnapshot.manifestSha256,
                 workspaceSha256: input.sealedSnapshot.workspaceSha256,
               })
+              CodingHostPlan.verifySealedConfiguration(input.plan, input.sealedSnapshot.archive.entries)
             },
             catch: () => failure("coding_source_drift"),
           })

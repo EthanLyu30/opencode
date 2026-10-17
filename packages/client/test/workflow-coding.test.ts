@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test"
 import { OpenCode } from "../src"
-import { OpenCode as EffectOpenCode } from "../src/effect"
 import { Effect } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/unstable/http"
 
@@ -54,6 +53,7 @@ test("generated coding admission uses the exact public body and preserves global
 })
 
 test("generated Effect client exposes the same coding contract without importing a host runtime", async () => {
+  const { OpenCode } = await import("../src/effect")
   const http = HttpClient.make((request) => {
     expect(request.method).toBe("POST")
     expect(request.url).toBe("http://localhost/api/workflow/coding-build")
@@ -91,7 +91,7 @@ test("generated Effect client exposes the same coding contract without importing
   })
   const result = await Effect.runPromise(
     Effect.gen(function* () {
-      const client = yield* EffectOpenCode.make({ baseUrl: "http://localhost" })
+      const client = yield* OpenCode.make({ baseUrl: "http://localhost" })
       return yield* client.workflows.codingBuildCreate({
         prompt: "Fix a library",
         checks: { cwd: ".", test: "bun-test" },

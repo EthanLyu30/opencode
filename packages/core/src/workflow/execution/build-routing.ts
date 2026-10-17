@@ -25,7 +25,7 @@ export function resolve(input: { readonly workflow: Workflow.Info; readonly stag
     const role = Schema.decodeUnknownSync(WorkflowCodingBuild.Role)(input.stage.type)
     return CodingRouting.resolve({
       role,
-      budget: input.workflow.budget,
+      budget: CodingRouting.budget(input.workflow),
       selection: CodingModelSelection.fromWorkflow(input.workflow),
       benchmarkTransport: transport,
       requested: WorkflowRouting.requestedFromStage(role === "code_review" ? "design" : role, input.stage.input),

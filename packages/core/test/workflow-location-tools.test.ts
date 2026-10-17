@@ -470,7 +470,7 @@ describe("Workflow Location tools", () => {
             const stage = { ...declared, attempt: 1, status: "running" as const, leaseOwner: "worker" }
             const route = CodingRouting.resolve({
               role: "deliver",
-              budget: detail.run.budget,
+              budget: CodingRouting.budget(detail.run),
               selection: CodingModelSelection.fromWorkflow(detail.run),
             })
             modelResponses.push(
@@ -525,9 +525,19 @@ describe("Workflow Location tools", () => {
             const workflow = {
               ...base.workflow,
               type: "coding-build",
-              input: CodingModelSelection.withSelection({ brief: "Owned tool fixture" }, selection),
+              input: CodingModelSelection.withSelection(
+                {
+                  brief: "Owned tool fixture",
+                  coding: { maxRevisions: 0, maxTokens: 20000, maxTurns: 20, maxToolCalls: 40 },
+                },
+                selection,
+              ),
             }
-            const route = CodingRouting.resolve({ role: "implement", budget: workflow.budget, selection })
+            const route = CodingRouting.resolve({
+              role: "implement",
+              budget: CodingRouting.budget(workflow),
+              selection,
+            })
             yield* persistModelInput({ ...base, workflow, route })
             yield* Effect.gen(function* () {
               const registry = yield* ToolRegistry.Service
@@ -620,7 +630,13 @@ describe("Workflow Location tools", () => {
           const workflow = Workflow.Info.make({
             ...base.workflow,
             type: "coding-build",
-            input: CodingModelSelection.withSelection({ brief: "Review the library fix" }, selection),
+            input: CodingModelSelection.withSelection(
+              {
+                brief: "Review the library fix",
+                coding: { maxRevisions: 0, maxTokens: 20000, maxTurns: 20, maxToolCalls: 40 },
+              },
+              selection,
+            ),
           })
           const stage = Workflow.Stage.make({ ...base.stage, type: "code_review", input: { revision: 0 } })
           modelResponses.push(
@@ -636,7 +652,7 @@ describe("Workflow Location tools", () => {
               workflow,
               stage,
               stages: [stage],
-              route: CodingRouting.resolve({ role: "code_review", budget: workflow.budget, selection }),
+              route: CodingRouting.resolve({ role: "code_review", budget: CodingRouting.budget(workflow), selection }),
             }),
           )
           expect(result.semantic?.outcome).toMatchObject({ role: "code_review", verdict: "pass", revision: 0 })
@@ -673,7 +689,13 @@ describe("Workflow Location tools", () => {
             const workflow = {
               ...base.workflow,
               type: "coding-build",
-              input: CodingModelSelection.withSelection({ brief: "Interpret trusted test results" }, selection),
+              input: CodingModelSelection.withSelection(
+                {
+                  brief: "Interpret trusted test results",
+                  coding: { maxRevisions: 0, maxTokens: 20000, maxTurns: 20, maxToolCalls: 40 },
+                },
+                selection,
+              ),
             }
             const stage = { ...base.stage, type: "test", input: { revision: 0 }, leaseOwner: "worker" }
             const record: CodingArtifacts.CheckRecord = {
@@ -715,7 +737,7 @@ describe("Workflow Location tools", () => {
               workflow,
               stage,
               stages: [stage],
-              route: CodingRouting.resolve({ role: "test", budget: workflow.budget, selection }),
+              route: CodingRouting.resolve({ role: "test", budget: CodingRouting.budget(workflow), selection }),
               preparation,
             }
             modelResponses.push(

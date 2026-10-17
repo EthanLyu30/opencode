@@ -123,7 +123,7 @@ export function build(input: BuildInput): Contract {
   const selection = CodingModelSelection.fromWorkflow(input.workflow)
   const expected = CodingRouting.resolve({
     role,
-    budget: input.workflow.budget,
+    budget: CodingRouting.budget(input.workflow),
     selection,
     benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(input.workflow),
   })
@@ -137,7 +137,7 @@ export function build(input: BuildInput): Contract {
   })
   if (
     WorkflowBusinessArtifact.encode(facts(input.route)) !== WorkflowBusinessArtifact.encode(facts(expected)) ||
-    WorkflowBusinessArtifact.encode(input.route.budget) !== WorkflowBusinessArtifact.encode(input.workflow.budget)
+    WorkflowBusinessArtifact.encode(input.route.budget) !== WorkflowBusinessArtifact.encode(expected.budget)
   )
     throw new Error("Coding contract route differs from frozen admission")
   const revision = CodingArtifacts.revisionOf(input.workflow, input.stage, input.priorArtifacts)
@@ -253,7 +253,7 @@ export function verifyAuthority(input: {
     priorArtifacts: input.priorArtifacts,
     route: CodingRouting.resolve({
       role,
-      budget: input.workflow.budget,
+      budget: CodingRouting.budget(input.workflow),
       selection: CodingModelSelection.fromWorkflow(input.workflow),
       benchmarkTransport: WorkflowBenchmarkTransport.fromWorkflow(input.workflow),
     }),

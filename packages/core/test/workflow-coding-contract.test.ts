@@ -144,7 +144,11 @@ describe("Coding provider contracts", () => {
       CodingContract.build({
         workflow,
         stage: fixture.stage,
-        route: CodingRouting.resolve({ role: "code_review", budget: workflow.budget, selection: fixture.selection }),
+        route: CodingRouting.resolve({
+          role: "code_review",
+          budget: CodingRouting.budget(workflow),
+          selection: fixture.selection,
+        }),
         priorArtifacts: [],
       })
     const original = make(fixture.workflow)
