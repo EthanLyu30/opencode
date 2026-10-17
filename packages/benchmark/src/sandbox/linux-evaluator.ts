@@ -16,6 +16,8 @@ import { scoreIndependentEvaluation, type EvaluationFacts } from "../evaluator/i
 import { requireLinuxHost, requireLinuxObservation, bindLinuxEvaluationFacts } from "./evaluation-host"
 import { requireControllerFacts, type ControllerFactsObserver } from "./controller-facts"
 import { sha256Text } from "../hash"
+import { disjoint } from "../evaluator/independent/snapshot"
+import { directRoot } from "../corpus/evaluation-bundle"
 
 export type LinuxEvaluateInput = Omit<EvaluateInput, "facts"> & Readonly<{ dependency: DependencyResolution }>
 export async function evaluateLinux(
@@ -36,6 +38,9 @@ export async function evaluateLinux(
       identity.candidateSha256 !== snapshot.candidateSha256
     )
       throw new TypeError("TASK24_EVALUATE_IDENTITY_INVALID")
+    await directRoot(input.evidenceRoot)
+    for (const root of [snapshot.sourceRoot, snapshot.workRoot, bundle.root])
+      if (!disjoint(input.evidenceRoot, root)) throw new TypeError("TASK24_EVIDENCE_ROOT_OVERLAP")
     await verifyEvaluationContext(input)
     const required = bundle.profile.dependency,
       d = input.dependency
@@ -101,7 +106,7 @@ export async function evaluateLinux(
       if (cases.length !== ordered.length || ordered.some((c) => !c))
         throw new TypeError("TASK24_PROBE_COVERAGE_INVALID")
       functional = evaluateFunctional({ oracle: bundle.oracle, observation: { cases: ordered }, evidence })
-      if (bundle.profile.kind === "primary") {
+      if (bundle.profile.kind === "primary" && functional.mandatoryPassed) {
         if (!options.browser || !bundle.profile.preview)
           return { kind: "blocked", reason: "BROWSER_CAPABILITY_UNAVAILABLE" }
         const previewRequest = { ...common, build: built.build, preview: bundle.profile.preview },

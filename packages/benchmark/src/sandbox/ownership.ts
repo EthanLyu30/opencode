@@ -13,6 +13,7 @@ import {
 import { requireOperation, isRealDockerRunner, requireDockerExecution } from "./docker"
 import { sessionState, revalidateSession } from "./preflight"
 import { directoryIdentity } from "./storage"
+import { fileIdentity } from "./storage"
 
 export type OwnerSeed = Readonly<{
   acceptanceID: string
@@ -31,7 +32,26 @@ export type ContainerSpec = Readonly<{
   dependencies?: readonly Readonly<{ name: string; target: string }>[]
   interactive?: boolean
   preparingDependencies?: true
+  protectedFiles?: readonly { source: string; target: string }[]
 }>
+export function assertRequestedMounts(
+  mounts: readonly { Type: string; Source: string; Destination: string; RW: boolean; Name?: string }[],
+  spec: ContainerSpec,
+) {
+  const expected = [
+    ...(spec.workspace
+      ? [{ Type: "bind", Source: spec.workspace.source, Destination: "/workspace", RW: !spec.workspace.readonly }]
+      : []),
+    ...(spec.protectedFiles ?? []).map((f) => ({ Type: "bind", Source: f.source, Destination: f.target, RW: false })),
+    ...(spec.dependencies ?? []).map((f) => ({ Type: "volume", Name: f.name, Destination: f.target, RW: false })),
+  ]
+  if (
+    mounts.length !== expected.length ||
+    expected.some((e) => !mounts.some((m) => Object.entries(e).every(([k, v]) => m[k as keyof typeof m] === v)))
+  )
+    throw new TypeError("TASK24_LINUX_REQUESTED_MOUNTS")
+}
+const requestedSpecs = new Map<string, ContainerSpec>()
 const Text = Schema.NonEmptyString
 const Inspection = Schema.Struct({
   Id: Text,
@@ -121,7 +141,7 @@ export function decodeOwnedInspection(input: unknown, owner: Owner, session: Eng
     if (mount.Type === "bind") {
       requireDPath(mount.Source)
       if (
-        mount.Destination !== "/workspace" ||
+        (mount.Destination !== "/workspace" && !(mount.Destination.startsWith("/workspace/") && !mount.RW)) ||
         !mount.Source.toLowerCase().startsWith(state.manifest.roots.work.toLowerCase() + "\\")
       )
         throw new TypeError("TASK24_LINUX_MOUNT_POLICY")
@@ -133,6 +153,8 @@ export function decodeOwnedInspection(input: unknown, owner: Owner, session: Eng
     )
       throw new TypeError("TASK24_LINUX_MOUNT_POLICY")
   }
+  const spec = requestedSpecs.get(canonicalJson(owner))
+  if (spec) assertRequestedMounts(value.Mounts, spec)
   return freeze(value)
 }
 function invocation(argv: readonly string[], signal: AbortSignal, timeoutMs = 15000): DockerInvocation {
@@ -189,6 +211,19 @@ export async function createOwnedContainer(input: {
     if (!source.toLowerCase().startsWith(state.manifest.roots.work.toLowerCase() + "\\") || source.includes(","))
       throw new TypeError("TASK24_LINUX_WORKSPACE")
     mounts.push("--mount", `type=bind,src=${source},dst=/workspace${spec.workspace.readonly ? ",readonly" : ""}`)
+  }
+  for (const file of spec.protectedFiles ?? []) {
+    if (
+      !spec.workspace ||
+      !file.source.startsWith(spec.workspace.source + "\\") ||
+      file.target !== "/workspace/" + file.source.slice(spec.workspace.source.length + 1).replaceAll("\\", "/") ||
+      file.source.includes(",") ||
+      file.target.includes(",")
+    )
+      throw new TypeError("TASK24_LINUX_PROTECTED_MOUNT")
+    safePath(file.target.slice("/workspace/".length))
+    await fileIdentity(file.source)
+    mounts.push("--mount", `type=bind,src=${file.source},dst=${file.target},readonly`)
   }
   for (const mount of spec.dependencies ?? []) {
     if (
@@ -288,6 +323,7 @@ export async function createOwnedContainer(input: {
     throw new TypeError("TASK24_LINUX_CREATE_UNCERTAIN")
   }
   const owner = freeze({ ...input.owner, containerID })
+  requestedSpecs.set(canonicalJson(owner), structuredClone(spec))
   try {
     await inspectOwnedContainer({ ...input, owner })
     if (input.start === false) return owner

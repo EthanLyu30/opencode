@@ -77,6 +77,23 @@ const issuedResults = new WeakSet<object>()
 export function requireIndependentResult(result: IndependentResult): void {
   if (!issuedResults.has(result)) throw new TypeError("TASK24_RESULT_UNVALIDATED")
 }
+/** Pure measurement fragment; it cannot issue a result or a Linux authority. */
+export function unmeasuredLinuxFunctional(input: { points: number; mandatoryPassed: boolean }) {
+  if (input.mandatoryPassed || !Number.isFinite(input.points) || input.points < 0 || input.points > 45)
+    throw new TypeError("TASK24_UNMEASURED_FUNCTIONAL")
+  return {
+    kind: "primary" as const,
+    measurementStatus: "candidate_failure" as const,
+    functional: input.points,
+    qualifiedSuccess: false,
+    visual: null,
+    visualComposite: null,
+    viewportScores: null,
+    diagnosticTotal: null,
+    accessibilityResponsive: null,
+    unmeasuredReason: "not_run_due_to_functional_failure",
+  }
+}
 export function scoreIndependentEvaluation(facts: EvaluationFacts): IndependentResult {
   const identity = decodeEvaluationIdentity(facts.identity)
   if (
@@ -202,6 +219,12 @@ export function scoreIndependentEvaluation(facts: EvaluationFacts): IndependentR
         visualComposite: null,
         viewportScores: null,
         diagnosticTotal: null,
+      }
+    } else if (facts.assurance === "linux-attested" && !functional.mandatoryPassed && facts.visual === null) {
+      body = {
+        ...common,
+        ...unmeasuredLinuxFunctional(functional),
+        disqualifications: [...policy.disqualifications, "FUNCTIONAL_FAILED"],
       }
     } else {
       const v = facts.visual

@@ -56,3 +56,17 @@ test("browser admission requires its exact capability origin and paths; never at
     await f.dispose()
   }
 })
+import { validateBrowserAdmission } from "../../src/sandbox/browser"
+test("browser adversarial matrix accepts only an owned local canary and task-specific D fixture", () => {
+  const data = {
+    canaryURL: "http://127.0.0.1:12345/" + "a".repeat(64),
+    fileURL: "file:///D:/OpenCode-Benchmark/Task24/tmp/own/canary.txt",
+  }
+  expect(() => validateBrowserAdmission(data)).not.toThrow()
+  for (const c of [
+    { ...data, canaryURL: "https://api.deepseek.com" },
+    { ...data, fileURL: "file:///C:/Users/Administrator/.env" },
+    { ...data, canaryURL: "http://127.0.0.1:12345/short" },
+  ])
+    expect(() => validateBrowserAdmission(c)).toThrow()
+})

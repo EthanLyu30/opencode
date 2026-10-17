@@ -74,3 +74,28 @@ for (const failure of ["empty", "throw"] as const)
       await f.dispose()
     }
   })
+import { assertRequestedMounts } from "../../src/sandbox/ownership"
+test("owned creation attests the exact requested mounts, including protected read-only drivers", () => {
+  const spec = {
+    image: "example.invalid/runtime@sha256:" + "a".repeat(64),
+    argv: ["/usr/local/bin/node"],
+    workspace: { source: "D:\\OpenCode-Benchmark\\Task24\\workspaces\\own\\candidate", readonly: false },
+    protectedFiles: [
+      {
+        source: "D:\\OpenCode-Benchmark\\Task24\\workspaces\\own\\candidate\\.task24\\driver.mjs",
+        target: "/workspace/.task24/driver.mjs",
+      },
+    ],
+  }
+  const mounts = [
+    { Type: "bind", Source: spec.workspace.source, Destination: "/workspace", RW: true },
+    { Type: "bind", Source: spec.protectedFiles[0]!.source, Destination: "/workspace/.task24/driver.mjs", RW: false },
+  ]
+  expect(() => assertRequestedMounts(mounts, spec)).not.toThrow()
+  for (const changed of [
+    mounts.slice(0, 1),
+    [mounts[0]!, { ...mounts[1]!, RW: true }],
+    [{ ...mounts[0]!, Source: spec.workspace.source + "-other" }, mounts[1]!],
+  ])
+    expect(() => assertRequestedMounts(changed, spec)).toThrow()
+})

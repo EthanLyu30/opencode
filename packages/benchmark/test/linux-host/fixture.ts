@@ -143,6 +143,7 @@ export async function sessionFixture() {
   const calls: DockerInvocation[] = []
   const state = { running: false, removed: false, foreign: false, readOnly: true }
   const labels: Record<string, string> = {}
+  const mounts: { Type: string; Source: string; Destination: string; RW: boolean; Name?: string }[] = []
   const id = "b".repeat(64)
   const inspect = () => ({
     Id: id,
@@ -165,7 +166,7 @@ export async function sessionFixture() {
         "/home/sandbox": "rw,nosuid,nodev,noexec,size=16777216,mode=700,uid=65532,gid=65532",
       },
     },
-    Mounts: [],
+    Mounts: mounts,
     State: { Running: state.running },
   })
   const runner = {
@@ -173,7 +174,19 @@ export async function sessionFixture() {
       calls.push(input)
       const argv = input.argv
       if (argv.includes("create")) {
+        mounts.length = 0
         argv.forEach((v, i) => {
+          if (v === "--mount") {
+            const flags = argv[i + 1]!.split(","),
+              map = Object.fromEntries(flags.filter((f) => f.includes("=")).map((f) => f.split("=")))
+            mounts.push({
+              Type: map.type!,
+              Source: map.type === "volume" ? "/var/lib/docker/volumes/" + map.src! : map.src!,
+              Destination: map.dst!,
+              RW: !flags.includes("readonly"),
+              ...(map.type === "volume" ? { Name: map.src } : {}),
+            })
+          }
           if (v === "--label") {
             const s = argv[i + 1]!.indexOf("=")
             labels[argv[i + 1]!.slice(0, s)] = argv[i + 1]!.slice(s + 1)

@@ -33,6 +33,29 @@ export function requireBrowserTrace(value: object, identity: EvaluationIdentityV
     throw new TypeError("TASK24_BROWSER_TRACE_AUTHORITY")
   return trace
 }
+export function validateBrowserAdmission(raw: unknown) {
+  const data = Schema.decodeUnknownSync(Schema.Struct({ canaryURL: Schema.String, fileURL: Schema.String }))(raw, {
+    onExcessProperty: "error",
+  })
+  const url = new URL(data.canaryURL),
+    file = new URL(data.fileURL)
+  if (
+    url.origin !== `http://127.0.0.1:${url.port}` ||
+    !/^\/[a-f0-9]{64}$/.test(url.pathname) ||
+    url.search ||
+    url.hash ||
+    url.username ||
+    url.password ||
+    file.protocol !== "file:" ||
+    file.hostname ||
+    !/^\/D:\/OpenCode-Benchmark\/Task24\/tmp\/[a-zA-Z0-9_./-]+$/.test(file.pathname) ||
+    file.pathname.split("/").includes("..") ||
+    file.search ||
+    file.hash
+  )
+    throw new TypeError("TASK24_BROWSER_ADMISSION_INPUT")
+  return data
+}
 
 export function isAdmittedLinuxBrowserURL(value: string, base: string, paths: readonly string[]): boolean {
   try {
@@ -146,7 +169,7 @@ export function makeLinuxBrowser(input: {
     registered.get(canonicalJson(identity)) ?? input.previewRegistry.get(identity)
   async function execute(
     identity: EvaluationIdentityV2,
-    operation: "capture" | "probe",
+    operation: "capture" | "probe" | "admission",
     data: unknown,
     signal: AbortSignal,
   ) {
@@ -187,6 +210,8 @@ export function makeLinuxBrowser(input: {
     })
     input.release.base.verify()
     if (!result.started || result.exitCode !== 0 || result.truncated) throw new TypeError("TASK24_BROWSER_V2_TRANSPORT")
+    if (canonicalJson(await fileIdentity(input.release.helper.path)) !== canonicalJson(input.release.helper))
+      throw new TypeError("TASK24_BROWSER_HELPER_DRIFT")
     const reply = Schema.decodeUnknownSync(
       Schema.Struct({
         identity: Schema.Unknown,
@@ -279,6 +304,21 @@ export function makeLinuxBrowser(input: {
         response = decodeProbeResponse(Buffer.from(canonicalJson(raw)))
       traces.set(response, requireBrowserTrace(raw as object, request.identity))
       return response
+    },
+    async admission(identity: EvaluationIdentityV2, data: ReturnType<typeof validateBrowserAdmission>) {
+      const raw = await execute(identity, "admission", validateBrowserAdmission(data), new AbortController().signal)
+      const result = Schema.decodeUnknownSync(
+        Schema.Struct({
+          networkBlocked: Schema.Boolean,
+          websocketBlocked: Schema.Boolean,
+          fileBlocked: Schema.Boolean,
+          dataBlocked: Schema.Boolean,
+          crossCapabilityBlocked: Schema.Boolean,
+          blockedRequests: Schema.Int,
+        }),
+      )(raw, { onExcessProperty: "error" })
+      traces.set(result, requireBrowserTrace(raw, identity))
+      return result
     },
     async observations(identity: EvaluationIdentityV2) {
       const found = observations.get(canonicalJson(identity))

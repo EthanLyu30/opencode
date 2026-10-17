@@ -19,7 +19,7 @@ import {
 import { probeWorkerSource, decodeProbeResponse, makeProbeRequest } from "../evaluator/independent/probe"
 import { sha256Text } from "../hash"
 import { materializeCandidate, readCandidateArchive, outputPolicy, assertSourceUnchanged } from "./archive"
-import { buildWorkerSource } from "./worker"
+import { buildWorkerSource, linuxPolicyAuditSource, linuxProbeWorkerSource } from "./worker"
 import { sessionState } from "./preflight"
 import { requireOperation } from "./docker"
 import { createOwnedContainer, cleanupOwnedContainer, inspectOwnedContainer, type Owner } from "./ownership"
@@ -169,6 +169,16 @@ export function makeLinuxBackend(input: {
         argv: ["/usr/local/bin/node", "-e", "setInterval(()=>{},1000)"],
         workspace: { source: workspace, readonly: operation !== "build" },
         dependencies: p.image.volumes,
+        protectedFiles:
+          operation === "build"
+            ? (await ordinaryFiles(workspace))
+                .filter(
+                  (f) =>
+                    p.profile.protectedPaths.some((p) => f.path === p || f.path.startsWith(p + "/")) ||
+                    /(?:^|\/)(?:package\.json|.*lock.*|.*config\..*)$/i.test(f.path),
+                )
+                .map((f) => ({ source: path.join(workspace, f.path), target: "/workspace/" + f.path }))
+            : [],
       },
     })
     owned.set(owner.containerID, owner)
@@ -181,8 +191,7 @@ export function makeLinuxBackend(input: {
         "--workdir",
         "/workspace",
         owner.containerID,
-        operation === "build" ? "/usr/local/bin/node" : "/usr/local/bin/bun",
-        ...(operation === "probe" ? ["--no-env-file"] : []),
+        "/usr/local/bin/node",
         "-e",
         source,
         "/workspace",
@@ -252,6 +261,21 @@ export function makeLinuxBackend(input: {
         (f) =>
           p.profile.protectedPaths.includes(f.path) || /(?:^|\/)(?:package\.json|.*lock.*|.*config\..*)$/i.test(f.path),
       )
+      if (request.identity.campaignID === "linux-oracle-calibration") {
+        const audited = await execute(
+          request,
+          "build",
+          linuxPolicyAuditSource(),
+          { files: before.filter((f) => f.size <= 1048576 && /\.[cm]?[jt]sx?$/.test(f.path)).map((f) => f.path) },
+          workspace,
+        )
+        if (audited.execution.exitCode !== 0) throw new TypeError("TASK24_POLICY_AUDIT_FAILED")
+        const result = Schema.decodeUnknownSync(
+          Schema.Struct({ events: Schema.Array(Schema.Struct({ code: Schema.Literal("external-network") })) }),
+        )(JSON.parse(Buffer.from(audited.execution.stdout).toString("utf8")), { onExcessProperty: "error" })
+        if (result.events.length)
+          return { payload: { kind: "candidate_failure", reason: "POLICY_REJECTED" }, receipt: audited.receipt }
+      }
       const commands = request.commands.map((c) => ({
         ...c,
         argv:
@@ -311,13 +335,7 @@ export function makeLinuxBackend(input: {
       })
       if (canonicalJson(request) !== canonicalJson(checked)) throw new TypeError("TASK24_LINUX_PROBE_REQUEST")
       const before = await ordinaryFiles(workspace)
-      const { execution, receipt } = await execute(
-        request,
-        "probe",
-        "process.argv[2]=process.argv.at(-1);\n" + probeWorkerSource(),
-        request,
-        workspace,
-      )
+      const { execution, receipt } = await execute(request, "probe", linuxProbeWorkerSource(), request, workspace)
       await readCandidateArchive(request.candidate, p.profile)
       if (canonicalJson(await ordinaryFiles(workspace)) !== canonicalJson(before))
         throw new TypeError("TASK24_LINUX_PROBE_SOURCE_DRIFT")

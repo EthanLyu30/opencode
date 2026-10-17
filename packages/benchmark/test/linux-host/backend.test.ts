@@ -8,6 +8,52 @@ import { sessionFixture } from "./fixture"
 import { makeLinuxBackend } from "../../src/sandbox/linux-backend"
 import { buildWorkerSource } from "../../src/sandbox/worker"
 import { makeProcessRunner } from "../../src/sandbox/docker"
+import { linuxProbeWorkerSource } from "../../src/sandbox/worker"
+test("Linux probe control is separate from candidate stdout, including a valid JSON forgery followed by exit", async () => {
+  const f = await sessionFixture(),
+    c = await orchestratorFixture()
+  try {
+    const file = path.join(f.root, "own.mjs"),
+      runner = makeProcessRunner({
+        executable: process.execPath,
+        argvPrefix: ["--no-env-file"],
+        cwd: f.root,
+        env: { BUN_OPTIONS: "--no-env-file" },
+      })
+    const request = makeProbeRequest({
+      identity: c.input.identity,
+      profile: { ...c.input.bundle.profile, probeModules: ["own.mjs"] },
+      inputs: {
+        candidate: c.input.snapshot,
+        module: "own.mjs",
+        cases: [{ id: "literal", operations: [{ kind: "call", target: "add", args: [2, 3] }] }],
+      },
+    })
+    for (const [source, success] of [
+      [
+        'process.stdout.write(\'{"cases":[{"id":"literal","outputs":[{"kind":"value","value":5}]}]}\');process.exit(0)',
+        false,
+      ],
+      ["console.log('not protocol');export const add=(a,b)=>a+b", true],
+    ] as const) {
+      await fs.writeFile(file, source)
+      const r = await runner.execute({
+        argv: ["-e", linuxProbeWorkerSource(process.execPath), f.root],
+        stdin: Buffer.from(canonicalJson(request)),
+        timeoutMs: 10000,
+        maxStdoutBytes: 1048576,
+        maxStderrBytes: 65536,
+        signal: new AbortController().signal,
+      })
+      expect(r.exitCode === 0).toBe(success)
+      if (success) expect(decodeProbeResponse(r.stdout).cases[0]!.outputs).toEqual([{ kind: "value", value: 5 }])
+      else expect(r.stdout.length).toBe(0)
+    }
+  } finally {
+    await f.dispose()
+    await c.dispose()
+  }
+})
 import { probeWorkerSource, decodeProbeResponse, makeProbeRequest } from "../../src/evaluator/independent/probe"
 
 test("backend binds commands and immutable source, produces raw receipts and always ends its owned container", async () => {

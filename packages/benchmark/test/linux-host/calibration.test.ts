@@ -3,12 +3,67 @@ import {
   makeCalibrationSchedule,
   runCalibrationSchedule,
   semanticMeasurementSha256,
+  matchesCalibrationOutcome,
 } from "../../src/sandbox/calibration"
 import { finalizeLinuxCorpus, publicBuildDriverSource } from "../../src/corpus/evaluation-finalize"
 import { sessionFixture } from "./fixture"
 import { makeProcessRunner } from "../../src/sandbox/docker"
 import { evaluationFactsFixture } from "../independent/fixture"
 import { scoreIndependentEvaluation } from "../../src/evaluator/independent/result"
+import { unmeasuredLinuxFunctional } from "../../src/evaluator/independent/result"
+test("a measured functional failure preserves its measurement and leaves visual unmeasured", () => {
+  expect(unmeasuredLinuxFunctional({ points: 12, mandatoryPassed: false })).toMatchObject({
+    functional: 12,
+    visual: null,
+    visualComposite: null,
+    unmeasuredReason: "not_run_due_to_functional_failure",
+  })
+  expect(() => unmeasuredLinuxFunctional({ points: 45, mandatoryPassed: true })).toThrow()
+})
+import { linuxPolicyAuditSource } from "../../src/sandbox/worker"
+test("calibration checks measured values against original labels instead of trusting matched flags", () => {
+  const result = scoreIndependentEvaluation(evaluationFactsFixture()),
+    entry = { ...makeCalibrationSchedule(tasks).entries[0]!, kind: "primary" as const }
+  expect(matchesCalibrationOutcome(entry, result)).toBe(true)
+  expect(
+    matchesCalibrationOutcome(
+      {
+        ...entry,
+        control: { ...entry.control, expected: { functional: "fail", visual: "not_observed", policy: "pass" } },
+      },
+      result,
+    ),
+  ).toBe(false)
+})
+test("Linux admission audit only reads own source and returns a bounded policy observation without executing it", async () => {
+  const f = await sessionFixture()
+  try {
+    await fs.writeFile(
+      path.join(f.root, "own.js"),
+      "void fetch('https://task24-denied.invalid/calibration').catch(()=>{});throw Error('must not run')",
+    )
+    const runner = makeProcessRunner({
+      executable: process.execPath,
+      argvPrefix: ["--no-env-file"],
+      cwd: f.root,
+      env: {},
+    })
+    const r = await runner.execute({
+      argv: ["-e", linuxPolicyAuditSource(), f.root],
+      stdin: Buffer.from(JSON.stringify({ files: ["own.js"] })),
+      timeoutMs: 5000,
+      maxStdoutBytes: 1048576,
+      maxStderrBytes: 65536,
+      signal: new AbortController().signal,
+    })
+    expect(r.exitCode).toBe(0)
+    expect(JSON.parse(Buffer.from(r.stdout).toString())).toEqual({ events: [{ code: "external-network" }] })
+  } finally {
+    await f.dispose()
+  }
+})
+import fs from "node:fs/promises"
+import path from "node:path"
 const controls = [
   "correct",
   "alternate-correct",

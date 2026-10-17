@@ -65,6 +65,18 @@ export type ProjectAcceptanceEvidence = Readonly<{
   probe: RawProbe
   captures: readonly PublishedEvidence[]
   operations: readonly OperationReceipt[]
+  admission: {
+    result: {
+      networkBlocked: boolean
+      websocketBlocked: boolean
+      fileBlocked: boolean
+      dataBlocked: boolean
+      crossCapabilityBlocked: boolean
+      blockedRequests: number
+    }
+    canaryHealthy: boolean
+    canaryHits: number
+  }
 }>
 export type EngineAcceptanceInput = Readonly<{
   session: EngineSession
@@ -441,9 +453,30 @@ export async function acceptLinuxEngine(input: EngineAcceptanceInput): Promise<E
           throw new TypeError("TASK24_ACCEPT_PROJECT_EXPECTATION")
         for (const capture of project.captures) {
           const trace = requireBrowserTrace(capture, project.identity)
+          if (
+            trace.browserSha256 !== manifest.artifacts.find((a) => a.id === "browser")?.sha256 ||
+            trace.fontSha256 !== manifest.artifacts.find((a) => a.id === "fonts")?.sha256 ||
+            trace.helperSha256 !== manifest.artifacts.find((a) => a.id === "browser-helper")?.sha256
+          )
+            throw new TypeError("TASK24_ACCEPT_BROWSER_RUNTIME")
           projectRefs.push(trace.evidence)
           verifyEvidenceFile(manifest.roots.evidence, trace.evidence)
         }
+        const admission = project.admission,
+          trace = requireBrowserTrace(admission.result, project.identity)
+        if (
+          !admission.canaryHealthy ||
+          admission.canaryHits !== 0 ||
+          !admission.result.networkBlocked ||
+          !admission.result.websocketBlocked ||
+          !admission.result.fileBlocked ||
+          !admission.result.dataBlocked ||
+          !admission.result.crossCapabilityBlocked ||
+          admission.result.blockedRequests < 3
+        )
+          throw new TypeError("TASK24_ACCEPT_BROWSER_ADMISSION")
+        verifyEvidenceFile(manifest.roots.evidence, trace.evidence)
+        projectRefs.push(trace.evidence)
         if (project.kind === "http" && !project.operations.some((o) => o.operation === "preview"))
           throw new TypeError("TASK24_ACCEPT_HTTP_RELAY")
       }

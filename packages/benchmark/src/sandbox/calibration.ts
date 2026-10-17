@@ -98,6 +98,24 @@ export type CalibrationReport = Readonly<{
   }[]
   reportSha256: string
 }>
+export function matchesCalibrationOutcome(entry: CalibrationEntry, r: IndependentResult) {
+  const functional = r.functional === null ? "not_observed" : r.functional === 45 ? "pass" : "fail"
+  const visual =
+    r.kind === "guardrail"
+      ? null
+      : r.visualComposite === null
+        ? "not_observed"
+        : r.visualComposite >= 75 && r.viewportScores?.every((v) => v >= 65)
+          ? "pass"
+          : "fail"
+  const policy = r.disqualifications.some((v) => v.startsWith("POLICY_")) ? "fail" : "pass"
+  return (
+    r.kind === entry.kind &&
+    functional === entry.control.expected.functional &&
+    visual === entry.control.expected.visual &&
+    policy === entry.control.expected.policy
+  )
+}
 export async function runCalibrationSchedule(
   plan: ReturnType<typeof makeCalibrationSchedule>,
   evaluate: (entry: CalibrationEntry, index: number) => Promise<EvaluationOutcome>,
@@ -131,21 +149,7 @@ export async function runCalibrationSchedule(
         real = true
         realEvaluations++
       }
-      const functional = r.functional === null ? "not_observed" : r.functional === 45 ? "pass" : "fail",
-        visual =
-          r.kind === "guardrail"
-            ? null
-            : r.visualComposite === null
-              ? "not_observed"
-              : r.visualComposite >= 75 && r.viewportScores?.every((v) => v >= 65)
-                ? "pass"
-                : "fail",
-        policy = r.disqualifications.some((v) => v.startsWith("POLICY_")) ? "fail" : "pass"
-      matched =
-        r.kind === entry.kind &&
-        functional === expected.functional &&
-        visual === expected.visual &&
-        policy === expected.policy
+      matched = matchesCalibrationOutcome(entry, r)
       measurementSha256 = semanticMeasurementSha256(r)
       const prior = first.get(entry.taskID)
       stable = entry.repeat === 0 || prior === measurementSha256

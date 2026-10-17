@@ -197,7 +197,8 @@ export function makeControllerFactsObserver(options: {
       }
       cases.push({ id: "$all-mandatory", passed: !!functional && functional.mandatoryPassed && interactionPassed })
       const assertions =
-        build.kind === "candidate_failure"
+        build.kind === "candidate_failure" ||
+        (input.bundle.profile.kind === "primary" && functional && !functional.mandatoryPassed)
           ? input.bundle.oracle.requirements.map((r) => ({ ...r, passed: false }))
           : compareRequirementPlans(plans, input.bundle.oracle.requirements, { cases, files: source, ...browser })
       if (

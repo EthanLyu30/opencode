@@ -8,7 +8,7 @@ import { canonicalJson } from "../campaign/canonical"
 import { sha256Bytes } from "../hash"
 import { FIXED_VIEWPORTS, type BrowserCaptureRequest } from "../evaluator/browser-protocol"
 import { directRoot } from "../corpus/evaluation-bundle"
-import { isAdmittedLinuxBrowserURL, validateBrowserProbe } from "./browser"
+import { isAdmittedLinuxBrowserURL, validateBrowserProbe, validateBrowserAdmission } from "./browser"
 import type { ProbeRequest } from "../evaluator/independent/host"
 import { decodeRequirementPlans } from "./controller-facts"
 import { decodeEvaluationIdentity } from "../corpus/evaluation-profile"
@@ -23,7 +23,7 @@ class HelperFailure extends Error {
 }
 const Request = Schema.Struct({
   schemaVersion: Schema.Literal(2),
-  operation: Schema.Literals(["capture", "probe"]),
+  operation: Schema.Literals(["capture", "probe", "admission"]),
   identity: Schema.Unknown,
   base: Schema.String,
   previewID: Schema.String,
@@ -133,11 +133,7 @@ export async function browserHelperMain() {
       if (pageErrors.length < 200) pageErrors.push(e.message.slice(0, 512))
     })
     page.on("framenavigated", (frame) => {
-      if (
-        frame === page.mainFrame() &&
-        frame.url() !== "about:blank" &&
-        !isAdmittedLinuxBrowserURL(frame.url(), request.base, request.paths)
-      ) {
+      if (frame.url() !== "about:blank" && !isAdmittedLinuxBrowserURL(frame.url(), request.base, request.paths)) {
         blocked++
         void page.close()
       }
@@ -153,7 +149,96 @@ export async function browserHelperMain() {
     await page.waitForSelector("body", { state: "visible", timeout: 10000 })
     await page.evaluate(() => document.fonts.ready)
     await twoFrames(page, 10000)
-    if (request.operation === "probe") {
+    if (request.operation === "admission") {
+      const input = validateBrowserAdmission(request.data),
+        cross = new URL(request.base)
+      cross.pathname = "/" + "0".repeat(64) + "/index.html"
+      const networkBlocked = await page.evaluate(async (url) => {
+        try {
+          await fetch(url)
+          return false
+        } catch {
+          return true
+        }
+      }, input.canaryURL)
+      const crossCapabilityBlocked = await page.evaluate(async (url) => {
+        try {
+          await fetch(url)
+          return false
+        } catch {
+          return true
+        }
+      }, cross.href)
+      const websocketBlocked = await page.evaluate(
+        (url) =>
+          new Promise<boolean>((resolve) => {
+            const socket = new WebSocket(url.replace("http:", "ws:"))
+            const timer = setTimeout(() => {
+              socket.close()
+              resolve(false)
+            }, 1500)
+            socket.onopen = () => {
+              clearTimeout(timer)
+              socket.close()
+              resolve(false)
+            }
+            socket.onerror = socket.onclose = () => {
+              clearTimeout(timer)
+              resolve(true)
+            }
+          }),
+        input.canaryURL,
+      )
+      // These attempts originate in page script, as candidate attacks do; the controller never navigates to host files.
+      const fileBlocked = await page
+        .evaluate(
+          (url) =>
+            new Promise<boolean>((resolve) => {
+              const f = document.createElement("iframe")
+              const timer = setTimeout(() => {
+                let blocked = true
+                try {
+                  blocked = !f.contentDocument || f.contentWindow?.location.href === "about:blank"
+                } catch {}
+                f.remove()
+                resolve(blocked)
+              }, 500)
+              f.onload = () => {
+                try {
+                  if (f.contentWindow?.location.href === url) {
+                    clearTimeout(timer)
+                    resolve(false)
+                  }
+                } catch {}
+              }
+              f.src = url
+              document.body.append(f)
+            }),
+          input.fileURL,
+        )
+        .catch(() => page.isClosed())
+      const dataAttempt = page
+        .evaluate(
+          () =>
+            new Promise<boolean>((resolve) => {
+              const f = document.createElement("iframe")
+              f.onload = () => resolve(false)
+              f.src = "data:text/html,<p>own-data-canary</p>"
+              document.body.append(f)
+              setTimeout(() => resolve(false), 1000)
+            }),
+        )
+        .catch(() => page.isClosed())
+      const dataBlocked = await dataAttempt
+      result = {
+        networkBlocked,
+        websocketBlocked,
+        fileBlocked,
+        dataBlocked,
+        crossCapabilityBlocked,
+        blockedRequests: blocked,
+      }
+    } else if (request.operation === "probe") {
       validateBrowserProbe(request.data)
       const r = request.data as ProbeRequest
       result = await page.evaluate(
@@ -255,7 +340,7 @@ export async function browserHelperMain() {
       }
     }
     const dom = []
-    for (const raw of request.plans) {
+    for (const raw of request.operation === "admission" ? [] : request.plans) {
       const p = raw as { kind?: string; selector?: string }
       if (p.kind !== "dom" || typeof p.selector !== "string") continue
       const locator = page.locator(p.selector)
