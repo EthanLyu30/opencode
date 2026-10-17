@@ -10,7 +10,7 @@
 
 **Spec:** [2026-10-17-opencode-task24b-readiness-design.md](../specs/2026-10-17-opencode-task24b-readiness-design.md)，用户已确认。重点实现第3–4节及第7节的评测前置条件；不实现 B-Prep2/3/4。
 
-**Status:** 计划待用户审阅；尚未实施。起点 `983b5a275c33b2872dd28a727b73020a2e177593`，之后的本轮文档变更不改变运行源码。
+**Status:** 2026-10-17 用户已确认并授权本计划实施；实施基线 `19ae30d1469caa3f140b381c2caac232f7898a57`。付费、Docker准备和部署替换仍不授权。
 
 ## Global Constraints
 
@@ -101,7 +101,7 @@ if ((Get-Location).Path -ne 'D:\OpenCode-Audit\packages\benchmark') { throw 'Wro
 
 ---
 
-### Task1: v2档案、oracle和公开/私有bundle
+### Task 1: v2档案、oracle和公开/私有bundle
 
 **Files:** Create `src/corpus/evaluation-profile.ts`, `src/corpus/evaluation-bundle.ts`, `test/independent/fixture.ts`, `test/independent/profile.test.ts`, `test/independent/bundle.test.ts`。
 
@@ -120,7 +120,7 @@ expect(JSON.stringify(exportPublicTask(bundle))).not.toContain(fixture.oracleCan
 - [ ] **Step4 — 跑GREEN：** 同上两文件，再跑 `./test/corpus/validate.test.ts ./test/corpus/materialize.test.ts ./test/campaign/candidate.test.ts ./test/campaign/fairness.test.ts` 及 `& $BPrep1Bun --no-env-file run typecheck`。Expected:全部通过、无旧schema或literal快照变化。
 - [ ] **Step5 — 提交：** 只stage本任务文件，`git commit -m 'feat(benchmark): define independent evaluation bundles'`。
 
-### Task2: 候选冻结、隔离副本与源码/配置/制品身份
+### Task 2: 候选冻结、隔离副本与源码/配置/制品身份
 
 **Files:** Create `src/evaluator/independent/snapshot.ts`, `test/independent/snapshot.test.ts`；扩展本计划 `fixture.ts` 的纯数据/文件夹具。
 
@@ -139,7 +139,7 @@ await expect(verifyCandidate(snapshot)).rejects.toThrow("TASK24_CANDIDATE_DRIFT"
 - [ ] **Step4 — 跑GREEN：** 同上并联跑Task1两文件、旧 `./test/evaluator/evidence.test.ts ./test/e2e/leakage.test.ts`，然后package typecheck。Expected:全部通过；所有失败路径不修改原件，外部同名哨兵保留。
 - [ ] **Step5 — 提交：** `git commit -m 'feat(benchmark): freeze independent candidate snapshots'`，仅本任务文件。
 
-### Task3: 无oracle泄露的功能probe与失败关闭宿主接口
+### Task 3: 无oracle泄露的功能probe与失败关闭宿主接口
 
 **Files:** Create `src/evaluator/independent/{host,probe,functional}.ts`, `test/independent/{probe,functional}.test.ts`。
 
@@ -161,7 +161,7 @@ expect(() => decodeProbeResponse(new Uint8Array(1024 * 1024 + 1))).toThrow("TASK
 - [ ] **Step4 — 跑GREEN：** 同上及Task1/2文件、旧 `./test/evaluator/functional.test.ts ./test/evaluator/policy.test.ts ./test/evaluator/mutation.test.ts` 和package typecheck。Expected:全过，空报告/伪造分数不能通过，旧评分不变。
 - [ ] **Step5 — 提交：** `git commit -m 'feat(benchmark): evaluate functional probes outside candidates'`。
 
-### Task4: 真实页面事实合同与主任务/guardrail分离评分
+### Task 4: 真实页面事实合同与主任务/guardrail分离评分
 
 **Files:** Create `src/evaluator/independent/{visual,result}.ts`, `test/independent/{visual,result}.test.ts`。
 
@@ -190,7 +190,7 @@ expect(scoreIndependentEvaluation(evaluationFactsFixture({ viewportScores: [74.9
 - [ ] **Step4 — 跑GREEN：** 同上、新功能测试，旧 `./test/evaluator/visual.test.ts ./test/evaluator/score.test.ts ./test/evaluator/quality.test.ts ./test/evaluator/requirements.test.ts ./test/evaluator/capture.test.ts ./test/evaluator/browser-protocol.test.ts`、typecheck。Expected:原75/65与每个组件权重断言不变；不扩展v1浏览器协议。
 - [ ] **Step5 — 提交：** `git commit -m 'feat(benchmark): separate visual and guardrail evaluation results'`。
 
-### Task5: 固定16题的公共适配、独立oracle与校准材料
+### Task 5: 固定16题的公共适配、独立oracle与校准材料
 
 **Files:** Create `src/corpus/evaluation-catalogue.ts`, `src/corpus/evaluation-author.ts`, 六个 `evaluation-fixtures/*.ts`、`script/prepare-independent-corpus.ts`、`test/independent/{catalogue,author}.test.ts`。
 
@@ -230,7 +230,7 @@ expect(evaluationCatalogue().filter((task) => task.kind === "guardrail")).toHave
 - [ ] **Step4 — 跑GREEN：** 同上，加全部新profile/功能/结果测试、旧 `./test/corpus/source-lock.test.ts ./test/corpus/validate.test.ts ./test/run/plan.test.ts`及typecheck。再在本计划新临时输出运行一次准备命令，仅检查档案/文件/逐题缺失，Expected:16题均列出、旧source/bundle/hash/pilot名单未改，无付费/候选执行/安装；blocked题不记ready。
 - [ ] **Step5 — 提交：** `git commit -m 'feat(benchmark): prepare independent corpus adapters'`；生成的真实语料/隐藏材料留D盘新目录并保持ignored，只提交代码和脱敏准备摘要。
 
-### Task6: 独立组合入口、证据发布与B-Prep1零额度验收
+### Task 6: 独立组合入口、证据发布与B-Prep1零额度验收
 
 **Files:** Create `src/evaluator/independent/{index,publication}.ts`, `test/independent/{orchestrator,publication}.test.ts`、上述验证报告。
 
