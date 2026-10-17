@@ -2,12 +2,28 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { sha256Text } from "../../src/hash"
 import { decodeEvaluationIdentity } from "../../src/corpus/evaluation-profile"
+import { evidenceReferenceForBytes } from "../../src/evaluator/evidence"
+import { aggregateVisualViewports } from "../../src/evaluator/visual"
+import type { EvaluationFacts } from "../../src/evaluator/independent/result"
 
 export function identity(overrides: Record<string, unknown> = {}) {
   return decodeEvaluationIdentity({schemaVersion: 2, campaignID: "fixture", runID: "run-1", attemptID: "attempt-1", leaseGeneration: 1,
     taskID: "fixture-add", armID: "A", repeat: 0, ...Object.fromEntries(["campaignSha256","binarySha256","routeSha256","profileSha256","oracleSha256","seedSha256","candidateSha256","evaluatorSha256"].map(k => [k, sha256Text(k)])), ...overrides})
 }
 export const candidate = {archiveFile: "candidate.json", archiveSha256: sha256Text("archive"), candidateSha256: identity().candidateSha256, configSha256: sha256Text("config")}
+export function evaluationFactsFixture(options:{viewportScores?:number[];kind?:"primary"|"guardrail"}={}):EvaluationFacts {
+  const evidence=[evidenceReferenceForBytes("fixture","facts.json",Buffer.from("fixture facts"))]
+  const scores=options.viewportScores??[100,100,100]
+  const viewports=(["mobile","tablet","desktop"] as const).map((viewportID,i)=>({viewportID,composite:scores[i]!,points:scores[i]!*0.3,components:{ssim:scores[i]!,pixelColor:scores[i]!,domGeometry:scores[i]!,typographyStyle:scores[i]!,responsiveInteraction:scores[i]!},design2Code:{ssim:scores[i]!/100,pixelSimilarity:scores[i]!/100},evidence}))
+  const kind=options.kind??"primary"
+  return {kind,identity:identity(),assurance:"fixture",source:{candidateSha256:identity().candidateSha256,configSha256:candidate.configSha256},
+    build:{status:"passed",manifest:{candidateSha256:identity().candidateSha256,configSha256:candidate.configSha256,dependencySha256:sha256Text("none"),files:[{path:"index.html",sha256:sha256Text("built"),size:5}],buildSha256:sha256Text("build")},evidence},
+    functional:{assertions:[{id:"sum",mandatory:true,weight:1,passed:true}],executedAssertions:1,mandatoryPassed:true,points:45,evidence},
+    requirements:{assertions:[{id:"public",mandatory:true,weight:1,passed:true}],artifacts:[],evidence},
+    quality:{checks:(["typecheck","lint","structure","dependency-policy"] as const).map(id=>({id,status:"passed" as const})),evidence},
+    policy:{events:[],evidence},runtime:{ceilingsPassed:true,humanEdited:false,evidence},
+    visual:kind==="guardrail"?null:{identity:identity(),buildSha256:sha256Text("build"),browserSha256:sha256Text("browser"),fontSha256:sha256Text("font"),captures:["mobile","tablet","desktop"],result:aggregateVisualViewports(viewports),accessibility:{points:5,requiredPassed:true,failures:[],evidence},evidence}}
+}
 
 export async function independentFixture(label: string) {
   const parent = process.env.TMPDIR!

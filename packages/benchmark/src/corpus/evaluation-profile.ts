@@ -36,7 +36,7 @@ const Oracle = Schema.Struct({
   schemaVersion: Schema.Literal(2), taskID: TaskID, kind: Kind, privateFiles: Schema.Array(FileEntry),
   cases: Schema.NonEmptyArray(Schema.Struct({ ...Assertion.fields, module: Text, operations: Schema.NonEmptyArray(Operation), expected: Schema.NonEmptyArray(Expected) })),
   requirements: Schema.Array(Assertion), quality: Strings, policy: Strings,
-  visual: Schema.NullOr(Schema.Struct({ references: Schema.Struct({ mobile: FileEntry, tablet: FileEntry, desktop: FileEntry }), masks: Schema.Array(Schema.Struct({ x: Schema.Finite, y: Schema.Finite, width: Schema.Finite, height: Schema.Finite })), tolerance: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)), browserSha256: Sha256, fontSha256: Sha256 })),
+  visual: Schema.NullOr(Schema.Struct({ references: Schema.Struct({ mobile: FileEntry, tablet: FileEntry, desktop: FileEntry }), domReferences: Schema.Struct({ mobile: FileEntry, tablet: FileEntry, desktop: FileEntry }), masks: Schema.Array(Schema.Struct({ x: Schema.Finite, y: Schema.Finite, width: Schema.Finite, height: Schema.Finite })), tolerance: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)), browserSha256: Sha256, fontSha256: Sha256 })),
   calibration: Schema.Array(Schema.Struct({ id: Text, kind: Schema.Literals(["correct", "alternate-correct", "seed", "functional-bad", "visual-bad", "responsive-bad", "policy-bad"]), path: Text })), note: Schema.String,
 })
 export const EvaluationIdentityV2 = Schema.Struct({
@@ -82,7 +82,7 @@ export function decodeEvaluationOracle(input: unknown): EvaluationOracle {
   for (const c of o.cases) { safePath(c.module); if (c.operations.length !== c.expected.length || c.operations.length > 1000 || c.weight <= 0) throw new TypeError("TASK24_CASE") }
   for (const f of o.privateFiles) { safePath(f.path); if (!f.path.startsWith("private/")) throw new TypeError("TASK24_PRIVATE_PATH") }
   unique(o.privateFiles.map((v) => v.path))
-  if (o.visual) for (const f of Object.values(o.visual.references)) if (!o.privateFiles.some((x) => canonicalJson(x) === canonicalJson(f))) throw new TypeError("TASK24_REFERENCE_UNDECLARED")
+  if (o.visual) for (const f of [...Object.values(o.visual.references),...Object.values(o.visual.domReferences)]) if (!o.privateFiles.some((x) => canonicalJson(x) === canonicalJson(f))) throw new TypeError("TASK24_REFERENCE_UNDECLARED")
   for (const c of o.calibration) { safePath(c.path); if (!c.path.startsWith("private/")) throw new TypeError("TASK24_CALIBRATION_PATH") }
   return freeze(o)
 }
