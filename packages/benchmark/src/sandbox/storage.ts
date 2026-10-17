@@ -1,10 +1,11 @@
 import fs from "node:fs/promises"
+import { createReadStream } from "node:fs"
+import { createHash } from "node:crypto"
 import path from "node:path"
 import { Schema } from "effect"
 import { directRoot } from "../corpus/evaluation-bundle"
 import { freeze } from "../corpus/evaluation-profile"
 import { requireDPath, StorageRecord, type Gate, type StorageProof, type FileIdentity } from "./contracts"
-import { sha256Bytes } from "../hash"
 
 export function verifyStorageProof(input: unknown): StorageProof {
   const value = Schema.decodeUnknownSync(StorageRecord)(input, { onExcessProperty: "error" })
@@ -23,10 +24,18 @@ export async function fileIdentity(file: string): Promise<FileIdentity> {
   await directRoot(path.dirname(file))
   const stat = await fs.lstat(file)
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new TypeError("TASK24_LINUX_FILE_IDENTITY")
+  const hasher = createHash("sha256")
+  for await (const chunk of createReadStream(file)) hasher.update(chunk)
+  const after = await fs.lstat(file)
+  if (
+    `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.size}:${stat.mtimeMs}` !==
+    `${after.dev}:${after.ino}:${after.birthtimeMs}:${after.size}:${after.mtimeMs}`
+  )
+    throw new TypeError("TASK24_LINUX_FILE_DRIFT")
   return freeze({
     path: file,
     fileID: `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`,
-    sha256: sha256Bytes(await fs.readFile(file)),
+    sha256: hasher.digest("hex"),
   })
 }
 export async function directoryIdentity(directory: string): Promise<string> {

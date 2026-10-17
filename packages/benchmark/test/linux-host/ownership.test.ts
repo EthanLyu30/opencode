@@ -19,7 +19,12 @@ test("owned lifecycle validates actual inspect policy and never stops a substitu
       guard,
       signal: new AbortController().signal,
     }
+    await expect(
+      createOwnedContainer({ ...input, spec: { ...input.spec, preparingDependencies: true } }),
+    ).rejects.toThrow("TASK24_LINUX_CONTAINER_SPEC")
     const owned = await createOwnedContainer(input)
+    const created = f.calls.find((c) => c.argv.includes("create"))!
+    expect(created.argv[created.argv.indexOf("--entrypoint") + 1]).toBe("/opt/task24/worker")
     expect(f.state.running).toBe(true)
     expect(guards).toBeGreaterThanOrEqual(2)
     f.state.foreign = true

@@ -19,6 +19,12 @@ test("actual trusted fixture process preserves binary stdin/stdout and enforces 
     })
     expect(Array.from(echo.stdout)).toEqual([0, 255, 13, 10])
     expect(echo.exitCode).toBe(0)
+    const fileEcho = await runner.execute({
+      ...common,
+      argv: ["process.stdout.write(Buffer.from(await Bun.stdin.arrayBuffer()))"],
+      stdinFile: f.cli,
+    })
+    expect(Buffer.from(fileEcho.stdout).toString("utf8")).toBe("known non-executable Docker fixture")
     const bounded = await runner.execute({
       ...common,
       argv: ['process.stdout.write("x".repeat(1000))'],

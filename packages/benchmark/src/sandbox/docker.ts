@@ -63,12 +63,17 @@ export function makeProcessRunner(options: {
         throw new TypeError("TASK24_LINUX_INVOCATION")
       if (input.signal.aborted)
         return { started: false, exitCode: 130, stdout: new Uint8Array(), stderr: new Uint8Array(), truncated: false }
+      if (
+        input.stdinFile &&
+        (input.stdin || canonicalJson(await fileIdentity(input.stdinFile.path)) !== canonicalJson(input.stdinFile))
+      )
+        throw new TypeError("TASK24_LINUX_STDIN_FILE")
       const proc = (() => {
         try {
           return Bun.spawn([options.executable, ...options.argvPrefix, ...input.argv], {
             cwd: options.cwd,
             env: { ...options.env },
-            stdin: input.stdin ? "pipe" : "ignore",
+            stdin: input.stdinFile ? Bun.file(input.stdinFile.path) : input.stdin ? "pipe" : "ignore",
             stdout: "pipe",
             stderr: "pipe",
             windowsHide: true,
@@ -128,6 +133,11 @@ export function makeProcessRunner(options: {
           proc.exited,
           write(),
         ])
+        if (
+          input.stdinFile &&
+          canonicalJson(await fileIdentity(input.stdinFile.path)) !== canonicalJson(input.stdinFile)
+        )
+          throw new TypeError("TASK24_LINUX_STDIN_FILE")
         return {
           started: true,
           exitCode: timedOut ? 124 : input.signal.aborted ? 130 : exitCode,
@@ -180,7 +190,14 @@ export function makeDockerRunner(options: {
       const args = input.argv[0] === "--context" ? input.argv.slice(2) : input.argv
       const context = input.argv[0] === "--context" ? input.argv[1] : request.context
       if (context !== request.context && context !== "default") throw new TypeError("TASK24_LINUX_OPERATION_DENIED")
-      const readonly = args[0] === "version" || args[0] === "info" || (args[0] === "context" && args[1] === "inspect")
+      const readonly =
+        args[0] === "version" ||
+        args[0] === "info" ||
+        (args[0] === "context" && args[1] === "inspect") ||
+        (!!options.session &&
+          args[0] === "image" &&
+          args[1] === "inspect" &&
+          /^[a-z0-9./:_-]+@sha256:[a-f0-9]{64}$/.test(args[2] ?? ""))
       if (!readonly) {
         const map: Record<string, EngineApproval["allowedOperations"][number]> = {
           "container/create": "container-create",

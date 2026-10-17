@@ -30,6 +30,7 @@ export type ContainerSpec = Readonly<{
   workspace?: Readonly<{ source: string; readonly: boolean }>
   dependencies?: readonly Readonly<{ name: string; target: string }>[]
   interactive?: boolean
+  preparingDependencies?: true
 }>
 const Text = Schema.NonEmptyString
 const Inspection = Schema.Struct({
@@ -167,7 +168,14 @@ export async function createOwnedContainer(input: {
     labels = ownerLabels(input.owner),
     spec = input.spec
   if (
-    state.manifest.phase !== "accept" ||
+    (spec.preparingDependencies
+      ? !(
+          state.manifest.phase === "prepare" &&
+          state.approval.allowedOperations.includes("volume-prepare") &&
+          !spec.workspace &&
+          canonicalJson(spec.argv) === canonicalJson(["/usr/local/bin/node", "-e", "setInterval(()=>{},1000)"])
+        )
+      : state.manifest.phase !== "accept") ||
     !state.manifest.artifacts.some((a) => a.kind === "image" && a.image === spec.image) ||
     !spec.argv.length ||
     spec.argv.some((v) => v.includes("\0"))
@@ -189,7 +197,10 @@ export async function createOwnedContainer(input: {
     )
       throw new TypeError("TASK24_LINUX_DEPENDENCY_MOUNT")
     safePath(mount.target.slice(1))
-    mounts.push("--mount", `type=volume,src=${mount.name},dst=${mount.target},readonly,volume-nocopy`)
+    mounts.push(
+      "--mount",
+      `type=volume,src=${mount.name},dst=${mount.target},readonly${spec.preparingDependencies ? "" : ",volume-nocopy"}`,
+    )
   }
   const argv = [
     "container",
@@ -227,9 +238,11 @@ export async function createOwnedContainer(input: {
     "HOME=/home/sandbox",
     "--env",
     "LANG=C.UTF-8",
+    "--entrypoint",
+    spec.argv[0]!,
     ...mounts,
     spec.image,
-    ...spec.argv,
+    ...spec.argv.slice(1),
   ]
   const result = await input.runner.execute(invocation(argv, input.signal)).catch(() => null)
   const containerID = result ? Buffer.from(result.stdout).toString("utf8").trim() : ""

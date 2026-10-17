@@ -101,6 +101,7 @@ export type Gate<T> =
 export type DockerInvocation = Readonly<{
   argv: readonly string[]
   stdin?: Uint8Array
+  stdinFile?: FileIdentity
   timeoutMs: number
   maxStdoutBytes: number
   maxStderrBytes: number
