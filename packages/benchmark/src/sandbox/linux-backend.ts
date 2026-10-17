@@ -85,11 +85,18 @@ export function makeLinuxBackend(input: {
     service?: { entry: string; port: number; policy: RelayPolicy }
   }[]
   signal?: AbortSignal
+  evidenceRoot?: string
 }) {
   const state = sessionState(input.session),
     signal = input.signal ?? new AbortController().signal
   if (state.manifest.phase !== "accept" || input.images.manifestSha256 !== input.session.manifestSha256)
     throw new TypeError("TASK24_LINUX_BACKEND_MANIFEST")
+  const evidenceRoot = input.evidenceRoot ?? state.manifest.roots.evidence
+  if (
+    evidenceRoot !== state.manifest.roots.evidence &&
+    !evidenceRoot.startsWith(state.manifest.roots.evidence + path.sep)
+  )
+    throw new TypeError("TASK24_LINUX_EVIDENCE_ROOT")
   const profiles = input.profiles.map((p) => {
     const profile = decodeTaskExecutionProfile(p.profile)
     outputPolicy(profile, p.outputs)
@@ -203,7 +210,7 @@ export function makeLinuxBackend(input: {
         argv,
         inspect,
         execution,
-        evidenceRoot: state.manifest.roots.evidence,
+        evidenceRoot,
       })
       receipts.push(receipt)
       if (!execution.started || execution.truncated || execution.exitCode === 124 || execution.exitCode === 130)
@@ -215,6 +222,7 @@ export function makeLinuxBackend(input: {
   }
   return {
     session: input.session,
+    evidenceRoot,
     describe(request: CommonRequest) {
       return policy(request).profile
     },
@@ -273,9 +281,7 @@ export function makeLinuxBackend(input: {
       if (reply.commands.some((c) => c.exitCode !== 0))
         return { payload: { kind: "candidate_failure", reason: "BUILD_CHECK_FAILED" }, receipt }
       if (reply.commands.length !== commands.length) throw new TypeError("TASK24_LINUX_BUILD_INCOMPLETE")
-      const exported = p.outputs.length
-        ? after.filter((f) => p.outputs.some((o) => f.path === o || f.path.startsWith(o + "/")))
-        : after
+      const exported = after
       const build = buildManifest({
         candidateSha256: request.candidate.candidateSha256,
         configSha256: request.candidate.configSha256,
@@ -420,7 +426,7 @@ export function makeLinuxBackend(input: {
               argv,
               inspect,
               execution,
-              evidenceRoot: state.manifest.roots.evidence,
+              evidenceRoot,
             }),
           )
           if (!execution.started || execution.exitCode !== 0 || execution.truncated)

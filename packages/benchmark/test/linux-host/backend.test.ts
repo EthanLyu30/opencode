@@ -14,6 +14,8 @@ test("backend binds commands and immutable source, produces raw receipts and alw
   const f = await sessionFixture(),
     c = await orchestratorFixture()
   try {
+    const evidenceRoot = path.join(f.manifest.roots.evidence, "own-evaluation")
+    await fs.mkdir(evidenceRoot)
     const runner = {
       async execute(r: Parameters<typeof f.runner.execute>[0]) {
         if (r.argv.includes("exec"))
@@ -28,6 +30,7 @@ test("backend binds commands and immutable source, produces raw receipts and alw
       },
     }
     const backend = makeLinuxBackend({
+      evidenceRoot,
       session: f.session,
       images: {
         schemaVersion: 2,
@@ -55,6 +58,7 @@ test("backend binds commands and immutable source, produces raw receipts and alw
     const raw = await backend.build(request)
     expect(raw.payload.kind).toBe("ok")
     expect(raw.receipt.assurance).toBe("fixture")
+    expect(await fs.stat(path.join(evidenceRoot, raw.receipt.evidence.relativePath)).then((s) => s.isFile())).toBe(true)
     expect(raw.receipt.binding?.candidateSha256).toBe(c.input.identity.candidateSha256)
     expect(raw).not.toHaveProperty("assurance")
     expect(backend.probeMode({ ...request, module: "src/math.js" })).toBe("node")

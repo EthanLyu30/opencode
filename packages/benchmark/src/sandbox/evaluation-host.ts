@@ -55,6 +55,7 @@ const observations = new WeakMap<
     request: CommonRequest
     receipts: readonly OperationReceipt[]
     browserTrace?: BrowserTrace
+    evidenceRoot: string
   }
 >()
 const hosts = new WeakMap<EvaluationHost, { authority: LinuxAuthority; backend: LinuxBackend }>()
@@ -70,7 +71,7 @@ export function requireLinuxObservation(observation: object) {
   const state = requireLinuxAuthority(binding.authority)
   for (const receipt of binding.receipts) {
     requireOperationReceipt(receipt)
-    verifyOperationReceipt({ receipt, manifest: state.manifest, evidenceRoot: state.evidenceRoot })
+    verifyOperationReceipt({ receipt, manifest: state.manifest, evidenceRoot: binding.evidenceRoot })
     if (
       receipt.assurance !== "linux-attested" ||
       receipt.binding?.candidateSha256 !== binding.request.candidate.candidateSha256 ||
@@ -131,6 +132,7 @@ export function makeLinuxEvaluationHost(input: {
       request,
       receipts,
       ...(browserTrace ? { browserTrace } : {}),
+      evidenceRoot: input.backend.evidenceRoot,
     })
     requireLinuxObservation(result)
     return result
@@ -207,6 +209,7 @@ export type LinuxResultProof = Readonly<{
   engineReceiptSha256: string
   operations: readonly OperationReceipt[]
   browserOperations: readonly BrowserTrace[]
+  evidenceRoot: string
 }>
 const factsIssued = new WeakMap<EvaluationFacts, { authority: LinuxAuthority; proof: LinuxResultProof }>()
 const resultAuthorities = new WeakMap<object, LinuxAuthority>()
@@ -232,6 +235,8 @@ export function bindLinuxEvaluationFacts(
     const trace = requireLinuxObservation(o).browserTrace
     return trace ? [trace] : []
   })
+  const roots = [...new Set(observed.map((o) => requireLinuxObservation(o).evidenceRoot))]
+  if (roots.length !== 1) throw new TypeError("TASK24_LINUX_RESULT_ROOT")
   factsIssued.set(value, {
     authority,
     proof: freeze({
@@ -239,6 +244,7 @@ export function bindLinuxEvaluationFacts(
       engineReceiptSha256: authority.engineReceiptSha256,
       operations,
       browserOperations,
+      evidenceRoot: roots[0]!,
     }),
   })
   return value
@@ -267,6 +273,8 @@ export function verifyLinuxResultProof(
 ) {
   if (!authority) throw new TypeError("TASK24_LINUX_RESULT_AUTHORITY")
   const state = requireLinuxAuthority(authority)
+  if (proof.evidenceRoot !== state.evidenceRoot && !proof.evidenceRoot.startsWith(state.evidenceRoot + path.sep))
+    throw new TypeError("TASK24_LINUX_RESULT_ROOT")
   if (
     proof.manifestSha256 !== authority.manifestSha256 ||
     proof.engineReceiptSha256 !== authority.engineReceiptSha256 ||
@@ -275,7 +283,7 @@ export function verifyLinuxResultProof(
   )
     throw new TypeError("TASK24_LINUX_RESULT_PROOF")
   for (const r of proof.operations) {
-    verifyOperationReceipt({ receipt: r, manifest: state.manifest, evidenceRoot: state.evidenceRoot })
+    verifyOperationReceipt({ receipt: r, manifest: state.manifest, evidenceRoot: proof.evidenceRoot })
     if (
       r.assurance !== "linux-attested" ||
       r.owner.runID !== identity.runID ||
@@ -287,10 +295,10 @@ export function verifyLinuxResultProof(
       throw new TypeError("TASK24_LINUX_RESULT_PROOF")
   }
   for (const trace of proof.browserOperations) {
-    verifyEvidenceFile(state.evidenceRoot, trace.evidence)
+    verifyEvidenceFile(proof.evidenceRoot, trace.evidence)
     const { evidence, ...body } = trace
     if (
-      canonicalJson(JSON.parse(readFileSync(path.join(state.evidenceRoot, evidence.relativePath), "utf8"))) !==
+      canonicalJson(JSON.parse(readFileSync(path.join(proof.evidenceRoot, evidence.relativePath), "utf8"))) !==
         canonicalJson(body) ||
       canonicalJson(trace.identity) !== canonicalJson(identity)
     )
