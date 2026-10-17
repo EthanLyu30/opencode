@@ -1,6 +1,13 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { sha256Text } from "../../src/hash"
+import { decodeEvaluationIdentity } from "../../src/corpus/evaluation-profile"
+
+export function identity(overrides: Record<string, unknown> = {}) {
+  return decodeEvaluationIdentity({schemaVersion: 2, campaignID: "fixture", runID: "run-1", attemptID: "attempt-1", leaseGeneration: 1,
+    taskID: "fixture-add", armID: "A", repeat: 0, ...Object.fromEntries(["campaignSha256","binarySha256","routeSha256","profileSha256","oracleSha256","seedSha256","candidateSha256","evaluatorSha256"].map(k => [k, sha256Text(k)])), ...overrides})
+}
+export const candidate = {archiveFile: "candidate.json", archiveSha256: sha256Text("archive"), candidateSha256: identity().candidateSha256, configSha256: sha256Text("config")}
 
 export async function independentFixture(label: string) {
   const parent = process.env.TMPDIR!
