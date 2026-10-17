@@ -13,6 +13,8 @@ import {
   type ProbePayload,
   type FailurePayload,
   type CommonRequest,
+  type PreviewRequest,
+  type BuildManifest,
 } from "../evaluator/independent/host"
 import { probeWorkerSource, decodeProbeResponse, makeProbeRequest } from "../evaluator/independent/probe"
 import { sha256Text } from "../hash"
@@ -24,6 +26,17 @@ import { createOwnedContainer, cleanupOwnedContainer, inspectOwnedContainer, typ
 import { recordOperationReceipt, type OperationReceipt } from "./receipt"
 import type { ResolvedImages, ResolvedTask } from "./dependencies"
 import type { EngineSession, DockerRunner, AuthorityGuard } from "./contracts"
+import { relayWorkerSource } from "./relay-worker"
+import {
+  encodeRelayFrame,
+  decodeRelayFrame,
+  relayLimits,
+  validateRelayRequest,
+  validateRelayResponse,
+  type RelayPolicy,
+} from "./relay-protocol"
+import type { PreviewSource } from "./preview"
+import { safePath } from "../corpus/evaluation-profile"
 
 export type BackendImage = Pick<ResolvedTask, "taskID" | "image" | "volumes" | "receiptSha256">
 export type RawBuild = Readonly<{ payload: BuildPayload | FailurePayload; receipt: OperationReceipt }>
@@ -34,7 +47,11 @@ export function makeLinuxBackend(input: {
   images: Omit<ResolvedImages, "tasks"> & { tasks: readonly BackendImage[] }
   runner: DockerRunner
   guard: AuthorityGuard
-  profiles: readonly { profile: TaskExecutionProfile; outputs: readonly string[] }[]
+  profiles: readonly {
+    profile: TaskExecutionProfile
+    outputs: readonly string[]
+    service?: { entry: string; port: number; policy: RelayPolicy }
+  }[]
   signal?: AbortSignal
 }) {
   const state = sessionState(input.session),
@@ -44,9 +61,22 @@ export function makeLinuxBackend(input: {
   const profiles = input.profiles.map((p) => {
     const profile = decodeTaskExecutionProfile(p.profile)
     outputPolicy(profile, p.outputs)
-    return freeze({ profile, outputs: [...p.outputs] })
+    if (p.service) {
+      safePath(p.service.entry)
+      if (
+        !profile.protectedPaths.includes(p.service.entry) ||
+        !profile.preview ||
+        p.service.port < 1024 ||
+        p.service.port > 65535 ||
+        !Number.isInteger(p.service.port)
+      )
+        throw new TypeError("TASK24_LINUX_SERVICE_POLICY")
+    }
+    return freeze({ profile, outputs: [...p.outputs], ...(p.service ? { service: structuredClone(p.service) } : {}) })
   })
   const workspaces = new Map<string, string>(),
+    builds = new Map<string, BuildManifest>(),
+    receipts: OperationReceipt[] = [],
     owned = new Map<string, Owner>(),
     allocated = new Set<string>()
   function policy(request: CommonRequest) {
@@ -138,6 +168,7 @@ export function makeLinuxBackend(input: {
         execution,
         evidenceRoot: state.manifest.roots.evidence,
       })
+      receipts.push(receipt)
       if (!execution.started || execution.truncated || execution.exitCode === 124 || execution.exitCode === 130)
         throw new TypeError("TASK24_LINUX_TRANSPORT_INCOMPLETE")
       return { execution, receipt }
@@ -204,6 +235,7 @@ export function makeLinuxBackend(input: {
         files: exported,
       })
       workspaces.set(key(request), workspace)
+      builds.set(key(request), build)
       return freeze({ payload: { kind: "ok", commands: reply.commands, build }, receipt })
     },
     async probe(request: ProbeRequest): Promise<RawProbe> {
@@ -247,6 +279,116 @@ export function makeLinuxBackend(input: {
       return freeze({ payload: { kind: "ok", response }, receipt })
     },
     stop,
+    receipts() {
+      return [...receipts]
+    },
+    async previewSource(request: PreviewRequest): Promise<PreviewSource> {
+      const p = policy(request),
+        root = workspaces.get(key(request)),
+        built = builds.get(key(request))
+      if (
+        !root ||
+        !built ||
+        !p.profile.preview ||
+        canonicalJson(request.preview) !== canonicalJson(p.profile.preview) ||
+        canonicalJson(built) !== canonicalJson(request.build)
+      )
+        throw new TypeError("TASK24_LINUX_PREVIEW_BUILD")
+      const current = await ordinaryFiles(root)
+      assertSourceUnchanged(built.files, current)
+      if (!built.files.some((f) => f.path === request.preview.entry)) throw new TypeError("TASK24_LINUX_PREVIEW_ENTRY")
+      if (!p.service)
+        return {
+          root,
+          files: built.files,
+          buildSha256: built.buildSha256,
+          stop: async () => {
+            await input.guard()
+          },
+        }
+      const service = p.service
+      const source = `import {spawn} from 'node:child_process';const p=spawn('/usr/local/bin/bun',['--no-env-file',${JSON.stringify("/workspace/" + service.entry)}],{cwd:'/workspace',env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:'/home/sandbox',BUN_OPTIONS:'--no-env-file',HOST:'127.0.0.1',PORT:${JSON.stringify(String(service.port))}},stdio:'ignore'});p.once('exit',code=>process.exit(code??1));setInterval(()=>{},1000)`
+      const owner = await createOwnedContainer({
+        ...input,
+        signal,
+        owner: {
+          acceptanceID: input.session.acceptanceID,
+          runID: request.identity.runID,
+          attemptID: request.identity.attemptID,
+          leaseGeneration: request.identity.leaseGeneration,
+          operationID: "preview",
+          nonce: randomBytes(16).toString("hex"),
+          daemonFingerprint: state.inventory.contextFingerprint,
+        },
+        spec: {
+          image: p.image.image,
+          argv: ["/usr/local/bin/node", "-e", source],
+          workspace: { source: root, readonly: true },
+          dependencies: p.image.volumes,
+        },
+      })
+      owned.set(owner.containerID, owner)
+      let stopped = false
+      return {
+        root,
+        files: built.files,
+        buildSha256: built.buildSha256,
+        async exchange(r, requestSignal) {
+          if (stopped || requestSignal.aborted) throw new TypeError("TASK24_LINUX_PREVIEW_ENDED")
+          validateRelayRequest(r, service.policy)
+          await requireOperation(input.session, "container-exec", input.guard)
+          const worker = relayWorkerSource(service.policy.paths),
+            argv = [
+              "container",
+              "exec",
+              "--interactive",
+              owner.containerID,
+              "/usr/local/bin/node",
+              "-e",
+              worker,
+              String(service.port),
+            ]
+          const execution = await input.runner.execute({
+            argv,
+            stdin: encodeRelayFrame(r, relayLimits.requestBytes),
+            timeoutMs: relayLimits.timeoutMs,
+            maxStdoutBytes: relayLimits.responseBytes + relayLimits.headerBytes + 4,
+            maxStderrBytes: 65536,
+            signal: AbortSignal.any([signal, requestSignal]),
+          })
+          const inspect = await inspectOwnedContainer({ ...input, owner, signal })
+          receipts.push(
+            await recordOperationReceipt({
+              ...input,
+              owner,
+              operation: "preview",
+              binding: {
+                candidateSha256: request.candidate.candidateSha256,
+                configSha256: request.candidate.configSha256,
+                profileSha256: request.profileSha256,
+                dependencySha256: p.image.receiptSha256,
+                workerSha256: sha256Text(worker),
+              },
+              argv,
+              inspect,
+              execution,
+              evidenceRoot: state.manifest.roots.evidence,
+            }),
+          )
+          if (!execution.started || execution.exitCode !== 0 || execution.truncated)
+            throw new TypeError("TASK24_LINUX_PREVIEW_PROTOCOL")
+          const reply = decodeRelayFrame(execution.stdout, relayLimits.responseBytes)
+          if (!("status" in reply)) throw new TypeError("TASK24_LINUX_PREVIEW_PROTOCOL")
+          validateRelayResponse(reply)
+          return reply
+        },
+        async stop() {
+          if (stopped) return
+          await stop(owner)
+          stopped = true
+        },
+      }
+    },
     async workspace(request: CommonRequest) {
       policy(request)
       const root = workspaces.get(key(request))
@@ -265,6 +407,7 @@ export function makeLinuxBackend(input: {
         await fs.rm(resolved, { recursive: true })
       }
       workspaces.clear()
+      builds.clear()
       allocated.clear()
     },
   }

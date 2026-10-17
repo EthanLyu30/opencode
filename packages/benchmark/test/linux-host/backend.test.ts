@@ -57,6 +57,19 @@ test("backend binds commands and immutable source, produces raw receipts and alw
     expect(raw.receipt.assurance).toBe("fixture")
     expect(raw.receipt.binding?.candidateSha256).toBe(c.input.identity.candidateSha256)
     expect(raw).not.toHaveProperty("assurance")
+    await expect(
+      backend.previewSource({
+        ...request,
+        build: raw.payload.kind === "ok" ? raw.payload.build : undefined,
+        preview: {
+          entry: "src/math.js",
+          kind: "html",
+          requiredCapabilities: [],
+          interaction: "none",
+          timeoutMs: 30000,
+        },
+      } as never),
+    ).rejects.toThrow()
     expect(f.state.removed).toBe(true)
     expect(await fs.readFile(c.input.snapshot.archiveFile)).toEqual(before)
     await expect(
