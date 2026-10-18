@@ -5,8 +5,33 @@ import { sha256Text, sha256Bytes } from "../../hash"
 import { directoryIdentity, fileIdentity } from "../storage"
 import { type FileIdentity } from "../contracts"
 import { canonicalDesktopPath } from "./compatibility"
+import { desktopProbeEnvironment, readDesktopProbeRootProof, revalidateDesktopProbeEnvironment } from "./probe-root"
+import { desktopProbeBootstrap } from "./probe-worker"
 
 const consoleImage = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+export type DesktopRecordAnchor = {
+  path: string
+  identity: string
+  parents?: readonly { path: string; identity: string | null }[]
+}
+export async function readDesktopRecordParents(anchor: string) {
+  const parents: { path: string; identity: string | null }[] = []
+  for (const value of [path.join(anchor, "reports"), path.join(anchor, "reports", "desktop-launch")]) {
+    const identity = await fs.lstat(value).then(
+      () => directoryIdentity(value),
+      (error: unknown) => {
+        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return null
+        throw error
+      },
+    )
+    parents.push({ path: value, identity })
+  }
+  return parents
+}
+async function requireRecordParents(anchor: DesktopRecordAnchor) {
+  if (anchor.parents && canonicalJson(await readDesktopRecordParents(anchor.path)) !== canonicalJson(anchor.parents))
+    throw new TypeError("TASK24_DESKTOP_REPORT_PARENT_DRIFT")
+}
 async function consoleDirectoryIdentity(directory: string) {
   if (directory !== path.dirname(consoleImage) && directory !== path.dirname(path.dirname(consoleImage)))
     throw new TypeError("TASK24_DESKTOP_CONSOLE_LEASE")
@@ -41,9 +66,7 @@ export async function desktopConsoleImageIdentity(): Promise<FileIdentity> {
 /** The helper holds non-delete-sharing handles, including every ancestor, until the callback returns.
  * Directory/file creation is FILE_CREATE relative to those handles, never a checked pathname reopened later.
  * There is deliberately no path-based fallback on an unsupported host. */
-const script = String.raw`
-$ErrorActionPreference = 'Stop'
-Add-Type -TypeDefinition @'
+const publicationCode = String.raw`
 using System;
 using System.IO;
 using System.Text;
@@ -154,9 +177,17 @@ public static class DesktopPublication {
     var values = new List<SafeFileHandle>(dirs.Values); values.Reverse(); foreach (var h in values) h.Dispose();
   }
 }
-'@
+`
+const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$first = [Console]::ReadLine() | ConvertFrom-Json
+$p=@{cwd=$env:TEMP;tempIdentity=$first.tempIdentity;tempOwnerSha256=$first.tempOwnerSha256}
+${desktopProbeBootstrap}
+$hash=[Security.Cryptography.SHA256]::Create()
+try {$digest=[BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$first.helperSource))).Replace('-','').ToLowerInvariant()} finally {$hash.Dispose()}
+if($digest -cne '${sha256Bytes(Buffer.from(publicationCode))}'){exit 249}
+Add-Type -TypeDefinition ([string]$first.helperSource)
 try {
-  $first = [Console]::ReadLine() | ConvertFrom-Json
   [DesktopPublication]::OpenParent([string]$first.root,[string]$first.anchor)
   [Console]::WriteLine('pinned')
   while ($null -ne ($line = [Console]::ReadLine())) {
@@ -195,7 +226,7 @@ export async function withDesktopPublication<T>(
     layout?: "profile" | "read" | "record"
     consoleLease?: boolean
     recordParents?: { anchor: string; identity: string; missing: readonly string[] }
-    boundAncestor?: { path: string; identity: string }
+    boundAncestor?: DesktopRecordAnchor
   } = {},
 ): Promise<T> {
   if (process.platform !== "win32") throw new TypeError("TASK24_DESKTOP_PUBLICATION_UNAVAILABLE")
@@ -221,8 +252,9 @@ export async function withDesktopPublication<T>(
     throw new TypeError("TASK24_DESKTOP_RECORD_LAYOUT")
   const identity = consoleLease ? consoleDirectoryIdentity : directoryIdentity
   const parentID = expected.recordParents?.identity ?? expected.parentIdentity ?? (await identity(parent))
-  const temp = canonicalDesktopPath(process.env.TEMP ?? "")
-  await directoryIdentity(temp)
+  const env = await desktopProbeEnvironment(),
+    temp = env.TEMP
+  await revalidateDesktopProbeEnvironment(env)
   const child = Bun.spawn(
     [
       "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
@@ -238,18 +270,7 @@ export async function withDesktopPublication<T>(
       stdout: "pipe",
       stderr: "ignore",
       windowsHide: true,
-      env: {
-        SystemRoot: "C:\\Windows",
-        WINDIR: "C:\\Windows",
-        PATH: "C:\\Windows\\System32",
-        TEMP: temp,
-        TMP: temp,
-        HOME: temp,
-        USERPROFILE: temp,
-        APPDATA: temp,
-        LOCALAPPDATA: temp,
-        PSModuleAnalysisCachePath: "NUL",
-      },
+      env,
     },
   )
   const timer = setTimeout(() => child.kill(), consoleLease ? 75000 : 30000)
@@ -286,7 +307,18 @@ export async function withDesktopPublication<T>(
     return target
   }
   try {
-    await request({ root, anchor: record ? anchor : undefined }, "pinned")
+    const proof = readDesktopProbeRootProof(env)
+    await request(
+      {
+        root,
+        anchor: record ? anchor : undefined,
+        tempIdentity: proof.identity,
+        tempOwnerSha256: proof.ownerSha256,
+        helperSource: publicationCode,
+      },
+      "pinned",
+    )
+    await revalidateDesktopProbeEnvironment(env)
     if ((await identity(record ? anchor : parent)) !== parentID) throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
     if (expected.boundAncestor) {
       if (
@@ -295,6 +327,7 @@ export async function withDesktopPublication<T>(
         (await directoryIdentity(expected.boundAncestor.path)) !== expected.boundAncestor.identity
       )
         throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
+      await requireRecordParents(expected.boundAncestor)
     }
     if (record) await request({ op: "record-parents", anchor, relative: expected.recordParents!.missing })
     if (expected.layout === "read" && mode !== "existing") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
@@ -350,9 +383,10 @@ export async function withDesktopPublication<T>(
 export async function withDesktopRecordPublication<T>(
   root: string,
   callback: (publication: DesktopPublication) => Promise<T>,
-  boundAncestor: { path: string; identity: string },
+  boundAncestor: DesktopRecordAnchor,
 ) {
   canonicalDesktopPath(root)
+  await requireRecordParents(boundAncestor)
   if (await fs.exists(root)) throw new TypeError("TASK24_DESKTOP_RECORD_EXISTS")
   const parent = path.dirname(root)
   let anchor = parent

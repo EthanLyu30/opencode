@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { canonicalJson } from "../../campaign/canonical"
+import { freeze } from "../../corpus/evaluation-profile"
 import { fileIdentity } from "../storage"
 import { type Gate, type FileIdentity } from "../contracts"
 import {
@@ -12,6 +13,7 @@ import {
   type DesktopLaunchApproval,
   type DesktopLaunchSession,
   type DesktopProcessIdentity,
+  type DesktopAttemptDiagnostics,
 } from "./contracts"
 import {
   consumeDesktopGrant,
@@ -33,9 +35,44 @@ type LaunchState = {
   lock: FileIdentity
   stopped: boolean
   stop?: Promise<Gate<"stopped">>
+  last?: typeof DesktopObservation.Type
+  failureCode?: string
 }
 const sessions = new WeakMap<DesktopLaunchSession, LaunchState>()
 const attemptCleanup = new WeakMap<object, "stopped" | "uncertain" | "not_needed">()
+const diagnosticFacts = new WeakMap<object, DesktopAttemptDiagnostics>()
+function diagnosticCode(value: unknown) {
+  const text = value instanceof Error ? value.message : typeof value === "string" ? value : "desktop_operation_failed"
+  return /^[a-zA-Z0-9_.:-]{1,200}$/.test(text) ? text : "desktop_operation_failed"
+}
+function diagnostic(
+  state?: LaunchState,
+  failureCode: string | null = state?.failureCode ?? null,
+  cleanupCode: string | null = null,
+): DesktopAttemptDiagnostics {
+  const last = state?.last
+  return freeze(
+    structuredClone({
+      failureCode,
+      cleanupCode,
+      ownedProcess: state?.process ?? null,
+      lastObservation: last
+        ? {
+            phase: last.phase,
+            runningDocker: last.runningDocker,
+            runningWsl: last.runningWsl,
+            process: last.process ?? null,
+            pipe: last.pipe ?? null,
+            related: (last.related ?? []).slice(0, 16),
+            relatedOmitted: Math.max(0, (last.related?.length ?? 0) - 16),
+          }
+        : null,
+    }),
+  )
+}
+export function readDesktopAttemptDiagnostics(result: object) {
+  return diagnosticFacts.get(result)
+}
 export function readDesktopAttemptCleanup(result: object) {
   return attemptCleanup.get(result) ?? "uncertain"
 }
@@ -61,6 +98,7 @@ export async function boundedDesktopOperation<T>(
 }
 function requireOwnedProcess(raw: unknown, state: LaunchState, allowStarting = false) {
   const observed = Schema.decodeUnknownSync(DesktopObservation)(raw, { onExcessProperty: "error" })
+  state.last = observed
   if (
     allowStarting &&
     observed.phase === "starting" &&
@@ -126,9 +164,18 @@ export async function startDesktopReadonly(input: {
   let startAttempted = false
   let ownedLock: FileIdentity | undefined
   let consuming = false
+  let failure: string | null = null
   const blocked = (code: string, cleanup: "stopped" | "uncertain" | "not_needed", missing?: readonly string[]) => {
     const result = desktopBlocked(code, missing)
     attemptCleanup.set(result, cleanup)
+    diagnosticFacts.set(
+      result,
+      diagnostic(
+        issued ? sessions.get(issued) : undefined,
+        failure,
+        cleanup === "uncertain" ? (missing?.[0] ?? "cleanup_uncertain") : null,
+      ),
+    )
     return result
   }
   try {
@@ -193,12 +240,21 @@ export async function startDesktopReadonly(input: {
     await run(revalidateDesktopLaunchSession(session, input.signal))
     return { kind: "ready", value: session }
   } catch (error) {
+    failure = diagnosticCode(error)
+    if (issued) sessions.get(issued)!.failureCode = failure
     let outcome: "stopped" | "not_needed" = "not_needed"
     if (issued) {
       const cleanup = await stopDesktopLaunch(issued)
-      if (cleanup.kind !== "ready") return blocked("cleanup_uncertain", "uncertain")
+      if (cleanup.kind !== "ready") {
+        const result = blocked("cleanup_uncertain", "uncertain", [failure, ...cleanup.missing])
+        diagnosticFacts.set(
+          result,
+          diagnosticFacts.get(cleanup) ?? diagnostic(sessions.get(issued), failure, "cleanup_uncertain"),
+        )
+        return result
+      }
       outcome = "stopped"
-    } else if (startAttempted) return blocked("cleanup_uncertain", "uncertain", ["start_identity_unobserved"])
+    } else if (startAttempted) return blocked("cleanup_uncertain", "uncertain", ["start_identity_unobserved", failure])
     else if (consuming) return blocked("cleanup_uncertain", "not_needed", ["grant_consumption_unobserved"])
     else if (ownedLock) {
       try {
@@ -216,26 +272,34 @@ export async function stopDesktopLaunch(session: DesktopLaunchSession): Promise<
   if (state.stopped) return { kind: "ready", value: "stopped" }
   if (state.stop) return state.stop
   state.stop = (async () => {
+    const result = (code?: string) => {
+      const value = code
+        ? desktopBlocked("cleanup_uncertain", [code])
+        : { kind: "ready" as const, value: "stopped" as const }
+      diagnosticFacts.set(value, diagnostic(state, state.failureCode ?? null, code ?? null))
+      return value
+    }
     try {
       const deadline = Date.now() + 30000
       const cleanupSignal = AbortSignal.timeout(30000)
       const run = <T>(operation: Promise<T>) => boundedDesktopOperation(operation, deadline - Date.now())
       // Cleanup uses its consumed stop-owned authority even if the start grant has since expired.
       requireOwnedProcess(await run(state.platform.observe(state.spec, cleanupSignal)), state, true)
-      if ((await run(state.platform.stop(state.process))) !== "stopped") return desktopBlocked("cleanup_uncertain")
+      if ((await run(state.platform.stop(state.process))) !== "stopped") return result("stop_not_confirmed")
       const after = Schema.decodeUnknownSync(DesktopObservation)(
         await run(state.platform.observe(state.spec, cleanupSignal)),
         {
           onExcessProperty: "error",
         },
       )
+      state.last = after
       if (after.runningDocker || after.runningWsl || after.process || after.pipe || after.phase !== "stopped")
-        return desktopBlocked("cleanup_uncertain")
+        return result("stop_residuals_observed")
       await run(removeDesktopActiveLock(state.profile, state.lock))
       state.stopped = true
-      return { kind: "ready" as const, value: "stopped" as const }
-    } catch {
-      return desktopBlocked("cleanup_uncertain")
+      return result()
+    } catch (error) {
+      return result(diagnosticCode(error))
     }
   })()
   return state.stop

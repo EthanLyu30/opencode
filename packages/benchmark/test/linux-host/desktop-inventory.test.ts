@@ -226,3 +226,67 @@ test("stale records cannot restore a live session", async () => {
     await f.close()
   }
 })
+
+test("report ancestors cannot be adopted after consumption when replaced or unexpectedly created", async () => {
+  const { publishDesktopLaunchRecord } = await import("../../src/sandbox/desktop/inventory")
+  for (const existing of [true, false]) {
+    const f = await launchFixture()
+    try {
+      const reports = path.join(f.root, "reports"),
+        base = path.join(reports, "desktop-launch")
+      if (existing) await fs.mkdir(base, { recursive: true })
+      await consumeDesktopGrant(f.profile, f.approval)
+      if (existing) await fs.rename(reports, reports + "-original")
+      await fs.mkdir(base, { recursive: true })
+      await fs.writeFile(path.join(base, "sentinel"), "foreign-parent")
+      const before = await fileIdentity(path.join(base, "sentinel"))
+      const failed = await publishDesktopLaunchRecord({
+        profile: f.profile,
+        approval: f.approval,
+        record: record(f),
+      }).then(
+        () => false,
+        () => true,
+      )
+      expect(failed).toBe(true)
+      expect(await fs.readdir(base)).toEqual(["sentinel"])
+      expect(await fileIdentity(path.join(base, "sentinel"))).toEqual(before)
+    } finally {
+      await f.close()
+    }
+  }
+})
+
+test("uncertain attempts retain original failure and known residual identities", async () => {
+  for (const kind of ["start", "stop"]) {
+    const f = await commandAttempt()
+    try {
+      if (kind === "start")
+        f.platform.start = async () => {
+          f.calls.start++
+          throw Error("synthetic_start_failure")
+        }
+      else
+        f.platform.stop = async () => {
+          f.calls.stop++
+          return "uncertain"
+        }
+      const result = await f.run(f.startArgv)
+      expect(result.output).toMatchObject({ code: "cleanup_uncertain" })
+      const stored = JSON.parse(await fs.readFile(f.report, "utf8"))
+      expect(stored.missing).toContain(kind === "start" ? "synthetic_start_failure" : "stop_not_confirmed")
+      if (kind === "start") {
+        expect(stored.diagnostics.failureCode).toBe("synthetic_start_failure")
+        expect(stored.diagnostics.ownedProcess).toBeNull()
+      } else {
+        expect(stored.diagnostics.cleanupCode).toBe("stop_not_confirmed")
+        expect(stored.diagnostics.ownedProcess.pid).toBe(1234)
+        expect(stored.diagnostics.ownedProcess.image).toEqual(f.spec.install.backend)
+        expect(stored.diagnostics.lastObservation.runningDocker).toBe(true)
+        expect(stored.diagnostics.lastObservation.pipe.owner.pid).toBe(1234)
+      }
+    } finally {
+      await f.close()
+    }
+  }
+})

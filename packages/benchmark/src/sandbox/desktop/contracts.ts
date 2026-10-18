@@ -101,6 +101,24 @@ export const ProcessIdentity = Schema.Struct({
   parentPID: Schema.Int.check(Schema.isGreaterThan(0)),
 })
 export type DesktopProcessIdentity = typeof ProcessIdentity.Type
+const DiagnosticCode = Schema.NullOr(Schema.NonEmptyString.check(Schema.isPattern(/^[a-zA-Z0-9_.:-]{1,200}$/)))
+export const DesktopAttemptDiagnostics = Schema.Struct({
+  failureCode: DiagnosticCode,
+  cleanupCode: DiagnosticCode,
+  ownedProcess: Schema.NullOr(ProcessIdentity),
+  lastObservation: Schema.NullOr(
+    Schema.Struct({
+      phase: Schema.Literals(["idle", "starting", "running", "stopped"]),
+      runningDocker: Schema.Boolean,
+      runningWsl: Schema.Boolean,
+      process: Schema.NullOr(ProcessIdentity),
+      pipe: Schema.NullOr(Schema.Struct({ endpoint: Schema.String, owner: ProcessIdentity })),
+      related: Schema.Array(ProcessIdentity),
+      relatedOmitted: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+    }),
+  ),
+})
+export type DesktopAttemptDiagnostics = typeof DesktopAttemptDiagnostics.Type
 export type DesktopLaunchSession = Readonly<{ launchID: string }>
 export const DesktopObservation = Schema.Struct({
   phase: Schema.Literals(["idle", "starting", "running", "stopped"]),

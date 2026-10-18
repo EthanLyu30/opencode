@@ -15,7 +15,13 @@ import {
   requireDesktopConsumedGrant,
 } from "./profile"
 import { makeWindowsDesktopPlatform, isNativeDesktopPlatform } from "./platform"
-import { startDesktopReadonly, stopDesktopLaunch, boundedDesktopOperation, readDesktopAttemptCleanup } from "./launch"
+import {
+  startDesktopReadonly,
+  stopDesktopLaunch,
+  boundedDesktopOperation,
+  readDesktopAttemptCleanup,
+  readDesktopAttemptDiagnostics,
+} from "./launch"
 import { publishDesktopLaunchRecord, readDesktopLaunchRecord } from "./inventory"
 import { checkDesktopApprovalRequest, confirmDesktopInteractive } from "./approval"
 import { readDesktopNativeDiagnostics } from "./native-audit"
@@ -261,8 +267,15 @@ export function makeDesktopLaunchController(
                 : inventory.missing.length
                   ? "desktop_inventory_blocked"
                   : "inventory_observed_not_accepted"))
-      const missing =
-        started.kind === "blocked" ? started.missing : failure ? [failure] : (inventory?.missing ?? [code])
+      const diagnostics = readDesktopAttemptDiagnostics(cleanup ?? started)
+      const missing = [
+        ...new Set([
+          ...(started.kind === "blocked" ? started.missing : failure ? [failure] : (inventory?.missing ?? [])),
+          ...(diagnostics?.failureCode ? [diagnostics.failureCode] : []),
+          ...(diagnostics?.cleanupCode ? [diagnostics.cleanupCode] : []),
+          ...(outcome === "uncertain" ? ["cleanup_uncertain"] : []),
+        ]),
+      ]
       try {
         requireDesktopConsumedGrant(profile, approval)
       } catch {
@@ -290,17 +303,19 @@ export function makeDesktopLaunchController(
             missing: missing.map(safeCode),
             inventory: inventory ?? null,
             cleanup: outcome,
+            diagnostics,
             engine_verified: false,
             tool_capability_verified: false,
             corpus_engine_ready: false,
           },
         })
-        return response(2, code, { missing, inventory, reportPublished: true, record: file })
+        return response(2, code, { missing, inventory, diagnostics, reportPublished: true, record: file })
       } catch {
         return response(2, code === "cleanup_uncertain" ? code : "desktop_report_publication_failed", {
           missing,
           inventory,
           attemptCode: code,
+          diagnostics,
           reportPublished: false,
         })
       }

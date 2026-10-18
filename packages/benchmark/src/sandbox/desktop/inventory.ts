@@ -6,7 +6,12 @@ import { freeze } from "../../corpus/evaluation-profile"
 import { Sha256 } from "../../schema"
 import { StorageRecord } from "../contracts"
 import { directoryIdentity } from "../storage"
-import { type DesktopPlatform, type DesktopPreparedProfile, type DesktopLaunchApproval } from "./contracts"
+import {
+  DesktopAttemptDiagnostics,
+  type DesktopPlatform,
+  type DesktopPreparedProfile,
+  type DesktopLaunchApproval,
+} from "./contracts"
 import { requireDesktopConsumedGrant, readDesktopConsumedRecordAnchor } from "./profile"
 import { requireDesktopPlan } from "./planning"
 import { isNativeDesktopPlatform } from "./platform"
@@ -45,6 +50,7 @@ const Record = Schema.Struct({
   missing: Schema.Array(Code),
   inventory: Schema.NullOr(Inventory),
   cleanup: Schema.Literals(["stopped", "uncertain", "not_needed"]),
+  diagnostics: Schema.optionalKey(DesktopAttemptDiagnostics),
   ...Ready,
 })
 export type DesktopLaunchRecord = typeof Record.Type

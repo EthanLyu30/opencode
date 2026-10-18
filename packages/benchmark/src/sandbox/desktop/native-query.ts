@@ -7,6 +7,7 @@ import { directoryIdentity } from "../storage"
 import { canonicalDesktopPath, decodeDesktopLaunchSpec, desktopRoot } from "./compatibility"
 import type { DesktopLaunchSpec } from "./contracts"
 import { runDesktopProbe } from "./native-process"
+import { readDesktopProbeImage } from "./probe-image"
 import { desktopNativeQueryScript } from "./native-script"
 
 const Text = Schema.NonEmptyString
@@ -133,6 +134,10 @@ export async function queryDesktopWindows(raw: DesktopLaunchSpec, signal: AbortS
   const spec = requireDesktopNativeSpec(raw)
   if (signal.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(15000)])
+  const systemImages = {
+    powershell: await readDesktopProbeImage("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+    wsl: await readDesktopProbeImage("C:\\Windows\\System32\\wsl.exe"),
+  }
   const disks = async () => {
     const result = await Promise.all(
       Object.entries(spec.disks).map(async ([key, disk]) => {
@@ -155,6 +160,7 @@ export async function queryDesktopWindows(raw: DesktopLaunchSpec, signal: AbortS
   }
   const before = await disks()
   const result = await runDesktopProbe({
+    image: systemImages.powershell,
     exe: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     argv: [
       "-NoLogo",
@@ -179,6 +185,7 @@ export async function queryDesktopWindows(raw: DesktopLaunchSpec, signal: AbortS
   )
   const [list, running] = desktopNativeProbeCommands()
   const allResult = await runDesktopProbe({
+    image: systemImages.wsl,
     ...list!,
     timeoutMs: 5000,
     stdoutLimit: 8192,
@@ -190,6 +197,7 @@ export async function queryDesktopWindows(raw: DesktopLaunchSpec, signal: AbortS
   if (canonicalJson([...installedWsl].sort()) !== canonicalJson([...metadata.installedWsl].sort()))
     throw new TypeError("TASK24_DESKTOP_WSL_PARTIAL")
   const runningResult = await runDesktopProbe({
+    image: systemImages.wsl,
     ...running!,
     timeoutMs: 5000,
     stdoutLimit: 8192,

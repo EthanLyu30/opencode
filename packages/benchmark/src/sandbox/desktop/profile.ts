@@ -21,14 +21,16 @@ import { isNativeDesktopPlatform } from "./platform"
 import { requireDesktopApproval } from "./approval"
 export { confirmDesktopApproval, requireDesktopApproval } from "./approval"
 export { planDesktopProfile, requireDesktopPlan } from "./planning"
-import { withDesktopPublication, type DesktopPublication } from "./publication"
+import {
+  withDesktopPublication,
+  readDesktopRecordParents,
+  type DesktopPublication,
+  type DesktopRecordAnchor,
+} from "./publication"
 
 const prepared = new WeakSet<object>()
 const preparedByRoot = new Map<string, DesktopPreparedProfile>()
-const consumed = new WeakMap<
-  DesktopLaunchApproval,
-  { profile: DesktopPreparedProfile; anchor: { path: string; identity: string } }
->()
+const consumed = new WeakMap<DesktopLaunchApproval, { profile: DesktopPreparedProfile; anchor: DesktopRecordAnchor }>()
 export function requireDesktopConsumedGrant(profile: DesktopPreparedProfile, approval: DesktopLaunchApproval) {
   if (!prepared.has(profile) || consumed.get(approval)?.profile !== profile || approval.phase !== "start-readonly")
     throw new TypeError("TASK24_DESKTOP_CONSUMPTION_AUTHORITY")
@@ -36,7 +38,10 @@ export function requireDesktopConsumedGrant(profile: DesktopPreparedProfile, app
 }
 export function readDesktopConsumedRecordAnchor(profile: DesktopPreparedProfile, approval: DesktopLaunchApproval) {
   requireDesktopConsumedGrant(profile, approval)
-  return Object.freeze({ ...consumed.get(approval)!.anchor })
+  return freeze({
+    ...consumed.get(approval)!.anchor,
+    parents: consumed.get(approval)!.anchor.parents?.map((p) => ({ ...p })),
+  })
 }
 
 async function writeGrant(publication: DesktopPublication, approval: DesktopLaunchApproval, plan: DesktopLaunchPlan) {
@@ -57,7 +62,11 @@ export async function consumeDesktopGrant(profile: DesktopPreparedProfile, appro
   const anchorPath = isNativeDesktopPlatform(requireDesktopPlan(profile.plan))
     ? "D:\\OpenCode-Benchmark\\Task24"
     : path.dirname(profile.plan.paths.root)
-  const anchor = { path: anchorPath, identity: await directoryIdentity(anchorPath) }
+  const anchor = {
+    path: anchorPath,
+    identity: await directoryIdentity(anchorPath),
+    parents: await readDesktopRecordParents(anchorPath),
+  }
   await withDesktopPublication(
     profile.plan.paths.root,
     "existing",

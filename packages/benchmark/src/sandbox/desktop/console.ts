@@ -1,7 +1,8 @@
 import { Schema } from "effect"
 import { canonicalJson } from "../../campaign/canonical"
 import { sha256Text } from "../../hash"
-import { desktopProbeEnvironment } from "./native-process"
+import { desktopProbeEnvironment, readDesktopProbeRootProof, revalidateDesktopProbeEnvironment } from "./probe-root"
+import { desktopProbeBootstrap } from "./probe-worker"
 import { withDesktopReadLease, desktopConsoleImageIdentity } from "./publication"
 
 const Packet = Schema.Struct({
@@ -50,6 +51,8 @@ export function desktopConsoleInputMatches(expected: string, input: string | nul
 export const desktopConsoleProgram = String.raw`
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
+$p=$env:OC_TASK24_PROBE_ROOT | ConvertFrom-Json
+${desktopProbeBootstrap}
 $p=$env:OC_TASK24_CONSOLE_PACKET | ConvertFrom-Json
 Add-Type -TypeDefinition @'
 using System;
@@ -130,7 +133,18 @@ export async function readDesktopConsoleDecision(
       await desktopConsoleImageIdentity(),
       async (leaseSignal) => {
         const combined = AbortSignal.any([signal, leaseSignal])
-        const env = { ...(await desktopProbeEnvironment()), OC_TASK24_CONSOLE_PACKET: canonicalJson(packet) }
+        const base = await desktopProbeEnvironment()
+        await revalidateDesktopProbeEnvironment(base)
+        const proof = readDesktopProbeRootProof(base)
+        const env = {
+          ...base,
+          OC_TASK24_CONSOLE_PACKET: canonicalJson(packet),
+          OC_TASK24_PROBE_ROOT: canonicalJson({
+            cwd: base.TEMP,
+            tempIdentity: proof.identity,
+            tempOwnerSha256: proof.ownerSha256,
+          }),
+        }
         if (combined.aborted) return "cancelled"
         const child = Bun.spawn(
           [

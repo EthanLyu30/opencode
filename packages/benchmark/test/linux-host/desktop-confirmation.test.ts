@@ -8,6 +8,13 @@ import {
   requireDesktopApproval,
 } from "../../src/sandbox/desktop/profile"
 import { makeWindowsDesktopPlatform } from "../../src/sandbox/desktop/platform"
+import { desktopProbeEnvironment, readDesktopProbeRootProof } from "../../src/sandbox/desktop/probe-root"
+
+async function consoleFixturePrefix() {
+  const env = await desktopProbeEnvironment()
+  const proof = readDesktopProbeRootProof(env)
+  return `$env:OC_TASK24_PROBE_ROOT='${JSON.stringify({ cwd: env.TEMP, tempIdentity: proof.identity, tempOwnerSha256: proof.ownerSha256 })}';\n`
+}
 
 test("fixed system console image has a read-only identity lease without widening D writes", async () => {
   const api = await desktopFeature<typeof import("../../src/sandbox/desktop/publication")>("publication")
@@ -77,7 +84,10 @@ test("redirected or truncated console confirmation cannot issue authority", asyn
   expect(await api.readDesktopConsoleDecision(packet, new AbortController().signal)).toBe("unavailable")
   const { runDesktopProbe } = await import("../../src/sandbox/desktop/native-process")
   // Exercise the real fixed helper with inherited pipe handles, including compilation; no console/challenge entered.
-  const script = `$env:OC_TASK24_CONSOLE_PACKET='${JSON.stringify(packet)}';\n` + api.desktopConsoleProgram
+  const script =
+    (await consoleFixturePrefix()) +
+    `$env:OC_TASK24_CONSOLE_PACKET='${JSON.stringify(packet)}';\n` +
+    api.desktopConsoleProgram
   const child = await runDesktopProbe({
     exe: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     argv: [
@@ -120,6 +130,7 @@ test("single-use challenge rejects generic or stale input", async () => {
   expect(api.desktopConsoleInputMatches(phrase, phrase, Date.now() - 1)).toBe(false)
   const { runDesktopProbe } = await import("../../src/sandbox/desktop/native-process")
   const source =
+    (await consoleFixturePrefix()) +
     "$env:OC_TASK24_CONSOLE_PACKET='{}';\n" +
     api.desktopConsoleProgram!.split("exit [DesktopConsole]::Run")[0] +
     String.raw`
@@ -182,6 +193,7 @@ test("console key events accept uppercase modifiers without accepting control or
   const api = await import("../../src/sandbox/desktop/console")
   const { runDesktopProbe } = await import("../../src/sandbox/desktop/native-process")
   const source =
+    (await consoleFixturePrefix()) +
     "$env:OC_TASK24_CONSOLE_PACKET='{}';\n" +
     api.desktopConsoleProgram.split("exit [DesktopConsole]::Run")[0] +
     String.raw`
