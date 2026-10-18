@@ -100,3 +100,8 @@ NC1–NC6 和 NC7 输入修复之后，整体审查安全修复提交为 `14a9d5
 真实准备须等证据门禁通过，并另批准确清单与本地确认；真实启动还须再次另批。Linux Docker 验收、校准、真实执行循环、付费跑分及部署替换仍未执行，三项 readiness 始终为 false。
 
 交付取证：软件和首版报告提交 `959e8c9bfbb6a8f983964e0a6970d63620fbee4d` 已普通 push 到 fork/dev，31项 pre-push 类型检查全部成功，ls-remote 与本地一致；该提交再次完整回归为411 pass /10既有 skip /0 fail /1930 assertions /104 files，135.32s，源码 typecheck 退出0。NC1–NC7 软件任务完成。本次后续仅补报告取证文字，不改已验证业务源码；最终报告修订提交的远端 HEAD 由交付消息再次核对。
+
+清理结果：已核对本次 owner、绝对路径、祖先及目录内无 reparse point；但删除命令在创建进程前被环境策略拒绝，未执行、未删除任何文件。不换接口、不逐文件绕过，也不重试此前旧目录。以下两处专属临时物保留，合计约6 MB；不是正式运行数据、部署或用户输入：
+
+- `D:\OpenCode-Benchmark\Task24\tmp\bprep1-native-cli-20261018-6e9184ab`：本轮 helper/回归夹具与专属缓存。
+- `D:\OpenCode-Audit\.superpowers\sdd\2026-10-18-task24b-dl6-native-cli-confirmation`：本计划进度账本、测试日志、审查 diff 和辅助脚本。
