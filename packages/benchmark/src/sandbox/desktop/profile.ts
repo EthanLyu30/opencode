@@ -7,7 +7,6 @@ import { fileIdentity, directoryIdentity } from "../storage"
 import { FileIdentity } from "../contracts"
 import { sha256Text } from "../../hash"
 import {
-  DesktopApproval,
   DesktopObservation,
   desktopBlocked,
   type DesktopLaunchApproval,
@@ -18,55 +17,16 @@ import {
 } from "./contracts"
 import { readDesktopText, revalidateDesktopSpec } from "./compatibility"
 import { requireDesktopPlan } from "./planning"
+import { requireDesktopApproval } from "./approval"
+export { confirmDesktopApproval, requireDesktopApproval } from "./approval"
 export { planDesktopProfile, requireDesktopPlan } from "./planning"
 import { withDesktopPublication, type DesktopPublication } from "./publication"
 
-const approvals = new WeakMap<object, string>()
 const prepared = new WeakSet<object>()
 const preparedByRoot = new Map<string, DesktopPreparedProfile>()
 
-/** Called by a trusted embedding controller; JSON input or flags never count as human confirmation. */
-export async function confirmDesktopApproval(
-  raw: unknown,
-  verifyHumanConfirmation: (approval: DesktopLaunchApproval) => Promise<boolean>,
-) {
-  const approval = freeze(Schema.decodeUnknownSync(DesktopApproval)(raw, { onExcessProperty: "error" }))
-  if (
-    !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(approval.launchID) ||
-    !Number.isFinite(approval.issuedAt) ||
-    !Number.isFinite(approval.expiresAt) ||
-    approval.issuedAt > Date.now() ||
-    approval.expiresAt <= Date.now() ||
-    approval.expiresAt - approval.issuedAt > 900000 ||
-    !(await verifyHumanConfirmation(approval))
-  )
-    throw new TypeError("TASK24_DESKTOP_CONFIRMATION_REQUIRED")
-  approvals.set(approval, sha256Text(canonicalJson(approval)))
-  return approval
-}
-export function requireDesktopApproval(
-  approval: DesktopLaunchApproval,
-  plan: DesktopLaunchPlan,
-  phase: DesktopLaunchApproval["phase"],
-  sid: string,
-) {
-  if (
-    approvals.get(approval) !== sha256Text(canonicalJson(approval)) ||
-    approval.phase !== phase ||
-    approval.sid !== sid ||
-    approval.issuedAt > Date.now() ||
-    approval.expiresAt <= Date.now() ||
-    approval.expiresAt - approval.issuedAt > 900000 ||
-    approval.planSha256 !== plan.planSha256 ||
-    approval.compatibilitySha256 !== plan.compatibilitySha256 ||
-    canonicalJson(approval.registration) !== canonicalJson(plan.spec.registration) ||
-    canonicalJson(approval.disks) !== canonicalJson(plan.spec.disks)
-  )
-    throw new TypeError("TASK24_DESKTOP_APPROVAL_AUTHORITY")
-}
-async function writeGrant(publication: DesktopPublication, approval: DesktopLaunchApproval) {
-  if (approvals.get(approval) !== sha256Text(canonicalJson(approval)) || !/^[a-f0-9]{64}$/.test(approval.nonce))
-    throw new TypeError("TASK24_DESKTOP_APPROVAL_AUTHORITY")
+async function writeGrant(publication: DesktopPublication, approval: DesktopLaunchApproval, plan: DesktopLaunchPlan) {
+  requireDesktopApproval(approval, plan, approval.phase, approval.sid)
   await publication.write(
     path.join("state", "grants", approval.nonce + ".json"),
     canonicalJson({
@@ -77,17 +37,21 @@ async function writeGrant(publication: DesktopPublication, approval: DesktopLaun
   )
 }
 export async function consumeDesktopGrant(profile: DesktopPreparedProfile, approval: DesktopLaunchApproval) {
+  requireDesktopApproval(approval, profile.plan, "start-readonly", approval.sid)
+  if (approval.phase !== "start-readonly" || approval.manifestSha256 !== profile.manifestSha256)
+    throw new TypeError("TASK24_DESKTOP_PROFILE_BINDING")
   return withDesktopPublication(
     profile.plan.paths.root,
     "existing",
     async (publication) => {
       await revalidateDesktopProfile(profile)
-      await writeGrant(publication, approval)
+      await writeGrant(publication, approval, profile.plan)
     },
     { parentIdentity: profile.directories[path.dirname(profile.plan.paths.root)], rootIdentity: profile.rootIdentity },
   )
 }
 export async function writeDesktopActiveLock(profile: DesktopPreparedProfile, approval: DesktopLaunchApproval) {
+  requireDesktopApproval(approval, profile.plan, "start-readonly", approval.sid)
   return withDesktopPublication(
     profile.plan.paths.root,
     "existing",
@@ -123,6 +87,7 @@ export async function prepareDesktopProfile(input: {
     const plan = input.plan,
       approval = input.approval
     requireDesktopPlan(plan, input.platform)
+    requireDesktopApproval(approval, plan, "prepare-profile", approval.sid)
     if (canonicalJson(input.spec) !== canonicalJson(plan.spec)) throw new TypeError("TASK24_DESKTOP_SPEC_DRIFT")
     const state = Schema.decodeUnknownSync(DesktopObservation)(await input.platform.observe(plan.spec), {
       onExcessProperty: "error",
@@ -148,7 +113,7 @@ export async function prepareDesktopProfile(input: {
           "owner.json",
           canonicalJson({ schemaVersion: 1, nonce: approval.nonce, planSha256: plan.planSha256 }),
         )
-        await writeGrant(publication, approval)
+        await writeGrant(publication, approval, plan)
         await publication.directories()
         const settingsFile = path.join(plan.paths.home, "AppData", "Roaming", "Docker", "settings-store.json")
         const settings = await publication.write(

@@ -126,6 +126,7 @@ export async function startDesktopReadonly(input: {
     const deadline = Date.now() + 120000
     const run = <T>(operation: Promise<T>) => boundedDesktopOperation(operation, deadline - Date.now(), input.signal)
     requireDesktopPlan(input.profile.plan, input.platform)
+    requireDesktopApproval(input.approval, input.profile.plan, "start-readonly", input.approval.sid)
     if (canonicalJson(input.spec) !== canonicalJson(input.profile.plan.spec))
       throw new TypeError("TASK24_DESKTOP_SPEC_DRIFT")
     await run(revalidateDesktopProfile(input.profile))

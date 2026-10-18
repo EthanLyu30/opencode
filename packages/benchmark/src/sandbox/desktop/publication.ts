@@ -1,9 +1,42 @@
 import path from "node:path"
+import fs from "node:fs/promises"
 import { canonicalJson } from "../../campaign/canonical"
-import { sha256Text } from "../../hash"
+import { sha256Text, sha256Bytes } from "../../hash"
 import { directoryIdentity, fileIdentity } from "../storage"
 import { type FileIdentity } from "../contracts"
 import { canonicalDesktopPath } from "./compatibility"
+
+const consoleImage = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+async function consoleDirectoryIdentity(directory: string) {
+  if (directory !== path.dirname(consoleImage) && directory !== path.dirname(path.dirname(consoleImage)))
+    throw new TypeError("TASK24_DESKTOP_CONSOLE_LEASE")
+  let current = path.parse(directory).root
+  for (const part of path.relative(current, directory).split(path.sep)) {
+    current = path.join(current, part)
+    const s = await fs.lstat(current)
+    if (!s.isDirectory() || s.isSymbolicLink() || (await fs.realpath(current)).toLowerCase() !== current.toLowerCase())
+      throw new TypeError("TASK24_DESKTOP_CONSOLE_LEASE")
+  }
+  const s = await fs.stat(directory)
+  return `${s.dev}:${s.ino}:${s.birthtimeMs}`
+}
+/** Fixed system image, read only. Windows component-store hardlinks are safe under the same non-write-sharing lease. */
+export async function desktopConsoleImageIdentity(): Promise<FileIdentity> {
+  await consoleDirectoryIdentity(path.dirname(consoleImage))
+  const before = await fs.lstat(consoleImage)
+  if (
+    !before.isFile() ||
+    before.isSymbolicLink() ||
+    before.size > 4194304 ||
+    (await fs.realpath(consoleImage)).toLowerCase() !== consoleImage.toLowerCase()
+  )
+    throw new TypeError("TASK24_DESKTOP_CONSOLE_LEASE")
+  const bytes = await fs.readFile(consoleImage),
+    after = await fs.lstat(consoleImage)
+  const key = (s: typeof before) => `${s.dev}:${s.ino}:${s.birthtimeMs}:${s.size}:${s.mtimeMs}:${s.nlink}`
+  if (key(before) !== key(after)) throw new TypeError("TASK24_DESKTOP_CONSOLE_LEASE")
+  return { path: consoleImage, fileID: `${before.dev}:${before.ino}:${before.birthtimeMs}`, sha256: sha256Bytes(bytes) }
+}
 
 /** The helper holds non-delete-sharing handles, including every ancestor, until the callback returns.
  * Directory/file creation is FILE_CREATE relative to those handles, never a checked pathname reopened later.
@@ -39,7 +72,8 @@ public static class DesktopPublication {
   static void Check(SafeFileHandle h, string expected, bool directory) {
     Info info;
     if (h.IsInvalid || !GetFileInformationByHandle(h, out info)) throw Error();
-    if ((info.Attributes & 0x400) != 0 || ((info.Attributes & 0x10) != 0) != directory || (!directory && info.Links != 1)) throw new IOException("Unsafe file kind");
+    bool systemRead = reading && String.Equals(expected,@"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",StringComparison.Ordinal);
+    if ((info.Attributes & 0x400) != 0 || ((info.Attributes & 0x10) != 0) != directory || (!directory && info.Links != 1 && !systemRead)) throw new IOException("Unsafe file kind");
     var b = new StringBuilder(32768);
     uint length = GetFinalPathNameByHandleW(h, b, (uint)b.Capacity, 0);
     if (length == 0 || length >= b.Capacity || !String.Equals(b.ToString(), @"\\?\" + expected, StringComparison.OrdinalIgnoreCase)) throw new IOException("Path binding");
@@ -52,7 +86,7 @@ public static class DesktopPublication {
       Marshal.StructureToPtr(u, memory, false);
       var o = new OA(); o.Length = (uint)Marshal.SizeOf(typeof(OA)); o.Root = parent.DangerousGetHandle(); o.Name = memory; o.Attributes = 0x40;
       IntPtr raw; IOS io;
-      uint access = directory ? 0x1000A0u : create ? 0x110082u : 0x110080u;
+      uint access = directory ? 0x1000A0u : create ? 0x110082u : reading ? 0x100081u : 0x110080u;
       int status = NtCreateFile(out raw, access, ref o, out io, IntPtr.Zero, directory ? 0x10u : 0x80u, 1, create ? 2u : 1u, directory ? 0x200021u : 0x200060u, IntPtr.Zero, 0);
       if (status < 0) throw new IOException("NT create " + status.ToString("X8"));
       var h = new SafeFileHandle(raw, true);
@@ -144,12 +178,24 @@ export async function withDesktopPublication<T>(
   root: string,
   mode: "create" | "existing",
   callback: (publication: DesktopPublication) => Promise<T>,
-  expected: { parentIdentity?: string; rootIdentity?: string; layout?: "profile" | "read" } = {},
+  expected: {
+    parentIdentity?: string
+    rootIdentity?: string
+    layout?: "profile" | "read"
+    consoleLease?: boolean
+  } = {},
 ): Promise<T> {
   if (process.platform !== "win32") throw new TypeError("TASK24_DESKTOP_PUBLICATION_UNAVAILABLE")
-  canonicalDesktopPath(root)
+  const consoleLease = expected.consoleLease === true
+  if (
+    consoleLease &&
+    (expected.layout !== "read" || mode !== "existing" || root !== "C:\\Windows\\System32\\WindowsPowerShell\\v1.0")
+  )
+    throw new TypeError("TASK24_DESKTOP_CONSOLE_LEASE")
+  canonicalDesktopPath(root, consoleLease ? "C" : "D")
   const parent = path.dirname(root)
-  const parentID = expected.parentIdentity ?? (await directoryIdentity(parent))
+  const identity = consoleLease ? consoleDirectoryIdentity : directoryIdentity
+  const parentID = expected.parentIdentity ?? (await identity(parent))
   const temp = canonicalDesktopPath(process.env.TEMP ?? "")
   await directoryIdentity(temp)
   const child = Bun.spawn(
@@ -181,7 +227,7 @@ export async function withDesktopPublication<T>(
       },
     },
   )
-  const timer = setTimeout(() => child.kill(), 30000)
+  const timer = setTimeout(() => child.kill(), consoleLease ? 75000 : 30000)
   const reader = child.stdout.getReader()
   let pending = ""
   const next = async () => {
@@ -204,7 +250,7 @@ export async function withDesktopPublication<T>(
     if ((await next()) !== reply) throw new TypeError("TASK24_DESKTOP_PUBLICATION_HELPER")
   }
   const relativePath = (relative: string) => {
-    const target = canonicalDesktopPath(path.join(root, relative))
+    const target = canonicalDesktopPath(path.join(root, relative), consoleLease ? "C" : "D")
     if (
       !relative ||
       path.isAbsolute(relative) ||
@@ -216,10 +262,10 @@ export async function withDesktopPublication<T>(
   }
   try {
     await request({ root }, "pinned")
-    if ((await directoryIdentity(parent)) !== parentID) throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
+    if ((await identity(parent)) !== parentID) throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
     if (expected.layout === "read" && mode !== "existing") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
     await request({ op: "tree", create: mode === "create", profile: expected.layout !== "read" })
-    if (expected.rootIdentity && (await directoryIdentity(root)) !== expected.rootIdentity)
+    if (expected.rootIdentity && (await identity(root)) !== expected.rootIdentity)
       throw new TypeError("TASK24_DESKTOP_PROFILE_DRIFT")
     if (mode === "existing" && expected.layout !== "read") await request({ op: "directories" })
     return await callback({
@@ -231,7 +277,10 @@ export async function withDesktopPublication<T>(
         const relative = path.relative(root, file.path)
         relativePath(relative)
         await request({ op: "pin", relative })
-        if (canonicalJson(await fileIdentity(file.path)) !== canonicalJson(file))
+        if (
+          canonicalJson(await (consoleLease ? desktopConsoleImageIdentity() : fileIdentity(file.path))) !==
+          canonicalJson(file)
+        )
           throw new TypeError("TASK24_DESKTOP_FILE_DRIFT")
       },
       async write(relative, text) {
@@ -263,7 +312,13 @@ export async function withDesktopPublication<T>(
 }
 
 /** The callback deadline ends before the helper's fixed 30s handle lifetime. */
-export async function withDesktopReadLease<T>(file: FileIdentity, callback: (signal: AbortSignal) => Promise<T>) {
+export async function withDesktopReadLease<T>(
+  file: FileIdentity,
+  callback: (signal: AbortSignal) => Promise<T>,
+  purpose?: "console",
+) {
+  if (purpose === "console" && file.path !== "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+    throw new TypeError("TASK24_DESKTOP_CONSOLE_LEASE")
   const began = Date.now(),
     root = path.dirname(file.path)
   return withDesktopPublication(
@@ -271,7 +326,10 @@ export async function withDesktopReadLease<T>(file: FileIdentity, callback: (sig
     "existing",
     async (publication) => {
       await publication.pin(file)
-      const remaining = Math.min(15000, 25000 - (Date.now() - began))
+      const remaining =
+        purpose === "console"
+          ? Math.min(60000, 70000 - (Date.now() - began))
+          : Math.min(15000, 25000 - (Date.now() - began))
       if (remaining <= 0) throw new TypeError("TASK24_DESKTOP_DEADLINE")
       const signal = AbortSignal.timeout(remaining)
       const operation = callback(signal)
@@ -280,6 +338,10 @@ export async function withDesktopReadLease<T>(file: FileIdentity, callback: (sig
       )
       return Promise.race([operation, timeout])
     },
-    { layout: "read", rootIdentity: await directoryIdentity(root) },
+    {
+      layout: "read",
+      rootIdentity: await (purpose === "console" ? consoleDirectoryIdentity(root) : directoryIdentity(root)),
+      consoleLease: purpose === "console",
+    },
   )
 }
