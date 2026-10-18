@@ -13,14 +13,14 @@ import {
   type DesktopLaunchApproval,
   type DesktopLaunchPlan,
   type DesktopLaunchSpec,
-  type DesktopCompatibilityReport,
   type DesktopPlatform,
   type DesktopPreparedProfile,
 } from "./contracts"
-import { decodeDesktopLaunchSpec, readDesktopText, requireDesktopReport, revalidateDesktopSpec } from "./compatibility"
+import { readDesktopText, revalidateDesktopSpec } from "./compatibility"
+import { requireDesktopPlan } from "./planning"
+export { planDesktopProfile, requireDesktopPlan } from "./planning"
 import { withDesktopPublication, type DesktopPublication } from "./publication"
 
-const plans = new WeakMap<object, DesktopPlatform>()
 const approvals = new WeakMap<object, string>()
 const prepared = new WeakSet<object>()
 const preparedByRoot = new Map<string, DesktopPreparedProfile>()
@@ -44,11 +44,6 @@ export async function confirmDesktopApproval(
   approvals.set(approval, sha256Text(canonicalJson(approval)))
   return approval
 }
-export function requireDesktopPlan(plan: DesktopLaunchPlan, platform?: DesktopPlatform) {
-  const authority = plans.get(plan)
-  if (!authority || (platform && authority !== platform)) throw new TypeError("TASK24_DESKTOP_PLAN_AUTHORITY")
-  return authority
-}
 export function requireDesktopApproval(
   approval: DesktopLaunchApproval,
   plan: DesktopLaunchPlan,
@@ -68,64 +63,6 @@ export function requireDesktopApproval(
     canonicalJson(approval.disks) !== canonicalJson(plan.spec.disks)
   )
     throw new TypeError("TASK24_DESKTOP_APPROVAL_AUTHORITY")
-}
-export function planDesktopProfile(raw: DesktopLaunchSpec, report: DesktopCompatibilityReport) {
-  try {
-    const spec = decodeDesktopLaunchSpec(raw),
-      platform = requireDesktopReport(spec, report)
-    const paths = {
-      root: spec.profileRoot,
-      home: path.join(spec.profileRoot, "home-oc-task24-dd479"),
-      frontend: path.join(spec.profileRoot, "frontend"),
-      cli: path.join(spec.profileRoot, "cli"),
-      temp: path.join(spec.profileRoot, "temp"),
-    }
-    const settings = {
-      SettingsVersion: 44,
-      CustomWslDistroDir: spec.dataRoot,
-      WslEngineEnabled: true,
-      UseWindowsContainers: false,
-      AutoStart: false,
-    }
-    const env = {
-      PINATA_HOME_DIRECTORY_OVERRIDE: paths.home,
-      PINATA_USER_DATA_DIR_OVERRIDE: paths.frontend,
-      HOME: paths.home,
-      USERPROFILE: paths.home,
-      APPDATA: path.join(paths.home, "AppData", "Roaming"),
-      LOCALAPPDATA: path.join(paths.home, "AppData", "Local"),
-      TEMP: paths.temp,
-      TMP: paths.temp,
-      DOCKER_CONFIG: paths.cli,
-      DOCKER_HOST: "",
-      DOCKER_CONTEXT: "default",
-      DOCKER_TLS_VERIFY: "",
-      DOCKER_CERT_PATH: "",
-      BUILDX_BUILDER: "",
-      BUILDKIT_HOST: "",
-      SystemRoot: "C:\\Windows",
-      WINDIR: "C:\\Windows",
-      PATH: path.dirname(spec.install.cli.path) + ";C:\\Windows\\System32",
-      PSModuleAnalysisCachePath: path.join(paths.temp, "ModuleAnalysisCache"),
-    }
-    const body = {
-      schemaVersion: 1 as const,
-      assurance: report.assurance,
-      spec,
-      specSha256: sha256Text(canonicalJson(spec)),
-      compatibilitySha256: sha256Text(canonicalJson(report)),
-      paths,
-      env,
-      settings,
-      settingsSha256: sha256Text(canonicalJson(settings)),
-      endpoint: "npipe:////./pipe/home-oc-task24-dd479dockerDesktopEngine",
-    }
-    const plan = freeze({ ...body, planSha256: sha256Text(canonicalJson(body)) })
-    plans.set(plan, platform)
-    return { kind: "ready" as const, value: plan }
-  } catch (error) {
-    return desktopBlocked(error instanceof Error ? error.message : "desktop_plan_failed")
-  }
 }
 async function writeGrant(publication: DesktopPublication, approval: DesktopLaunchApproval) {
   if (approvals.get(approval) !== sha256Text(canonicalJson(approval)) || !/^[a-f0-9]{64}$/.test(approval.nonce))

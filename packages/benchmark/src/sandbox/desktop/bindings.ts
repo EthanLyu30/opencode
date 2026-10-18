@@ -1,0 +1,145 @@
+import fs from "node:fs/promises"
+import path from "node:path"
+import { canonicalJson } from "../../campaign/canonical"
+import { sha256Text } from "../../hash"
+import { directoryIdentity, fileIdentity } from "../storage"
+import { canonicalDesktopPath } from "./compatibility"
+
+const documents = {
+  specs: [
+    "docs/superpowers/specs/2026-10-18-task24b-d-drive-docker-launch-design.md",
+    "docs/superpowers/specs/2026-10-18-task24b-dl6-native-cli-confirmation-design.md",
+  ],
+  plans: [
+    "docs/superpowers/plans/2026-10-18-task24b-d-drive-docker-launch.md",
+    "docs/superpowers/plans/2026-10-18-task24b-dl6-native-cli-confirmation.md",
+  ],
+}
+
+export function desktopDocumentDigest(entries: readonly { path: string; sha256: string }[]) {
+  if (
+    entries.length !== 2 ||
+    new Set(entries.map((e) => e.path.toLowerCase())).size !== entries.length ||
+    entries.some(
+      (e) =>
+        !/^[a-zA-Z0-9_./-]+$/.test(e.path) ||
+        path.posix.normalize(e.path) !== e.path ||
+        e.path.startsWith("/") ||
+        e.path.split("/").some((p) => p === ".." || !p) ||
+        !/^[a-f0-9]{64}$/.test(e.sha256),
+    )
+  )
+    throw new TypeError("TASK24_DESKTOP_DOCUMENT_BINDING")
+  return sha256Text(canonicalJson([...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))))
+}
+
+async function gitText(root: string, args: string[], signal?: AbortSignal) {
+  if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
+  const temp = canonicalDesktopPath(process.env.TEMP ?? "")
+  await directoryIdentity(temp)
+  const child = Bun.spawn(
+    [
+      "C:\\Program Files\\Git\\cmd\\git.exe",
+      "--no-optional-locks",
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "core.untrackedCache=false",
+      "-C",
+      root,
+      ...args,
+    ],
+    {
+      cwd: temp,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsHide: true,
+      env: {
+        SystemRoot: "C:\\Windows",
+        WINDIR: "C:\\Windows",
+        PATH: "C:\\Windows\\System32",
+        HOME: temp,
+        USERPROFILE: temp,
+        TEMP: temp,
+        TMP: temp,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "NUL",
+        GIT_TERMINAL_PROMPT: "0",
+        PSModuleAnalysisCachePath: "NUL",
+      },
+    },
+  )
+  const abort = () => child.kill()
+  const timeout = setTimeout(abort, 5000)
+  signal?.addEventListener("abort", abort, { once: true })
+  const read = async (stream: ReadableStream<Uint8Array>) => {
+    const reader = stream.getReader(),
+      parts: Uint8Array[] = []
+    let size = 0
+    try {
+      while (true) {
+        const next = await reader.read()
+        if (next.done) return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(parts))
+        size += next.value.byteLength
+        if (size > 65536) throw new TypeError("TASK24_DESKTOP_GIT_LIMIT")
+        parts.push(next.value)
+      }
+    } finally {
+      reader.releaseLock()
+    }
+  }
+  try {
+    const [output, error, code] = await Promise.all([read(child.stdout), read(child.stderr), child.exited])
+    if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
+    if (code !== 0 || error.trim()) throw new TypeError("TASK24_DESKTOP_GIT_QUERY")
+    return output.trim()
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener("abort", abort)
+    child.kill()
+    await child.exited
+  }
+}
+
+export async function readDesktopBindings(repoRoot: string, signal?: AbortSignal) {
+  const root = canonicalDesktopPath(repoRoot),
+    rootID = await directoryIdentity(root)
+  const status = () => gitText(root, ["status", "--porcelain=v1", "--untracked-files=normal"], signal)
+  const tree = await gitText(root, ["rev-parse", "HEAD^{tree}"], signal)
+  if (!/^[a-f0-9]{40}$/.test(tree) || (await status())) throw new TypeError("TASK24_DESKTOP_SOURCE_DIRTY")
+  const read = async (relative: string) => {
+    const file = path.join(root, relative)
+    const before = await fs.lstat(file)
+    if (before.size > 1048576) throw new TypeError("TASK24_DESKTOP_DOCUMENT_LIMIT")
+    const identity = await fileIdentity(file),
+      after = await fs.lstat(file)
+    if (
+      before.mtimeMs !== after.mtimeMs ||
+      before.size !== after.size ||
+      before.ino !== after.ino ||
+      before.birthtimeMs !== after.birthtimeMs
+    )
+      throw new TypeError("TASK24_DESKTOP_DOCUMENT_DRIFT")
+    return { relative, identity, mtimeMs: after.mtimeMs, size: after.size }
+  }
+  const first = await Promise.all([...documents.specs, ...documents.plans].map(read))
+  const after = await Promise.all(first.map((f) => read(f.relative)))
+  if (
+    canonicalJson(first) !== canonicalJson(after) ||
+    (await status()) ||
+    tree !== (await gitText(root, ["rev-parse", "HEAD^{tree}"], signal)) ||
+    rootID !== (await directoryIdentity(root))
+  )
+    throw new TypeError("TASK24_DESKTOP_DOCUMENT_DRIFT")
+  if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
+  const digest = (files: readonly string[]) =>
+    desktopDocumentDigest(
+      first.filter((f) => files.includes(f.relative)).map((f) => ({ path: f.relative, sha256: f.identity.sha256 })),
+    )
+  return Object.freeze({
+    sourceSha256: sha256Text("git-tree:" + tree),
+    specSha256: digest(documents.specs),
+    planSha256: digest(documents.plans),
+  })
+}
