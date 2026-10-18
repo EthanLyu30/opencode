@@ -50,7 +50,17 @@
 
 复核部署 `D:\OpenCode-Local\bin\opencode-local.exe` SHA256 仍为 `ff814205889f709c3374aaa855f3f17be1974bac9e86893e8c62d5e7de4fe9ce`；真实 `.wslconfig` 仍为 `6a6432a0a5a905c76a7a4ae381deb63eec6c700f34741ab238ab71aa383d92e9`。旧 C 盘 Local/Docker、Roaming/Docker、Roaming/Docker Desktop 三目录元数据与开始时相同；元数据不是 OS 级无写入审计。
 
-没有创建真实 `toolchain\docker-launch-dd479` profile，没有迁移/删除旧 C 盘目录、改注册/VHD、启动/停止 Docker 或 WSL，也没有拉镜像/运行容器或真实 provider 请求。所有会写入的合成文件均处于精确 owner 临时根；最终验证与 push 后清理本轮两棵临时根和本计划 SDD workspace，保留源码/测试、已批准规格/计划和本报告。未知所有权文件不删，清理结果在最终交付核对。
+没有创建真实 `toolchain\docker-launch-dd479` profile，没有迁移/删除旧 C 盘目录、改注册/VHD、启动/停止 Docker 或 WSL，也没有拉镜像/运行容器或真实 provider 请求。所有会写入的合成文件均处于精确 owner 临时根，源码/测试、已批准规格/计划和本报告保留。
+
+源码修复提交 `73035818d5832ac374266d0283bf48cf3cca0d44` 已普通 push 到 `fork/dev`；正常 pre-push **31 successful / 31 total（30 cached）**，独立 `ls-remote` 与本地 HEAD 完全相等，工作区干净。没有绕过 hooks。
+
+**清理尚未完成**：两棵临时根的准确 owner/解析路径及本计划 ledger 均已核对，递归只读盘点中三棵树的 reparse point 都为0；实际删除命令被执行环境策略拒绝，未尝试换接口绕过。再次只读核实三处仍在，总计约 10.5 MiB，全在 D 盘：
+
+- `D:\OpenCode-Benchmark\Task24\tmp\desktop-launch-20261018-1f72a9e4`
+- `D:\OpenCode-Benchmark\Task24\tmp\bprep1-desktop-launch-20261018-1f72a9e4`
+- `D:\OpenCode-Audit\.superpowers\sdd\2026-10-18-task24b-d-drive-docker-launch`
+
+这些仅为本轮缓存、测试残留与工作日志，非用户输入/部署；暂留原因与位置显式交付，不称已清理，也不删除任何归属不确定文件。代码/文档已提交可从 Git 恢复，临时树本身没有另作备份。
 
 ## 距离真实验收与付费试跑的剩余门槛
 
