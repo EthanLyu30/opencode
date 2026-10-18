@@ -82,21 +82,26 @@ export async function prepareDesktopProfile(input: {
   plan: DesktopLaunchPlan
   approval: DesktopLaunchApproval
   platform: DesktopPlatform
+  signal?: AbortSignal
 }) {
   try {
+    if (input.signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
     const plan = input.plan,
       approval = input.approval
     requireDesktopPlan(plan, input.platform)
     requireDesktopApproval(approval, plan, "prepare-profile", approval.sid)
     if (canonicalJson(input.spec) !== canonicalJson(plan.spec)) throw new TypeError("TASK24_DESKTOP_SPEC_DRIFT")
-    const state = Schema.decodeUnknownSync(DesktopObservation)(await input.platform.observe(plan.spec), {
+    const state = Schema.decodeUnknownSync(DesktopObservation)(await input.platform.observe(plan.spec, input.signal), {
       onExcessProperty: "error",
     })
     requireDesktopApproval(approval, plan, "prepare-profile", state.sid)
+    if (state.runningDocker || state.runningWsl || !["idle", "stopped"].includes(state.phase))
+      throw new TypeError("TASK24_DESKTOP_START_CONFLICT")
     if (approval.phase !== "prepare-profile" || approval.expectedProfileRoot !== plan.paths.root)
       throw new TypeError("TASK24_DESKTOP_PROFILE_BINDING")
     await revalidateDesktopSpec(plan.spec)
     const parentIdentity = await directoryIdentity(path.dirname(plan.paths.root))
+    if (input.signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
     if (await fs.exists(plan.paths.root)) {
       const existing = preparedByRoot.get(plan.paths.root)
       if (!existing || existing.ownerNonce !== approval.nonce || existing.plan.planSha256 !== plan.planSha256)

@@ -96,14 +96,14 @@ function requireOwnedProcess(raw: unknown, state: LaunchState, allowStarting = f
   if (canonicalJson(child) !== canonicalJson(state.process)) throw new TypeError("TASK24_DESKTOP_PROCESS_IDENTITY")
   return observed
 }
-export async function revalidateDesktopLaunchSession(session: DesktopLaunchSession) {
+export async function revalidateDesktopLaunchSession(session: DesktopLaunchSession, signal?: AbortSignal) {
   const state = sessions.get(session)
   if (!state || state.stopped || state.approval.expiresAt <= Date.now())
     throw new TypeError("TASK24_DESKTOP_SESSION_AUTHORITY")
   await revalidateDesktopProfile(state.profile)
   if (canonicalJson(await fileIdentity(state.lock.path)) !== canonicalJson(state.lock))
     throw new TypeError("TASK24_DESKTOP_ACTIVE_LOCK")
-  requireOwnedProcess(await boundedDesktopOperation(state.platform.observe(state.spec), 15000), state)
+  requireOwnedProcess(await boundedDesktopOperation(state.platform.observe(state.spec, signal), 15000, signal), state)
   return Object.freeze({
     spec: state.spec,
     profile: state.profile,
@@ -130,9 +130,12 @@ export async function startDesktopReadonly(input: {
     if (canonicalJson(input.spec) !== canonicalJson(input.profile.plan.spec))
       throw new TypeError("TASK24_DESKTOP_SPEC_DRIFT")
     await run(revalidateDesktopProfile(input.profile))
-    const observed = Schema.decodeUnknownSync(DesktopObservation)(await run(input.platform.observe(input.spec)), {
-      onExcessProperty: "error",
-    })
+    const observed = Schema.decodeUnknownSync(DesktopObservation)(
+      await run(input.platform.observe(input.spec, input.signal)),
+      {
+        onExcessProperty: "error",
+      },
+    )
     requireDesktopApproval(input.approval, input.profile.plan, "start-readonly", observed.sid)
     if (
       input.approval.phase !== "start-readonly" ||
@@ -171,11 +174,11 @@ export async function startDesktopReadonly(input: {
     const state = sessions.get(session)!
     while (true) {
       await run(revalidateDesktopProfile(input.profile))
-      const observation = requireOwnedProcess(await run(input.platform.observe(input.spec)), state, true)
+      const observation = requireOwnedProcess(await run(input.platform.observe(input.spec, input.signal)), state, true)
       if (observation.phase === "running") break
       await run(new Promise<void>((resolve) => setTimeout(resolve, 200)))
     }
-    await run(revalidateDesktopLaunchSession(session))
+    await run(revalidateDesktopLaunchSession(session, input.signal))
     return { kind: "ready", value: session }
   } catch (error) {
     if (issued) {
@@ -200,13 +203,17 @@ export async function stopDesktopLaunch(session: DesktopLaunchSession): Promise<
   state.stop = (async () => {
     try {
       const deadline = Date.now() + 30000
+      const cleanupSignal = AbortSignal.timeout(30000)
       const run = <T>(operation: Promise<T>) => boundedDesktopOperation(operation, deadline - Date.now())
       // Cleanup uses its consumed stop-owned authority even if the start grant has since expired.
-      requireOwnedProcess(await run(state.platform.observe(state.spec)), state, true)
+      requireOwnedProcess(await run(state.platform.observe(state.spec, cleanupSignal)), state, true)
       if ((await run(state.platform.stop(state.process))) !== "stopped") return desktopBlocked("cleanup_uncertain")
-      const after = Schema.decodeUnknownSync(DesktopObservation)(await run(state.platform.observe(state.spec)), {
-        onExcessProperty: "error",
-      })
+      const after = Schema.decodeUnknownSync(DesktopObservation)(
+        await run(state.platform.observe(state.spec, cleanupSignal)),
+        {
+          onExcessProperty: "error",
+        },
+      )
       if (after.runningDocker || after.runningWsl || after.process || after.pipe || after.phase !== "stopped")
         return desktopBlocked("cleanup_uncertain")
       await run(removeDesktopActiveLock(state.profile, state.lock))

@@ -60,12 +60,22 @@ test("controller audit and plan remain diagnostic; serialized approval alone can
 test("trusted controller prepares then observes and always stops its fixture, never declaring readiness", async () => {
   const f = await profileFixture()
   try {
-    const specFile = path.join(f.root, "spec.json"),
-      approvalFile = path.join(f.root, "approval.json")
+    const control = path.join(f.root, "control", "desktop-launch", f.raw.launchID)
+    await fs.mkdir(control, { recursive: true })
+    const specFile = path.join(control, "spec.json"),
+      approvalFile = path.join(control, "prepare-approval.json"),
+      startFile = path.join(control, "start-approval.json")
     await fs.writeFile(specFile, canonicalJson(f.spec))
     await fs.writeFile(approvalFile, canonicalJson(f.raw))
     const controller = makeDesktopLaunchController(f.platform, async () => true)
-    const prepared = await controller(["prepare-profile", "--spec", specFile, "--approval", approvalFile])
+    const prepared = await controller([
+      "prepare-profile",
+      "--spec",
+      specFile,
+      "--approval",
+      approvalFile,
+      "--interactive",
+    ])
     expect(prepared.exitCode).toBe(0)
     expect(prepared.output).toMatchObject({ code: "profile_prepared", assurance: "fixture", engine_verified: false })
     const { expectedProfileRoot, ...common } = f.raw
@@ -76,9 +86,16 @@ test("trusted controller prepares then observes and always stops its fixture, ne
       operations: ["start-readonly", "stop-owned"],
       manifestSha256: sha256Text(await fs.readFile(path.join(f.spec.profileRoot, "manifest.json"), "utf8")),
     }
-    await fs.writeFile(approvalFile, canonicalJson(start))
+    await fs.writeFile(startFile, canonicalJson(start))
     const restartedController = makeDesktopLaunchController(f.platform, async () => true)
-    const result = await restartedController(["start-readonly", "--spec", specFile, "--approval", approvalFile])
+    const result = await restartedController([
+      "start-readonly",
+      "--spec",
+      specFile,
+      "--approval",
+      startFile,
+      "--interactive",
+    ])
     expect(result.exitCode).toBe(2)
     expect(result.output).toMatchObject({
       code: "desktop_inventory_blocked",
