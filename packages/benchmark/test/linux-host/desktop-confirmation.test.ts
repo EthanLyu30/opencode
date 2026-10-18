@@ -177,3 +177,38 @@ test("confirmation panel binds actual settings and all document digests", async 
     await f.close()
   }
 })
+
+test("console key events accept uppercase modifiers without accepting control or overflow input", async () => {
+  const api = await import("../../src/sandbox/desktop/console")
+  const { runDesktopProbe } = await import("../../src/sandbox/desktop/native-process")
+  const source =
+    "$env:OC_TASK24_CONSOLE_PACKET='{}';\n" +
+    api.desktopConsoleProgram.split("exit [DesktopConsole]::Run")[0] +
+    String.raw`
+$b=[System.Text.StringBuilder]::new()
+if(-not [DesktopConsole]::AcceptCharacter(16,[char]0,16,1,$b)){exit 10}
+if(-not [DesktopConsole]::AcceptCharacter(80,[char]'P',16,1,$b)){exit 11}
+if($b.ToString() -cne 'P'){exit 12}
+if([DesktopConsole]::AcceptCharacter(67,[char]3,8,1,$b)){exit 13}
+if(-not [DesktopConsole]::AcceptCharacter(65,[char]'a',0,2,$b)){exit 14}
+if($b.ToString() -cne 'Paa'){exit 15}
+if([DesktopConsole]::AcceptCharacter(65,[char]'a',0,256,$b)){exit 16}
+if([DesktopConsole]::AcceptCharacter(65,[char]'a',0,0,$b)){exit 17}
+exit 0
+`
+  const result = await runDesktopProbe({
+    exe: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    argv: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(source, "utf16le").toString("base64"),
+    ],
+    timeoutMs: 10000,
+    stdoutLimit: 8192,
+    stderrLimit: 8192,
+  })
+  expect(Buffer.from(result.stderr).toString("utf8")).toBe("")
+  expect(result.exitCode).toBe(0)
+})

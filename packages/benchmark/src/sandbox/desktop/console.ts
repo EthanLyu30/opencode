@@ -66,6 +66,7 @@ public static class DesktopConsole {
   [StructLayout(LayoutKind.Explicit, Size=20)] struct Input {
     [FieldOffset(0)] public ushort Type;
     [FieldOffset(4)] public int Down;
+    [FieldOffset(8)] public ushort Repeat;
     [FieldOffset(10)] public ushort Key;
     [FieldOffset(14)] public char Char;
     [FieldOffset(16)] public uint Control;
@@ -76,6 +77,12 @@ public static class DesktopConsole {
     if(input==null || input.Length>256 || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()>=expires) return false;
     foreach(char c in input) if(c<32 || c>126) return false;
     return String.Equals(expected,input,StringComparison.Ordinal);
+  }
+  public static bool AcceptCharacter(ushort key,char value,uint control,ushort repeat,StringBuilder input) {
+    if((control & 15)!=0) return false;
+    if(value==0 && (key==16 || key==160 || key==161 || key==20)) return true;
+    if(value<32 || value>126 || repeat==0 || input.Length+repeat>256) return false;
+    input.Append(value,(int)repeat); return true;
   }
   public static int Run(string panel,string panelHash,string requestHash,string controller,string launch,string phase,long expires) {
     IntPtr stdin=GetStdHandle(-10), stdout=GetStdHandle(-11), stderr=GetStdHandle(-12); uint mode, pending;
@@ -99,8 +106,7 @@ public static class DesktopConsole {
           if(pending!=0) return 2;
           return Matches(expected,input.ToString(),expires)?0:2;
         }
-        if(e.Char<32 || e.Char>126 || input.Length>=256 || (e.Control & 12)!=0) return 2;
-        input.Append(e.Char);
+        if(!AcceptCharacter(e.Key,e.Char,e.Control,e.Repeat,input)) return 2;
       }
     }
     return 2;
