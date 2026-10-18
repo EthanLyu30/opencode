@@ -72,7 +72,7 @@ DL1 在 `contracts.ts` 定义以下严格类型，后续任务沿用名称；所
 - `DesktopLaunchInventory`：launchID、`assurance:"fixture"|"native"`、`status:"inventory_observed_not_accepted"|"blocked"|"cleanup_uncertain"`、missing、安装/profile/pipe/进程/注册/盘位观察 hash、nullable `StorageProof`、profile endpoint、原生产 default endpoint、`production_default_compatible:boolean|null`；后三项 readiness 固定 false，不含 `EngineSession`。
 - `DesktopPlatform`：固定操作接口 `audit(spec:DesktopLaunchSpec):Promise<DesktopCompatibilityReport>`、`observe(spec:DesktopLaunchSpec):Promise<unknown>`、`start(plan:DesktopLaunchPlan):Promise<DesktopProcessIdentity>`、`stop(process:DesktopProcessIdentity):Promise<"stopped"|"uncertain">`。observe 的 raw 数据严格解码；固定 native 适配器没有任意 argv/shell/URL 入口。fixture 实现只能产生 fixture session/report；生产工厂登记 native 来源，不能由调用方参数升格。
 
-## DL1：固定版本兼容审计与启动阻断
+## Task 1: DL1 — 固定版本兼容审计与启动阻断
 
 **Files:** 新建 `desktop/contracts.ts`、`desktop/compatibility.ts`、`desktop/platform.ts`（仅审计/观察能力）；新建 `desktop-compatibility.test.ts`、`desktop-fixture.ts`。路径前缀分别为 `src/sandbox/` 和 `test/linux-host/`。
 
@@ -96,7 +96,7 @@ DL1 在 `contracts.ts` 定义以下严格类型，后续任务沿用名称；所
 - [ ] **GREEN：** 同一测试命令及包内 `& $DesktopBun --no-env-file run typecheck`。Expected：全过；实际兼容审计如 blocked，后续继续完成可独立验证的软件，但禁止 native 准备/启动。若复用必须改注册/初始化新盘，报告不可行并停止该环境路线，不做替代系统改造。
 - [ ] **提交：** 仅 stage 本任务新文件；`git commit -m "feat(benchmark): audit pinned desktop launch compatibility"`。
 
-## DL2：安全 D profile 计划与排他准备
+## Task 2: DL2 — 安全 D profile 计划与排他准备
 
 **Files:** 新建 `src/sandbox/desktop/profile.ts`、`test/linux-host/desktop-profile.test.ts`，复用 `src/offline/atomic.ts` 的不可变发布规则和 storage 路径身份检查，不改公共语义。
 
@@ -116,7 +116,7 @@ DL1 在 `contracts.ts` 定义以下严格类型，后续任务沿用名称；所
 - [ ] **GREEN：** 同一测试命令。断言设置仅有规格五键、所有应用写入路径 D、`.wslconfig` 仍为真实 C 来源；fixture 准备前后无真实目录访问。Expected：全过，无真实 profile 准备。
 - [ ] **提交：** 仅 stage 本任务文件；`git commit -m "feat(benchmark): stage isolated D-drive desktop profiles"`。
 
-## DL3：单次授权、准确进程归属与可取消生命周期
+## Task 3: DL3 — 单次授权、准确进程归属与可取消生命周期
 
 **Files:** 新建 `src/sandbox/desktop/launch.ts`、`test/linux-host/desktop-launch.test.ts`；完成 `desktop/platform.ts` 的 guarded start/stop。DL3 session 查询在此接到私有 WeakMap，不能加入接受 JSON 即签发的捷径。
 
@@ -135,7 +135,7 @@ DL1 在 `contracts.ts` 定义以下严格类型，后续任务沿用名称；所
 - [ ] **GREEN：** 同一命令。覆盖每一 await 边界取消、进程提前退出、pipe 身份变化、重复 stop、超时及控制器崩溃后只读调和；未知残留为 cleanup_uncertain，不杀未知进程，不注销 WSL。platform 未能证明作用域正确的停止机制时 native start 永远拒绝，不能用 `kill(pid)` 当未审计的默认后备。Expected：全过，无真实进程启动。
 - [ ] **提交：** 仅 stage 本任务变更；`git commit -m "feat(benchmark): guard desktop launch lifecycle and ownership"`。
 
-## DL4：profile 专用只读连接与活动盘来源分离
+## Task 4: DL4 — profile 专用只读连接与活动盘来源分离
 
 **Files:** 新建 `src/sandbox/desktop/inspection.ts`；修改 `src/sandbox/storage-source.ts`；扩充 `desktop/platform.ts`；新建 `desktop-storage.test.ts`；在旧 `managed-storage.test.ts`、`docker.test.ts`、`preflight.test.ts` 追加回归。不修改 `contracts.ts` 的旧 Host/StorageProof schema 或生产 `docker-config.ts`。
 
@@ -155,7 +155,7 @@ DL1 在 `contracts.ts` 定义以下严格类型，后续任务沿用名称；所
 - [ ] **GREEN：** 同一命令；准确 PowerShell parser 只解析两种脚本，不执行。覆盖两块盘身份替换、未被使用的附加盘、错误 engine ID、多 dockerd/缺工具都 blocked；容器/volume/image/desktop start 等 argv 全部拒绝。Expected：全过，未发布就绪或调用生产入口。
 - [ ] **提交：** 仅 stage 本任务变更；`git commit -m "feat(benchmark): bind desktop profile storage observations"`。
 
-## DL5：独立命令、零 Docker 联合验证与交付
+## Task 5: DL5 — 独立命令、零 Docker 联合验证与交付
 
 **Files:** 新建 `src/sandbox/desktop/command.ts`、`script/desktop-launch.ts`、`test/linux-host/desktop-command.test.ts`；追加旧 `command.test.ts` 的不可接受新报告断言；创建规格规定的 verification 报告。
 
@@ -189,7 +189,7 @@ DL1 在 `contracts.ts` 定义以下严格类型，后续任务沿用名称；所
 
 - [ ] **一次整体审查与交付：** 覆盖本轮完整源码范围和规格边界；重要问题做 RED→GREEN 后重跑相关及全套验证。精确清理本任务临时材料，保留正式源码/报告，外来和不确定文件不动。`git diff --check`、文档格式检查、仅 stage 已验证任务文件；`git commit -m "feat(benchmark): expose guarded desktop launch diagnostics"`。按既有远端配置普通 push `fork dev`，保留 pre-push hooks，复核本地/远端 commit；未批准 DL6 时直接报告其 not_run，不能暗中执行。
 
-## DL6：单独批准后的真实准备与启动只读核查（默认不执行）
+## Task 6: DL6 — 单独批准后的真实准备与启动只读核查（默认不执行）
 
 这是软件交付后的环境阶段，**不是本轮或计划确认自动开启的动作**。不要求为等待该授权而扣住已验证的软件提交/push，也不能把 DL6 标成通过。
 
