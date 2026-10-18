@@ -129,8 +129,8 @@ export type DesktopLaunchInventory = Readonly<{
   corpus_engine_ready: false
 }>
 export interface DesktopPlatform {
-  audit(spec: DesktopLaunchSpec): Promise<DesktopCompatibilityReport>
-  observe(spec: DesktopLaunchSpec): Promise<unknown>
+  audit(spec: DesktopLaunchSpec, signal?: AbortSignal): Promise<DesktopCompatibilityReport>
+  observe(spec: DesktopLaunchSpec, signal?: AbortSignal): Promise<unknown>
   start(plan: DesktopLaunchPlan): Promise<DesktopProcessIdentity>
   stop(process: DesktopProcessIdentity): Promise<"stopped" | "uncertain">
 }

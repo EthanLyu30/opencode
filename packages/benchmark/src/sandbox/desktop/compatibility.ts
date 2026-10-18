@@ -122,8 +122,9 @@ export function requireDesktopReport(spec: DesktopLaunchSpec, report: DesktopCom
     throw new TypeError("TASK24_DESKTOP_REPORT_AUTHORITY")
   return issued.platform
 }
-export async function auditDesktopCompatibility(raw: unknown, platform: DesktopPlatform) {
+export async function auditDesktopCompatibility(raw: unknown, platform: DesktopPlatform, signal?: AbortSignal) {
   try {
+    if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
     const spec = decodeDesktopLaunchSpec(raw)
     if (isNativeDesktopPlatform(platform)) {
       const base = "D:\\Applications\\Docker"
@@ -155,7 +156,10 @@ export async function auditDesktopCompatibility(raw: unknown, platform: DesktopP
         throw new TypeError("TASK24_DESKTOP_FIXTURE_SCOPE")
     }
     await revalidateDesktopSpec(spec)
-    const rawReport = Schema.decodeUnknownSync(Compatibility)(await platform.audit(spec), { onExcessProperty: "error" })
+    const rawReport = Schema.decodeUnknownSync(Compatibility)(await platform.audit(spec, signal), {
+      onExcessProperty: "error",
+    })
+    if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
     const missing = [...rawReport.missing]
     if (rawReport.specSha256 !== sha256Text(canonicalJson(spec))) missing.push("compatibility_spec_mismatch")
     for (const id of ["path_routing", "backend_environment", "registration_reuse", "stop_owned", "cli_default"]) {

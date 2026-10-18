@@ -1,39 +1,43 @@
-import { sha256Text } from "../../hash"
-import { canonicalJson } from "../../campaign/canonical"
 import type { DesktopPlatform } from "./contracts"
+import { collectDesktopNativeAudit, unprovedDesktopNativeEvidence, type DesktopNativeDiagnostics } from "./native-audit"
+import { queryDesktopWindows } from "./native-query"
 
 const native = new WeakSet<object>()
+const diagnostics = new WeakMap<DesktopPlatform, DesktopNativeDiagnostics>()
 export function isNativeDesktopPlatform(platform: DesktopPlatform) {
   return native.has(platform)
+}
+export function readNativePlatformDiagnostics(platform: DesktopPlatform) {
+  return diagnostics.get(platform)
 }
 
 /** No guessed start/stop implementation: closed-backend propagation and reuse remain unproved. */
 export function makeWindowsDesktopPlatform(): DesktopPlatform {
   const platform: DesktopPlatform = {
-    async audit(spec) {
-      return {
-        assurance: "native-static",
-        specSha256: sha256Text(canonicalJson(spec)),
-        checks: (
-          ["path_routing", "backend_environment", "registration_reuse", "stop_owned", "cli_default"] as const
-        ).map((id) => ({
-          id,
-          source: spec.install.asar.path,
-          sourceSha256: spec.install.asar.sha256,
-          location: "4.79 frontend overrides observed; backend/VM/stop and CLI behavior not attested",
-          conclusion: "unproved" as const,
-        })),
-        missing: [
-          "backend_environment_unproved",
-          "registration_reuse_unproved",
-          "stop_owned_unproved",
-          "path_routing_unproved",
-          "cli_default_unproved",
-        ],
+    async audit(spec, signal) {
+      diagnostics.delete(platform)
+      if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
+      try {
+        const result = await collectDesktopNativeAudit(spec, signal)
+        if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
+        diagnostics.set(platform, result.diagnostics)
+        return result.report
+      } catch (error) {
+        if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
+        const result = unprovedDesktopNativeEvidence(
+          spec,
+          error instanceof Error ? error.message : "TASK24_DESKTOP_NATIVE_AUDIT",
+        )
+        diagnostics.set(platform, result.diagnostics)
+        return result.report
       }
     },
-    async observe() {
-      throw new TypeError("TASK24_DESKTOP_NATIVE_RULES_UNPROVED")
+    async observe(spec, signal) {
+      const snapshot = await queryDesktopWindows(spec, signal ?? new AbortController().signal)
+      const runningDocker =
+        snapshot.processes.some((p) => p.role !== "service") || snapshot.pipes.some((p) => p.present)
+      const runningWsl = snapshot.runningWsl.length > 0
+      return { phase: runningDocker || runningWsl ? "running" : "idle", sid: snapshot.sid, runningDocker, runningWsl }
     },
     async start() {
       throw new TypeError("TASK24_DESKTOP_NATIVE_RULES_UNPROVED")

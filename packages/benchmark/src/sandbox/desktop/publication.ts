@@ -34,6 +34,7 @@ public static class DesktopPublication {
   static readonly Dictionary<string, SafeFileHandle> files = new Dictionary<string, SafeFileHandle>(StringComparer.OrdinalIgnoreCase);
   static string root;
   static bool creating;
+  static bool reading;
   static Exception Error() { return new Win32Exception(Marshal.GetLastWin32Error()); }
   static void Check(SafeFileHandle h, string expected, bool directory) {
     Info info;
@@ -75,15 +76,18 @@ public static class DesktopPublication {
     string parent = Path.GetDirectoryName(target);
     dirs.Add(target, Relative(dirs[parent], Path.GetFileName(target), true, create, target));
   }
-  public static void Tree(bool create) {
+  public static void Tree(bool create, bool profile) {
     creating = create;
+    reading = !create && !profile;
     dirs.Add(root, Relative(dirs[Path.GetDirectoryName(root)], Path.GetFileName(root), true, create, root));
-    Directory("state", create); Directory(@"state\grants", create);
+    if(profile) { Directory("state", create); Directory(@"state\grants", create); }
   }
   public static void Directories() {
+    if(reading) throw new IOException("Read only");
     foreach (string relative in new string[] {"home-oc-task24-dd479", @"home-oc-task24-dd479\AppData", @"home-oc-task24-dd479\AppData\Local", @"home-oc-task24-dd479\AppData\Local\Docker", @"home-oc-task24-dd479\AppData\Roaming", @"home-oc-task24-dd479\AppData\Roaming\Docker", "frontend", "cli", "temp"}) Directory(relative, creating);
   }
   public static void Write(string relative, string encoded) {
+    if(reading) throw new IOException("Read only");
     string target = Path.Combine(root, relative);
     var h = Relative(dirs[Path.GetDirectoryName(target)], Path.GetFileName(target), false, true, target);
     files.Add(relative, h);
@@ -96,6 +100,7 @@ public static class DesktopPublication {
     files.Add(relative, Relative(dirs[Path.GetDirectoryName(target)], Path.GetFileName(target), false, false, target));
   }
   public static void Remove(string relative) {
+    if(reading) throw new IOException("Read only");
     var h = files[relative];
     if (!SetFileInformationByHandle(h, 4, new byte[] {1}, 1)) throw Error();
     h.Dispose(); files.Remove(relative);
@@ -113,7 +118,7 @@ try {
   while ($null -ne ($line = [Console]::ReadLine())) {
     $request = $line | ConvertFrom-Json
     switch ($request.op) {
-      'tree' { [DesktopPublication]::Tree([bool]$request.create) }
+      'tree' { [DesktopPublication]::Tree([bool]$request.create, [bool]$request.profile) }
       'directories' { [DesktopPublication]::Directories() }
       'write' { [DesktopPublication]::Write([string]$request.relative, [string]$request.data) }
       'pin' { [DesktopPublication]::Pin([string]$request.relative) }
@@ -130,6 +135,7 @@ finally { [DesktopPublication]::Close() }
 
 export type DesktopPublication = {
   directories(): Promise<void>
+  pin(file: FileIdentity): Promise<void>
   write(relative: string, text: string): Promise<FileIdentity>
   remove(file: FileIdentity): Promise<void>
 }
@@ -138,7 +144,7 @@ export async function withDesktopPublication<T>(
   root: string,
   mode: "create" | "existing",
   callback: (publication: DesktopPublication) => Promise<T>,
-  expected: { parentIdentity?: string; rootIdentity?: string } = {},
+  expected: { parentIdentity?: string; rootIdentity?: string; layout?: "profile" | "read" } = {},
 ): Promise<T> {
   if (process.platform !== "win32") throw new TypeError("TASK24_DESKTOP_PUBLICATION_UNAVAILABLE")
   canonicalDesktopPath(root)
@@ -211,15 +217,25 @@ export async function withDesktopPublication<T>(
   try {
     await request({ root }, "pinned")
     if ((await directoryIdentity(parent)) !== parentID) throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
-    await request({ op: "tree", create: mode === "create" })
+    if (expected.layout === "read" && mode !== "existing") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
+    await request({ op: "tree", create: mode === "create", profile: expected.layout !== "read" })
     if (expected.rootIdentity && (await directoryIdentity(root)) !== expected.rootIdentity)
       throw new TypeError("TASK24_DESKTOP_PROFILE_DRIFT")
-    if (mode === "existing") await request({ op: "directories" })
+    if (mode === "existing" && expected.layout !== "read") await request({ op: "directories" })
     return await callback({
       async directories() {
+        if (expected.layout === "read") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
         await request({ op: "directories" })
       },
+      async pin(file) {
+        const relative = path.relative(root, file.path)
+        relativePath(relative)
+        await request({ op: "pin", relative })
+        if (canonicalJson(await fileIdentity(file.path)) !== canonicalJson(file))
+          throw new TypeError("TASK24_DESKTOP_FILE_DRIFT")
+      },
       async write(relative, text) {
+        if (expected.layout === "read") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
         const target = relativePath(relative)
         await request({ op: "write", relative, data: Buffer.from(text).toString("base64") })
         const file = await fileIdentity(target)
@@ -227,6 +243,7 @@ export async function withDesktopPublication<T>(
         return file
       },
       async remove(file) {
+        if (expected.layout === "read") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
         const relative = path.relative(root, file.path)
         relativePath(relative)
         await request({ op: "pin", relative })
@@ -243,4 +260,26 @@ export async function withDesktopPublication<T>(
     reader.releaseLock()
     clearTimeout(timer)
   }
+}
+
+/** The callback deadline ends before the helper's fixed 30s handle lifetime. */
+export async function withDesktopReadLease<T>(file: FileIdentity, callback: (signal: AbortSignal) => Promise<T>) {
+  const began = Date.now(),
+    root = path.dirname(file.path)
+  return withDesktopPublication(
+    root,
+    "existing",
+    async (publication) => {
+      await publication.pin(file)
+      const remaining = Math.min(15000, 25000 - (Date.now() - began))
+      if (remaining <= 0) throw new TypeError("TASK24_DESKTOP_DEADLINE")
+      const signal = AbortSignal.timeout(remaining)
+      const operation = callback(signal)
+      const timeout = new Promise<never>((_, reject) =>
+        signal.addEventListener("abort", () => reject(new TypeError("TASK24_DESKTOP_DEADLINE")), { once: true }),
+      )
+      return Promise.race([operation, timeout])
+    },
+    { layout: "read", rootIdentity: await directoryIdentity(root) },
+  )
 }
