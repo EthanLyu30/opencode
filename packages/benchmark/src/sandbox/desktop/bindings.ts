@@ -4,6 +4,7 @@ import { canonicalJson } from "../../campaign/canonical"
 import { sha256Text } from "../../hash"
 import { directoryIdentity, fileIdentity } from "../storage"
 import { canonicalDesktopPath } from "./compatibility"
+import { runDesktopProbe } from "./native-process"
 
 const documents = {
   specs: [
@@ -34,72 +35,17 @@ export function desktopDocumentDigest(entries: readonly { path: string; sha256: 
 }
 
 async function gitText(root: string, args: string[], signal?: AbortSignal) {
-  if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
-  const temp = canonicalDesktopPath(process.env.TEMP ?? "")
-  await directoryIdentity(temp)
-  const child = Bun.spawn(
-    [
-      "C:\\Program Files\\Git\\cmd\\git.exe",
-      "--no-optional-locks",
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      "core.untrackedCache=false",
-      "-C",
-      root,
-      ...args,
-    ],
-    {
-      cwd: temp,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      windowsHide: true,
-      env: {
-        SystemRoot: "C:\\Windows",
-        WINDIR: "C:\\Windows",
-        PATH: "C:\\Windows\\System32",
-        HOME: temp,
-        USERPROFILE: temp,
-        TEMP: temp,
-        TMP: temp,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "NUL",
-        GIT_TERMINAL_PROMPT: "0",
-        PSModuleAnalysisCachePath: "NUL",
-      },
-    },
-  )
-  const abort = () => child.kill()
-  const timeout = setTimeout(abort, 5000)
-  signal?.addEventListener("abort", abort, { once: true })
-  const read = async (stream: ReadableStream<Uint8Array>) => {
-    const reader = stream.getReader(),
-      parts: Uint8Array[] = []
-    let size = 0
-    try {
-      while (true) {
-        const next = await reader.read()
-        if (next.done) return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(parts))
-        size += next.value.byteLength
-        if (size > 65536) throw new TypeError("TASK24_DESKTOP_GIT_LIMIT")
-        parts.push(next.value)
-      }
-    } finally {
-      reader.releaseLock()
-    }
-  }
-  try {
-    const [output, error, code] = await Promise.all([read(child.stdout), read(child.stderr), child.exited])
-    if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
-    if (code !== 0 || error.trim()) throw new TypeError("TASK24_DESKTOP_GIT_QUERY")
-    return output.trim()
-  } finally {
-    clearTimeout(timeout)
-    signal?.removeEventListener("abort", abort)
-    child.kill()
-    await child.exited
-  }
+  const result = await runDesktopProbe({
+    exe: "C:\\Program Files\\Git\\cmd\\git.exe",
+    argv: ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-C", root, ...args],
+    signal,
+    timeoutMs: 5000,
+    stdoutLimit: 65536,
+    stderrLimit: 65536,
+    env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "NUL", GIT_TERMINAL_PROMPT: "0" },
+  })
+  if (result.exitCode || result.stderr.length) throw new TypeError("TASK24_DESKTOP_GIT_QUERY")
+  return new TextDecoder("utf-8", { fatal: true }).decode(result.stdout).trim()
 }
 
 export async function readDesktopBindings(repoRoot: string, signal?: AbortSignal) {
