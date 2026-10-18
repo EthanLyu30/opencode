@@ -4,6 +4,7 @@ import { Schema } from "effect"
 import { canonicalJson } from "../../campaign/canonical"
 import { freeze } from "../../corpus/evaluation-profile"
 import { fileIdentity, directoryIdentity } from "../storage"
+import { FileIdentity } from "../contracts"
 import { sha256Text } from "../../hash"
 import {
   DesktopApproval,
@@ -261,4 +262,56 @@ export async function revalidateDesktopProfile(profile: DesktopPreparedProfile) 
       throw new TypeError("TASK24_DESKTOP_FILE_DRIFT")
   const manifest = await readDesktopText(path.join(profile.plan.paths.root, "manifest.json"))
   if (manifest.sha256 !== profile.manifestSha256) throw new TypeError("TASK24_DESKTOP_MANIFEST_DRIFT")
+}
+
+/** Reloads only prepared files after a fresh audit; never reconstructs live process/session authority. */
+export async function loadDesktopPreparedProfile(plan: DesktopLaunchPlan): Promise<DesktopPreparedProfile> {
+  requireDesktopPlan(plan)
+  const file = path.join(plan.paths.root, "manifest.json")
+  const snapshot = await readDesktopText(file)
+  const body = Schema.decodeUnknownSync(
+    Schema.Struct({
+      schemaVersion: Schema.Literal(1),
+      planSha256: Schema.String,
+      compatibilitySha256: Schema.String,
+      rootIdentity: Schema.String,
+      ownerNonce: Schema.String,
+      files: Schema.Array(FileIdentity),
+      directories: Schema.Record(Schema.String, Schema.String),
+    }),
+  )(Schema.decodeUnknownSync(Schema.UnknownFromJsonString)(snapshot.text), { onExcessProperty: "error" })
+  const settingsFile = path.join(plan.paths.home, "AppData", "Roaming", "Docker", "settings-store.json")
+  const expectedFiles = [path.join(plan.paths.root, "owner.json"), settingsFile].sort()
+  const expectedDirectories = [
+    ...new Set([
+      path.dirname(plan.paths.root),
+      ...Object.values(plan.paths),
+      path.dirname(settingsFile),
+      path.join(plan.paths.root, "state"),
+      path.join(plan.paths.root, "state", "grants"),
+    ]),
+  ].sort()
+  if (
+    body.planSha256 !== plan.planSha256 ||
+    body.compatibilitySha256 !== plan.compatibilitySha256 ||
+    !/^[a-f0-9]{64}$/.test(body.ownerNonce) ||
+    canonicalJson(body.files.map((f) => f.path).sort()) !== canonicalJson(expectedFiles) ||
+    canonicalJson(Object.keys(body.directories).sort()) !== canonicalJson(expectedDirectories)
+  )
+    throw new TypeError("TASK24_DESKTOP_MANIFEST_BINDING")
+  const owner = await readDesktopText(expectedFiles.find((f) => path.basename(f) === "owner.json")!)
+  if (owner.text !== canonicalJson({ schemaVersion: 1, nonce: body.ownerNonce, planSha256: plan.planSha256 }))
+    throw new TypeError("TASK24_DESKTOP_OWNER_BINDING")
+  const profile: DesktopPreparedProfile = freeze({
+    assurance: plan.assurance,
+    plan,
+    manifestSha256: snapshot.sha256,
+    ownerNonce: body.ownerNonce,
+    rootIdentity: body.rootIdentity,
+    files: [...body.files, await fileIdentity(file)],
+    directories: body.directories,
+  })
+  prepared.add(profile)
+  await revalidateDesktopProfile(profile)
+  return profile
 }
