@@ -6,6 +6,7 @@ import { sha256Text } from "../hash"
 import { FileIdentity, requireDPath, decodeHostRequest, type HostRequest, type StorageProof } from "./contracts"
 import { fileIdentity, inspectStorage } from "./storage"
 import { makeProcessRunner, makeDockerRunner } from "./docker"
+import type { DesktopLaunchSession } from "./desktop/contracts"
 const SourceFields = {
   desktop: FileIdentity,
   backend: FileIdentity,
@@ -15,6 +16,12 @@ const SourceFields = {
 export const StorageSource = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("desktop-wsl-legacy"), ...SourceFields }),
   Schema.Struct({ kind: Schema.Literal("desktop-wsl-managed"), ...SourceFields, settingsFile: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literal("desktop-wsl-managed-launch"),
+    ...SourceFields,
+    settingsFile: Schema.String,
+    profileManifest: Schema.String,
+  }),
 ])
 const ManagedSettings = Schema.Struct({
   SettingsVersion: Schema.Literal(44),
@@ -41,6 +48,24 @@ export function bindEffectiveSwap(input: {
 }
 export type StorageSource = typeof StorageSource.Type
 export function decodeManagedRegistration(raw: unknown) {
+  const value = parseManagedRegistration(raw)
+  return bindManagedRegistration(
+    value,
+    path.win32.join(value.windowsProfile, "AppData", "Roaming", "Docker", "settings-store.json"),
+  )
+}
+export function decodeManagedLaunchRegistration(
+  raw: unknown,
+  authority: { windowsProfile: string; dockerProfile: string },
+) {
+  const value = parseManagedRegistration(raw)
+  if (value.windowsProfile !== authority.windowsProfile) throw new TypeError("TASK24_DESKTOP_WINDOWS_PROFILE_BINDING")
+  return bindManagedRegistration(
+    value,
+    path.win32.join(requireDPath(authority.dockerProfile), "AppData", "Roaming", "Docker", "settings-store.json"),
+  )
+}
+function parseManagedRegistration(raw: unknown) {
   const value = Schema.decodeUnknownSync(
     Schema.Struct({
       version: Schema.String,
@@ -59,6 +84,9 @@ export function decodeManagedRegistration(raw: unknown) {
       daemonServerID: Schema.String,
     }),
   )(raw, { onExcessProperty: "error" })
+  return value
+}
+function bindManagedRegistration(value: ReturnType<typeof parseManagedRegistration>, settingsPath: string) {
   if (!/^4\.79\.0(?:\.\d+)?$/.test(value.version)) throw new TypeError("TASK24_STORAGE_VERSION_UNSUPPORTED")
   const root = requireDPath(value.settings.CustomWslDistroDir),
     basePath = requireDPath(value.basePath.replace(/^\\\\\?\\/, "")),
@@ -69,8 +97,7 @@ export function decodeManagedRegistration(raw: unknown) {
     value.settings.UseWindowsContainers === true ||
     basePath.toLowerCase() !== path.win32.join(root, "main").toLowerCase() ||
     path.win32.normalize(value.settingsPath) !== value.settingsPath ||
-    value.settingsPath.toLowerCase() !==
-      path.win32.join(value.windowsProfile, "AppData", "Roaming", "Docker", "settings-store.json").toLowerCase() ||
+    value.settingsPath.toLowerCase() !== settingsPath.toLowerCase() ||
     !Number.isFinite(value.settingsModifiedAt) ||
     !Number.isFinite(value.backendStartedAt) ||
     value.settingsModifiedAt < 0 ||
@@ -161,11 +188,38 @@ export async function readWslConfigSnapshot(input: { file: string; windowsProfil
   }
 }
 export function storageObservationScript(input: { request: HostRequest; source: StorageSource }): string {
+  if (input.source.kind === "desktop-wsl-managed-launch") throw new TypeError("TASK24_DESKTOP_SESSION_REQUIRED")
+  return buildStorageObservationScript(input)
+}
+export async function desktopStorageObservationScript(input: {
+  request: HostRequest
+  source: StorageSource
+  launch: DesktopLaunchSession
+}) {
+  const { revalidateDesktopLaunchSession } = await import("./desktop/launch")
+  const state = await revalidateDesktopLaunchSession(input.launch)
+  if (
+    input.source.kind !== "desktop-wsl-managed-launch" ||
+    input.source.settingsFile !==
+      path.join(state.profile.plan.paths.home, "AppData", "Roaming", "Docker", "settings-store.json") ||
+    input.source.profileManifest !== path.join(state.spec.profileRoot, "manifest.json") ||
+    input.source.wslConfig !== state.spec.wslConfig.path ||
+    input.request.endpoint !== state.profile.plan.endpoint ||
+    canonicalJson(input.source.desktop) !== canonicalJson(state.spec.install.desktop) ||
+    canonicalJson(input.source.backend) !== canonicalJson(state.spec.install.backend)
+  )
+    throw new TypeError("TASK24_DESKTOP_STORAGE_SOURCE_BINDING")
+  return buildStorageObservationScript(input, input.source.settingsFile)
+}
+function buildStorageObservationScript(
+  input: { request: HostRequest; source: StorageSource },
+  launchSettings?: string,
+): string {
   const request = decodeHostRequest(input.request),
     source = Schema.decodeUnknownSync(StorageSource)(input.source, { onExcessProperty: "error" }),
     literal = source.desktop.path.replaceAll("'", "''"),
     pipe = request.endpoint.split("/").at(-1)!,
-    distro = source.kind === "desktop-wsl-managed" ? "docker-desktop" : "docker-desktop-data",
+    distro = source.kind !== "desktop-wsl-legacy" ? "docker-desktop" : "docker-desktop-data",
     linux = String.raw`set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 pids=""
@@ -182,10 +236,10 @@ engine="$(cat "/proc/$pid/root/var/lib/docker/engine-id")"
 uuid="$(nsenter -t "$pid" -m -- blkid -c /dev/null -p -s UUID -o value "/dev/block/$device")"
 printf '%s\n%s\n' "$engine" "$uuid"`,
     managed =
-      source.kind === "desktop-wsl-managed"
+      source.kind !== "desktop-wsl-legacy"
         ? `
 if($v -notmatch '^4\\.79\\.0(?:\\.\\d+)?$'){throw 'unsupported-version'}
-$settingsPath=Join-Path $p 'AppData\\Roaming\\Docker\\settings-store.json';if($settingsPath -ine '${source.settingsFile.replaceAll("'", "''")}'){throw 'settings-path'}
+$settingsPath=${launchSettings ? "'" + launchSettings.replaceAll("'", "''") + "'" : "Join-Path $p 'AppData\\Roaming\\Docker\\settings-store.json'"};if($settingsPath -ine '${source.settingsFile.replaceAll("'", "''")}'){throw 'settings-path'}
 $settings=Get-Content -LiteralPath $settingsPath -Raw|ConvertFrom-Json;if($settings.SettingsVersion -ne 44 -or $settings.CustomWslDistroDir -cnotmatch '^D:\\\\'){throw 'managed-settings'}
 $imagePath=Join-Path $settings.CustomWslDistroDir 'disk\\docker_data.vhdx';$image=Get-DiskImage -ImagePath $imagePath
 $prefix=[string][char]92+[char]92+'.'+[char]92+'PhysicalDrive';if(-not $image.Attached -or -not $image.DevicePath.StartsWith($prefix) -or $image.DevicePath.Substring($prefix.Length) -notmatch '^[0-9]+$'){throw 'active-disk-unobserved'}
@@ -249,9 +303,18 @@ export function decodeLegacyRegistration(raw: unknown) {
   return { ...value, basePath: requireDPath(value.basePath.replace(/^\\\\\?\\/, "")) }
 }
 /** Separate versioned legacy/managed collectors; unknown layouts and Hyper-V remain blocked. */
-export function makeStorageProbe(input: { request: HostRequest; source: StorageSource }) {
+export function makeStorageProbe(input: {
+  request: HostRequest
+  source: StorageSource
+  launch?: DesktopLaunchSession
+}) {
   return async (): Promise<StorageProof> => {
     const source = Schema.decodeUnknownSync(StorageSource)(input.source, { onExcessProperty: "error" })
+    if (source.kind === "desktop-wsl-managed-launch") {
+      const { readDesktopLaunchStorage } = await import("./desktop/inspection")
+      if (!input.launch) throw new TypeError("TASK24_DESKTOP_SESSION_REQUIRED")
+      return readDesktopLaunchStorage({ request: input.request, source, session: input.launch })
+    }
     if (
       canonicalJson(await fileIdentity(source.desktop.path)) !== canonicalJson(source.desktop) ||
       canonicalJson(await fileIdentity(source.backend.path)) !== canonicalJson(source.backend) ||
