@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test"
 import fs from "node:fs/promises"
+import { existsSync } from "node:fs"
 import path from "node:path"
 import { profileFixture } from "./desktop-profile.test"
 import { confirmDesktopApproval, prepareDesktopProfile } from "../../src/sandbox/desktop/profile"
@@ -169,6 +170,34 @@ test("disk replacement and corrupt durable nonce are detected instead of repaire
     expect((await startDesktopReadonly(f.request)).kind).toBe("blocked")
     expect(f.calls.start).toBe(0)
     expect(await fs.exists(path.join(f.spec.profileRoot, "state", "grants", f.approval.nonce + ".json"))).toBe(false)
+  } finally {
+    await f.close()
+  }
+})
+
+test("cancellation after lock creation removes only that lock and allows a fresh authorized attempt", async () => {
+  const f = await launchFixture()
+  try {
+    const lock = path.join(f.spec.profileRoot, "state", "active.json")
+    const controller = new AbortController()
+    const signal = new Proxy(controller.signal, {
+      get(target, key) {
+        if (key === "aborted" && existsSync(lock)) controller.abort()
+        const value = Reflect.get(target, key, target)
+        return typeof value === "function" ? value.bind(target) : value
+      },
+    })
+    expect((await startDesktopReadonly({ ...f.request, signal })).kind).toBe("blocked")
+    expect(f.calls.start).toBe(0)
+    expect(await fs.exists(lock)).toBe(false)
+    expect(await fs.exists(path.join(f.spec.profileRoot, "state", "grants", f.approval.nonce + ".json"))).toBe(true)
+    const approval = await confirmDesktopApproval(
+      { ...f.approval, nonce: sha256Text(crypto.randomUUID()) },
+      async () => true,
+    )
+    const restarted = await startDesktopReadonly({ ...f.request, approval })
+    expect(restarted.kind).toBe("ready")
+    if (restarted.kind === "ready") await stopDesktopLaunch(restarted.value)
   } finally {
     await f.close()
   }

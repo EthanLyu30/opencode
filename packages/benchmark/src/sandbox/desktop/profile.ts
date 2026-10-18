@@ -17,13 +17,8 @@ import {
   type DesktopPlatform,
   type DesktopPreparedProfile,
 } from "./contracts"
-import {
-  canonicalDesktopPath,
-  decodeDesktopLaunchSpec,
-  readDesktopText,
-  requireDesktopReport,
-  revalidateDesktopSpec,
-} from "./compatibility"
+import { decodeDesktopLaunchSpec, readDesktopText, requireDesktopReport, revalidateDesktopSpec } from "./compatibility"
+import { withDesktopPublication, type DesktopPublication } from "./publication"
 
 const plans = new WeakMap<object, DesktopPlatform>()
 const approvals = new WeakMap<object, string>()
@@ -132,40 +127,53 @@ export function planDesktopProfile(raw: DesktopLaunchSpec, report: DesktopCompat
     return desktopBlocked(error instanceof Error ? error.message : "desktop_plan_failed")
   }
 }
-async function writeExclusive(file: string, text: string) {
-  await directoryIdentity(path.dirname(file))
-  const handle = await fs.open(file, "wx")
-  try {
-    await handle.writeFile(text)
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  return fileIdentity(file)
-}
-async function ownDirectory(root: string, target: string) {
-  canonicalDesktopPath(target)
-  if (target !== root && !target.startsWith(root + path.sep)) throw new TypeError("TASK24_DESKTOP_DIRECTORY_SCOPE")
-  await directoryIdentity(root)
-  let current = root
-  for (const part of path.relative(root, target).split(path.sep).filter(Boolean)) {
-    current = path.join(current, part)
-    if (!(await fs.exists(current))) await fs.mkdir(current)
-    await directoryIdentity(current)
-  }
-}
-export async function consumeDesktopGrant(profileRoot: string, approval: DesktopLaunchApproval) {
+async function writeGrant(publication: DesktopPublication, approval: DesktopLaunchApproval) {
   if (approvals.get(approval) !== sha256Text(canonicalJson(approval)) || !/^[a-f0-9]{64}$/.test(approval.nonce))
     throw new TypeError("TASK24_DESKTOP_APPROVAL_AUTHORITY")
-  const ledger = path.join(profileRoot, "state", "grants")
-  await ownDirectory(profileRoot, ledger)
-  await writeExclusive(
-    path.join(ledger, approval.nonce + ".json"),
+  await publication.write(
+    path.join("state", "grants", approval.nonce + ".json"),
     canonicalJson({
       phase: approval.phase,
       launchID: approval.launchID,
       approvalSha256: sha256Text(canonicalJson(approval)),
     }),
+  )
+}
+export async function consumeDesktopGrant(profile: DesktopPreparedProfile, approval: DesktopLaunchApproval) {
+  return withDesktopPublication(
+    profile.plan.paths.root,
+    "existing",
+    async (publication) => {
+      await revalidateDesktopProfile(profile)
+      await writeGrant(publication, approval)
+    },
+    { parentIdentity: profile.directories[path.dirname(profile.plan.paths.root)], rootIdentity: profile.rootIdentity },
+  )
+}
+export async function writeDesktopActiveLock(profile: DesktopPreparedProfile, approval: DesktopLaunchApproval) {
+  return withDesktopPublication(
+    profile.plan.paths.root,
+    "existing",
+    async (publication) => {
+      await revalidateDesktopProfile(profile)
+      return publication.write(
+        path.join("state", "active.json"),
+        canonicalJson({ launchID: approval.launchID, nonce: approval.nonce }),
+      )
+    },
+    { parentIdentity: profile.directories[path.dirname(profile.plan.paths.root)], rootIdentity: profile.rootIdentity },
+  )
+}
+export async function removeDesktopActiveLock(profile: DesktopPreparedProfile, lock: FileIdentity) {
+  if (!prepared.has(profile) || lock.path !== path.join(profile.plan.paths.root, "state", "active.json"))
+    throw new TypeError("TASK24_DESKTOP_ACTIVE_LOCK")
+  return withDesktopPublication(
+    profile.plan.paths.root,
+    "existing",
+    async (publication) => {
+      await publication.remove(lock)
+    },
+    { parentIdentity: profile.directories[path.dirname(profile.plan.paths.root)], rootIdentity: profile.rootIdentity },
   )
 }
 export async function prepareDesktopProfile(input: {
@@ -194,56 +202,58 @@ export async function prepareDesktopProfile(input: {
       await revalidateDesktopProfile(existing)
       return { kind: "ready" as const, value: existing }
     }
-    await fs.mkdir(plan.paths.root)
-    const rootIdentity = await directoryIdentity(plan.paths.root)
-    const owner = await writeExclusive(
-      path.join(plan.paths.root, "owner.json"),
-      canonicalJson({ schemaVersion: 1, nonce: approval.nonce, planSha256: plan.planSha256 }),
+    return await withDesktopPublication(
+      plan.paths.root,
+      "create",
+      async (publication) => {
+        const rootIdentity = await directoryIdentity(plan.paths.root)
+        const owner = await publication.write(
+          "owner.json",
+          canonicalJson({ schemaVersion: 1, nonce: approval.nonce, planSha256: plan.planSha256 }),
+        )
+        await writeGrant(publication, approval)
+        await publication.directories()
+        const settingsFile = path.join(plan.paths.home, "AppData", "Roaming", "Docker", "settings-store.json")
+        const settings = await publication.write(
+          path.relative(plan.paths.root, settingsFile),
+          canonicalJson(plan.settings),
+        )
+        const directories: Record<string, string> = {}
+        for (const target of [
+          path.dirname(plan.paths.root),
+          ...Object.values(plan.paths),
+          path.dirname(settingsFile),
+          path.join(plan.paths.root, "state"),
+          path.join(plan.paths.root, "state", "grants"),
+        ])
+          directories[target] = await directoryIdentity(target)
+        const body = {
+          schemaVersion: 1,
+          planSha256: plan.planSha256,
+          compatibilitySha256: plan.compatibilitySha256,
+          rootIdentity,
+          ownerNonce: approval.nonce,
+          files: [owner, settings],
+          directories,
+        }
+        const text = canonicalJson(body)
+        const manifest = await publication.write("manifest.json", text)
+        const result: DesktopPreparedProfile = freeze({
+          assurance: plan.assurance,
+          plan,
+          manifestSha256: sha256Text(text),
+          ownerNonce: approval.nonce,
+          rootIdentity,
+          files: [owner, settings, manifest],
+          directories,
+        })
+        prepared.add(result)
+        await revalidateDesktopProfile(result)
+        preparedByRoot.set(plan.paths.root, result)
+        return { kind: "ready" as const, value: result }
+      },
+      { parentIdentity },
     )
-    await consumeDesktopGrant(plan.paths.root, approval)
-    if ((await directoryIdentity(path.dirname(plan.paths.root))) !== parentIdentity)
-      throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
-    for (const target of [
-      ...Object.values(plan.paths),
-      path.join(plan.paths.home, "AppData", "Local", "Docker"),
-      path.join(plan.paths.home, "AppData", "Roaming", "Docker"),
-    ])
-      await ownDirectory(plan.paths.root, target)
-    const settingsFile = path.join(plan.paths.home, "AppData", "Roaming", "Docker", "settings-store.json")
-    const settings = await writeExclusive(settingsFile, canonicalJson(plan.settings))
-    const directories: Record<string, string> = {}
-    for (const target of [
-      path.dirname(plan.paths.root),
-      ...Object.values(plan.paths),
-      path.dirname(settingsFile),
-      path.join(plan.paths.root, "state"),
-      path.join(plan.paths.root, "state", "grants"),
-    ])
-      directories[target] = await directoryIdentity(target)
-    const body = {
-      schemaVersion: 1,
-      planSha256: plan.planSha256,
-      compatibilitySha256: plan.compatibilitySha256,
-      rootIdentity,
-      ownerNonce: approval.nonce,
-      files: [owner, settings],
-      directories,
-    }
-    const text = canonicalJson(body)
-    const manifest = await writeExclusive(path.join(plan.paths.root, "manifest.json"), text)
-    const result: DesktopPreparedProfile = freeze({
-      assurance: plan.assurance,
-      plan,
-      manifestSha256: sha256Text(text),
-      ownerNonce: approval.nonce,
-      rootIdentity,
-      files: [owner, settings, manifest],
-      directories,
-    })
-    prepared.add(result)
-    await revalidateDesktopProfile(result)
-    preparedByRoot.set(plan.paths.root, result)
-    return { kind: "ready" as const, value: result }
   } catch (error) {
     return desktopBlocked(error instanceof Error ? error.message : "desktop_prepare_failed")
   }
@@ -251,6 +261,11 @@ export async function prepareDesktopProfile(input: {
 export async function revalidateDesktopProfile(profile: DesktopPreparedProfile) {
   if (!prepared.has(profile)) throw new TypeError("TASK24_DESKTOP_PROFILE_AUTHORITY")
   requireDesktopPlan(profile.plan)
+  const settings = await readDesktopText(
+    path.join(profile.plan.paths.home, "AppData", "Roaming", "Docker", "settings-store.json"),
+  )
+  if (settings.sha256 !== profile.plan.settingsSha256 || settings.text !== canonicalJson(profile.plan.settings))
+    throw new TypeError("TASK24_DESKTOP_SETTINGS_BINDING")
   await revalidateDesktopSpec(profile.plan.spec)
   if ((await directoryIdentity(profile.plan.paths.root)) !== profile.rootIdentity)
     throw new TypeError("TASK24_DESKTOP_PROFILE_DRIFT")
@@ -299,6 +314,9 @@ export async function loadDesktopPreparedProfile(plan: DesktopLaunchPlan): Promi
     canonicalJson(Object.keys(body.directories).sort()) !== canonicalJson(expectedDirectories)
   )
     throw new TypeError("TASK24_DESKTOP_MANIFEST_BINDING")
+  const settings = await readDesktopText(settingsFile)
+  if (settings.sha256 !== plan.settingsSha256 || settings.text !== canonicalJson(plan.settings))
+    throw new TypeError("TASK24_DESKTOP_SETTINGS_BINDING")
   const owner = await readDesktopText(expectedFiles.find((f) => path.basename(f) === "owner.json")!)
   if (owner.text !== canonicalJson({ schemaVersion: 1, nonce: body.ownerNonce, planSha256: plan.planSha256 }))
     throw new TypeError("TASK24_DESKTOP_OWNER_BINDING")

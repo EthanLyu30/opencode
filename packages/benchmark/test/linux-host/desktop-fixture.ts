@@ -1,6 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
-import { fileIdentity } from "../../src/sandbox/storage"
+import { fileIdentity, directoryIdentity } from "../../src/sandbox/storage"
 import { canonicalJson } from "../../src/campaign/canonical"
 import { sha256Text } from "../../src/hash"
 import type {
@@ -12,8 +12,15 @@ import type {
 export async function desktopFixture() {
   const parent = process.env.TMPDIR!
   const owner = JSON.parse(await fs.readFile(path.join(parent, "owner.json"), "utf8"))
-  if (owner.runOwner !== "desktop-launch-20261018-1f72a9e4") throw Error("DESKTOP_FIXTURE_OWNER")
+  await directoryIdentity(parent)
+  if (
+    owner.nonce !== "bprep2-0786b1f11abc" ||
+    typeof owner.runOwner !== "string" ||
+    !/^[a-z0-9-]{8,128}$/.test(owner.runOwner)
+  )
+    throw Error("DESKTOP_FIXTURE_OWNER")
   const root = await fs.mkdtemp(path.join(parent, "desktop-"))
+  const rootIdentity = await directoryIdentity(root)
   await fs.mkdir(path.join(root, "install"))
   const files = await Promise.all(
     ["desktop", "frontend", "backend", "asar", "cli"].map(async (key) => {
@@ -124,7 +131,8 @@ export async function desktopFixture() {
       return observation
     },
     async close() {
-      if (!root.startsWith(parent + path.sep)) throw Error("CLEANUP_SCOPE")
+      if (!root.startsWith(parent + path.sep) || (await directoryIdentity(root)) !== rootIdentity)
+        throw Error("CLEANUP_SCOPE")
       await fs.rm(root, { recursive: true })
     },
   }

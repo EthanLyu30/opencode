@@ -8,7 +8,10 @@ import {
   prepareDesktopProfile,
   confirmDesktopApproval,
   revalidateDesktopProfile,
+  loadDesktopPreparedProfile,
 } from "../../src/sandbox/desktop/profile"
+import { fileIdentity } from "../../src/sandbox/storage"
+import { canonicalJson } from "../../src/campaign/canonical"
 import { sha256Text } from "../../src/hash"
 
 export async function profileFixture() {
@@ -181,6 +184,31 @@ test("exact prepared retry is read-only, while a replaced manifest or replayed j
     await fs.appendFile(path.join(f.spec.profileRoot, "manifest.json"), "corrupt")
     expect((await prepareDesktopProfile(request)).kind).toBe("blocked")
     expect((await fs.readFile(path.join(f.spec.profileRoot, "manifest.json"), "utf8")).endsWith("corrupt")).toBe(true)
+  } finally {
+    await f.close()
+  }
+})
+
+test("a self-consistent rewritten manifest cannot authorize settings different from the audited plan", async () => {
+  const f = await profileFixture()
+  try {
+    const result = await prepareDesktopProfile({
+      spec: f.spec,
+      plan: f.plan,
+      approval: await f.approve(),
+      platform: f.platform,
+    })
+    if (result.kind !== "ready") throw Error("PREPARE")
+    const settings = path.join(f.plan.paths.home, "AppData", "Roaming", "Docker", "settings-store.json")
+    const manifest = path.join(f.spec.profileRoot, "manifest.json")
+    await fs.writeFile(settings, canonicalJson({ ...f.plan.settings, CustomWslDistroDir: "C:\\foreign-data" }))
+    const body = JSON.parse(await fs.readFile(manifest, "utf8"))
+    body.files = await Promise.all(
+      body.files.map(async (file: { path: string }) => (file.path === settings ? fileIdentity(settings) : file)),
+    )
+    await fs.writeFile(manifest, canonicalJson(body))
+    await expect(loadDesktopPreparedProfile(f.plan)).rejects.toThrow("SETTINGS")
+    expect(f.calls.start).toBe(0)
   } finally {
     await f.close()
   }

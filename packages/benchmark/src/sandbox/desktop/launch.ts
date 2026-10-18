@@ -1,8 +1,6 @@
-import fs from "node:fs/promises"
-import path from "node:path"
 import { Schema } from "effect"
 import { canonicalJson } from "../../campaign/canonical"
-import { fileIdentity, directoryIdentity } from "../storage"
+import { fileIdentity } from "../storage"
 import { type Gate, type FileIdentity } from "../contracts"
 import {
   DesktopObservation,
@@ -15,7 +13,14 @@ import {
   type DesktopLaunchSession,
   type DesktopProcessIdentity,
 } from "./contracts"
-import { consumeDesktopGrant, requireDesktopPlan, requireDesktopApproval, revalidateDesktopProfile } from "./profile"
+import {
+  consumeDesktopGrant,
+  requireDesktopPlan,
+  requireDesktopApproval,
+  revalidateDesktopProfile,
+  writeDesktopActiveLock,
+  removeDesktopActiveLock,
+} from "./profile"
 import { isNativeDesktopPlatform } from "./platform"
 
 type LaunchState = {
@@ -115,6 +120,7 @@ export async function startDesktopReadonly(input: {
 }): Promise<Gate<DesktopLaunchSession>> {
   let issued: DesktopLaunchSession | undefined
   let startAttempted = false
+  let ownedLock: FileIdentity | undefined
   try {
     if (input.signal.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
     const deadline = Date.now() + 120000
@@ -135,18 +141,10 @@ export async function startDesktopReadonly(input: {
       !["idle", "stopped"].includes(observed.phase)
     )
       throw new TypeError("TASK24_DESKTOP_START_CONFLICT")
-    await run(consumeDesktopGrant(input.profile.plan.paths.root, input.approval))
+    await run(consumeDesktopGrant(input.profile, input.approval))
     await run(revalidateDesktopProfile(input.profile))
-    const lockPath = path.join(input.profile.plan.paths.root, "state", "active.json")
-    await directoryIdentity(path.dirname(lockPath))
-    const handle = await fs.open(lockPath, "wx")
-    try {
-      await handle.writeFile(canonicalJson({ launchID: input.approval.launchID, nonce: input.approval.nonce }))
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
-    const lock = await fileIdentity(lockPath)
+    const lock = await writeDesktopActiveLock(input.profile, input.approval)
+    ownedLock = lock
     if (input.signal.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
     startAttempted = true
     const process = Schema.decodeUnknownSync(ProcessIdentity)(await run(input.platform.start(input.profile.plan)), {
@@ -183,6 +181,13 @@ export async function startDesktopReadonly(input: {
       const cleanup = await stopDesktopLaunch(issued)
       if (cleanup.kind !== "ready") return desktopBlocked("cleanup_uncertain")
     } else if (startAttempted) return desktopBlocked("cleanup_uncertain", ["start_identity_unobserved"])
+    else if (ownedLock) {
+      try {
+        await removeDesktopActiveLock(input.profile, ownedLock)
+      } catch {
+        return desktopBlocked("cleanup_uncertain")
+      }
+    }
     return desktopBlocked(error instanceof Error ? error.message : "desktop_start_failed")
   }
 }
@@ -203,9 +208,7 @@ export async function stopDesktopLaunch(session: DesktopLaunchSession): Promise<
       })
       if (after.runningDocker || after.runningWsl || after.process || after.pipe || after.phase !== "stopped")
         return desktopBlocked("cleanup_uncertain")
-      if (canonicalJson(await fileIdentity(state.lock.path)) !== canonicalJson(state.lock))
-        return desktopBlocked("cleanup_uncertain")
-      await fs.unlink(state.lock.path)
+      await run(removeDesktopActiveLock(state.profile, state.lock))
       state.stopped = true
       return { kind: "ready" as const, value: "stopped" as const }
     } catch {

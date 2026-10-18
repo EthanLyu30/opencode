@@ -8,7 +8,7 @@
 
 **Tech Stack:** 现有 Bun 1.3.14、TypeScript、Effect Schema、Windows PowerShell 固定只读查询与 parser、固定版本 Docker CLI；不新增运行依赖，不修改 Docker 安装包。
 
-**Spec:** [D 盘启动档案规格](../specs/2026-10-18-task24b-d-drive-docker-launch-design.md)。按用户要求，规格和计划本轮同时成文，**两者均待确认**，不是已批准的执行记录。
+**Spec:** [D 盘启动档案规格](../specs/2026-10-18-task24b-d-drive-docker-launch-design.md)。用户已批准 DL1–DL5 的代码、无 Docker 回归及验证后提交/push。软件与整体审查修复已通过验证，详见[验证报告](../reports/2026-10-18-task24b-d-drive-docker-launch-verification.md)；DL6 仍未授权。native 兼容缺项保持 blocked，不等同真实启动可用。
 
 ## Global Constraints
 
@@ -207,4 +207,4 @@ DL1–DL5 是软件交付，DL6 是额外授权的环境观察；两者分开报
 
 计划不承诺基于 override 实现操作系统级禁止一切 C 写入；应用路径证据不能补齐就不启动。若需要改生产 default 接入、使用新 WSL 注册/数据盘或改变系统隔离来继续，超出本计划，先提出最小补充设计并等待用户决定。
 
-**交接：** 请用户一起审阅配套规格和本计划；确认后才按保留的 native 执行方式开始 DL1–DL5。当前没有实施授权，未创建真实 D profile、未启动 Docker、未替换部署。
+**交接：** DL1–DL5 软件及无 Docker 回归已实施，实际证据以验证报告为准。DL6 真实准备/启动核查、Linux 验收、校准和付费跑分未运行、仍需另批；未创建真实 D profile、未启动 Docker、未替换部署。

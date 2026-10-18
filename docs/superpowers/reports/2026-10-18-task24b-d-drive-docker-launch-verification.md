@@ -24,7 +24,27 @@
 - DL5 五个新入口合跑：**24 pass / 0 fail / 151 assertions**；完整包 **369 pass / 10 既有 skip / 0 fail / 1563 assertions / 96 files**。含独立脚本真实子进程无参数退出2、严格参数、无确认不写入、跨控制器重载准备档案及 finally 收尾，不声称验收成功。
 - 包内 `bun --no-env-file run typecheck` 退出0；另以本轮 D 临时 scoped tsconfig 纳入全部源码、全部 Linux 测试及 `desktop-launch` / `linux-host` / `accept-linux-host` 三脚本，包内 `typecheck --project` 退出0。外置临时 config 初次无法自动找到 Bun types，补其准确包内 typeRoots 后通过；没有修改业务 tsconfig、安装依赖或关闭类型检查。
 
-实际全范围审查及其修复记录在完成后追加；当前这份记录只证明上述已执行的软件检查，不把尚未做的审查写成通过。
+## 一次整体审查及 RED→GREEN 修复
+
+按顺序实施技能，仅派一次独立审查，覆盖 `8923a3b11..e4c7760c9` 全范围及规格/计划。审查发现 4 项 Important、无 Critical 或 Minor；全部纳入一次修复，不增设重复审查。
+
+1. **配置重载绑定**：原 reload 可接受“改设置并重算 manifest”的自洽文件。回归实际复现错误放行；现在重载及每次 revalidate 都同时核对设置字节和原 plan 的 settings hash。对应 `a self-consistent rewritten manifest cannot authorize settings different from the audited plan`，RED→GREEN。
+2. **目录替换/文件发布竞态**：不再使用“检查父目录后按路径 mkdir/open”的组合。新增仅 Windows 可用、有界隐藏辅助进程，所有临时/应用目录显式 D 盘；原子 `FILE_CREATE` 相对已固定的父目录句柄创建目录/文件，并保持祖先、根、子目录和文件的非写/非删除共享句柄至操作完成。先固定原文件、核对身份，再用该句柄移除锁；不按重新解析的路径删除。平台不支持时拒绝，不回退到旧模式。真实 NTFS 测试验证父/新根/state 在发布窗口内不能重命名，foreign 普通目录/junction 不接管，越界/ADS 不写、替换锁不删；3 tests / 21 assertions，新增原语不存在时 RED，接入后 GREEN。所用语义依据 [NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)、[CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew) 和 [GetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileinformationbyhandle)，官方接口说明不被当成 Docker 兼容证明。
+3. **启动前取消遗留锁**：原实测取消后 active.json 遗留；现在仅清理本次准确锁身份，已消费 nonce 保留，新的可信授权可以重试。对应 `cancellation after lock creation removes only that lock and allows a fresh authorized attempt`，RED→GREEN；未放宽未知/未决启动的 cleanup_uncertain 语义。
+4. **夹具写死本轮 run owner**：旧夹具拒绝新的独立 owner；现在核对固定夹具标记、格式合法的当前 owner 和真实目录身份，清理仍绑定准确临时根。真实新子进程用新 owner 通过，不冒充本轮标识。对应 `committed fixtures accept a fresh run owner without impersonating the implementation run`，RED→GREEN。
+
+修复中补充锁替换测试时，Bun `.rejects` 匹配器会使已经打开的 Windows 管道等待无法交接；临时阶段日志证明辅助进程已收到并回包。仅将这个新测试改为先 await 成功/拒绝结果、再同步精确断言，通过后移除全部诊断日志；没有放宽时限、旧断言或改业务等待算法。中止的诊断进程只按核对过的本轮 PID/可执行文件/父子关系停止，没有操作 Docker/WSL 进程。
+
+修复与格式化后完整 benchmark：**375 pass / 10 既有 skip / 0 fail / 1594 assertions / 98 files，47.95s，退出0**。包内源码 `typecheck` 与涵盖全部 Linux 测试/三个入口的 scoped `typecheck --project` 均退出0。没有改旧测试、增加 skip 或扩大 Windows 时限。10 项既有 skip 保留如下：
+
+- offline security/leakage：真实二进制 terminal/network 拒绝与空日志证明。
+- offline crash/recovery：8 个真实崩溃点收敛。
+- browser integration：惰性控件、三视口一致采集、popup/download/navigation 逃逸、等待超时、外部子资源阻断（5 项）。
+- candidate import：环境/argv/stdin/mount 隐藏输入隔离。
+- daemon-owned container 超时清除。
+- authenticated Node/Chromium helper 的两次 PDF 字节一致。
+
+上述跳过项目不被算作已完成真实验收。无延期 Minor；审查未判断的环境/部署/消费边界按下方 Rulings 明确保留，而非默认通过。
 
 ## 保护对象与清理边界
 
@@ -48,3 +68,7 @@
 1. 计划标题改为 `Task N: DLN` 以使用现成 task-start/task-done 工具；不改任务范围。若有误，代价只是文档标题调整。
 2. 由可信进程内确认回调登记授权，不把 JSON 当成人类批准；当前独立 CLI 不解锁 native 操作。若有误，代价是 DL6 前还需接入正式确认传输。
 3. 新控制器先重新审计，再严格重载准备 manifest，仅恢复文件身份、不恢复 live session。若有误，代价是合法 profile 可能被安全阻断；不会因此接管运行中的进程。
+4. 用 Windows 句柄绑定原子发布替代路径检查/重开，超出平台能力时拒绝而无不安全 fallback；这是原发布竞态要求的最小平台适配，不启动 Docker 或改全局设置。若有误，代价是系统权限/共享限制可能阻断合法操作，须保留原目录并单独诊断。
+5. 审查不替 native 路径传递、WSL/VHD 复用、安全停止或 default 兼容作结论；这些继续 unproved/blocked，fixture 不能解锁。若有误，代价是 DL6 前仍需补证据或另议最小路线，不能承诺直接可启动。
+6. DL6、Linux 真实验收/校准、付费与部署不在本轮审查的可执行范围，全部保持 not_run，而非未发现问题即通过。若有误，代价是还需后续独立授权与实证。
+7. 不扩大为修改生产 default 或操作系统级绝对禁止 C 写入的工程；当前提供来源隔离和缺项阻断，不冒充 OS 审计。若有误，代价是未来 default/强隔离需求可能需要另立获批设计。

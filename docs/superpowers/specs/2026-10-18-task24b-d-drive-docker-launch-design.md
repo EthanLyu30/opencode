@@ -1,6 +1,6 @@
 # Task24B：D 盘专用 Docker 启动档案与既有数据盘复用规格
 
-**状态：待书面审阅，未授权实施。** 2026-10-18 用户确认方案方向，并要求本轮同时编写规格和实施计划、确认后再执行。本轮只读调查和写文档；不创建真实启动档案、不启动 Docker、不改系统配置。
+**状态：DL1–DL5 软件已获批并通过无 Docker 验证；DL6 未授权。** 2026-10-18 用户确认规格和计划后批准代码、无 Docker 回归及验证后提交/push。实际软件证据见[验证报告](../reports/2026-10-18-task24b-d-drive-docker-launch-verification.md)。native 兼容证据仍有缺项、保持 blocked；没有创建真实启动档案、启动 Docker 或修改系统配置。
 
 **代码基线：** `dev` / `d437c4bd90f05f17a6fa894b31ea2606ada6307b`。继承 [Task24B 就绪规格](2026-10-17-opencode-task24b-readiness-design.md)、[B-Prep2 计划](../plans/2026-10-17-task24b-linux-docker-host.md)及[上次环境准备报告](../reports/2026-10-18-task24b-managed-storage-preparation.md)。这是解决启动路径阻断的增量子项目，不重做 B-Prep1/B-Prep2，也不改变实验题目、分组、试跑次数或评分。
 
@@ -134,7 +134,7 @@ prepare 授权绑定准备前已知的 plan/compatibility hash 和目标路径�
 
 最后记录软件状态、真实环境缺项和 `production_default_compatible`，并保持 `engine_verified=false`、`tool_capability_verified=false`、`corpus_engine_ready=false`。只有未来另获许可且真实矩阵/能力/校准通过，才可能改变后三项。
 
-源码提交/push 不触发部署。实施验证通过后按用户既有要求普通提交并 push `fork/dev`，保留 hooks；如环境阶段尚未获准，报告“软件已完成、真实准备/核查未运行”，不能将整个环境目标标为完成。本轮只提交书面规格与计划到本地，不 push 或执行实施步骤。
+源码提交/push 不触发部署。实施验证通过后按用户要求普通提交并 push `fork/dev`，保留 hooks；如环境阶段尚未获准，报告“软件已完成、真实准备/核查未运行”，不能将整个环境目标标为完成。本次授权仅覆盖 DL1–DL5 的软件及无 Docker 验证，不包含 DL6 或后续消费。
 
 ## 9. 方案取舍与依据
 
@@ -147,4 +147,4 @@ prepare 授权绑定准备前已知的 plan/compatibility hash 和目标路径�
 - [Electron app 源码文档](https://github.com/electron/electron/blob/main/docs/api/app.md)：userData、sessionData、crashDumps 等路径需分别考虑，不能从一个 override 推导全部缓存位置。
 - [WSL 配置](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)：真实用户 `.wslconfig` 是全局 WSL2 配置，须在相关 VM 启动时生效，不能用子进程的假 home 代替。
 
-配套 [实施计划](../plans/2026-10-18-task24b-d-drive-docker-launch.md) 与本文一起待用户确认；确认前不执行。
+配套 [实施计划](../plans/2026-10-18-task24b-d-drive-docker-launch.md) 已获用户确认；DL1–DL5 软件记录见验证报告，DL6 仍待单独确认。
