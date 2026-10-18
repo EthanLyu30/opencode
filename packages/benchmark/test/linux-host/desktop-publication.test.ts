@@ -3,7 +3,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { desktopFixture } from "./desktop-fixture"
 import { directoryIdentity, fileIdentity } from "../../src/sandbox/storage"
-import { withDesktopPublication } from "../../src/sandbox/desktop/publication"
+import { withDesktopPublication, withDesktopRecordPublication } from "../../src/sandbox/desktop/publication"
 
 test("parent and freshly created root cannot be exchanged between claim and file publication", async () => {
   const f = await desktopFixture()
@@ -32,6 +32,41 @@ test("parent and freshly created root cannot be exchanged between claim and file
     expect(await fs.readFile(path.join(f.spec.profileRoot, "owner.json"), "utf8")).toBe("owned")
     expect(await fs.readdir(outside)).toEqual(["sentinel"])
     expect(await fs.readFile(path.join(outside, "sentinel"), "utf8")).toBe("user-owned")
+  } finally {
+    await f.close()
+  }
+})
+
+test("record layout holds report ancestors and only creates its exclusive inventory leaf", async () => {
+  const f = await desktopFixture()
+  try {
+    const anchor = { path: f.root, identity: await directoryIdentity(f.root) }
+    const root = path.join(f.root, "reports", "desktop-launch", "owned-record")
+    await withDesktopRecordPublication(
+      root,
+      async (publication) => {
+        await expect(fs.rename(f.root, f.root + "-displaced")).rejects.toThrow()
+        await expect(fs.rename(path.dirname(root), path.join(f.root, "moved-reports"))).rejects.toThrow()
+        await expect(publication.directories()).rejects.toThrow()
+        await expect(publication.write("owner.json", "unexpected")).rejects.toThrow()
+        const file = await publication.write("inventory.json", "historical-data-only")
+        await expect(publication.remove(file)).rejects.toThrow()
+      },
+      anchor,
+    )
+    expect(await fs.readdir(root)).toEqual(["inventory.json"])
+    expect(await fs.exists(path.join(root, "state"))).toBe(false)
+    const refused = path.join(f.root, "reports", "desktop-launch", "wrong-ancestor")
+    await expect(
+      withDesktopRecordPublication(
+        refused,
+        async (p) => {
+          await p.write("inventory.json", "must-not-write")
+        },
+        { ...anchor, identity: "wrong-identity" },
+      ),
+    ).rejects.toThrow()
+    expect(await fs.exists(refused)).toBe(false)
   } finally {
     await f.close()
   }

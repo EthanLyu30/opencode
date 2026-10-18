@@ -17,6 +17,7 @@ import {
 } from "./contracts"
 import { readDesktopText, revalidateDesktopSpec } from "./compatibility"
 import { requireDesktopPlan } from "./planning"
+import { isNativeDesktopPlatform } from "./platform"
 import { requireDesktopApproval } from "./approval"
 export { confirmDesktopApproval, requireDesktopApproval } from "./approval"
 export { planDesktopProfile, requireDesktopPlan } from "./planning"
@@ -24,6 +25,19 @@ import { withDesktopPublication, type DesktopPublication } from "./publication"
 
 const prepared = new WeakSet<object>()
 const preparedByRoot = new Map<string, DesktopPreparedProfile>()
+const consumed = new WeakMap<
+  DesktopLaunchApproval,
+  { profile: DesktopPreparedProfile; anchor: { path: string; identity: string } }
+>()
+export function requireDesktopConsumedGrant(profile: DesktopPreparedProfile, approval: DesktopLaunchApproval) {
+  if (!prepared.has(profile) || consumed.get(approval)?.profile !== profile || approval.phase !== "start-readonly")
+    throw new TypeError("TASK24_DESKTOP_CONSUMPTION_AUTHORITY")
+  requireDesktopPlan(profile.plan)
+}
+export function readDesktopConsumedRecordAnchor(profile: DesktopPreparedProfile, approval: DesktopLaunchApproval) {
+  requireDesktopConsumedGrant(profile, approval)
+  return Object.freeze({ ...consumed.get(approval)!.anchor })
+}
 
 async function writeGrant(publication: DesktopPublication, approval: DesktopLaunchApproval, plan: DesktopLaunchPlan) {
   requireDesktopApproval(approval, plan, approval.phase, approval.sid)
@@ -40,18 +54,26 @@ export async function consumeDesktopGrant(profile: DesktopPreparedProfile, appro
   requireDesktopApproval(approval, profile.plan, "start-readonly", approval.sid)
   if (approval.phase !== "start-readonly" || approval.manifestSha256 !== profile.manifestSha256)
     throw new TypeError("TASK24_DESKTOP_PROFILE_BINDING")
-  return withDesktopPublication(
+  const anchorPath = isNativeDesktopPlatform(requireDesktopPlan(profile.plan))
+    ? "D:\\OpenCode-Benchmark\\Task24"
+    : path.dirname(profile.plan.paths.root)
+  const anchor = { path: anchorPath, identity: await directoryIdentity(anchorPath) }
+  await withDesktopPublication(
     profile.plan.paths.root,
     "existing",
     async (publication) => {
       await revalidateDesktopProfile(profile)
+      if ((await directoryIdentity(anchor.path)) !== anchor.identity) throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
       await writeGrant(publication, approval, profile.plan)
     },
     { parentIdentity: profile.directories[path.dirname(profile.plan.paths.root)], rootIdentity: profile.rootIdentity },
   )
+  // History authority is a fact observed in this process, not an expiring start grant or a disk reconstruction.
+  consumed.set(approval, { profile, anchor })
 }
 export async function writeDesktopActiveLock(profile: DesktopPreparedProfile, approval: DesktopLaunchApproval) {
   requireDesktopApproval(approval, profile.plan, "start-readonly", approval.sid)
+  requireDesktopConsumedGrant(profile, approval)
   return withDesktopPublication(
     profile.plan.paths.root,
     "existing",

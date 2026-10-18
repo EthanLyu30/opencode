@@ -35,6 +35,10 @@ type LaunchState = {
   stop?: Promise<Gate<"stopped">>
 }
 const sessions = new WeakMap<DesktopLaunchSession, LaunchState>()
+const attemptCleanup = new WeakMap<object, "stopped" | "uncertain" | "not_needed">()
+export function readDesktopAttemptCleanup(result: object) {
+  return attemptCleanup.get(result) ?? "uncertain"
+}
 export async function boundedDesktopOperation<T>(
   operation: Promise<T>,
   timeoutMs: number,
@@ -121,6 +125,12 @@ export async function startDesktopReadonly(input: {
   let issued: DesktopLaunchSession | undefined
   let startAttempted = false
   let ownedLock: FileIdentity | undefined
+  let consuming = false
+  const blocked = (code: string, cleanup: "stopped" | "uncertain" | "not_needed", missing?: readonly string[]) => {
+    const result = desktopBlocked(code, missing)
+    attemptCleanup.set(result, cleanup)
+    return result
+  }
   try {
     if (input.signal.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
     const deadline = Date.now() + 120000
@@ -145,7 +155,9 @@ export async function startDesktopReadonly(input: {
       !["idle", "stopped"].includes(observed.phase)
     )
       throw new TypeError("TASK24_DESKTOP_START_CONFLICT")
+    consuming = true
     await run(consumeDesktopGrant(input.profile, input.approval))
+    consuming = false
     await run(revalidateDesktopProfile(input.profile))
     const lock = await writeDesktopActiveLock(input.profile, input.approval)
     ownedLock = lock
@@ -181,18 +193,21 @@ export async function startDesktopReadonly(input: {
     await run(revalidateDesktopLaunchSession(session, input.signal))
     return { kind: "ready", value: session }
   } catch (error) {
+    let outcome: "stopped" | "not_needed" = "not_needed"
     if (issued) {
       const cleanup = await stopDesktopLaunch(issued)
-      if (cleanup.kind !== "ready") return desktopBlocked("cleanup_uncertain")
-    } else if (startAttempted) return desktopBlocked("cleanup_uncertain", ["start_identity_unobserved"])
+      if (cleanup.kind !== "ready") return blocked("cleanup_uncertain", "uncertain")
+      outcome = "stopped"
+    } else if (startAttempted) return blocked("cleanup_uncertain", "uncertain", ["start_identity_unobserved"])
+    else if (consuming) return blocked("cleanup_uncertain", "not_needed", ["grant_consumption_unobserved"])
     else if (ownedLock) {
       try {
         await removeDesktopActiveLock(input.profile, ownedLock)
       } catch {
-        return desktopBlocked("cleanup_uncertain")
+        return blocked("cleanup_uncertain", "uncertain")
       }
     }
-    return desktopBlocked(error instanceof Error ? error.message : "desktop_start_failed")
+    return blocked(error instanceof Error ? error.message : "desktop_start_failed", outcome)
   }
 }
 export async function stopDesktopLaunch(session: DesktopLaunchSession): Promise<Gate<"stopped">> {

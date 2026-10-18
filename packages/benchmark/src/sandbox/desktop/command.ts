@@ -1,4 +1,3 @@
-import fs from "node:fs/promises"
 import path from "node:path"
 import { Schema } from "effect"
 import {
@@ -13,9 +12,11 @@ import {
   prepareDesktopProfile,
   confirmDesktopApproval,
   loadDesktopPreparedProfile,
+  requireDesktopConsumedGrant,
 } from "./profile"
 import { makeWindowsDesktopPlatform, isNativeDesktopPlatform } from "./platform"
-import { startDesktopReadonly, stopDesktopLaunch, boundedDesktopOperation } from "./launch"
+import { startDesktopReadonly, stopDesktopLaunch, boundedDesktopOperation, readDesktopAttemptCleanup } from "./launch"
+import { publishDesktopLaunchRecord, readDesktopLaunchRecord } from "./inventory"
 import { checkDesktopApprovalRequest, confirmDesktopInteractive } from "./approval"
 import { readDesktopNativeDiagnostics } from "./native-audit"
 import { canonicalJson } from "../../campaign/canonical"
@@ -133,13 +134,13 @@ export function makeDesktopLaunchController(
         const session = sessions.get(id)
         if (!session) {
           if (mode === "stop-owned") return response(2, "session_not_live")
-          const file = path.join("D:\\OpenCode-Benchmark\\Task24\\reports\\desktop-launch", id, "inventory.json")
-          if (!(await fs.exists(file))) return response(2, "session_not_live")
-          const record = await readDesktopText(file)
-          return response(2, "stale_record_not_live", { recordSha256: record.sha256 })
+          const record = await readDesktopLaunchRecord(platform, id)
+          if (!record) return response(2, "session_not_live")
+          return response(2, "stale_record_not_live", record)
         }
         if (mode === "stop-owned") {
           const stopped = await stopDesktopLaunch(session)
+          if (stopped.kind === "ready") sessions.delete(id)
           return response(stopped.kind === "ready" ? 0 : 2, stopped.kind === "ready" ? "stopped" : stopped.code)
         }
         return response(2, "inventory_observed_not_accepted", { inventory: await inspectDesktopLaunch(session) })
@@ -229,23 +230,80 @@ export function makeDesktopLaunchController(
         platform,
         signal,
       })
-      if (started.kind !== "ready") return response(2, started.code, { missing: started.missing })
-      sessions.set(started.value.launchID, started.value)
       let inventory: DesktopLaunchInventory | undefined,
         failure: string | undefined,
         cleanup: Awaited<ReturnType<typeof stopDesktopLaunch>> | undefined
-      try {
-        inventory = await inspectDesktopLaunch(started.value)
-      } catch (error) {
-        failure = error instanceof Error ? error.message : "desktop_inspect_failed"
-      } finally {
-        cleanup = await stopDesktopLaunch(started.value)
+      if (started.kind === "ready") {
+        sessions.set(started.value.launchID, started.value)
+        try {
+          inventory = await boundedDesktopOperation(inspectDesktopLaunch(started.value), 15000, signal)
+        } catch (error) {
+          failure = error instanceof Error ? error.message : "desktop_inspect_failed"
+        } finally {
+          cleanup = await stopDesktopLaunch(started.value)
+          if (cleanup.kind === "ready") sessions.delete(started.value.launchID)
+        }
       }
-      if (cleanup.kind !== "ready") return response(2, "cleanup_uncertain")
-      if (failure || !inventory) return response(2, failure ?? "desktop_inventory_missing")
-      return response(2, inventory.missing.length ? "desktop_inventory_blocked" : "inventory_observed_not_accepted", {
-        inventory,
-      })
+      const outcome =
+        started.kind === "ready"
+          ? cleanup?.kind === "ready"
+            ? "stopped"
+            : "uncertain"
+          : readDesktopAttemptCleanup(started)
+      const code =
+        outcome === "uncertain"
+          ? "cleanup_uncertain"
+          : started.kind === "blocked"
+            ? started.code
+            : (failure ??
+              (!inventory
+                ? "desktop_inventory_missing"
+                : inventory.missing.length
+                  ? "desktop_inventory_blocked"
+                  : "inventory_observed_not_accepted"))
+      const missing =
+        started.kind === "blocked" ? started.missing : failure ? [failure] : (inventory?.missing ?? [code])
+      try {
+        requireDesktopConsumedGrant(profile, approval)
+      } catch {
+        return response(2, code, { missing, reportPublished: false })
+      }
+      const safeCode = (value: string) => (/^[a-zA-Z0-9_.:-]{1,200}$/.test(value) ? value : "desktop_operation_blocked")
+      try {
+        const file = await publishDesktopLaunchRecord({
+          profile,
+          approval,
+          record: {
+            schemaVersion: 1,
+            launchID: approval.launchID,
+            specSha256: profile.plan.specSha256,
+            planSha256: profile.plan.planSha256,
+            compatibilitySha256: profile.plan.compatibilitySha256,
+            manifestSha256: profile.manifestSha256,
+            status:
+              code === "cleanup_uncertain"
+                ? "cleanup_uncertain"
+                : code === "inventory_observed_not_accepted"
+                  ? "inventory_observed_not_accepted"
+                  : "blocked",
+            code: safeCode(code),
+            missing: missing.map(safeCode),
+            inventory: inventory ?? null,
+            cleanup: outcome,
+            engine_verified: false,
+            tool_capability_verified: false,
+            corpus_engine_ready: false,
+          },
+        })
+        return response(2, code, { missing, inventory, reportPublished: true, record: file })
+      } catch {
+        return response(2, code === "cleanup_uncertain" ? code : "desktop_report_publication_failed", {
+          missing,
+          inventory,
+          attemptCode: code,
+          reportPublished: false,
+        })
+      }
     } catch (error) {
       return response(2, error instanceof Error ? error.message : "desktop_operation_blocked")
     }

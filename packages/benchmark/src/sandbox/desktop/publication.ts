@@ -93,16 +93,26 @@ public static class DesktopPublication {
       try { Check(h, expected, directory); return h; } catch { h.Dispose(); throw; }
     } finally { Marshal.FreeHGlobal(memory); Marshal.FreeHGlobal(u.Buffer); }
   }
-  public static void OpenParent(string value) {
+  public static void OpenParent(string value, string anchor) {
     root = value;
     string current = Path.GetPathRoot(root);
     var drive = CreateFileW(current, 0x1000A0, 1, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
     try { Check(drive, current, true); dirs.Add(current, drive); } catch { drive.Dispose(); throw; }
-    string parent = Path.GetDirectoryName(root);
+    string parent = String.IsNullOrEmpty(anchor) ? Path.GetDirectoryName(root) : anchor;
+    if(!String.Equals(parent,Path.GetDirectoryName(root),StringComparison.OrdinalIgnoreCase) && !Path.GetDirectoryName(root).StartsWith(parent+"\\",StringComparison.OrdinalIgnoreCase)) throw new IOException("Anchor scope");
     foreach (string part in parent.Substring(current.Length).Split('\\')) {
       string next = Path.Combine(current, part);
       dirs.Add(next, Relative(dirs[current], part, true, false, next)); current = next;
     }
+  }
+  public static void RecordParents(string anchor, string[] relative) {
+    string current=anchor;
+    foreach(string part in relative) {
+      string next=Path.Combine(current,part);
+      if(!Path.GetDirectoryName(root).StartsWith(next,StringComparison.OrdinalIgnoreCase)) throw new IOException("Record parent scope");
+      dirs.Add(next,Relative(dirs[current],part,true,true,next)); current=next;
+    }
+    if(!String.Equals(current,Path.GetDirectoryName(root),StringComparison.OrdinalIgnoreCase)) throw new IOException("Record parent binding");
   }
   static void Directory(string relative, bool create) {
     string target = Path.Combine(root, relative);
@@ -147,12 +157,13 @@ public static class DesktopPublication {
 '@
 try {
   $first = [Console]::ReadLine() | ConvertFrom-Json
-  [DesktopPublication]::OpenParent([string]$first.root)
+  [DesktopPublication]::OpenParent([string]$first.root,[string]$first.anchor)
   [Console]::WriteLine('pinned')
   while ($null -ne ($line = [Console]::ReadLine())) {
     $request = $line | ConvertFrom-Json
     switch ($request.op) {
       'tree' { [DesktopPublication]::Tree([bool]$request.create, [bool]$request.profile) }
+      'record-parents' { [DesktopPublication]::RecordParents([string]$request.anchor,[string[]]$request.relative) }
       'directories' { [DesktopPublication]::Directories() }
       'write' { [DesktopPublication]::Write([string]$request.relative, [string]$request.data) }
       'pin' { [DesktopPublication]::Pin([string]$request.relative) }
@@ -181,8 +192,10 @@ export async function withDesktopPublication<T>(
   expected: {
     parentIdentity?: string
     rootIdentity?: string
-    layout?: "profile" | "read"
+    layout?: "profile" | "read" | "record"
     consoleLease?: boolean
+    recordParents?: { anchor: string; identity: string; missing: readonly string[] }
+    boundAncestor?: { path: string; identity: string }
   } = {},
 ): Promise<T> {
   if (process.platform !== "win32") throw new TypeError("TASK24_DESKTOP_PUBLICATION_UNAVAILABLE")
@@ -194,8 +207,20 @@ export async function withDesktopPublication<T>(
     throw new TypeError("TASK24_DESKTOP_CONSOLE_LEASE")
   canonicalDesktopPath(root, consoleLease ? "C" : "D")
   const parent = path.dirname(root)
+  const record = expected.layout === "record"
+  if (record && (mode !== "create" || !expected.recordParents)) throw new TypeError("TASK24_DESKTOP_RECORD_LAYOUT")
+  if (!record && expected.recordParents) throw new TypeError("TASK24_DESKTOP_RECORD_LAYOUT")
+  const anchor = expected.recordParents?.anchor ?? parent
+  canonicalDesktopPath(anchor, consoleLease ? "C" : "D")
+  if (
+    record &&
+    ((anchor !== parent && !parent.startsWith(anchor + path.sep)) ||
+      canonicalJson(path.relative(anchor, parent).split(path.sep).filter(Boolean)) !==
+        canonicalJson(expected.recordParents!.missing))
+  )
+    throw new TypeError("TASK24_DESKTOP_RECORD_LAYOUT")
   const identity = consoleLease ? consoleDirectoryIdentity : directoryIdentity
-  const parentID = expected.parentIdentity ?? (await identity(parent))
+  const parentID = expected.recordParents?.identity ?? expected.parentIdentity ?? (await identity(parent))
   const temp = canonicalDesktopPath(process.env.TEMP ?? "")
   await directoryIdentity(temp)
   const child = Bun.spawn(
@@ -261,16 +286,25 @@ export async function withDesktopPublication<T>(
     return target
   }
   try {
-    await request({ root }, "pinned")
-    if ((await identity(parent)) !== parentID) throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
+    await request({ root, anchor: record ? anchor : undefined }, "pinned")
+    if ((await identity(record ? anchor : parent)) !== parentID) throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
+    if (expected.boundAncestor) {
+      if (
+        !record ||
+        !(anchor === expected.boundAncestor.path || anchor.startsWith(expected.boundAncestor.path + path.sep)) ||
+        (await directoryIdentity(expected.boundAncestor.path)) !== expected.boundAncestor.identity
+      )
+        throw new TypeError("TASK24_DESKTOP_PARENT_DRIFT")
+    }
+    if (record) await request({ op: "record-parents", anchor, relative: expected.recordParents!.missing })
     if (expected.layout === "read" && mode !== "existing") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
-    await request({ op: "tree", create: mode === "create", profile: expected.layout !== "read" })
+    await request({ op: "tree", create: mode === "create", profile: !record && expected.layout !== "read" })
     if (expected.rootIdentity && (await identity(root)) !== expected.rootIdentity)
       throw new TypeError("TASK24_DESKTOP_PROFILE_DRIFT")
     if (mode === "existing" && expected.layout !== "read") await request({ op: "directories" })
     return await callback({
       async directories() {
-        if (expected.layout === "read") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
+        if (expected.layout === "read" || record) throw new TypeError("TASK24_DESKTOP_READ_ONLY")
         await request({ op: "directories" })
       },
       async pin(file) {
@@ -285,6 +319,7 @@ export async function withDesktopPublication<T>(
       },
       async write(relative, text) {
         if (expected.layout === "read") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
+        if (record && relative !== "inventory.json") throw new TypeError("TASK24_DESKTOP_RECORD_LAYOUT")
         const target = relativePath(relative)
         await request({ op: "write", relative, data: Buffer.from(text).toString("base64") })
         const file = await fileIdentity(target)
@@ -292,7 +327,7 @@ export async function withDesktopPublication<T>(
         return file
       },
       async remove(file) {
-        if (expected.layout === "read") throw new TypeError("TASK24_DESKTOP_READ_ONLY")
+        if (expected.layout === "read" || record) throw new TypeError("TASK24_DESKTOP_READ_ONLY")
         const relative = path.relative(root, file.path)
         relativePath(relative)
         await request({ op: "pin", relative })
@@ -309,6 +344,30 @@ export async function withDesktopPublication<T>(
     reader.releaseLock()
     clearTimeout(timer)
   }
+}
+
+/** Missing report parents and the exclusive launch leaf are created only relative to held handles. */
+export async function withDesktopRecordPublication<T>(
+  root: string,
+  callback: (publication: DesktopPublication) => Promise<T>,
+  boundAncestor: { path: string; identity: string },
+) {
+  canonicalDesktopPath(root)
+  if (await fs.exists(root)) throw new TypeError("TASK24_DESKTOP_RECORD_EXISTS")
+  const parent = path.dirname(root)
+  let anchor = parent
+  while (!(await fs.exists(anchor))) {
+    const next = path.dirname(anchor)
+    if (next === anchor || next === path.parse(next).root) throw new TypeError("TASK24_DESKTOP_RECORD_PARENT")
+    anchor = next
+  }
+  const identity = await directoryIdentity(anchor)
+  const missing = path.relative(anchor, parent).split(path.sep).filter(Boolean)
+  return withDesktopPublication(root, "create", callback, {
+    layout: "record",
+    recordParents: { anchor, identity, missing },
+    boundAncestor,
+  })
 }
 
 /** The callback deadline ends before the helper's fixed 30s handle lifetime. */
