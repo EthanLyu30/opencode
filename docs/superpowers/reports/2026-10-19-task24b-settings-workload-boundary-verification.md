@@ -111,3 +111,10 @@ native 仍缺完整 path_routing、backend_environment、registration_reuse、st
 直连 GitHub 的只读预检曾被 reset；仅为 Git 子进程复用已有代理变量和既有 manager/schannel 设置后恢复。没有修改全局网络/Git 配置、显示代理值/凭据、读取模型 Key 或打开登录窗口。
 
 审查/交付后仅清理本计划 `.superpowers/sdd/2026-10-19-task24b-settings-workload-boundary` 和本轮 D 盘 owner 临时根。先核实准确 owner、根/祖先身份、无链接及逐项清单；不触及兄弟工作区、旧 C 目录、用户文件或此前被拒绝清理的目录。清理执行结果以会话最终答复为准，不预先声称完成。
+
+最终清理尝试在进程启动前被执行策略拒绝，没有任何删除，也没有尝试替代删除方式。以下两处本轮自有中间物仍在，未声称清理成功：
+
+- `D:\OpenCode-Benchmark\Task24\tmp\bprep1-settings-workload-20261019-a4c63e91`：D 盘隔离环境、临时夹具/编译输出和本轮工具缓存。
+- `D:\OpenCode-Audit\.superpowers\sdd\2026-10-19-task24b-settings-workload-boundary`：本轮执行账本、工作副本、日志、runner 和审查 diff。
+
+清理前后只读缓存清单比对显示：pre-push 没有新增仓库内所收集的 Turbo 日志/tsbuildinfo 或 Turbo 目录；预先存在的 32 文件/32 目录未接管删除。代码和报告已推送、可通过 Git 获取；上述保留的是生成性中间物，不是部署或用户数据。
