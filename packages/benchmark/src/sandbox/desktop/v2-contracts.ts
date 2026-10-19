@@ -4,6 +4,7 @@ import { Sha256 } from "../../schema"
 import { freeze } from "../../corpus/evaluation-profile"
 import { FileIdentity } from "../contracts"
 import { canonicalDesktopPath } from "./compatibility"
+import { parseDesktopSettingsJson } from "./settings-json"
 import {
   DesktopSpec,
   type DesktopLaunchSpec,
@@ -150,9 +151,12 @@ export function decodeDesktopIntentV2(
   expected: { dataRoot: string; policyID: string; policySha256: string },
 ): DesktopIntentV2 {
   if (Buffer.byteLength(text) > 16384) throw new TypeError("TASK24_DESKTOP_V2_INTENT_LIMIT")
-  const value = Schema.decodeUnknownSync(DesktopIntent)(Schema.decodeUnknownSync(Schema.UnknownFromJsonString)(text), {
-    onExcessProperty: "error",
-  })
+  const value = Schema.decodeUnknownSync(DesktopIntent)(
+    parseDesktopSettingsJson(new TextEncoder().encode(text), 16384),
+    {
+      onExcessProperty: "error",
+    },
+  )
   canonicalDesktopPath(value.expected.CustomWslDistroDir)
   if (
     value.expected.CustomWslDistroDir !== expected.dataRoot ||
