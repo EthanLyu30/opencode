@@ -106,6 +106,8 @@ native 仍缺完整 path_routing、backend_environment、registration_reuse、st
 
 ## 提交、推送与清理
 
-最终提交与 push 仅在新进程全量验证、独立审查及所需修复通过之后进行，不强推、不创建额外分支/PR。目标为 `fork/dev`（GitHub `EthanLyu30/opencode`）。实际状态待补。
+最终代码修复提交 `68ece417eca42af34c1936ea15af0ce330736686` 已正常 push 到 `fork/dev`（GitHub `EthanLyu30/opencode`），远端由 `fd3861ba88` 前进到该提交，exit 0；没有强推、额外分支或 PR。未绕过 pre-push：37 个包在范围内，31 项 typecheck 全部成功，0 cache hit，30.716s。本文推送回执续提交随后正常发布，最终远端 HEAD 以会话交付核对为准。
+
+直连 GitHub 的只读预检曾被 reset；仅为 Git 子进程复用已有代理变量和既有 manager/schannel 设置后恢复。没有修改全局网络/Git 配置、显示代理值/凭据、读取模型 Key 或打开登录窗口。
 
 审查/交付后仅清理本计划 `.superpowers/sdd/2026-10-19-task24b-settings-workload-boundary` 和本轮 D 盘 owner 临时根。先核实准确 owner、根/祖先身份、无链接及逐项清单；不触及兄弟工作区、旧 C 目录、用户文件或此前被拒绝清理的目录。清理执行结果以会话最终答复为准，不预先声称完成。
