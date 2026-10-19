@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { FileIdentity, type Gate, type StorageProof } from "../contracts"
 import { Sha256 } from "../../schema"
+import type { DesktopSpecVersioned, DesktopPlanVersioned } from "./v2-contracts"
 
 const Text = Schema.NonEmptyString
 const Disk = Schema.Struct({ path: Text, fileID: Text, volumeID: Text })
@@ -147,9 +148,9 @@ export type DesktopLaunchInventory = Readonly<{
   corpus_engine_ready: false
 }>
 export interface DesktopPlatform {
-  audit(spec: DesktopLaunchSpec, signal?: AbortSignal): Promise<DesktopCompatibilityReport>
-  observe(spec: DesktopLaunchSpec, signal?: AbortSignal): Promise<unknown>
-  start(plan: DesktopLaunchPlan): Promise<DesktopProcessIdentity>
+  audit(spec: DesktopSpecVersioned, signal?: AbortSignal): Promise<DesktopCompatibilityReport>
+  observe(spec: DesktopSpecVersioned, signal?: AbortSignal): Promise<unknown>
+  start(plan: DesktopPlanVersioned): Promise<DesktopProcessIdentity>
   stop(process: DesktopProcessIdentity): Promise<"stopped" | "uncertain">
 }
 export function desktopBlocked(code: string, missing: readonly string[] = [code]): Gate<never> {

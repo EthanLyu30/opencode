@@ -5,6 +5,7 @@ import { sha256Text } from "../../hash"
 import { directoryIdentity, fileIdentity } from "../storage"
 import { canonicalDesktopPath } from "./compatibility"
 import { runDesktopProbe } from "./native-process"
+import { readDesktopDirectoryV2, readDesktopFileV2 } from "./identity-v2"
 
 const documents = {
   specs: [
@@ -87,5 +88,56 @@ export async function readDesktopBindings(repoRoot: string, signal?: AbortSignal
     sourceSha256: sha256Text("git-tree:" + tree),
     specSha256: digest(documents.specs),
     planSha256: digest(documents.plans),
+  })
+}
+
+const documentsV2 = Object.freeze({
+  specs: [...documents.specs, "docs/superpowers/specs/2026-10-19-task24b-settings-workload-boundary-design.md"],
+  plans: [...documents.plans, "docs/superpowers/plans/2026-10-19-task24b-settings-workload-boundary.md"],
+})
+export function desktopDocumentDigestV2(kind: "specs" | "plans", entries: readonly { path: string; sha256: string }[]) {
+  const expected = documentsV2[kind]
+  if (
+    entries.length !== 3 ||
+    new Set(entries.map((e) => e.path)).size !== 3 ||
+    entries.some(
+      (e) =>
+        !expected.includes(e.path) ||
+        !/[a-f0-9]{64}/.test(e.sha256) ||
+        e.sha256.length !== 64 ||
+        /^0{64}$/.test(e.sha256),
+    )
+  )
+    throw new TypeError("TASK24_DESKTOP_V2_DOCUMENT_BINDING")
+  return sha256Text(canonicalJson([...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))))
+}
+export async function readDesktopBindingsV2(repoRoot: string, signal?: AbortSignal) {
+  const root = canonicalDesktopPath(repoRoot),
+    identity = await readDesktopDirectoryV2(root)
+  const status = () => gitText(root, ["status", "--porcelain=v1", "--untracked-files=normal"], signal)
+  const tree = await gitText(root, ["rev-parse", "HEAD^{tree}"], signal)
+  if (!/^[a-f0-9]{40}$/.test(tree) || (await status())) throw new TypeError("TASK24_DESKTOP_SOURCE_DIRTY")
+  const read = async (relative: string) => ({
+    path: relative,
+    identity: (await readDesktopFileV2(path.join(root, relative))).identity,
+  })
+  const first = await Promise.all([...documentsV2.specs, ...documentsV2.plans].map(read))
+  if (
+    canonicalJson(first) !== canonicalJson(await Promise.all(first.map((f) => read(f.path)))) ||
+    (await status()) ||
+    tree !== (await gitText(root, ["rev-parse", "HEAD^{tree}"], signal)) ||
+    canonicalJson(identity) !== canonicalJson(await readDesktopDirectoryV2(root))
+  )
+    throw new TypeError("TASK24_DESKTOP_DOCUMENT_DRIFT")
+  if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
+  const digest = (kind: "specs" | "plans") =>
+    desktopDocumentDigestV2(
+      kind,
+      first.filter((f) => documentsV2[kind].includes(f.path)).map((f) => ({ path: f.path, sha256: f.identity.sha256 })),
+    )
+  return Object.freeze({
+    sourceSha256: sha256Text("git-tree:" + tree),
+    specSha256: digest("specs"),
+    planSha256: digest("plans"),
   })
 }

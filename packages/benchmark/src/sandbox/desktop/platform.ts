@@ -15,6 +15,7 @@ export function readNativePlatformDiagnostics(platform: DesktopPlatform) {
 export function makeWindowsDesktopPlatform(): DesktopPlatform {
   const platform: DesktopPlatform = {
     async audit(spec, signal) {
+      if (spec.schemaVersion !== 1) throw new TypeError("TASK24_DESKTOP_NATIVE_RULES_UNPROVED")
       diagnostics.delete(platform)
       if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
       try {
@@ -33,6 +34,7 @@ export function makeWindowsDesktopPlatform(): DesktopPlatform {
       }
     },
     async observe(spec, signal) {
+      if (spec.schemaVersion !== 1) throw new TypeError("TASK24_DESKTOP_NATIVE_RULES_UNPROVED")
       const snapshot = await queryDesktopWindows(spec, signal ?? new AbortController().signal)
       const runningDocker =
         snapshot.processes.some((p) => p.role !== "service") || snapshot.pipes.some((p) => p.present)
