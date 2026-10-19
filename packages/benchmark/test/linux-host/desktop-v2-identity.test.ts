@@ -11,6 +11,15 @@ test("v2 identities distinguish adjacent integers beyond Number precision", () =
   expect(api!.desktopIdentityV2({ ...base, ino: 17169973579407208n })).not.toBe(api!.desktopIdentityV2(base))
 })
 
+test("v2 ancestor identity includes the physical D drive without authorizing root writes", async () => {
+  expect(api).toBeDefined()
+  const stat = await fs.lstat("D:\\", { bigint: true })
+  expect((await api!.readDesktopDirectoryV2("D:\\")).fileID).toBe(`v2:${stat.dev}:${stat.ino}:${stat.birthtimeNs}`)
+  expect((await api!.readDesktopDirectoryV2(process.env.TMPDIR!)).parents["D:\\"]).toBe(
+    `v2:${stat.dev}:${stat.ino}:${stat.birthtimeNs}`,
+  )
+})
+
 test("v2 reads exact physical D identities and rejects hardlinks and C paths", async () => {
   expect(api).toBeDefined()
   const parent = process.env.TMPDIR!

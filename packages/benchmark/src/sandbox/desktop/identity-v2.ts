@@ -12,10 +12,21 @@ export function desktopIdentityV2(stat: Pick<BigIntStats, "dev" | "ino" | "birth
 }
 
 export async function readDesktopDirectoryV2(directory: string) {
-  canonicalDesktopPath(directory)
+  // Metadata-only drive-root observation, never a publication/write scope.
+  if (!/^[dD]:\\$/.test(directory)) canonicalDesktopPath(directory)
   const ids: Record<string, string> = {}
   let current = path.parse(directory).root
-  for (const part of path.relative(current, directory).split(path.sep)) {
+  const drive = await fs.lstat(current, { bigint: true })
+  const driveReal = (await fs.realpath(current)).toLowerCase()
+  // Bun on Windows reports realpath("D:\\") as "D:"; only this drive-root spelling is equivalent.
+  if (
+    !drive.isDirectory() ||
+    drive.isSymbolicLink() ||
+    (driveReal !== current.toLowerCase() && driveReal !== current.slice(0, -1).toLowerCase())
+  )
+    throw new TypeError("TASK24_DESKTOP_V2_DIRECTORY")
+  ids[current] = desktopIdentityV2(drive)
+  for (const part of path.relative(current, directory).split(path.sep).filter(Boolean)) {
     current = path.join(current, part)
     const stat = await fs.lstat(current, { bigint: true })
     if (

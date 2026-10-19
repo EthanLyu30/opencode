@@ -1,4 +1,5 @@
 import path from "node:path"
+export { planDesktopProfileV2, requireDesktopPlanV2 } from "./planning-v2"
 import { canonicalJson } from "../../campaign/canonical"
 import { freeze } from "../../corpus/evaluation-profile"
 import { sha256Text } from "../../hash"

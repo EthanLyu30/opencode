@@ -1,4 +1,10 @@
 import path from "node:path"
+export {
+  checkDesktopApprovalRequestV2,
+  confirmDesktopApprovalV2,
+  requireDesktopApprovalV2,
+  desktopConfirmationPanelV2,
+} from "./approval-v2"
 import { Schema } from "effect"
 import { canonicalJson } from "../../campaign/canonical"
 import { freeze } from "../../corpus/evaluation-profile"
