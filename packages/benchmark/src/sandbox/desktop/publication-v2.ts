@@ -58,7 +58,7 @@ public static class DesktopV2 {
  static readonly Dictionary<string,SafeFileHandle> dirs=new Dictionary<string,SafeFileHandle>(StringComparer.OrdinalIgnoreCase);
  static readonly Dictionary<string,SafeFileHandle> files=new Dictionary<string,SafeFileHandle>(StringComparer.OrdinalIgnoreCase);
  static readonly List<string> group=new List<string>();
- static string root; static bool writable;
+ static string root; static bool writable; static string recordName;
  static Info Check(SafeFileHandle h,string expected,bool directory) {
   Info i;
   if(h.IsInvalid||!GetFileInformationByHandle(h,out i)||(i.Attributes&0x400)!=0||((i.Attributes&0x10)!=0)!=directory||(!directory&&i.Links!=1))throw new IOException("file_kind");
@@ -79,7 +79,7 @@ public static class DesktopV2 {
    Marshal.StructureToPtr(u,m,false);var o=new OA();o.Length=(uint)Marshal.SizeOf(typeof(OA));o.Root=parent.DangerousGetHandle();o.Name=m;o.Attributes=0x40;
    IntPtr raw;IOS io;uint access=directory?0x1000A0u:create?0x110083u:deleting?0x110081u:0x100081u;
    // Parents allow child saves but never DELETE sharing; leased files allow READ sharing only.
-   int status=NtCreateFile(out raw,access,ref o,out io,IntPtr.Zero,directory?0x10u:0x80u,directory?3u:1u,create?2u:1u,directory?0x200021u:0x200060u,IntPtr.Zero,0);
+   int status=NtCreateFile(out raw,access,ref o,out io,IntPtr.Zero,directory?0x10u:0x80u,directory?3u:1u,create?(directory&&recordName!=null?3u:2u):1u,directory?0x200021u:0x200060u,IntPtr.Zero,0);
    if(status<0)throw new IOException("open_"+status.ToString("X8"));
    var h=new SafeFileHandle(raw,true);try{Check(h,expected,directory);return h;}catch{h.Dispose();throw;}
   }finally{Marshal.FreeHGlobal(m);Marshal.FreeHGlobal(u.Buffer);}
@@ -105,12 +105,18 @@ public static class DesktopV2 {
   Directory(root,create);
   foreach(string p in layout)if(!String.IsNullOrEmpty(p))Directory(Target(p),create);
  }
+ public static void Record(string id) {
+  if(!System.Text.RegularExpressions.Regex.IsMatch(id,@"\A[a-z0-9][a-z0-9._-]{0,127}\z"))throw new IOException("record_id");
+  recordName=@"reports\desktop-launch\"+id+@"\inventory.json";Directory(root,false);
+  Directory(Target(@"reports\desktop-launch\"+id),true);
+ }
  public static Dictionary<string,string> Identities(){var result=new Dictionary<string,string>();foreach(var pair in dirs)result.Add(pair.Key,ID(Check(pair.Value,pair.Key,true)));return result;}
  public static void Pin(string relative,bool deleting) {
   string target=Target(relative);Directory(Path.GetDirectoryName(target),false);
   if(!files.ContainsKey(relative))files.Add(relative,Relative(dirs[Path.GetDirectoryName(target)],Path.GetFileName(target),false,false,target,deleting));
  }
  static void WriteName(string relative) {
+  if(recordName!=null){if(!writable||relative!=recordName)throw new IOException("record_write_scope");return;}
   if(!writable||!(relative=="owner.json"||relative=="intent.json"||relative=="manifest.json"||relative==@"home-oc-task24-dd479\AppData\Roaming\Docker\settings-store.json"||relative==@"state\active.json"||(relative.StartsWith(@"state\grants\",StringComparison.Ordinal)&&relative.EndsWith(".json",StringComparison.Ordinal)&&relative.Length==82)))throw new IOException("write_scope");
  }
  public static void Write(string relative,string data) {
@@ -153,6 +159,7 @@ try{
    $r=$line|ConvertFrom-Json;$value=$null
    switch($r.op){
     'tree'{[DesktopV2]::Tree([bool]$r.create,[string[]]$r.layout);$value=[DesktopV2]::Identities()}
+    'record'{[DesktopV2]::Record([string]$r.id);$value=[DesktopV2]::Identities()}
     'pin'{[DesktopV2]::Pin([string]$r.relative,[bool]$r.deleting)}
     'write'{[DesktopV2]::Write([string]$r.relative,[string]$r.data)}
     'read'{$value=[DesktopV2]::Read([string]$r.relative)}
@@ -172,13 +179,21 @@ try{
 export async function withDesktopPublicationV2<T>(
   input: {
     root: string
-    mode: "read" | "create-profile" | "profile"
+    mode: "read" | "create-profile" | "profile" | "record"
+    recordID?: string
     parents: Readonly<Record<string, string>>
     signal: AbortSignal
   },
   use: (io: DesktopPublicationV2) => Promise<T>,
 ): Promise<T> {
   if (process.platform !== "win32" || input.signal.aborted) throw new TypeError("TASK24_DESKTOP_V2_HANDLE_UNAVAILABLE")
+  if (
+    !["read", "create-profile", "profile", "record"].includes(input.mode) ||
+    (input.mode === "record"
+      ? !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(input.recordID ?? "")
+      : input.recordID !== undefined)
+  )
+    throw new TypeError("TASK24_DESKTOP_V2_HANDLE_SCOPE")
   const root = canonicalDesktopPath(input.root),
     temp = canonicalDesktopPath(process.env.TMPDIR ?? "")
   // Only synthetic D roots have an enabled v2 catalog. This is not a native prepare entry point.
@@ -268,11 +283,15 @@ export async function withDesktopPublicationV2<T>(
       if (parents[name] !== id) throw new TypeError("TASK24_DESKTOP_V2_PARENT_DRIFT")
     }
     const dirs = identities(
-      await request({
-        op: "tree",
-        create: input.mode === "create-profile",
-        layout: input.mode === "read" ? [] : desktopProfileLayoutV2,
-      }),
+      await request(
+        input.mode === "record"
+          ? { op: "record", id: input.recordID }
+          : {
+              op: "tree",
+              create: input.mode === "create-profile",
+              layout: input.mode === "read" ? [] : desktopProfileLayoutV2,
+            },
+      ),
     )
     for (const [name, id] of Object.entries(input.parents))
       if (dirs[name] !== id) throw new TypeError("TASK24_DESKTOP_V2_DIRECTORY_DRIFT")
@@ -301,14 +320,19 @@ export async function withDesktopPublicationV2<T>(
       },
       async write(name, text) {
         relative(name)
-        if (input.mode === "read") throw new TypeError("TASK24_DESKTOP_V2_READ_ONLY")
+        if (
+          input.mode === "read" ||
+          (input.mode === "record" &&
+            name !== path.join("reports", "desktop-launch", input.recordID!, "inventory.json"))
+        )
+          throw new TypeError("TASK24_DESKTOP_V2_READ_ONLY")
         await request({ op: "write", relative: name, data: Buffer.from(text).toString("base64") })
         return (await read(name)).identity
       },
       async remove(file) {
         const name = path.relative(root, file.path)
         relative(name)
-        if (input.mode === "read" || name !== "state\\active.json")
+        if (input.mode === "read" || input.mode === "record" || name !== "state\\active.json")
           throw new TypeError("TASK24_DESKTOP_V2_REMOVE_SCOPE")
         await request({ op: "pin", relative: name, deleting: true })
         if (canonicalJson((await read(name)).identity) !== canonicalJson(file))

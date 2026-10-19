@@ -53,13 +53,20 @@ const Record = Schema.Struct({
   diagnostics: Schema.optionalKey(DesktopAttemptDiagnostics),
   ...Ready,
 })
-export type DesktopLaunchRecord = typeof Record.Type
+const RecordV2 = Schema.Struct({
+  ...Record.fields,
+  schemaVersion: Schema.Literal(2),
+  intentSha256: Sha256,
+  policySha256: Sha256,
+})
+const VersionedRecord = Schema.Union([Record, RecordV2])
+export type DesktopLaunchRecord = typeof VersionedRecord.Type
 const fixtureRecords = new WeakMap<
   DesktopPlatform,
   Map<string, { file: string; anchor: { path: string; identity: string } }>
 >()
 export function decodeDesktopLaunchRecord(raw: unknown): DesktopLaunchRecord {
-  const result = Schema.decodeUnknownSync(Record)(raw, { onExcessProperty: "error" })
+  const result = Schema.decodeUnknownSync(VersionedRecord)(raw, { onExcessProperty: "error" })
   if (
     Buffer.byteLength(canonicalJson(result)) > 65536 ||
     result.missing.length > 128 ||
@@ -80,6 +87,7 @@ export async function publishDesktopLaunchRecord(input: {
   const plan = input.profile.plan,
     approval = input.approval
   const record = decodeDesktopLaunchRecord(input.record)
+  if (record.schemaVersion !== 1) throw new TypeError("TASK24_DESKTOP_RECORD_VERSION")
   if (
     record.launchID !== approval.launchID ||
     record.specSha256 !== plan.specSha256 ||
@@ -120,6 +128,8 @@ export async function publishDesktopLaunchRecord(input: {
 /** Historical data only. No session, approval or engine capability is reconstructed. */
 export async function readDesktopLaunchRecord(platform: DesktopPlatform, launchID: string) {
   Schema.decodeUnknownSync(ID)(launchID)
+  const v2 = await readDesktopLaunchRecordV2(platform, launchID)
+  if (v2) return v2
   const fixture = fixtureRecords.get(platform)?.get(launchID)
   const file = isNativeDesktopPlatform(platform)
     ? path.join("D:\\OpenCode-Benchmark\\Task24\\reports\\desktop-launch", launchID, "inventory.json")
@@ -132,3 +142,5 @@ export async function readDesktopLaunchRecord(platform: DesktopPlatform, launchI
   if (record.launchID !== launchID) throw new TypeError("TASK24_DESKTOP_RECORD_BINDING")
   return { recordSha256: text.sha256, record, live: false as const }
 }
+import { readDesktopLaunchRecordV2 } from "./inventory-v2"
+export { publishDesktopLaunchRecordV2 } from "./inventory-v2"

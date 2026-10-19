@@ -16,6 +16,9 @@ import {
 } from "./contracts"
 import { revalidateDesktopLaunchSessionV1 as revalidateDesktopLaunchSession } from "./launch"
 import { readDesktopText } from "./compatibility"
+import { isDesktopSessionV2 } from "./launch-v2"
+import { inspectDesktopLaunchV2, makeDesktopProfileRunnerV2, readDesktopLaunchStorageV2 } from "./inspection-v2"
+export { decodeDesktopStorageObservationV2 } from "./inspection-v2"
 
 const Disk = Schema.Struct({ path: Schema.String, fileID: Schema.String, volumeID: Schema.String })
 const Snapshot = Schema.Struct({
@@ -75,6 +78,7 @@ export function decodeDesktopStorageObservation(
   })
 }
 export function makeDesktopProfileRunner(input: { request: HostRequest; session: DesktopLaunchSession }): DockerRunner {
+  if (isDesktopSessionV2(input.session)) return makeDesktopProfileRunnerV2(input)
   const request = decodeHostRequest(input.request)
   return {
     async execute(invocation) {
@@ -110,6 +114,7 @@ export function makeDesktopProfileRunner(input: { request: HostRequest; session:
   }
 }
 export async function inspectDesktopLaunch(session: DesktopLaunchSession): Promise<DesktopLaunchInventory> {
+  if (isDesktopSessionV2(session)) return inspectDesktopLaunchV2(session)
   const missing: string[] = []
   const context = await revalidateDesktopLaunchSession(session)
   const raw = Schema.decodeUnknownSync(DesktopObservation)(await context.platform.observe(context.spec), {
@@ -150,6 +155,7 @@ export async function readDesktopLaunchStorage(input: {
   source: StorageSource
   session: DesktopLaunchSession
 }): Promise<StorageProof> {
+  if (isDesktopSessionV2(input.session)) return readDesktopLaunchStorageV2(input)
   const context = await revalidateDesktopLaunchSession(input.session)
   if (
     context.assurance !== "native" ||
