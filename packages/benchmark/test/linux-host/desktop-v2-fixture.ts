@@ -117,6 +117,16 @@ export async function desktopV2Fixture() {
     calls,
     expected,
     payload,
+    async seedEmptyWorkload() {
+      await fs.writeFile(
+        spec.disks.data.path,
+        canonicalJson({
+          schemaVersion: 1,
+          fixtureKind: "task24-workload-state",
+          scopes: { containers: [], swarm: [], kubernetes: [] },
+        }),
+      )
+    },
     setObservation(value: Record<string, unknown>) {
       observation = value
     },

@@ -123,6 +123,10 @@ export function requireDesktopReport(spec: DesktopLaunchSpec, report: DesktopCom
   return issued.platform
 }
 export async function auditDesktopCompatibility(raw: unknown, platform: DesktopPlatform, signal?: AbortSignal) {
+  if (raw && typeof raw === "object" && "schemaVersion" in raw && raw.schemaVersion === 2) {
+    const { auditDesktopCompatibilityV2 } = await import("./compatibility-v2")
+    return auditDesktopCompatibilityV2(raw, platform, signal)
+  }
   try {
     if (signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
     const spec = decodeDesktopLaunchSpec(raw)
@@ -154,6 +158,10 @@ export async function auditDesktopCompatibility(raw: unknown, platform: DesktopP
         )
       )
         throw new TypeError("TASK24_DESKTOP_FIXTURE_SCOPE")
+    }
+    if (isNativeDesktopPlatform(platform)) {
+      const { nativeDesktopMissingV2 } = await import("./compatibility-v2")
+      return desktopBlocked("desktop_compatibility_blocked", nativeDesktopMissingV2)
     }
     await revalidateDesktopSpec(spec)
     const rawReport = Schema.decodeUnknownSync(Compatibility)(await platform.audit(spec, signal), {
