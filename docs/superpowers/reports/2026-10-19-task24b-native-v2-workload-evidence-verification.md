@@ -102,6 +102,17 @@ Go pclntab 在 backend file offset `88651968`；PE ImageBase `0x140000000`，tex
 
 ## 后续授权与停点
 
+### 发布与清理实测
+
+NW1 代码提交 `10463e9314d321ddfd29bdb3a75416cb88fe1f60`，独立审查记录提交 `7bf72bfa26e583784910ee922a6b4e39bb920805`。已正常 push 到 `https://github.com/EthanLyu30/opencode.git` 的 dev，并以 `ls-remote --refs fork refs/heads/dev` 核实与本地 HEAD 一致；包含此前两项规格/计划提交。未 force push、未创建 PR。保留原 pre-push hook，31/31 workspace typecheck 成功，30.315s。推送仅用临时 D 环境，Bun 包装器显式禁自动 env-file，使用合成 `.env` 验证嵌套脚本未加载；不读取真实项目环境文件。
+
+最终清理前只读核实了两个准确自有根的 owner/计划标记、规范路径及子树无 reparse point。但 PowerShell 原生删除命令在创建进程前被策略拒绝，**没有完成清理，也未换工具或方式重试**。因此以下临时物仍保留；不含用户正式交付，不得将它们当后续操作许可：
+
+- `D:\OpenCode-Benchmark\Task24\tmp\bprep1-native-v2-20261019-91c4d7ab`：本轮测试夹具、D 缓存、静态采样脚本、scoped tsconfig、测试/推送日志及仅含虚拟标记的 env 检查样本。
+- `D:\OpenCode-Audit\.superpowers\sdd\2026-10-19-task24b-native-v2-workload-evidence`：本轮执行账本、测试命令包装器、brief 和审查中间文件。
+
+这不涉及此前已被拒绝清理的任何目录；旧残留、旧未跟踪报告及正式文件继续原样保留。此清理实测记录另作纯文档提交和正常推送，准确最终 HEAD 以 Git 历史和最终交付核实为准。
+
 独立只读审查已覆盖 `f5cfa061aa..10463e9314`，结论为本次 NW1-only 交付可发布，Critical/Important/Minor 均为0；审查者独立复算七成员 canonical 安装摘要一致。审查没有另跑完整套件、重新采样安装或访问外部文档，这些依据本轮执行者的实际结果，不宣称双重验证。
 
 对审查保留项的逐项裁定如下，均不扩大本次权限：
