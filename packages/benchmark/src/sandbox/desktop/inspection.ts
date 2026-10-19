@@ -14,7 +14,7 @@ import {
   type DesktopPreparedProfile,
   type DesktopLaunchInventory,
 } from "./contracts"
-import { revalidateDesktopLaunchSession } from "./launch"
+import { revalidateDesktopLaunchSessionV1 as revalidateDesktopLaunchSession } from "./launch"
 import { readDesktopText } from "./compatibility"
 
 const Disk = Schema.Struct({ path: Schema.String, fileID: Schema.String, volumeID: Schema.String })
