@@ -252,7 +252,11 @@ export function readDesktopConsumedRecordAnchorV2(
   requireDesktopConsumedGrantV2(profile, approval)
   return freeze(structuredClone(consumed.get(approval)!.anchor))
 }
-export async function consumeDesktopGrantV2(profile: DesktopPreparedProfileV2, approval: DesktopLaunchApprovalV2) {
+export async function consumeDesktopGrantV2(
+  profile: DesktopPreparedProfileV2,
+  approval: DesktopLaunchApprovalV2,
+  signal?: AbortSignal,
+) {
   requireProfile(profile)
   requireDesktopApprovalV2(approval, profile.plan, "start-readonly", approval.sid)
   if (approval.phase !== "start-readonly" || approval.manifestSha256 !== profile.manifestSha256)
@@ -269,7 +273,12 @@ export async function consumeDesktopGrantV2(profile: DesktopPreparedProfileV2, a
   used.add(approval.nonce)
   usedStartNonces.set(key, used)
   await withDesktopPublicationV2(
-    { root: profile.plan.paths.root, mode: "profile", parents: proof.parents, signal: AbortSignal.timeout(30000) },
+    {
+      root: profile.plan.paths.root,
+      mode: "profile",
+      parents: proof.parents,
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000),
+    },
     async (io) => {
       await revalidateDesktopProfileV2(profile, "prepared")
       requireDesktopApprovalV2(approval, profile.plan, "start-readonly", approval.sid)
@@ -281,12 +290,18 @@ export async function consumeDesktopGrantV2(profile: DesktopPreparedProfileV2, a
 export async function writeDesktopActiveLockV2(
   profile: DesktopPreparedProfileV2,
   approval: DesktopLaunchApprovalV2,
+  signal?: AbortSignal,
 ): Promise<FileIdentity> {
   requireDesktopConsumedGrantV2(profile, approval)
   requireDesktopApprovalV2(approval, profile.plan, "start-readonly", approval.sid)
   const parents = (await readDesktopDirectoryV2(profile.plan.paths.root)).parents
   const lock = await withDesktopPublicationV2(
-    { root: profile.plan.paths.root, mode: "profile", parents, signal: AbortSignal.timeout(30000) },
+    {
+      root: profile.plan.paths.root,
+      mode: "profile",
+      parents,
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000),
+    },
     async (io) => {
       await revalidateDesktopProfileV2(profile, "prepared")
       return io.write(

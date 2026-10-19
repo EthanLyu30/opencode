@@ -36,6 +36,7 @@ import {
   readDesktopSettingsFailure,
   withDesktopRuntimeSettings,
   observeDesktopStoppingSettings,
+  withDesktopStoppingSettings,
   desktopSettingsError,
   type DesktopSettingsBootstrap,
   type DesktopSettingsSeal,
@@ -180,7 +181,10 @@ export async function startDesktopReadonlyV2(input: {
   let session: DesktopLaunchSession | undefined,
     bootstrap: DesktopSettingsBootstrap | undefined,
     lock: FileIdentity | undefined,
-    attempted = false
+    attempted = false,
+    consuming = false,
+    creatingLock = false
+  let startOperation: Promise<unknown> | undefined
   const deadline = Date.now() + 120000
   const run = <T>(operation: Promise<T>) =>
     boundedDesktopOperation(operation, Math.min(deadline, input.approval.expiresAt) - Date.now(), input.signal)
@@ -205,17 +209,39 @@ export async function startDesktopReadonlyV2(input: {
     )
       throw new TypeError("TASK24_DESKTOP_START_CONFLICT")
     const authority = readDesktopPlanAuthorityV2(input.profile.plan)
-    const startOperation = withDesktopWorkloadFact(authority.workload, input.spec, input.platform, async () => {
-      await run(consumeDesktopGrantV2(input.profile, input.approval))
-      lock = await run(writeDesktopActiveLockV2(input.profile, input.approval))
-      bootstrap = await run(beginDesktopSettingsRuntime(input))
-      requireDesktopApprovalV2(input.approval, input.profile.plan, "start-readonly", observation.sid)
-      if (input.signal.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
-      attempted = true
-      // The caller's deadline may return uncertainty, but cannot release the protected
-      // workload while an already invoked start still has not actually returned.
-      return input.platform.start(input.profile.plan)
-    })
+    const stageSignal = AbortSignal.any([
+      input.signal,
+      AbortSignal.timeout(Math.max(1, Math.min(deadline, input.approval.expiresAt) - Date.now())),
+    ])
+    const checkStart = () => {
+      if (stageSignal.aborted || Date.now() >= Math.min(deadline, input.approval.expiresAt))
+        throw new TypeError("TASK24_DESKTOP_CANCELLED")
+    }
+    startOperation = withDesktopWorkloadFact(
+      authority.workload,
+      input.spec,
+      input.platform,
+      async () => {
+        checkStart()
+        consuming = true
+        // Resource-producing operations acknowledge completion/cancellation before ownership is discarded.
+        await consumeDesktopGrantV2(input.profile, input.approval, stageSignal)
+        consuming = false
+        checkStart()
+        creatingLock = true
+        lock = await writeDesktopActiveLockV2(input.profile, input.approval, stageSignal)
+        creatingLock = false
+        checkStart()
+        bootstrap = await beginDesktopSettingsRuntime({ ...input, signal: stageSignal })
+        requireDesktopApprovalV2(input.approval, input.profile.plan, "start-readonly", observation.sid)
+        checkStart()
+        attempted = true
+        // The caller's deadline may return uncertainty, but cannot release the protected
+        // workload while an already invoked start still has not actually returned.
+        return input.platform.start(input.profile.plan)
+      },
+      stageSignal,
+    )
     const process = Schema.decodeUnknownSync(ProcessIdentity)(await run(startOperation), { onExcessProperty: "error" })
     if (
       process.ownerSID !== observation.sid ||
@@ -249,9 +275,17 @@ export async function startDesktopReadonlyV2(input: {
     await run(revalidateDesktopLaunchSessionV2(session, input.signal))
     return { kind: "ready", value: session }
   } catch (error) {
+    // Before an actual start there is no unbounded external effect: drain all resource
+    // acquisition acknowledgments so a late lock/bootstrap is still owned by this catch.
+    if (startOperation && !attempted) await startOperation.catch(() => {})
     const failure = desktopSettingsError(error)
-    let cleanup: "stopped" | "uncertain" | "not_needed" = attempted ? "uncertain" : "not_needed",
-      cleanupCode: string | null = attempted ? "start_identity_unobserved" : null
+    const resourceUncertain = consuming
+      ? "grant_consumption_unobserved"
+      : creatingLock
+        ? "active_publication_unobserved"
+        : null
+    let cleanup: "stopped" | "uncertain" | "not_needed" = attempted || resourceUncertain ? "uncertain" : "not_needed",
+      cleanupCode: string | null = attempted ? "start_identity_unobserved" : resourceUncertain
     if (session) {
       states.get(session)!.failureCode = failure
       const stopped = await stopDesktopLaunchV2(session)
@@ -297,24 +331,26 @@ export async function stopDesktopLaunchV2(session: DesktopLaunchSession): Promis
       // Ownership, not mutable configuration or grant expiry, is the stop prerequisite.
       owned(await run(state.platform.observe(state.spec, signal)), state, true)
       state.phase = "stopping"
-      try {
-        await run(observeDesktopStoppingSettings(session))
-      } catch (error) {
-        state.failureCode ??= desktopSettingsError(error)
-      }
-      if ((await run(state.platform.stop(state.process))) !== "stopped") throw new TypeError("stop_not_confirmed")
-      try {
-        await run(observeDesktopStoppingSettings(session))
-      } catch (error) {
-        state.failureCode ??= desktopSettingsError(error)
-      }
-      const after = Schema.decodeUnknownSync(DesktopObservation)(
-        await run(state.platform.observe(state.spec, signal)),
-        { onExcessProperty: "error" },
-      )
-      state.last = after
-      if (after.runningDocker || after.runningWsl || after.process || after.pipe || after.phase !== "stopped")
-        throw new TypeError("stop_residuals_observed")
+      await withDesktopStoppingSettings(session, async () => {
+        try {
+          await run(observeDesktopStoppingSettings(session))
+        } catch (error) {
+          state.failureCode ??= desktopSettingsError(error)
+        }
+        if ((await run(state.platform.stop(state.process))) !== "stopped") throw new TypeError("stop_not_confirmed")
+        try {
+          await run(observeDesktopStoppingSettings(session))
+        } catch (error) {
+          state.failureCode ??= desktopSettingsError(error)
+        }
+        const after = Schema.decodeUnknownSync(DesktopObservation)(
+          await run(state.platform.observe(state.spec, signal)),
+          { onExcessProperty: "error" },
+        )
+        state.last = after
+        if (after.runningDocker || after.runningWsl || after.process || after.pipe || after.phase !== "stopped")
+          throw new TypeError("stop_residuals_observed")
+      })
     } catch (error) {
       cleanupCode = desktopSettingsError(error)
     } finally {

@@ -81,18 +81,32 @@ export async function withDesktopWorkloadFact<T>(
   spec: DesktopSpecVersioned,
   platform: DesktopPlatform,
   use: () => Promise<T>,
+  acquisitionSignal?: AbortSignal,
 ): Promise<T> {
+  if (acquisitionSignal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
   const context = await requireFact(fact, spec, platform),
     root = path.dirname(context.state.file.path),
     parents = (await readDesktopDirectoryV2(root)).parents
-  return withDesktopPublicationV2({ root, mode: "read", parents, signal: AbortSignal.timeout(120000) }, async (io) => {
-    const relative = path.basename(context.state.file.path)
-    await io.acquire([relative])
-    const file = await io.read(relative)
-    if (canonicalJson(file.identity) !== canonicalJson(context.state.file))
-      throw new TypeError("TASK24_DESKTOP_WORKLOAD_DRIFT")
-    validate(file.bytes)
-    await requireFact(fact, spec, platform)
-    return use()
-  })
+  const protection = new AbortController(),
+    onAbort = () => protection.abort()
+  acquisitionSignal?.addEventListener("abort", onAbort, { once: true })
+  if (acquisitionSignal?.aborted) onAbort()
+  try {
+    return await withDesktopPublicationV2({ root, mode: "read", parents, signal: protection.signal }, async (io) => {
+      const relative = path.basename(context.state.file.path)
+      await io.acquire([relative])
+      const file = await io.read(relative)
+      if (canonicalJson(file.identity) !== canonicalJson(context.state.file))
+        throw new TypeError("TASK24_DESKTOP_WORKLOAD_DRIFT")
+      validate(file.bytes)
+      await requireFact(fact, spec, platform)
+      if (acquisitionSignal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
+      // Once an actual effect is invoked, only its completed return releases protection.
+      // The caller still has its original 120s wait/authority deadline, never renewed here.
+      acquisitionSignal?.removeEventListener("abort", onAbort)
+      return use()
+    })
+  } finally {
+    acquisitionSignal?.removeEventListener("abort", onAbort)
+  }
 }

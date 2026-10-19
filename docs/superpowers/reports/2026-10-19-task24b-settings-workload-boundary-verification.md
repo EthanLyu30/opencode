@@ -4,7 +4,7 @@
 
 ## 结论和适用范围
 
-本轮无 Docker 全量软件测试已通过，状态为 `software_fixture_verified`，不是原盘 Docker 启动许可或 Linux 验收。独立整段审查和 push 尚待完成，完成后以实际结果更新本报告。
+本轮 SW0–SW9 软件交付已通过无 Docker 验证，状态为 `software_fixture_verified`。独立整段审查发现的 4 项 Important 均在同一轮以 RED→GREEN 修复，最终全包 462 pass / 10 原有 skip / 0 fail。无延期 Minor。原盘维持 `native_blocked`，不等于 Docker 启动许可或 Linux 真实验收。
 
 v2 使用 bigint 精确身份，v1 身份算法和 v1 NT-handle helper 保持原样。新模块对版本显式分流；原视觉流程、workflow 租约/重试/预算、公开 StorageProof/HostRequest、生产连接配置、评测题目/分组/次数和现有部署没有调整。
 
@@ -50,14 +50,27 @@ v2 存储摘要严格绑定 `schemaVersion:2`、intent、policy、当前 runtime
 
 | 命令（benchmark 包目录）                                 | 实际结果                                                                 |
 | -------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `test ./test/linux-host --timeout 30000 --only-failures` | 184 pass / 0 fail，1235 assertions，45 files，257.05s，exit 0            |
-| `test --timeout 30000 --only-failures`                   | 457 pass / 10 skip / 0 fail，2274 assertions，115 files，258.88s，exit 0 |
+| `test ./test/linux-host --timeout 30000 --only-failures` | 189 pass / 0 fail，1246 assertions，46 files，281.40s，exit 0            |
+| `test --timeout 30000 --only-failures`                   | 462 pass / 10 skip / 0 fail，2285 assertions，116 files，286.91s，exit 0 |
 | `run typecheck`                                          | 最终重跑 exit 0                                                          |
 | `run typecheck --project <本轮 scoped config>`           | 最终重跑 exit 0                                                          |
 | 本轮文件 Prettier / `git diff --check`                   | 全范围本轮文件均 exit 0                                                  |
-| 全范围独立只读审查                                       | 待完成                                                                   |
+| 全范围独立只读审查                                       | 1 次；0 Critical / 4 Important / 0 Minor；同一修复轮覆盖全部四项         |
 
 scoped config 包含全部 src、linux-host 测试及现有 desktop-launch/linux-host/accept-linux-host 三脚本，不通过删减收集范围、增 skip 或放宽旧时间条件消除失败。Git pre-push 的根仓库 typecheck 不绕过。
+
+### 独立审查与唯一修复轮
+
+审查使用新上下文 `gpt-6-astra`，只读完整 `ec7fd6d..23e34b0` 范围、规格/计划及裁决，没有运行测试、改文件或调度二次审查。四项 Important 经作者核实后全部采纳，无延期 Minor。
+
+| 发现                                  | 覆盖回归与修复                                                                                                                                      |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| observed 漂移在切入 stopping 时被吸收 | 直接合法 Rename 后调用 stop，不先调用 use；停止前与原 seal 比较，成功收尾仍保留 drift 主失败                                                        |
+| start 到期后停止操作缺连续父链        | 到期并确认旧窗口关闭后，在 onStop 内尝试父目录 Rename（须拒绝）及合法目标 Rename（须成功）；独立 stop 父链横跨前检查、实际停止和后检查              |
+| 取消丢弃晚到 active/bootstrap         | 独立自有 Bun 子进程只延迟真实已签发资源的交付，不伪造 token；资源产生操作使用取消确认并被 join，捕获迟到归属后收尾，不把未观察的创建说成 not_needed |
+| 独立 120 秒计时释放仍待返回的启动保护 | 去除 helper 自己的效果期限，分离取得取消与已调用效果生命周期；调用者原 120 秒等待/使用权限不延长，未知启动仍报 uncertain                            |
+
+五个新增回归先全红 0/5（34.53s）；修复后分组 2/0（17.55s）和 3/0（20.98s），再与 runtime/E2E/workload 合跑 17/0（82.83s），最终全量结果见上表。资源交付屏障和独立计时调用观察仅存在于隔离测试子进程：没有修改全局 Date/系统时钟，没有增加 native 可注入时钟，也没有声称实际等待超过 120 秒；仍有真实 Windows 文件锁/替换/释放断言。原调用者启动 120000ms、轮询 200ms、停止 30000ms 均未改变。
 
 ## 实施裁决（按记录顺序）
 
@@ -72,6 +85,14 @@ scoped config 包含全部 src、linux-host 测试及现有 desktop-launch/linux
 9. v2 inspection/inventory 独立适配，固定 record-only 相对句柄发布诊断；代价是额外适配及很小的发布模式。
 10. v2 设置允许启动后保存，用当前 seal+实际 mtime 约束，wslConfig 仍须预先存在；代价是 v2 必须依赖完整租约/物理链，不能借用 v1 的 seed/时间算法；native 仍拒绝。
 11. 为满足最终审查必须覆盖已提交整段源码的执行顺序，SW9 先提交已验证源码与明确标记待审查的报告，再做一次全范围独立审查及最终报告续提交；不提前 push 或宣告交付完成。代价是多一份报告状态更新提交，不改变任何验收或操作门禁。
+12. 调用者原 120 秒等待/使用期限不变，但已调用效果的保护跟随其实际返回，取得阶段单独确认取消。代价是未完成的合成操作可保留自有只读保护至返回或控制器退出，绝不以此续发使用权或放行 native。
+13. 审查不判断被明确排除的真实 Docker/WSL 兼容、native 目录/采集/停止；继续拒绝并另获批准。代价是软件交付不等于真实 native 就绪。
+14. 审查不判断超出合成链的真实活动盘/daemon 真实性；此处不能签发 native proof/receipt。代价是真实 Linux 验收仍待完成。
+15. 不将同 SID 恶意代码/管理员纳入 OS 安全沙箱承诺（规格第四节已明确）；所有链接/身份/句柄/竞态检查仍保留。代价是不适用于恶意特权共租环境。
+16. 审查不修 v1 数字身份精度，遵守用户明确增量授权。代价是旧精度限制仍在旧路径，不能暗中转成 v2。
+17. fixture session 拒绝真实 CLI/原生存储执行不是缺失的放行功能。代价是未来真实适配仍须证据/授权，不能切一个 fixture 开关启用。
+18. 独立审查只读、未重新执行测试；作者另行核实新进程日志和类型检查。代价是没有第二次独立测试执行，而源码审查确实独立。
+19. push、报告闭合及清理放在修复/复验后的交付门禁，不提前执行。代价是这些操作尚未确认时不能宣称最终交付成功。
 
 ## 未放行事项及下一阶段条件
 

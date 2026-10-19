@@ -40,6 +40,10 @@ type Runtime = {
   failure: string | null
   controller: AbortController
   timer: ReturnType<typeof setTimeout>
+  stopping: boolean
+  stoppingParents?: DesktopSettingsParents
+  stoppingSignal?: AbortSignal
+  transitionChecked: boolean
 }
 const bootstraps = new WeakMap<DesktopSettingsBootstrap, Runtime>()
 const begun = new WeakSet<DesktopLaunchApprovalV2>()
@@ -53,7 +57,9 @@ export function desktopSettingsError(error: unknown): string {
 export async function beginDesktopSettingsRuntime(input: {
   profile: DesktopPreparedProfileV2
   approval: DesktopLaunchApprovalV2
+  signal?: AbortSignal
 }): Promise<DesktopSettingsBootstrap> {
+  if (input.signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
   requireDesktopConsumedGrantV2(input.profile, input.approval)
   if (begun.has(input.approval)) throw new TypeError("TASK24_DESKTOP_SETTINGS_BOOTSTRAP_AUTHORITY")
   begun.add(input.approval)
@@ -68,6 +74,12 @@ export async function beginDesktopSettingsRuntime(input: {
     close = yes
   })
   const controller = new AbortController()
+  const onAcquireAbort = () => {
+    close()
+    controller.abort()
+  }
+  input.signal?.addEventListener("abort", onAcquireAbort, { once: true })
+  if (input.signal?.aborted) onAcquireAbort()
   const done = withDesktopSettingsParents(
     input.profile,
     async (parents) => {
@@ -77,28 +89,40 @@ export async function beginDesktopSettingsRuntime(input: {
     controller.signal,
   )
   void done.catch(reject)
-  const parents = await ready
-  const state: Runtime = {
-    ...input,
-    parents,
-    close,
-    done,
-    closed: false,
-    busy: false,
-    failure: null,
-    controller,
-    timer: setTimeout(
-      () => {
-        state.closed = true
-        close()
-        controller.abort()
-      },
-      Math.min(120000, input.approval.expiresAt - Date.now()),
-    ),
+  try {
+    const parents = await ready
+    if (input.signal?.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
+    const state: Runtime = {
+      ...input,
+      parents,
+      close,
+      done,
+      closed: false,
+      busy: false,
+      failure: null,
+      stopping: false,
+      transitionChecked: false,
+      controller,
+      timer: setTimeout(
+        () => {
+          state.closed = true
+          close()
+          controller.abort()
+        },
+        Math.min(120000, input.approval.expiresAt - Date.now()),
+      ),
+    }
+    const token = Object.freeze({ launchID: input.approval.launchID })
+    bootstraps.set(token, state)
+    return token
+  } catch (error) {
+    close()
+    controller.abort()
+    await done.catch(() => {})
+    throw error
+  } finally {
+    input.signal?.removeEventListener("abort", onAcquireAbort)
   }
-  const token = Object.freeze({ launchID: input.approval.launchID })
-  bootstraps.set(token, state)
-  return token
 }
 export function bindDesktopSettingsRuntime(bootstrap: DesktopSettingsBootstrap, session: DesktopLaunchSession): void {
   const state = bootstraps.get(bootstrap),
@@ -212,6 +236,40 @@ export async function withDesktopRuntimeSettings<T>(
     state.busy = false
   }
 }
+// Independent stop authority pins the chain across shutdown, not only across sampling.
+export async function withDesktopStoppingSettings<T>(session: DesktopLaunchSession, use: () => Promise<T>): Promise<T> {
+  const state = sessions.get(session),
+    context = requireDesktopSettingsSession(session)
+  if (!state || state.stopping || context.phase !== "stopping" || !context.stopConsumed || !context.stopDeadline)
+    throw new TypeError("TASK24_DESKTOP_SETTINGS_STOP_AUTHORITY")
+  state.stopping = true
+  let entered = false
+  const signal = AbortSignal.timeout(Math.max(1, context.stopDeadline - Date.now()))
+  try {
+    return await withDesktopSettingsParents(
+      state.profile,
+      async (parents) => {
+        entered = true
+        state.stoppingParents = parents
+        state.stoppingSignal = signal
+        try {
+          return await use()
+        } finally {
+          state.stoppingParents = undefined
+          state.stoppingSignal = undefined
+        }
+      },
+      signal,
+    )
+  } catch (error) {
+    if (entered) throw error
+    state.failure ??= desktopSettingsError(error)
+    // Configuration protection cannot revoke the already consumed, re-owned stop target.
+    return use()
+  } finally {
+    state.stopping = false
+  }
+}
 // Stop validates settings only for diagnostics, never to grant or veto process cleanup.
 export async function observeDesktopStoppingSettings(session: DesktopLaunchSession): Promise<void> {
   const state = sessions.get(session),
@@ -219,15 +277,16 @@ export async function observeDesktopStoppingSettings(session: DesktopLaunchSessi
   if (!state || context.phase !== "stopping" || !context.stopConsumed || !context.stopDeadline)
     throw new TypeError("TASK24_DESKTOP_SETTINGS_STOP_AUTHORITY")
   try {
-    await withDesktopSettingsParents(
-      state.profile,
-      (parents) =>
-        withDesktopSettingsLease(
-          parents,
-          async () => {},
-          AbortSignal.timeout(Math.max(1, context.stopDeadline! - Date.now())),
-        ),
-      AbortSignal.timeout(Math.max(1, context.stopDeadline - Date.now())),
+    if (!state.stoppingParents || !state.stoppingSignal) throw new TypeError("TASK24_DESKTOP_SETTINGS_STOP_PARENTS")
+    const transition = !state.transitionChecked
+    state.transitionChecked = true
+    await withDesktopSettingsLease(
+      state.stoppingParents,
+      async (lease) => {
+        if (transition && state.seal && sealView(state, lease, state.seal.sequence).sha256 !== state.seal.sha256)
+          throw new TypeError("TASK24_DESKTOP_SETTINGS_OBSERVED_DRIFT")
+      },
+      state.stoppingSignal,
     )
   } catch (error) {
     state.failure ??= desktopSettingsError(error)
