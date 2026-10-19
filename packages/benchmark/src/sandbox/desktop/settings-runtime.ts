@@ -8,6 +8,7 @@ import { requireDesktopActiveLockV2, requireDesktopConsumedGrantV2 } from "./pro
 import {
   withDesktopSettingsParents,
   withDesktopSettingsLease,
+  sampleDesktopSettingsLease,
   type DesktopSettingsParents,
   type DesktopSettingsLease,
   requireDesktopSettingsLease,
@@ -41,6 +42,7 @@ type Runtime = {
   timer: ReturnType<typeof setTimeout>
 }
 const bootstraps = new WeakMap<DesktopSettingsBootstrap, Runtime>()
+const begun = new WeakSet<DesktopLaunchApprovalV2>()
 const sessions = new WeakMap<DesktopLaunchSession, Runtime>()
 const seals = new WeakMap<DesktopSettingsSeal, { session: DesktopLaunchSession; lease: DesktopSettingsLease }>()
 export function desktopSettingsError(error: unknown): string {
@@ -53,6 +55,8 @@ export async function beginDesktopSettingsRuntime(input: {
   approval: DesktopLaunchApprovalV2
 }): Promise<DesktopSettingsBootstrap> {
   requireDesktopConsumedGrantV2(input.profile, input.approval)
+  if (begun.has(input.approval)) throw new TypeError("TASK24_DESKTOP_SETTINGS_BOOTSTRAP_AUTHORITY")
+  begun.add(input.approval)
   await requireDesktopActiveLockV2(input.profile, input.approval)
   if (input.approval.expiresAt <= Date.now()) throw new TypeError("TASK24_DESKTOP_SETTINGS_EXPIRED")
   let resolve!: (value: DesktopSettingsParents) => void, reject!: (error: unknown) => void, close!: () => void
@@ -158,25 +162,20 @@ export async function sealDesktopSettingsRuntime(
     state = requireRuntime(session, true)
     if (state.busy || state.seal) throw new TypeError("TASK24_DESKTOP_SETTINGS_SEAL_AUTHORITY")
     state.busy = true
-    // Acquisition retries are local, bounded, and never retry a use callback.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const value = await withDesktopSettingsLease(
-          state.parents,
-          async (lease) => sealView(state!, lease, 1),
-          signal,
-          true,
-        )
-        state.seal = value
-        return { kind: "ready", value }
-      } catch (error) {
-        const code = desktopSettingsError(error)
-        if (code === "TASK24_DESKTOP_SETTINGS_INCOMPLETE") return desktopBlocked("settings_pending")
-        if (code !== "TASK24_DESKTOP_SETTINGS_UNSTABLE" && code !== "TASK24_DESKTOP_V2_HANDLE_OPERATION") throw error
-        if (attempt === 2) throw error
-      }
+    try {
+      const value = await sampleDesktopSettingsLease(
+        state.parents,
+        async (lease) => sealView(state!, lease, 1),
+        signal,
+        true,
+      )
+      state.seal = value
+      return { kind: "ready", value }
+    } catch (error) {
+      if (desktopSettingsError(error) === "TASK24_DESKTOP_SETTINGS_INCOMPLETE")
+        return desktopBlocked("settings_pending")
+      throw error
     }
-    throw new TypeError("TASK24_DESKTOP_SETTINGS_UNSTABLE")
   } catch (error) {
     if (state && !state.seal) state.failure ??= desktopSettingsError(error)
     return desktopBlocked(desktopSettingsError(error))

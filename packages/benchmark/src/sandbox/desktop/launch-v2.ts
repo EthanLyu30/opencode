@@ -149,7 +149,7 @@ export async function revalidateDesktopLaunchSessionV2(session: DesktopLaunchSes
   const state = states.get(session),
     context = requireDesktopSettingsSession(session)
   if (!state || context.phase !== "observed") throw new TypeError("TASK24_DESKTOP_SESSION_AUTHORITY")
-  await withDesktopRuntimeSettings(session, seal => observeDesktopLaunchSessionV2(session, seal, signal), signal)
+  await withDesktopRuntimeSettings(session, (seal) => observeDesktopLaunchSessionV2(session, seal, signal), signal)
   return Object.freeze({
     spec: state.spec,
     profile: state.profile,
@@ -157,13 +157,17 @@ export async function revalidateDesktopLaunchSessionV2(session: DesktopLaunchSes
     assurance: "fixture" as const,
   })
 }
-export async function observeDesktopLaunchSessionV2(session: DesktopLaunchSession, seal: DesktopSettingsSeal, signal?: AbortSignal) {
+export async function observeDesktopLaunchSessionV2(
+  session: DesktopLaunchSession,
+  seal: DesktopSettingsSeal,
+  signal?: AbortSignal,
+) {
   const state = states.get(session)
   requireDesktopSettingsSeal(session, seal)
   if (!state) throw new TypeError("TASK24_DESKTOP_SESSION_AUTHORITY")
   await requireDesktopActiveLockV2(state.profile, state.approval)
-  const value = owned(await boundedDesktopOperation(state.platform.observe(state.spec, signal),15000,signal),state)
-  requireDesktopSettingsSeal(session,seal)
+  const value = owned(await boundedDesktopOperation(state.platform.observe(state.spec, signal), 15000, signal), state)
+  requireDesktopSettingsSeal(session, seal)
   return value
 }
 export async function startDesktopReadonlyV2(input: {
@@ -201,17 +205,18 @@ export async function startDesktopReadonlyV2(input: {
     )
       throw new TypeError("TASK24_DESKTOP_START_CONFLICT")
     const authority = readDesktopPlanAuthorityV2(input.profile.plan)
-    const process = await withDesktopWorkloadFact(authority.workload, input.spec, input.platform, async () => {
+    const startOperation = withDesktopWorkloadFact(authority.workload, input.spec, input.platform, async () => {
       await run(consumeDesktopGrantV2(input.profile, input.approval))
       lock = await run(writeDesktopActiveLockV2(input.profile, input.approval))
       bootstrap = await run(beginDesktopSettingsRuntime(input))
       requireDesktopApprovalV2(input.approval, input.profile.plan, "start-readonly", observation.sid)
       if (input.signal.aborted) throw new TypeError("TASK24_DESKTOP_CANCELLED")
       attempted = true
-      return Schema.decodeUnknownSync(ProcessIdentity)(await run(input.platform.start(input.profile.plan)), {
-        onExcessProperty: "error",
-      })
+      // The caller's deadline may return uncertainty, but cannot release the protected
+      // workload while an already invoked start still has not actually returned.
+      return input.platform.start(input.profile.plan)
     })
+    const process = Schema.decodeUnknownSync(ProcessIdentity)(await run(startOperation), { onExcessProperty: "error" })
     if (
       process.ownerSID !== observation.sid ||
       !Object.values(input.spec.install).some((f) => canonicalJson(f) === canonicalJson(process.image))

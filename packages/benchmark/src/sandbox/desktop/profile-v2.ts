@@ -31,6 +31,7 @@ const consumed = new WeakMap<
   { profile: DesktopPreparedProfileV2; anchor: DesktopRecordAnchor }
 >()
 const active = new WeakMap<DesktopPreparedProfileV2, FileIdentity>()
+const usedStartNonces = new Map<string, Set<string>>()
 const text = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(bytes)
 function fail(error: unknown) {
   return desktopBlocked(
@@ -261,6 +262,12 @@ export async function consumeDesktopGrantV2(profile: DesktopPreparedProfileV2, a
   const anchor = path.dirname(profile.plan.paths.root),
     anchorID = (await readDesktopDirectoryV2(anchor)).fileID
   const proof = await readDesktopDirectoryV2(profile.plan.paths.root)
+  const key = profile.plan.paths.root + ":" + profile.rootIdentity
+  const used = usedStartNonces.get(key) ?? new Set<string>()
+  if (used.has(approval.nonce)) throw new TypeError("TASK24_DESKTOP_V2_NONCE_REPLAY")
+  // Burn the attempt before publication awaits: neither deletion nor concurrent requests can retry it.
+  used.add(approval.nonce)
+  usedStartNonces.set(key, used)
   await withDesktopPublicationV2(
     { root: profile.plan.paths.root, mode: "profile", parents: proof.parents, signal: AbortSignal.timeout(30000) },
     async (io) => {

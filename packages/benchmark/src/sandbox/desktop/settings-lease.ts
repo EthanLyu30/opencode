@@ -176,3 +176,36 @@ export async function withDesktopSettingsLease<T>(
     }
   }
 }
+
+/** Retries acquisition only. A callback (including its post-use checks) is never run twice. */
+export async function sampleDesktopSettingsLease<T>(
+  token: DesktopSettingsParents,
+  use: (lease: DesktopSettingsLease) => Promise<T>,
+  signal: AbortSignal,
+  bootstrap = false,
+): Promise<T> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let entered = false
+    try {
+      return await withDesktopSettingsLease(
+        token,
+        async (lease) => {
+          entered = true
+          return use(lease)
+        },
+        signal,
+        bootstrap,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ""
+      if (
+        entered ||
+        signal.aborted ||
+        !["TASK24_DESKTOP_SETTINGS_UNSTABLE", "TASK24_DESKTOP_V2_HANDLE_OPERATION"].includes(message)
+      )
+        throw error
+      if (attempt === 3) throw Object.assign(new TypeError("TASK24_DESKTOP_SETTINGS_UNSTABLE"), { attempts: 3 })
+    }
+  }
+  throw new TypeError("TASK24_DESKTOP_SETTINGS_UNSTABLE")
+}

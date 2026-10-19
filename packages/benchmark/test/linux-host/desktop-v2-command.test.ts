@@ -156,26 +156,33 @@ test("v2 malformed inputs and native evidence gaps have no output-tree effects",
   }
 }, 30000)
 
-test("v2 document or input identity drift never reaches preparation",async()=>{
-  const f=await profileFixtureV2()
+test("v2 document or input identity drift never reaches preparation", async () => {
+  const f = await profileFixtureV2()
   try {
-    const c=await controls(f)
-    await fs.writeFile(c.spec,canonicalJson({...f.spec,sourceSha256:"0".repeat(64)}))
-    const controller=makeDesktopLaunchController(f.platform,async()=>{f.calls.confirm++;return true})
-    let before=await tree(f.root)
-    expect((await controller(c.argv("prepare-profile"))).exitCode).toBe(2)
-    expect(f.calls.confirm).toBe(0);expect(await tree(f.root)).toEqual(before)
-    await fs.writeFile(c.spec,canonicalJson(f.spec))
-    const changed=makeDesktopLaunchController(f.platform,async()=>{
+    const c = await controls(f)
+    await fs.writeFile(c.spec, canonicalJson({ ...f.spec, sourceSha256: "0".repeat(64) }))
+    const controller = makeDesktopLaunchController(f.platform, async () => {
       f.calls.confirm++
-      const file=c.spec+".replacement"
-      await fs.writeFile(file,canonicalJson(f.spec));await fs.rename(file,c.spec)
       return true
     })
-    const result=await changed(c.argv("prepare-profile"))
-    expect(result.output).toMatchObject({code:"TASK24_DESKTOP_INPUT_DRIFT"})
+    let before = await tree(f.root)
+    expect((await controller(c.argv("prepare-profile"))).exitCode).toBe(2)
+    expect(f.calls.confirm).toBe(0)
+    expect(await tree(f.root)).toEqual(before)
+    await fs.writeFile(c.spec, canonicalJson(f.spec))
+    const changed = makeDesktopLaunchController(f.platform, async () => {
+      f.calls.confirm++
+      const file = c.spec + ".replacement"
+      await fs.writeFile(file, canonicalJson(f.spec))
+      await fs.rename(file, c.spec)
+      return true
+    })
+    const result = await changed(c.argv("prepare-profile"))
+    expect(result.output).toMatchObject({ code: "TASK24_DESKTOP_INPUT_DRIFT" })
     expect(f.calls.confirm).toBe(1)
     expect(await fs.exists(f.spec.profileRoot)).toBe(false)
-    expect([f.calls.start,f.calls.stop]).toEqual([0,0])
-  } finally {await f.close()}
-},30000)
+    expect([f.calls.start, f.calls.stop]).toEqual([0, 0])
+  } finally {
+    await f.close()
+  }
+}, 30000)

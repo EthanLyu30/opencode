@@ -175,3 +175,40 @@ test("v2 settings parents and completed leases cannot be cloned or replayed", as
     await f.close()
   }
 })
+
+test("one unstable sampling invocation stops at three real acquisitions without calling use", async () => {
+  const sample = (await import("../../src/sandbox/desktop/settings-lease")).sampleDesktopSettingsLease
+  expect(sample).toBeDefined()
+  const f = await profileFixtureV2()
+  try {
+    const profile = await f.prepareV2()
+    await f.emitRuntime()
+    const holder = await f.holdTarget("windows-daemon")
+    let calls = 0
+    try {
+      await api!.withDesktopSettingsParents(
+        profile,
+        async (parents) => {
+          const error = await sample(
+            parents,
+            async () => {
+              calls++
+              return "bad"
+            },
+            AbortSignal.timeout(5000),
+            true,
+          ).catch((e) => e)
+          expect(error.attempts).toBe(3)
+          expect(error.message).toBe("TASK24_DESKTOP_SETTINGS_UNSTABLE")
+          expect(calls).toBe(0)
+        },
+        AbortSignal.timeout(10000),
+      )
+    } finally {
+      await holder.release()
+    }
+    await fs.appendFile(profile.runtimeTargets.daemon, " ")
+  } finally {
+    await f.close()
+  }
+})

@@ -240,7 +240,11 @@ function validateSet(input: SettingsInput, partial: boolean): DesktopSettingsSem
   }
   const checked = input.files.map((f) => check(f, false))
   input.temporary.forEach((f) => check(f, true))
-  if (new Set(checked.map((f) => "FixtureEpoch" in f.value ? f.value.FixtureEpoch : undefined).filter((e) => e !== undefined)).size > 1)
+  if (
+    new Set(
+      checked.map((f) => ("FixtureEpoch" in f.value ? f.value.FixtureEpoch : undefined)).filter((e) => e !== undefined),
+    ).size > 1
+  )
     throw new TypeError("TASK24_DESKTOP_SETTINGS_CROSS_FILE")
   const files = checked.map(({ value, ...file }) => file).sort((a, b) => (a.target < b.target ? -1 : 1))
   return freeze({

@@ -4,10 +4,10 @@ import { confirmDesktopApprovalV2 } from "../../src/sandbox/desktop/approval-v2"
 import { startDesktopReadonly } from "../../src/sandbox/desktop/launch"
 import { withDesktopRuntimeSettings } from "../../src/sandbox/desktop/settings-runtime"
 
-export async function runtimeFixtureV2() {
+export async function runtimeFixtureV2(onStart?: (f: Awaited<ReturnType<typeof profileFixtureV2>>) => Promise<void>) {
   const f = await profileFixtureV2()
   const profile = await f.prepareV2()
-  f.onStart(() => f.emitRuntime())
+  f.onStart(() => (onStart ? onStart(f) : f.emitRuntime()))
   const approval = await confirmDesktopApprovalV2(f.startRaw(profile.manifestSha256), async () => true)
   const result = await startDesktopReadonly({
     spec: f.spec,
