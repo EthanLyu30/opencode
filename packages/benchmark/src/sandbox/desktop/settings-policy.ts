@@ -162,13 +162,22 @@ export function desktopTemporaryNames(policy: DesktopSettingsPolicy) {
   )
 }
 
-export function validateDesktopSettingsSet(input: {
+type SettingsInput = {
   policy: DesktopSettingsPolicy
   intent: DesktopIntentV2
   files: readonly DesktopSettingsBytes[]
   temporary: readonly DesktopSettingsBytes[]
   phase: "starting" | "observed" | "stopping"
-}): DesktopSettingsSemantics {
+}
+export function validateDesktopSettingsSet(input: SettingsInput): DesktopSettingsSemantics {
+  return validateSet(input, false)
+}
+// Data validation only: never issues a lease, runtime window or seal.
+export function validateDesktopSettingsPartialSet(input: SettingsInput): void {
+  if (input.phase !== "starting") throw new TypeError("TASK24_DESKTOP_SETTINGS_PHASE")
+  validateSet(input, true)
+}
+function validateSet(input: SettingsInput, partial: boolean): DesktopSettingsSemantics {
   Schema.decodeUnknownSync(DesktopIntent)(input.intent, { onExcessProperty: "error" })
   const state = requireDesktopSettingsPolicy(input.policy),
     spec = state.spec,
@@ -181,8 +190,8 @@ export function validateDesktopSettingsSet(input: {
   )
     throw new TypeError("TASK24_DESKTOP_SETTINGS_POLICY_BINDING")
   if (
-    input.files.length !== 3 ||
-    new Set(input.files.map((f) => f.target)).size !== 3 ||
+    (partial ? input.files.length > 3 : input.files.length !== 3) ||
+    new Set(input.files.map((f) => f.target)).size !== input.files.length ||
     input.temporary.length > 3 ||
     new Set(input.temporary.map((f) => f.relative)).size !== input.temporary.length ||
     input.files.reduce((n, f) => n + f.bytes.length, 0) > limits.filesBytes ||
@@ -211,8 +220,14 @@ export function validateDesktopSettingsSet(input: {
     )
       throw new TypeError("TASK24_DESKTOP_SETTINGS_TARGET")
     const raw = parseDesktopSettingsJson(file.bytes, limits.fileBytes)
-    const value =
-      file.target === "settings-store"
+    const seed =
+      partial &&
+      !isTemporary &&
+      file.target === "settings-store" &&
+      new TextDecoder().decode(file.bytes) === canonicalJson(input.intent.expected)
+    const value = seed
+      ? input.intent.expected
+      : file.target === "settings-store"
         ? Schema.decodeUnknownSync(Settings)(raw, { onExcessProperty: "error" })
         : Schema.decodeUnknownSync(Daemon)(raw, { onExcessProperty: "error" })
     return {
@@ -225,7 +240,7 @@ export function validateDesktopSettingsSet(input: {
   }
   const checked = input.files.map((f) => check(f, false))
   input.temporary.forEach((f) => check(f, true))
-  if (new Set(checked.map((f) => f.value.FixtureEpoch)).size !== 1)
+  if (new Set(checked.map((f) => "FixtureEpoch" in f.value ? f.value.FixtureEpoch : undefined).filter((e) => e !== undefined)).size > 1)
     throw new TypeError("TASK24_DESKTOP_SETTINGS_CROSS_FILE")
   const files = checked.map(({ value, ...file }) => file).sort((a, b) => (a.target < b.target ? -1 : 1))
   return freeze({

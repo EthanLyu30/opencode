@@ -8,6 +8,7 @@ import { readDesktopPlanAuthorityV2 } from "./planning-v2"
 import {
   desktopTemporaryNames,
   validateDesktopSettingsSet,
+  validateDesktopSettingsPartialSet,
   type DesktopSettingsPolicy,
   type DesktopSettingsBytes,
   type DesktopSettingsSemantics,
@@ -75,7 +76,7 @@ export function requireDesktopSettingsLease(lease: DesktopSettingsLease) {
     throw new TypeError("TASK24_DESKTOP_SETTINGS_LEASE_AUTHORITY")
   return lease
 }
-async function inventory(state: ParentState) {
+async function inventory(state: ParentState, partial = false) {
   const root = state.profile.plan.paths.root,
     targets = state.profile.plan.runtimeTargets
   const finals = Object.entries(targets).map(([target, file]) => ({
@@ -99,7 +100,7 @@ async function inventory(state: ParentState) {
       entries.push(known)
     }
   }
-  if (finals.some((f) => !entries.some((e) => e.relative === f.relative)))
+  if (!partial && finals.some((f) => !entries.some((e) => e.relative === f.relative)))
     throw new TypeError("TASK24_DESKTOP_SETTINGS_INCOMPLETE")
   if (entries.length > 6) throw new TypeError("TASK24_DESKTOP_SETTINGS_SET_LIMIT")
   return entries.sort((a, b) => (a.relative < b.relative ? -1 : 1))
@@ -109,6 +110,7 @@ export async function withDesktopSettingsLease<T>(
   token: DesktopSettingsParents,
   use: (lease: DesktopSettingsLease) => Promise<T>,
   signal: AbortSignal,
+  bootstrap = false,
 ): Promise<T> {
   const state = requireParents(token)
   if (state.leased || signal.aborted) throw new TypeError("TASK24_DESKTOP_SETTINGS_LEASE_BUSY")
@@ -117,10 +119,11 @@ export async function withDesktopSettingsLease<T>(
     lease: DesktopSettingsLease | undefined
   try {
     await revalidateDesktopProfileV2(state.profile, "immutable")
-    const names = await inventory(state)
+    const names = await inventory(state, bootstrap)
+    if (names.length === 0) throw new TypeError("TASK24_DESKTOP_SETTINGS_INCOMPLETE")
     await state.io.acquire(names.map((f) => f.relative))
     acquired = true
-    if (canonicalJson(names) !== canonicalJson(await inventory(state)))
+    if (canonicalJson(names) !== canonicalJson(await inventory(state, bootstrap)))
       throw new TypeError("TASK24_DESKTOP_SETTINGS_UNSTABLE")
     const files: DesktopSettingsBytes[] = [],
       temporary: DesktopSettingsBytes[] = []
@@ -133,13 +136,18 @@ export async function withDesktopSettingsLease<T>(
       })
       ;(state.profile.plan.runtimeTargets[entry.target] === file.identity.path ? files : temporary).push(value)
     }
-    const semantics = validateDesktopSettingsSet({
+    const input = {
       policy: state.policy,
       intent: state.profile.plan.intent,
       files,
       temporary,
-      phase: "observed",
-    })
+      phase: bootstrap ? ("starting" as const) : ("observed" as const),
+    }
+    if (bootstrap && files.length !== 3) {
+      validateDesktopSettingsPartialSet(input)
+      throw new TypeError("TASK24_DESKTOP_SETTINGS_INCOMPLETE")
+    }
+    const semantics = validateDesktopSettingsSet(input)
     lease = Object.freeze({
       files: Object.freeze(files),
       temporary: Object.freeze(temporary),

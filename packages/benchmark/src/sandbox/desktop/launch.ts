@@ -24,6 +24,16 @@ import {
   removeDesktopActiveLock,
 } from "./profile"
 import { isNativeDesktopPlatform } from "./platform"
+import {
+  isDesktopSessionV2,
+  startDesktopReadonlyV2,
+  stopDesktopLaunchV2,
+  revalidateDesktopLaunchSessionV2,
+  readDesktopAttemptDiagnosticsV2,
+  readDesktopAttemptCleanupV2,
+} from "./launch-v2"
+import type { DesktopLaunchSpecV2, DesktopPreparedProfileV2, DesktopLaunchApprovalV2 } from "./v2-contracts"
+export { requireDesktopSettingsSession } from "./launch-v2"
 
 type LaunchState = {
   spec: DesktopLaunchSpec
@@ -71,10 +81,10 @@ function diagnostic(
   )
 }
 export function readDesktopAttemptDiagnostics(result: object) {
-  return diagnosticFacts.get(result)
+  return diagnosticFacts.get(result) ?? readDesktopAttemptDiagnosticsV2(result)
 }
 export function readDesktopAttemptCleanup(result: object) {
-  return attemptCleanup.get(result) ?? "uncertain"
+  return attemptCleanup.get(result) ?? readDesktopAttemptCleanupV2(result) ?? "uncertain"
 }
 export async function boundedDesktopOperation<T>(
   operation: Promise<T>,
@@ -139,6 +149,10 @@ function requireOwnedProcess(raw: unknown, state: LaunchState, allowStarting = f
   return observed
 }
 export async function revalidateDesktopLaunchSession(session: DesktopLaunchSession, signal?: AbortSignal) {
+  if (isDesktopSessionV2(session)) return revalidateDesktopLaunchSessionV2(session, signal)
+  return revalidateDesktopLaunchSessionV1(session, signal)
+}
+export async function revalidateDesktopLaunchSessionV1(session: DesktopLaunchSession, signal?: AbortSignal) {
   const state = sessions.get(session)
   if (!state || state.stopped || state.approval.expiresAt <= Date.now())
     throw new TypeError("TASK24_DESKTOP_SESSION_AUTHORITY")
@@ -153,7 +167,42 @@ export async function revalidateDesktopLaunchSession(session: DesktopLaunchSessi
     assurance: state.assurance,
   })
 }
-export async function startDesktopReadonly(input: {
+export function startDesktopReadonly(input: {
+  spec: DesktopLaunchSpecV2
+  profile: DesktopPreparedProfileV2
+  approval: DesktopLaunchApprovalV2
+  platform: DesktopPlatform
+  signal: AbortSignal
+}): Promise<Gate<DesktopLaunchSession>>
+export function startDesktopReadonly(input: {
+  spec: DesktopLaunchSpec
+  profile: DesktopPreparedProfile
+  approval: DesktopLaunchApproval
+  platform: DesktopPlatform
+  signal: AbortSignal
+}): Promise<Gate<DesktopLaunchSession>>
+export async function startDesktopReadonly(
+  input:
+    | {
+        spec: DesktopLaunchSpec
+        profile: DesktopPreparedProfile
+        approval: DesktopLaunchApproval
+        platform: DesktopPlatform
+        signal: AbortSignal
+      }
+    | {
+        spec: DesktopLaunchSpecV2
+        profile: DesktopPreparedProfileV2
+        approval: DesktopLaunchApprovalV2
+        platform: DesktopPlatform
+        signal: AbortSignal
+      },
+): Promise<Gate<DesktopLaunchSession>> {
+  if (input.spec.schemaVersion === 2)
+    return startDesktopReadonlyV2(input as Parameters<typeof startDesktopReadonlyV2>[0])
+  return startDesktopReadonlyV1(input as Parameters<typeof startDesktopReadonlyV1>[0])
+}
+async function startDesktopReadonlyV1(input: {
   spec: DesktopLaunchSpec
   profile: DesktopPreparedProfile
   approval: DesktopLaunchApproval
@@ -267,6 +316,7 @@ export async function startDesktopReadonly(input: {
   }
 }
 export async function stopDesktopLaunch(session: DesktopLaunchSession): Promise<Gate<"stopped">> {
+  if (isDesktopSessionV2(session)) return stopDesktopLaunchV2(session)
   const state = sessions.get(session)
   if (!state) return desktopBlocked("TASK24_DESKTOP_SESSION_AUTHORITY")
   if (state.stopped) return { kind: "ready", value: "stopped" }

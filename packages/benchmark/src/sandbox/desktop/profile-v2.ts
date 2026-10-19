@@ -311,3 +311,10 @@ export async function removeDesktopActiveLockV2(profile: DesktopPreparedProfileV
   )
   active.delete(profile)
 }
+export async function requireDesktopActiveLockV2(profile: DesktopPreparedProfileV2, approval: DesktopLaunchApprovalV2) {
+  requireDesktopConsumedGrantV2(profile, approval)
+  const lock = active.get(profile)
+  if (!lock || canonicalJson((await readDesktopFileV2(lock.path)).identity) !== canonicalJson(lock))
+    throw new TypeError("TASK24_DESKTOP_V2_ACTIVE_LOCK")
+  return lock
+}
