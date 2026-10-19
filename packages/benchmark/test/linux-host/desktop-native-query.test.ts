@@ -6,6 +6,56 @@ const query = await desktopFeature<typeof import("../../src/sandbox/desktop/nati
 const script = await desktopFeature<typeof import("../../src/sandbox/desktop/native-script")>("native-script")
 const processProbe = await desktopFeature<typeof import("../../src/sandbox/desktop/native-process")>("native-process")
 
+async function runNativeInitialization(output: string) {
+  const source = script.desktopNativeQueryScript!()
+  const end = source.indexOf("$identity=")
+  expect(end).toBeGreaterThan(0)
+  // Exercise production initialization without querying any real host metadata.
+  return processProbe.runDesktopProbe!({
+    exe: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    argv: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(source.slice(0, end) + output, "utf16le").toString("base64"),
+    ],
+    timeoutMs: 10000,
+    stdoutLimit: 8192,
+    stderrLimit: 8192,
+  })
+}
+
+test("native query initialization suppresses progress without polluting metadata", async () => {
+  const result = await runNativeInitialization(
+    `Write-Progress -Activity 'native-query-fixture' -Status 'initializing' -PercentComplete 50
+[Console]::Out.Write('{"complete":true}')`,
+  )
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout.toString("utf8")).toBe('{"complete":true}')
+  expect(result.stderr.length).toBe(0)
+})
+
+test("native query initialization still stops on real PowerShell errors", async () => {
+  const result = await runNativeInitialization(
+    `Write-Error 'native-query-terminating-error'
+[Console]::Out.Write('must-not-continue')`,
+  )
+  expect(result.exitCode).not.toBe(0)
+  expect(result.stderr.toString("utf8")).toContain("native-query-terminating-error")
+  expect(result.stdout.length).toBe(0)
+})
+
+test("native query transport preserves real stderr even with a successful exit", async () => {
+  const result = await runNativeInitialization(
+    `Write-Error 'native-query-nonterminating-error' -ErrorAction Continue
+[Console]::Out.Write('{"complete":true}')`,
+  )
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout.toString("utf8")).toBe('{"complete":true}')
+  expect(result.stderr.toString("utf8")).toContain("native-query-nonterminating-error")
+})
+
 test("partial and localized observations never imply idle", async () => {
   const f = await desktopFixture()
   try {
