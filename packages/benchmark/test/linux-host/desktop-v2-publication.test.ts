@@ -24,6 +24,8 @@ test("v2 held parent/file handles bind exact identities and prohibit write/delet
         await expect(fs.rename(path.dirname(file), path.dirname(file) + ".moved")).rejects.toThrow()
         await io.release()
         await fs.appendFile(file, " released")
+        await fs.rename(file, file + ".moved")
+        await fs.rename(file + ".moved", file)
       },
     )
   } finally {

@@ -78,14 +78,15 @@ public static class DesktopV2 {
   try {
    Marshal.StructureToPtr(u,m,false);var o=new OA();o.Length=(uint)Marshal.SizeOf(typeof(OA));o.Root=parent.DangerousGetHandle();o.Name=m;o.Attributes=0x40;
    IntPtr raw;IOS io;uint access=directory?0x1000A0u:create?0x110083u:deleting?0x110081u:0x100081u;
-   int status=NtCreateFile(out raw,access,ref o,out io,IntPtr.Zero,directory?0x10u:0x80u,1,create?2u:1u,directory?0x200021u:0x200060u,IntPtr.Zero,0);
+   // Parents allow child saves but never DELETE sharing; leased files allow READ sharing only.
+   int status=NtCreateFile(out raw,access,ref o,out io,IntPtr.Zero,directory?0x10u:0x80u,directory?3u:1u,create?2u:1u,directory?0x200021u:0x200060u,IntPtr.Zero,0);
    if(status<0)throw new IOException("open_"+status.ToString("X8"));
    var h=new SafeFileHandle(raw,true);try{Check(h,expected,directory);return h;}catch{h.Dispose();throw;}
   }finally{Marshal.FreeHGlobal(m);Marshal.FreeHGlobal(u.Buffer);}
  }
  public static void Parents(string value,bool write) {
   root=value;writable=write;string current=Path.GetPathRoot(root);
-  var h=CreateFileW(current,0x1000A0u,1,IntPtr.Zero,3,0x02200000u,IntPtr.Zero);try{Check(h,current,true);dirs.Add(current,h);}catch{h.Dispose();throw;}
+  var h=CreateFileW(current,0x1000A0u,3,IntPtr.Zero,3,0x02200000u,IntPtr.Zero);try{Check(h,current,true);dirs.Add(current,h);}catch{h.Dispose();throw;}
   foreach(string part in Path.GetDirectoryName(root).Substring(current.Length).Split('\\')){string next=Path.Combine(current,part);dirs.Add(next,Relative(dirs[current],part,true,false,next,false));current=next;}
  }
  static string Target(string relative) {
@@ -263,7 +264,7 @@ export async function withDesktopPublicationV2<T>(
       }),
     )
     for (const [name, id] of Object.entries(input.parents)) {
-      if (name === root && input.mode !== "create-profile") continue
+      if (name === root || name.startsWith(root + path.sep)) continue
       if (parents[name] !== id) throw new TypeError("TASK24_DESKTOP_V2_PARENT_DRIFT")
     }
     const dirs = identities(
@@ -273,6 +274,8 @@ export async function withDesktopPublicationV2<T>(
         layout: input.mode === "read" ? [] : desktopProfileLayoutV2,
       }),
     )
+    for (const [name, id] of Object.entries(input.parents))
+      if (dirs[name] !== id) throw new TypeError("TASK24_DESKTOP_V2_DIRECTORY_DRIFT")
     if (input.parents[root] && dirs[root] !== input.parents[root]) throw new TypeError("TASK24_DESKTOP_V2_ROOT_DRIFT")
     await revalidateDesktopProbeEnvironment(env)
     const read = async (name: string) => {
