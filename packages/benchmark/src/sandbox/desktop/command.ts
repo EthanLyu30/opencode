@@ -36,6 +36,8 @@ import type {
   DesktopPreparedProfile,
   DesktopLaunchInventory,
 } from "./contracts"
+import type { DesktopLaunchApprovalV2 } from "./v2-contracts"
+import { runDesktopCommandV2 } from "./command-v2"
 
 const readiness = { engine_verified: false, tool_capability_verified: false, corpus_engine_ready: false }
 const modes = ["audit", "plan", "prepare-profile", "start-readonly", "inspect", "stop-owned"]
@@ -86,7 +88,7 @@ function requireControlLayout(
 }
 export function makeDesktopLaunchController(
   platform: DesktopPlatform,
-  verifyHumanConfirmation?: (approval: DesktopLaunchApproval) => Promise<boolean>,
+  verifyHumanConfirmation?: (approval: DesktopLaunchApproval | DesktopLaunchApprovalV2) => Promise<boolean>,
 ) {
   const sessions = new Map<string, DesktopLaunchSession>()
   return async (
@@ -160,6 +162,22 @@ export function makeDesktopLaunchController(
       checkCancelled()
       if (mutating) requireControlLayout(args.spec!, args.approval!, mode, isNativeDesktopPlatform(platform))
       const snapshot = await readInput(args.spec!)
+      if (
+        snapshot.raw &&
+        typeof snapshot.raw === "object" &&
+        "schemaVersion" in snapshot.raw &&
+        snapshot.raw.schemaVersion === 2
+      )
+        return runDesktopCommandV2({
+          mode,
+          specFile: args.spec!,
+          approvalFile: args.approval,
+          platform,
+          interactive,
+          verify: verifyHumanConfirmation,
+          signal,
+          sessions,
+        })
       const spec = decodeDesktopLaunchSpec(snapshot.raw)
       const launchID = mutating
         ? requireControlLayout(
