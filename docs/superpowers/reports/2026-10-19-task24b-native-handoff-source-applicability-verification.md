@@ -252,4 +252,10 @@ R6 的三个前置缺项 `offline_reader_unavailable / workload_layout_unproved 
 7. 其他厂商私有机制/新驱动/ACL/share/服务路线未裁定：不写普遍不可能，也不切换路线。若有新机制，先取得准确厂商契约/新范围。
 8. Linux验收/付费/部署及未来push/清理成功未由审查预判：前三项不执行；后两项由执行者实际核实再记录。若失败，如实报告失败/残留，不能推定成功。
 
-正常push、远端一致性和本轮自有技能中间物清理在实际完成后记录；这里不预写成功。
+### 发布实测
+
+已正常 push 到 `https://github.com/EthanLyu30/opencode.git` 的 `dev`，包括此前已批准的方案/计划和本包报告/审查提交；未推官方 origin、未 force push、未建 PR。首次 `ls-remote --refs fork refs/heads/dev` 实测为 `e16b38cac0fb1cb0ebd1ff259d1255b51cecbba4`，与当时本地 HEAD 一致。本节追加提交及最终远端一致性以最后交付的实际核实为准，避免把父提交误写为最终 HEAD。
+
+原 `.husky/_` pre-push 保留，完整31项 workspace typecheck 成功、0缓存、35.597s，远端缓存禁用；这是发布门禁，不是54项反例运行或安全交接机制实验。第一次推送尝试曾因 Turbo 在隔离环境找不到全局配置路径而被 hook 拒绝、尚未执行类型检查；只为本轮子进程补充 `TURBO_CONFIG_DIR_PATH` 指向准确自有 D 配置目录，重跑正常 push 成功。不修改 hook、仓库配置或产品代码，不加载真实项目 env。
+
+本轮唯一技能中间根为 `D:\OpenCode-Audit\.superpowers\sdd\2026-10-19-task24b-native-handoff-source-applicability`，当前约70107字节，低于262144字节；包括账本、brief、审查差异和短发布包装器/隔离环境配置，未保存完整网页/源码/安装副本/反汇编dump。所有提交/推送结束后，核实准确计划标记、归属、规范父链和无链接再清理；若策略拒绝即保留并在最终交付报告，不改工具重试或复用旧根。此处不预写清理成功，旧残留及R9始终不在清理范围。
