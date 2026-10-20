@@ -200,4 +200,10 @@ Task3提交前已复核R1–R4摘要全部一致，并核对基线至HEAD/工作
 
 已只读核对fork URL为 `https://github.com/EthanLyu30/opencode.git`、hooksPath为`.husky/_`，原pre-push要求Bun版本与workspace typecheck；没有修改钩子。仅为本轮子进程用白名单环境、D盘HOME/配置/TEMP、禁Node/Bun缓存及真实env加载、禁自动安装和Turbo结果写缓存/远端缓存。Git认证属于用户已批准的正常push，不作为本包厂商取证材料，不读取或打印真实Key/代理/凭据值。本轮发布中间物不扩大取证输入或留下可执行原生许可。
 
-实际推送/远端核对与清理结果待完成后交接，不将准备或独立审查当作它们已成功。
+### 发布实测
+
+默认发布通路两次返回 `Recv failure: Connection was reset`，未宣称上传成功；另一次普通只读ls-remote无输出后主动中止。随后仅在本轮发布子进程增加 `http.version=HTTP/1.1`，未修改仓库/全局Git配置：先只读核对原远端，再正常push，原pre-push钩子实际执行workspace typecheck，**31 successful / 31 total、0 cached，32.369s**，退出0。没有跳过钩子、强推或自动安装。
+
+首次成功push将fork/dev由 `e0f2ec0d2de71628957d8bd99a22b03d5d61b190` 更新到 `0d8af62798bb66bf71a031246f3d5d9cfdecb543`。随后独立ls-remote返回同一完整SHA，实际本地HEAD与远端一致；该发布包含此前已确认的规格/计划两次提交及本轮报告四次提交。基线至HEAD仅新增本报告，旧R4仍原样untracked。
+
+以上是本次发布记录补交前已经完成的实测，不将补交自身预记为推送成功。补交提交的最终远端身份和本轮准确中间根清理结果在实际核对后交接；发布门禁不构成双盘交接机制验收或本机/原盘权限。
