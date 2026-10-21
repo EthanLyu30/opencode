@@ -5,7 +5,14 @@ import path from "node:path"
 import { Schema } from "effect"
 import { directRoot } from "../corpus/evaluation-bundle"
 import { freeze } from "../corpus/evaluation-profile"
-import { requireDPath, StorageRecord, type Gate, type StorageProof, type FileIdentity } from "./contracts"
+import {
+  requireDPath,
+  StorageRecord,
+  type Gate,
+  type StorageProof,
+  type FileIdentity,
+  type HostRequest,
+} from "./contracts"
 
 export function verifyStorageProof(input: unknown): StorageProof {
   const value = Schema.decodeUnknownSync(StorageRecord)(input, { onExcessProperty: "error" })
@@ -22,6 +29,9 @@ export function storageIdentity(value: StorageProof | null) {
 export async function fileIdentity(file: string): Promise<FileIdentity> {
   requireDPath(file)
   await directRoot(path.dirname(file))
+  return readFileIdentity(file)
+}
+async function readFileIdentity(file: string): Promise<FileIdentity> {
   const stat = await fs.lstat(file)
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new TypeError("TASK24_LINUX_FILE_IDENTITY")
   const hasher = createHash("sha256")
@@ -38,6 +48,13 @@ export async function fileIdentity(file: string): Promise<FileIdentity> {
     sha256: hasher.digest("hex"),
   })
 }
+/** Only the system WSL launcher is an allowed C-drive executable; ordinary files remain D-only. */
+export async function hostCliIdentity(request: HostRequest) {
+  if (!request.wsl2 || request.cli.path !== "C:\\Windows\\System32\\wsl.exe") return fileIdentity(request.cli.path)
+  if ((await fs.realpath(request.cli.path)).toLowerCase() !== request.cli.path.toLowerCase())
+    throw new TypeError("TASK24_WSL2_LAUNCHER")
+  return readFileIdentity(request.cli.path)
+}
 export async function directoryIdentity(directory: string): Promise<string> {
   requireDPath(directory)
   await directRoot(directory)
@@ -51,6 +68,20 @@ export async function inspectStorage(input: unknown): Promise<Gate<StorageProof>
     const base = await fs.stat(value.dataRoot)
     for (const file of [value.disk, ...(value.swap.kind === "file" ? [value.swap.file] : [])]) {
       await directRoot(path.dirname(file.path))
+      if (file.fileID.startsWith("wsl2:")) {
+        const stat = await fs.lstat(file.path, { bigint: true })
+        const root = await fs.stat(value.dataRoot, { bigint: true })
+        if (
+          !stat.isFile() ||
+          stat.isSymbolicLink() ||
+          stat.nlink !== 1n ||
+          `wsl2:${stat.dev}:${stat.ino}:${stat.birthtimeNs}` !== file.fileID ||
+          String(stat.dev) !== file.volumeID ||
+          stat.dev !== root.dev
+        )
+          throw new TypeError("TASK24_LINUX_STORAGE_IDENTITY")
+        continue
+      }
       const stat = await fs.lstat(file.path)
       if (
         !stat.isFile() ||

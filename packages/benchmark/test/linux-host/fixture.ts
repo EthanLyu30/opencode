@@ -95,8 +95,50 @@ export async function hostFixture() {
   }
 }
 
-export async function sessionFixture() {
+export async function sessionFixture(independentWsl2 = false) {
   const f = await hostFixture()
+  if (independentWsl2) {
+    const launcher = path.join(f.root, "wsl.exe")
+    await fs.rename(f.cli.path, launcher)
+    f.cli.path = launcher
+    const installRoot = path.join(f.root, "fresh")
+    await fs.mkdir(installRoot)
+    const disk = path.join(installRoot, "ext4.vhdx")
+    await fs.rename(f.storage.disk.path, disk)
+    const diskStat = await fs.stat(disk, { bigint: true })
+    f.storage = {
+      ...f.storage,
+      disk: { ...f.storage.disk, path: disk, fileID: `wsl2:${diskStat.dev}:${diskStat.ino}:${diskStat.birthtimeNs}` },
+      dataRoot: installRoot,
+      engineID: "fixture-engine",
+    }
+    f.request = {
+      ...f.request,
+      endpoint: "unix:///var/run/docker.sock",
+      wsl2: {
+        distribution: "opencode-task24-fixture",
+        registrationID: "11111111-2222-4333-8444-555555555555",
+        installRoot,
+        guestCliSha256: "a".repeat(64),
+        guestExecution: { approved: true, expiresAt: Date.now() + 60000 },
+      },
+    }
+    const original = f.runner
+    f.runner = {
+      async execute(input) {
+        const result = await original.execute(input)
+        return input.argv.includes("context")
+          ? { ...result, stdout: Buffer.from(JSON.stringify({ Endpoints: { docker: { Host: f.request.endpoint } } })) }
+          : result
+      },
+    }
+    f.manifest = {
+      ...f.manifest,
+      ...f.request,
+      storage: f.storage,
+      engine: { ...f.manifest.engine, endpoint: f.request.endpoint, defaultEndpoint: f.request.endpoint },
+    }
+  }
   const image = "example.invalid/task24@sha256:" + "a".repeat(64)
   const manifest = decodeHostManifest({
     ...f.manifest,
@@ -215,5 +257,17 @@ export async function sessionFixture() {
     nonce: "c".repeat(32),
     daemonFingerprint: inventory.contextFingerprint,
   }
-  return { ...f, manifest, session: opened.value, image, owner, runner, calls, state, inspect, id }
+  return {
+    ...f,
+    manifest,
+    session: opened.value,
+    image,
+    owner,
+    inventoryRunner: f.runner,
+    runner,
+    calls,
+    state,
+    inspect,
+    id,
+  }
 }

@@ -14,6 +14,7 @@ import { requireOperation, isRealDockerRunner, requireDockerExecution } from "./
 import { sessionState, revalidateSession } from "./preflight"
 import { directoryIdentity } from "./storage"
 import { fileIdentity } from "./storage"
+import { mapWsl2Workspace, unmapWsl2Workspace } from "./wsl2-independent"
 
 export type OwnerSeed = Readonly<{
   acceptanceID: string
@@ -37,12 +38,25 @@ export type ContainerSpec = Readonly<{
 export function assertRequestedMounts(
   mounts: readonly { Type: string; Source: string; Destination: string; RW: boolean; Name?: string }[],
   spec: ContainerSpec,
+  sourcePath: (source: string) => string = (source) => source,
 ) {
   const expected = [
     ...(spec.workspace
-      ? [{ Type: "bind", Source: spec.workspace.source, Destination: "/workspace", RW: !spec.workspace.readonly }]
+      ? [
+          {
+            Type: "bind",
+            Source: sourcePath(spec.workspace.source),
+            Destination: "/workspace",
+            RW: !spec.workspace.readonly,
+          },
+        ]
       : []),
-    ...(spec.protectedFiles ?? []).map((f) => ({ Type: "bind", Source: f.source, Destination: f.target, RW: false })),
+    ...(spec.protectedFiles ?? []).map((f) => ({
+      Type: "bind",
+      Source: sourcePath(f.source),
+      Destination: f.target,
+      RW: false,
+    })),
     ...(spec.dependencies ?? []).map((f) => ({ Type: "volume", Name: f.name, Destination: f.target, RW: false })),
   ]
   if (
@@ -139,10 +153,10 @@ export function decodeOwnedInspection(input: unknown, owner: Owner, session: Eng
   if (Object.keys(config.Tmpfs).length !== 2) throw new TypeError("TASK24_LINUX_TMPFS_POLICY")
   for (const mount of value.Mounts) {
     if (mount.Type === "bind") {
-      requireDPath(mount.Source)
+      const source = unmapWsl2Workspace(state.manifest, mount.Source)
       if (
         (mount.Destination !== "/workspace" && !(mount.Destination.startsWith("/workspace/") && !mount.RW)) ||
-        !mount.Source.toLowerCase().startsWith(state.manifest.roots.work.toLowerCase() + "\\")
+        !source.toLowerCase().startsWith(state.manifest.roots.work.toLowerCase() + "\\")
       )
         throw new TypeError("TASK24_LINUX_MOUNT_POLICY")
     } else if (
@@ -154,7 +168,7 @@ export function decodeOwnedInspection(input: unknown, owner: Owner, session: Eng
       throw new TypeError("TASK24_LINUX_MOUNT_POLICY")
   }
   const spec = requestedSpecs.get(canonicalJson(owner))
-  if (spec) assertRequestedMounts(value.Mounts, spec)
+  if (spec) assertRequestedMounts(value.Mounts, spec, (source) => mapWsl2Workspace(state.manifest, source))
   return freeze(value)
 }
 function invocation(argv: readonly string[], signal: AbortSignal, timeoutMs = 15000): DockerInvocation {
@@ -210,7 +224,10 @@ export async function createOwnedContainer(input: {
     await directoryIdentity(source)
     if (!source.toLowerCase().startsWith(state.manifest.roots.work.toLowerCase() + "\\") || source.includes(","))
       throw new TypeError("TASK24_LINUX_WORKSPACE")
-    mounts.push("--mount", `type=bind,src=${source},dst=/workspace${spec.workspace.readonly ? ",readonly" : ""}`)
+    mounts.push(
+      "--mount",
+      `type=bind,src=${mapWsl2Workspace(state.manifest, source)},dst=/workspace${spec.workspace.readonly ? ",readonly" : ""}`,
+    )
   }
   for (const file of spec.protectedFiles ?? []) {
     if (
@@ -223,7 +240,7 @@ export async function createOwnedContainer(input: {
       throw new TypeError("TASK24_LINUX_PROTECTED_MOUNT")
     safePath(file.target.slice("/workspace/".length))
     await fileIdentity(file.source)
-    mounts.push("--mount", `type=bind,src=${file.source},dst=${file.target},readonly`)
+    mounts.push("--mount", `type=bind,src=${mapWsl2Workspace(state.manifest, file.source)},dst=${file.target},readonly`)
   }
   for (const mount of spec.dependencies ?? []) {
     if (

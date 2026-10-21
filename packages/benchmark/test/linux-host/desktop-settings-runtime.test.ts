@@ -50,27 +50,32 @@ test("v2 bootstrap accepts complete formatted replacement; seals cannot escape t
   }
 }, 30000)
 
-test("corrupt settings block use but retain consumed cleanup after start grant expiry", async () => {
-  const f = await profileFixtureV2()
-  try {
-    f.onStart(() => f.emitRuntime())
-    const { session, approval } = await start(f, 5000)
-    expect(Date.now()).toBeLessThan(approval.expiresAt)
-    await fs.writeFile(f.plan.runtimeTargets.daemon, "{")
-    await expect(withDesktopRuntimeSettings(session, async () => "used")).rejects.toThrow()
-    expect(readDesktopSettingsFailure(session)).not.toBeNull()
-    const remaining = Math.max(0, approval.expiresAt - Date.now() + 1)
-    expect(remaining).toBeLessThanOrEqual(5000)
-    await Bun.sleep(remaining)
-    const [one, two] = await Promise.all([stopDesktopLaunch(session), stopDesktopLaunch(session)])
-    expect(one).toEqual({ kind: "ready", value: "stopped" })
-    expect(two).toEqual(one)
-    expect(f.calls.stop).toBe(1)
-    expect(readDesktopAttemptDiagnostics(one)?.failureCode).not.toBeNull()
-  } finally {
-    await f.close()
-  }
-}, 30000)
+test(
+  "corrupt settings block use but retain consumed cleanup after start grant expiry",
+  async () => {
+    const f = await profileFixtureV2()
+    const validMs = process.platform === "win32" ? 15000 : 5000
+    try {
+      f.onStart(() => f.emitRuntime())
+      const { session, approval } = await start(f, validMs)
+      expect(Date.now()).toBeLessThan(approval.expiresAt)
+      await fs.writeFile(f.plan.runtimeTargets.daemon, "{")
+      await expect(withDesktopRuntimeSettings(session, async () => "used")).rejects.toThrow()
+      expect(readDesktopSettingsFailure(session)).not.toBeNull()
+      const remaining = Math.max(0, approval.expiresAt - Date.now() + 1)
+      expect(remaining).toBeLessThanOrEqual(validMs)
+      await Bun.sleep(remaining)
+      const [one, two] = await Promise.all([stopDesktopLaunch(session), stopDesktopLaunch(session)])
+      expect(one).toEqual({ kind: "ready", value: "stopped" })
+      expect(two).toEqual(one)
+      expect(f.calls.stop).toBe(1)
+      expect(readDesktopAttemptDiagnostics(one)?.failureCode).not.toBeNull()
+    } finally {
+      await f.close()
+    }
+  },
+  process.platform === "win32" ? 45000 : 30000,
+)
 
 test("stable malformed partial bootstrap fails immediately and uses exact owned cleanup", async () => {
   const f = await profileFixtureV2()

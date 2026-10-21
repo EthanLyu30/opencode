@@ -19,8 +19,16 @@ export const StorageRecord = Schema.Struct({
   ]),
   settingsSha256: Sha256,
   observedAt: Positive,
+  engineID: Schema.optionalKey(Text),
 })
 const Roots = Schema.Struct({ work: Text, temp: Text, config: Text, evidence: Text })
+const Wsl2 = Schema.Struct({
+  distribution: ID,
+  registrationID: Text.check(Schema.isPattern(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/)),
+  installRoot: Text,
+  guestCliSha256: Sha256,
+  guestExecution: Schema.Struct({ approved: Schema.Literal(true), expiresAt: Positive }),
+})
 const Request = Schema.Struct({
   schemaVersion: Schema.Literal(2),
   acceptanceID: ID,
@@ -31,6 +39,7 @@ const Request = Schema.Struct({
   endpoint: Text,
   architecture: Schema.Literals(["amd64", "arm64"]),
   roots: Roots,
+  wsl2: Schema.optionalKey(Wsl2),
 })
 export const EngineDescriptor = Schema.Struct({
   serverID: Text,
@@ -151,8 +160,27 @@ export function requireDPath(value: string): string {
 }
 export function decodeHostRequest(input: unknown): HostRequest {
   const value = Schema.decodeUnknownSync(Request)(input, { onExcessProperty: "error" })
-  requireDPath(value.cli.path)
-  if (!/^npipe:\/\/\/\/\.\/pipe\/[a-zA-Z0-9._-]+$/.test(value.endpoint)) throw new TypeError("TASK24_LINUX_ENDPOINT")
+  if (value.wsl2) {
+    if (value.cli.path !== "C:\\Windows\\System32\\wsl.exe") {
+      requireDPath(value.cli.path)
+      if (path.win32.basename(value.cli.path) !== "wsl.exe") throw new TypeError("TASK24_WSL2_LAUNCHER")
+    }
+    const install = requireDPath(value.wsl2.installRoot).toLowerCase()
+    if (
+      !/^opencode-task24-[a-z0-9][a-z0-9-]{0,63}$/.test(value.wsl2.distribution) ||
+      !/^d:\\opencode-benchmark\\task24\\(?:toolchain|tmp)\\.+/.test(install) ||
+      Object.values(value.roots).some((r) => {
+        const root = r.toLowerCase()
+        return root === install || root.startsWith(install + "\\") || install.startsWith(root + "\\")
+      })
+    )
+      throw new TypeError("TASK24_WSL2_INSTALL_ROOT")
+    if (value.endpoint !== "unix:///var/run/docker.sock" || value.context !== "default")
+      throw new TypeError("TASK24_WSL2_ENDPOINT")
+  } else {
+    requireDPath(value.cli.path)
+    if (!/^npipe:\/\/\/\/\.\/pipe\/[a-zA-Z0-9._-]+$/.test(value.endpoint)) throw new TypeError("TASK24_LINUX_ENDPOINT")
+  }
   const roots = Object.values(value.roots).map((v) => requireDPath(v).toLowerCase())
   for (const root of roots)
     if (!/^d:\\opencode-benchmark\\task24\\(?:tmp|workspaces|reports|toolchain)\\/.test(root))
@@ -165,7 +193,11 @@ export function decodeHostRequest(input: unknown): HostRequest {
 }
 export function requestOf(value: HostManifest): HostRequest {
   return decodeHostRequest(
-    Object.fromEntries(Object.keys(Request.fields).map((k) => [k, value[k as keyof HostRequest]])),
+    Object.fromEntries(
+      Object.keys(Request.fields)
+        .filter((k) => Object.hasOwn(value, k))
+        .map((k) => [k, value[k as keyof HostRequest]]),
+    ),
   )
 }
 export function decodeHostManifest(input: unknown): HostManifest {

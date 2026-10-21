@@ -14,7 +14,7 @@ import {
   type EngineApproval,
   type Gate,
 } from "./contracts"
-import { directoryIdentity, fileIdentity, inspectStorage, storageIdentity } from "./storage"
+import { directoryIdentity, hostCliIdentity, inspectStorage, storageIdentity } from "./storage"
 
 type Inspection = { request: HostRequest; runner: DockerRunner; storageProbe: () => Promise<unknown> }
 const inventories = new WeakMap<object, Inspection>()
@@ -26,7 +26,7 @@ const sessions = new WeakMap<
 export async function inspectLinuxHost(input: Inspection): Promise<HostInventory> {
   const request = decodeHostRequest(input.request),
     missing: string[] = []
-  const cli = await fileIdentity(request.cli.path).catch(() => null)
+  const cli = await hostCliIdentity(request).catch(() => null)
   if (!cli || canonicalJson(cli) !== canonicalJson(request.cli)) missing.push("engine_cli_changed")
   const roots: Record<string, string> = {}
   for (const [key, root] of Object.entries(request.roots)) {
@@ -36,6 +36,7 @@ export async function inspectLinuxHost(input: Inspection): Promise<HostInventory
   }
   const storage = await inspectStorage(await input.storageProbe().catch(() => null))
   if (storage.kind !== "ready") missing.push(storage.code)
+  if (request.wsl2 && storage.kind === "ready" && !storage.value.engineID) missing.push("engine_identity_not_verified")
   async function read(context: string, args: readonly string[]) {
     const r = await input.runner.execute({
       argv: ["--context", context, ...args],
@@ -49,7 +50,10 @@ export async function inspectLinuxHost(input: Inspection): Promise<HostInventory
     return JSON.parse(Buffer.from(r.stdout).toString("utf8"))
   }
   let engine: HostInventory["engine"] = null
-  if (!missing.includes("engine_cli_changed"))
+  if (
+    !missing.includes("engine_cli_changed") &&
+    (!request.wsl2 || (storage.kind === "ready" && !!storage.value.engineID))
+  )
     try {
       const context = await read(request.context, ["context", "inspect", request.context, "--format", "{{json .}}"])
       const defaultContext = await read("default", ["context", "inspect", "default", "--format", "{{json .}}"])
@@ -64,6 +68,7 @@ export async function inspectLinuxHost(input: Inspection): Promise<HostInventory
         info.ID !== defaultInfo.ID ||
         typeof info.ID !== "string" ||
         !info.ID ||
+        (request.wsl2 && storage.kind === "ready" && info.ID !== storage.value.engineID) ||
         version.Os !== "linux" ||
         info.OSType !== "linux" ||
         version.Arch !== request.architecture ||
@@ -82,7 +87,7 @@ export async function inspectLinuxHost(input: Inspection): Promise<HostInventory
     } catch {
       missing.push("engine_unavailable")
     }
-  const finalCli = await fileIdentity(request.cli.path).catch(() => null)
+  const finalCli = await hostCliIdentity(request).catch(() => null)
   if (canonicalJson(cli) !== canonicalJson(finalCli) && !missing.includes("engine_cli_changed"))
     missing.push("engine_cli_changed")
   const body = {

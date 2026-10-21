@@ -7,6 +7,7 @@ import { FileIdentity, requireDPath, decodeHostRequest, type HostRequest, type S
 import { fileIdentity, inspectStorage } from "./storage"
 import { makeProcessRunner, makeDockerRunner } from "./docker"
 import type { DesktopLaunchSession } from "./desktop/contracts"
+import { Wsl2StorageSource, readIndependentWslStorage } from "./wsl2-independent"
 const SourceFields = {
   desktop: FileIdentity,
   backend: FileIdentity,
@@ -14,6 +15,7 @@ const SourceFields = {
   allowEffectiveSwapProbe: Schema.Literal(true),
 }
 export const StorageSource = Schema.Union([
+  Wsl2StorageSource,
   Schema.Struct({ kind: Schema.Literal("desktop-wsl-legacy"), ...SourceFields }),
   Schema.Struct({ kind: Schema.Literal("desktop-wsl-managed"), ...SourceFields, settingsFile: Schema.String }),
   Schema.Struct({
@@ -216,8 +218,9 @@ function buildStorageObservationScript(
   launchSettings?: string,
 ): string {
   const request = decodeHostRequest(input.request),
-    source = Schema.decodeUnknownSync(StorageSource)(input.source, { onExcessProperty: "error" }),
-    literal = source.desktop.path.replaceAll("'", "''"),
+    source = Schema.decodeUnknownSync(StorageSource)(input.source, { onExcessProperty: "error" })
+  if (source.kind === "wsl2-independent") throw new TypeError("TASK24_WSL2_STORAGE_SOURCE")
+  const literal = source.desktop.path.replaceAll("'", "''"),
     pipe = request.endpoint.split("/").at(-1)!,
     distro = source.kind !== "desktop-wsl-legacy" ? "docker-desktop" : "docker-desktop-data",
     linux = String.raw`set -eu
@@ -310,6 +313,8 @@ export function makeStorageProbe(input: {
 }) {
   return async (): Promise<StorageProof> => {
     const source = Schema.decodeUnknownSync(StorageSource)(input.source, { onExcessProperty: "error" })
+    if (source.kind === "wsl2-independent") return readIndependentWslStorage(input.request, source)
+    if (input.request.wsl2) throw new TypeError("TASK24_WSL2_STORAGE_SOURCE")
     if (source.kind === "desktop-wsl-managed-launch") {
       const { readDesktopLaunchStorage } = await import("./desktop/inspection")
       if (!input.launch) throw new TypeError("TASK24_DESKTOP_SESSION_REQUIRED")

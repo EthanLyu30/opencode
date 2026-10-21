@@ -10,7 +10,8 @@ import {
   type EngineApproval,
   type AuthorityGuard,
 } from "./contracts"
-import { fileIdentity } from "./storage"
+import { fileIdentity, hostCliIdentity } from "./storage"
+import { makeNativeWsl2Transport } from "./wsl2-independent"
 import { revalidateSession } from "./preflight"
 import { sha256Bytes, sha256Text } from "../hash"
 
@@ -232,23 +233,25 @@ export function makeDockerRunner(options: {
   guard?: AuthorityGuard
 }): DockerRunner {
   const request = decodeHostRequest(options.request)
-  const process = makeProcessRunner({
-    executable: request.cli.path,
-    argvPrefix: [],
-    cwd: request.roots.temp,
-    env: {
-      DOCKER_CONFIG: request.roots.config,
-      DOCKER_HOST: "",
-      DOCKER_CONTEXT: request.context,
-      DOCKER_TLS_VERIFY: "",
-      DOCKER_CERT_PATH: "",
-      BUILDX_BUILDER: "",
-      BUILDKIT_HOST: "",
-      TEMP: request.roots.temp,
-      TMP: request.roots.temp,
-      PATH: path.dirname(request.cli.path),
-    },
-  })
+  const process = request.wsl2
+    ? makeNativeWsl2Transport(request)
+    : makeProcessRunner({
+        executable: request.cli.path,
+        argvPrefix: [],
+        cwd: request.roots.temp,
+        env: {
+          DOCKER_CONFIG: request.roots.config,
+          DOCKER_HOST: "",
+          DOCKER_CONTEXT: request.context,
+          DOCKER_TLS_VERIFY: "",
+          DOCKER_CERT_PATH: "",
+          BUILDX_BUILDER: "",
+          BUILDKIT_HOST: "",
+          TEMP: request.roots.temp,
+          TMP: request.roots.temp,
+          PATH: path.dirname(request.cli.path),
+        },
+      })
   const runner: DockerRunner = {
     async execute(input) {
       const args = input.argv[0] === "--context" ? input.argv.slice(2) : input.argv
@@ -275,10 +278,10 @@ export function makeDockerRunner(options: {
         if (!operation || !options.session || !options.guard) throw new TypeError("TASK24_LINUX_OPERATION_DENIED")
         await requireOperation(options.session, operation, options.guard)
       }
-      if (canonicalJson(await fileIdentity(request.cli.path)) !== canonicalJson(request.cli))
+      if (canonicalJson(await hostCliIdentity(request)) !== canonicalJson(request.cli))
         throw new TypeError("TASK24_LINUX_CLI_CHANGED")
       const result = await process.execute({ ...input, argv: ["--context", context!, ...args] })
-      if (canonicalJson(await fileIdentity(request.cli.path)) !== canonicalJson(request.cli))
+      if (canonicalJson(await hostCliIdentity(request)) !== canonicalJson(request.cli))
         throw new TypeError("TASK24_LINUX_CLI_CHANGED")
       executions.set(result, { runner, argv: canonicalJson(input.argv), bytes: executionBytes(result) })
       return result
