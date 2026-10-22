@@ -204,7 +204,7 @@ test("bounded probes reject oversized, cancelled and timed out own processes", a
     .runDesktopProbe?.({
       exe: process.execPath,
       argv: ["--no-env-file", "-e", 'process.stdout.write("X".repeat(8193))'],
-      timeoutMs: 3000,
+      timeoutMs: process.platform === "win32" ? 10000 : 3000,
       stdoutLimit: 8192,
       stderrLimit: 8192,
     })

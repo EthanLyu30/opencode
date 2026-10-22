@@ -2,6 +2,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { Task24Root } from "../../src/root"
 import { RunStore } from "../../src/run/store"
+import { removeClosedStoreFixture } from "./fixture-cleanup"
 
 export async function storeFixture(label: string) {
   const directory = path.join(Task24Root.ensure().tmp, `run-${label}-${crypto.randomUUID()}`)
@@ -12,22 +13,9 @@ export async function storeFixture(label: string) {
     database,
     store: RunStore.open(database),
     async dispose() {
-      Bun.gc(true)
-      for (let attempt = 0; ; attempt++) {
-        try {
-          await fs.rm(directory, { recursive: true, force: true })
-          return
-        } catch (cause) {
-          if (attempt >= 9 || !isBusy(cause)) throw cause
-          await new Promise((resolve) => setTimeout(resolve, 25))
-        }
-      }
+      await removeClosedStoreFixture(directory)
     },
   }
-}
-
-function isBusy(cause: unknown): boolean {
-  return cause instanceof Error && "code" in cause && cause.code === "EBUSY"
 }
 
 export const plannedRuns = [

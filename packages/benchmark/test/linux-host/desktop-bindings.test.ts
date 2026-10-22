@@ -52,69 +52,48 @@ test("planning preserves authority and explicitly enables singleton lock", async
   }
 })
 
-test("document reads bind clean tree and reject linked or dirty documents", async () => {
-  const f = await profileFixture()
-  try {
-    const root = path.join(f.root, "source")
-    await fs.mkdir(root)
-    const run = async (args: string[]) => {
-      const child = Bun.spawn(
-        ["C:\\Program Files\\Git\\cmd\\git.exe", "-c", "core.fsmonitor=false", "-C", root, ...args],
-        {
-          env: {
-            SystemRoot: "C:\\Windows",
-            PATH: process.env.PATH!,
-            HOME: process.env.HOME!,
-            TEMP: process.env.TEMP!,
-            TMP: process.env.TMP!,
-            GIT_CONFIG_NOSYSTEM: "1",
-            GIT_CONFIG_GLOBAL: "NUL",
+test(
+  "document reads bind clean tree and reject linked or dirty documents",
+  async () => {
+    const f = await profileFixture()
+    try {
+      const root = path.join(f.root, "source")
+      await fs.mkdir(root)
+      const run = async (args: string[]) => {
+        const child = Bun.spawn(
+          ["C:\\Program Files\\Git\\cmd\\git.exe", "-c", "core.fsmonitor=false", "-C", root, ...args],
+          {
+            env: {
+              SystemRoot: "C:\\Windows",
+              PATH: process.env.PATH!,
+              HOME: process.env.HOME!,
+              TEMP: process.env.TEMP!,
+              TMP: process.env.TMP!,
+              GIT_CONFIG_NOSYSTEM: "1",
+              GIT_CONFIG_GLOBAL: "NUL",
+            },
+            windowsHide: true,
+            stdout: "pipe",
+            stderr: "pipe",
           },
-          windowsHide: true,
-          stdout: "pipe",
-          stderr: "pipe",
-        },
-      )
-      const output = await new Response(child.stdout).text()
-      const error = await new Response(child.stderr).text()
-      if (await child.exited) throw Error(error)
-      return output.trim()
-    }
-    await run(["init", "--quiet"])
-    const documents = [
-      "docs/superpowers/specs/2026-10-18-task24b-d-drive-docker-launch-design.md",
-      "docs/superpowers/specs/2026-10-18-task24b-dl6-native-cli-confirmation-design.md",
-      "docs/superpowers/plans/2026-10-18-task24b-d-drive-docker-launch.md",
-      "docs/superpowers/plans/2026-10-18-task24b-dl6-native-cli-confirmation.md",
-    ]
-    for (const file of documents) {
-      await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true })
-      await fs.writeFile(path.join(root, file), "synthetic " + file)
-    }
-    await run(["add", "."])
-    await run([
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.invalid",
-      "-c",
-      "core.hooksPath=NUL",
-      "commit",
-      "--quiet",
-      "-m",
-      "fixture",
-    ])
-    const first = await readDesktopBindings(root)
-    expect(first).toMatchObject({ sourceSha256: sha256Text("git-tree:" + (await run(["rev-parse", "HEAD^{tree}"]))) })
-    expect(first?.specSha256).not.toBe(sha256Text("synthetic " + documents[0]))
-    for (const file of documents) {
-      await fs.appendFile(path.join(root, file), " revised")
-      const failure = await readDesktopBindings(root).then(
-        () => false,
-        () => true,
-      )
-      expect(failure).toBe(true)
-      await run(["add", file])
+        )
+        const output = await new Response(child.stdout).text()
+        const error = await new Response(child.stderr).text()
+        if (await child.exited) throw Error(error)
+        return output.trim()
+      }
+      await run(["init", "--quiet"])
+      const documents = [
+        "docs/superpowers/specs/2026-10-18-task24b-d-drive-docker-launch-design.md",
+        "docs/superpowers/specs/2026-10-18-task24b-dl6-native-cli-confirmation-design.md",
+        "docs/superpowers/plans/2026-10-18-task24b-d-drive-docker-launch.md",
+        "docs/superpowers/plans/2026-10-18-task24b-dl6-native-cli-confirmation.md",
+      ]
+      for (const file of documents) {
+        await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true })
+        await fs.writeFile(path.join(root, file), "synthetic " + file)
+      }
+      await run(["add", "."])
       await run([
         "-c",
         "user.name=Fixture",
@@ -125,24 +104,49 @@ test("document reads bind clean tree and reject linked or dirty documents", asyn
         "commit",
         "--quiet",
         "-m",
-        "revision",
+        "fixture",
       ])
-      const next = await readDesktopBindings(root)
-      expect(next?.[file.includes("/specs/") ? "specSha256" : "planSha256"]).not.toBe(
-        first?.[file.includes("/specs/") ? "specSha256" : "planSha256"],
-      )
+      const first = await readDesktopBindings(root)
+      expect(first).toMatchObject({ sourceSha256: sha256Text("git-tree:" + (await run(["rev-parse", "HEAD^{tree}"]))) })
+      expect(first?.specSha256).not.toBe(sha256Text("synthetic " + documents[0]))
+      for (const file of documents) {
+        await fs.appendFile(path.join(root, file), " revised")
+        const failure = await readDesktopBindings(root).then(
+          () => false,
+          () => true,
+        )
+        expect(failure).toBe(true)
+        await run(["add", file])
+        await run([
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "-c",
+          "core.hooksPath=NUL",
+          "commit",
+          "--quiet",
+          "-m",
+          "revision",
+        ])
+        const next = await readDesktopBindings(root)
+        expect(next?.[file.includes("/specs/") ? "specSha256" : "planSha256"]).not.toBe(
+          first?.[file.includes("/specs/") ? "specSha256" : "planSha256"],
+        )
+      }
+      const target = path.join(root, documents[0]!)
+      const linked = path.join(f.root, "linked-input.md")
+      await fs.rename(target, linked)
+      await fs.link(linked, target)
+      expect(
+        await readDesktopBindings(root).then(
+          () => false,
+          () => true,
+        ),
+      ).toBe(true)
+    } finally {
+      await f.close()
     }
-    const target = path.join(root, documents[0]!)
-    const linked = path.join(f.root, "linked-input.md")
-    await fs.rename(target, linked)
-    await fs.link(linked, target)
-    expect(
-      await readDesktopBindings(root).then(
-        () => false,
-        () => true,
-      ),
-    ).toBe(true)
-  } finally {
-    await f.close()
-  }
-})
+  },
+  process.platform === "win32" ? 60000 : 30000,
+)

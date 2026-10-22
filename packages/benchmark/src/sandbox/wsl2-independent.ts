@@ -1,10 +1,18 @@
 import path from "node:path"
 import fs from "node:fs/promises"
+import { randomBytes } from "node:crypto"
 import { Schema } from "effect"
 import { canonicalJson } from "../campaign/canonical"
 import { sha256Text } from "../hash"
 import { freeze, safePath } from "../corpus/evaluation-profile"
-import { decodeHostRequest, requireDPath, type HostRequest, type DockerRunner, type StorageProof } from "./contracts"
+import {
+  decodeHostRequest,
+  requireDPath,
+  type HostRequest,
+  type DockerRunner,
+  type DockerExecution,
+  type StorageProof,
+} from "./contracts"
 import { directoryIdentity, hostCliIdentity, inspectStorage } from "./storage"
 import { makeProcessRunner } from "./docker"
 
@@ -171,7 +179,9 @@ if args[:4]==['--context','default','container','create']:
         if flag in ['--interactive','--read-only']:
             i+=1
             continue
-        if flag not in ['--name','--label','--pull','--network','--cap-drop','--security-opt','--user','--pids-limit','--memory','--cpus','--stop-timeout','--log-driver','--tmpfs','--env','--entrypoint','--mount'] or i+1>=len(args):
+        if flag not in ['--name','--label','--pull','--network','--cap-drop','--security-opt','--user','--pids-limit','--memory','--cpus','--stop-timeout','--log-driver','--tmpfs','--env','--entrypoint','--mount','--workdir'] or i+1>=len(args):
+            raise SystemExit('TASK24_WSL2_ARGUMENTS')
+        if flag=='--workdir' and (not re.fullmatch(r'/(?:workspace(?:/[a-zA-Z0-9._-]+)*|)', args[i+1]) or any(v in ['.','..'] for v in args[i+1].split('/'))):
             raise SystemExit('TASK24_WSL2_ARGUMENTS')
         if flag=='--mount':
             flags=dict(v.split('=',1) for v in args[i+1].split(',') if '=' in v)
@@ -186,13 +196,68 @@ if args[:4]==['--context','default','container','create']:
         i+=2
     if i>=len(args) or not re.fullmatch(r'[a-z0-9./:_-]+@sha256:[a-f0-9]{64}',args[i]):
         raise SystemExit('TASK24_WSL2_ARGUMENTS')
-os.execv(p, [p] + args)`
+if globals().get('task24_frame') is None:
+    os.execv(p, [p] + args)
+else:
+    import subprocess, selectors, base64, json
+    child=subprocess.Popen([p]+args,stdin=sys.stdin.buffer,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    streams=selectors.DefaultSelector()
+    streams.register(child.stdout,selectors.EVENT_READ,'stdout')
+    streams.register(child.stderr,selectors.EVENT_READ,'stderr')
+    buffers={'stdout':bytearray(),'stderr':bytearray()}
+    truncated=False
+    while streams.get_map():
+        for key,_ in streams.select():
+            chunk=os.read(key.fileobj.fileno(),32768)
+            if not chunk:
+                streams.unregister(key.fileobj)
+                continue
+            limit=task24_frame[key.data]
+            remaining=limit-len(buffers[key.data])
+            buffers[key.data].extend(chunk[:remaining])
+            if len(chunk)>remaining:
+                truncated=True
+                child.kill()
+    exitCode=child.wait()
+    print(json.dumps({'nonce':task24_frame['nonce'],'exitCode':exitCode,'stdout':base64.b64encode(buffers['stdout']).decode(),'stderr':base64.b64encode(buffers['stderr']).decode(),'truncated':truncated},separators=(',',':')))`
+
+export function decodeWsl2CommandFrame(
+  outer: DockerExecution,
+  nonce: string,
+  limits: { maxStdoutBytes: number; maxStderrBytes: number },
+): DockerExecution {
+  if (!outer.started || outer.exitCode !== 0 || outer.truncated || outer.cleanupUncertain)
+    throw new TypeError("TASK24_WSL2_COMMAND_FRAME")
+  const value = Schema.decodeUnknownSync(
+    Schema.Struct({
+      nonce: Schema.Literal(nonce),
+      exitCode: Schema.Int,
+      stdout: Schema.String,
+      stderr: Schema.String,
+      truncated: Schema.Boolean,
+    }),
+  )(JSON.parse(new TextDecoder("utf8", { fatal: true }).decode(outer.stdout)), { onExcessProperty: "error" })
+  const stdout = Buffer.from(value.stdout, "base64"),
+    stderr = Buffer.from(value.stderr, "base64")
+  if (
+    stdout.toString("base64") !== value.stdout ||
+    stderr.toString("base64") !== value.stderr ||
+    stdout.length > limits.maxStdoutBytes ||
+    stderr.length > limits.maxStderrBytes
+  )
+    throw new TypeError("TASK24_WSL2_COMMAND_FRAME")
+  // The root-owned wrapper captured Docker's actual stderr independently. Outer
+  // WSL progress is NOT silently filtered from candidate output by string rules.
+  return { started: true, exitCode: value.exitCode, stdout, stderr, truncated: value.truncated }
+}
 
 /** Generic transport is deliberately not a real-runner attestation (fixtures can exercise it safely). */
 export function makeWsl2Transport(input: {
   request: HostRequest
   process: DockerRunner
   observeRegistration: () => Promise<unknown>
+  /** Fresh full guest/storage comparison in the SAME invocation, not a TTL cache. */
+  storage?: StorageProof
 }): DockerRunner {
   const request = decodeHostRequest(input.request)
   requireWsl2GuestAccess(request)
@@ -200,17 +265,31 @@ export function makeWsl2Transport(input: {
     async execute(invocation) {
       if (invocation.signal.aborted)
         return { started: false, exitCode: 130, stdout: new Uint8Array(), stderr: new Uint8Array(), truncated: false }
-      bindWsl2Registration(request, await input.observeRegistration())
+      const registration = bindWsl2Registration(request, await input.observeRegistration())
       const args = invocation.argv[0] === "--context" ? invocation.argv.slice(2) : invocation.argv
       if (invocation.argv[0] === "--context" && invocation.argv[1] !== "default")
         throw new TypeError("TASK24_WSL2_ENDPOINT")
+      const nonce = input.storage ? randomBytes(32).toString("hex") : undefined
       const result = await input.process.execute({
         ...invocation,
+        ...(nonce
+          ? { maxStdoutBytes: Math.ceil(((invocation.maxStdoutBytes + invocation.maxStderrBytes) * 4) / 3) + 1024 }
+          : {}),
         argv: wsl2GuestInvocation(request, [
           "/usr/bin/python3",
           "-I",
           "-c",
-          pinnedDocker,
+          (input.storage
+            ? String.raw`import subprocess, json, hashlib
+task24_frame=${JSON.stringify({ nonce, stdout: invocation.maxStdoutBytes, stderr: invocation.maxStderrBytes })}
+guest=json.loads(subprocess.check_output(['/usr/bin/python3','-I','-c',${JSON.stringify(guestStorageScript(request))}]))
+body={'registration':${JSON.stringify(JSON.stringify(registration))},'guest':guest,'disk':${JSON.stringify(JSON.stringify(input.storage.disk))}}
+body['registration']=json.loads(body['registration'])
+body['disk']=json.loads(body['disk'])
+if hashlib.sha256(json.dumps(body,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()!=${JSON.stringify(input.storage.settingsSha256)}:
+    raise SystemExit('TASK24_WSL2_STORAGE_BINDING')
+`
+            : "") + pinnedDocker,
           request.wsl2!.guestCliSha256,
           mapWsl2Workspace(request, request.roots.work),
           "--context",
@@ -219,7 +298,7 @@ export function makeWsl2Transport(input: {
         ]),
       })
       bindWsl2Registration(request, await input.observeRegistration())
-      return result
+      return nonce ? decodeWsl2CommandFrame(result, nonce, invocation) : result
     },
   }
 }
@@ -287,6 +366,11 @@ function nativeProcesses(request: HostRequest) {
 }
 export function makeNativeWsl2Transport(request: HostRequest) {
   return makeWsl2Transport({ request, ...nativeProcesses(request) })
+}
+
+/** Controller-only optimized transport; every call still performs fresh storage/engine checks. */
+export function makeNativeAttestedWsl2Transport(request: HostRequest, storage: StorageProof) {
+  return makeWsl2Transport({ request, storage, ...nativeProcesses(request) })
 }
 
 function guestStorageScript(request: HostRequest) {

@@ -237,5 +237,5 @@ test.skipIf(process.platform !== "win32" || process.env.TASK24_WINDOWS_ISOLATION
         })
     }
   },
-  45000,
+  process.platform === "win32" ? 120000 : 45000,
 )

@@ -9,10 +9,12 @@ import {
   type EngineSession,
   type EngineApproval,
   type AuthorityGuard,
+  type StorageProof,
+  requestOf,
 } from "./contracts"
-import { fileIdentity, hostCliIdentity } from "./storage"
-import { makeNativeWsl2Transport } from "./wsl2-independent"
-import { revalidateSession } from "./preflight"
+import { directoryIdentity, fileIdentity, hostCliIdentity, inspectStorage } from "./storage"
+import { makeNativeWsl2Transport, makeNativeAttestedWsl2Transport } from "./wsl2-independent"
+import { revalidateSession, sessionState } from "./preflight"
 import { sha256Bytes, sha256Text } from "../hash"
 
 const realRunners = new WeakSet<object>()
@@ -232,9 +234,25 @@ export function makeDockerRunner(options: {
   session?: EngineSession
   guard?: AuthorityGuard
 }): DockerRunner {
+  return makeRunner(options)
+}
+
+/** Same fresh proof, collected alongside execution instead of six WSL crossings per verb. */
+export async function makeProductionCommandDockerRunner(input: { session: EngineSession; guard: AuthorityGuard }) {
+  const state = await revalidateSession(input.session)
+  if (!state.manifest.wsl2 || state.manifest.phase !== "accept") throw new TypeError("TASK24_WSL2_PRODUCTION_SESSION")
+  return makeRunner({ request: requestOf(state.manifest), ...input }, state.manifest.storage)
+}
+
+function makeRunner(
+  options: { request: HostRequest; session?: EngineSession; guard?: AuthorityGuard },
+  storage?: StorageProof,
+): DockerRunner {
   const request = decodeHostRequest(options.request)
   const process = request.wsl2
-    ? makeNativeWsl2Transport(request)
+    ? storage
+      ? makeNativeAttestedWsl2Transport(request, storage)
+      : makeNativeWsl2Transport(request)
     : makeProcessRunner({
         executable: request.cli.path,
         argvPrefix: [],
@@ -257,12 +275,30 @@ export function makeDockerRunner(options: {
       const args = input.argv[0] === "--context" ? input.argv.slice(2) : input.argv
       const context = input.argv[0] === "--context" ? input.argv[1] : request.context
       if (context !== request.context && context !== "default") throw new TypeError("TASK24_LINUX_OPERATION_DENIED")
+      if (storage && options.session) {
+        const expected = sessionState(options.session).inventory.rootIdentities
+        for (const [key, root] of Object.entries(request.roots))
+          if ((await directoryIdentity(root).catch(() => null)) !== expected[key])
+            throw new TypeError("TASK24_LINUX_SESSION_STALE")
+      }
       const readonly = isReadonlyDockerInvocation(args, !!options.session)
       if (!readonly) {
+        if (
+          args[0] === "container" &&
+          args[1] === "cp" &&
+          (args.length !== 4 ||
+            args[2] !== "-" ||
+            !/^[a-f0-9]{64}:\/$/.test(args[3] ?? "") ||
+            !input.stdin ||
+            input.stdinFile ||
+            input.stdin.byteLength > 8388608)
+        )
+          throw new TypeError("TASK24_LINUX_OPERATION_DENIED")
         const map: Record<string, EngineApproval["allowedOperations"][number]> = {
           "container/create": "container-create",
           "container/start": "container-start",
           "container/exec": "container-exec",
+          "container/cp": "container-exec",
           "container/stop": "container-stop",
           "container/kill": "container-stop",
           "container/rm": "container-remove",
@@ -276,7 +312,15 @@ export function makeDockerRunner(options: {
         }
         const operation = map[`${args[0]}/${args[1]}`]
         if (!operation || !options.session || !options.guard) throw new TypeError("TASK24_LINUX_OPERATION_DENIED")
-        await requireOperation(options.session, operation, options.guard)
+        if (!storage) await requireOperation(options.session, operation, options.guard)
+        if (storage) {
+          await options.guard()
+          if (
+            !sessionState(options.session).approval.allowedOperations.includes(operation) ||
+            (await inspectStorage(storage)).kind !== "ready"
+          )
+            throw new TypeError("TASK24_LINUX_OPERATION_DENIED")
+        }
       }
       if (canonicalJson(await hostCliIdentity(request)) !== canonicalJson(request.cli))
         throw new TypeError("TASK24_LINUX_CLI_CHANGED")

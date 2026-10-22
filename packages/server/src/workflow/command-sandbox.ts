@@ -615,7 +615,8 @@ const reloadFrozenTestAuthority = Effect.fn("WorkflowCommandSandboxServer.reload
   },
 )
 
-async function runOwned(
+/** Trusted construction seam for benchmark host acceptance; normal admission stays in makeLayer. */
+export async function runOwned(
   engine: Docker.Engine,
   config: DockerConfig.ValidatedConfig,
   request: {

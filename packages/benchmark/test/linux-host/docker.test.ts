@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test"
 import { makeProcessRunner, makeDockerRunner } from "../../src/sandbox/docker"
-import { hostFixture } from "./fixture"
+import { hostFixture, sessionFixture } from "./fixture"
 
 test("actual trusted fixture process preserves binary stdin/stdout and enforces output/cancel limits", async () => {
   const f = await hostFixture()
@@ -41,6 +41,32 @@ test("actual trusted fixture process preserves binary stdin/stdout and enforces 
     await expect(docker.execute({ ...common, argv: ["container", "create", "x"] })).rejects.toThrow(
       "TASK24_LINUX_OPERATION_DENIED",
     )
+  } finally {
+    await f.dispose()
+  }
+})
+
+test("sealed production archive import admits stdin-only owned-ID cp but never host-file export/import", async () => {
+  const f = await sessionFixture()
+  try {
+    const runner = makeDockerRunner({ request: f.request, session: f.session, guard: async () => {} })
+    const common = {
+      timeoutMs: 2000,
+      maxStdoutBytes: 100,
+      maxStderrBytes: 100,
+      signal: new AbortController().signal,
+      stdin: Buffer.from("sealed own fixture bytes"),
+    }
+    for (const argv of [
+      ["container", "cp", "D:\\private", "b".repeat(64) + ":/"],
+      ["container", "cp", "-", "foreign:/"],
+      ["container", "cp", "-", "b".repeat(64) + ":/etc"],
+    ])
+      await expect(runner.execute({ ...common, argv })).rejects.toThrow("OPERATION_DENIED")
+    // A non-executable owned fixture reaches spawn and returns unavailable;
+    // it does not acquire a Docker execution/acceptance receipt.
+    const result = await runner.execute({ ...common, argv: ["container", "cp", "-", "b".repeat(64) + ":/"] })
+    expect(result.started).toBe(false)
   } finally {
     await f.dispose()
   }
