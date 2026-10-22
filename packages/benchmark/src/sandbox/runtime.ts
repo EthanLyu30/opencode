@@ -45,7 +45,7 @@ import {
   makeBrowserIsolationRunner,
 } from "./capability"
 import { makePublicToolHost } from "./public-tools"
-import { startPublicToolPipe } from "./mcp-server"
+import { startPublicToolLoopback } from "./mcp-server"
 import { publishImmutable } from "../offline/atomic"
 import { bindEvidenceFile } from "../evaluator/evidence"
 import { FixtureReply } from "./fixture-provider"
@@ -454,6 +454,7 @@ export async function openLinuxRuntime(session: EngineSession) {
               root = await fs.mkdtemp(path.join(manifest.roots.temp, "capability-")),
               raw = backend([{ profile, outputs: entry.outputs }]),
               web = browser(manifest.roots.evidence, root)
+            const lifecycle = new AbortController()
             let readonly = false,
               current: Awaited<ReturnType<typeof snapshotRequest>> | undefined,
               lease: Awaited<ReturnType<typeof startLinuxPreview>> | undefined
@@ -477,7 +478,12 @@ export async function openLinuxRuntime(session: EngineSession) {
               workspace: entry.input.roots.repo,
               profile,
               maxCalls: entry.input.budget.maxToolCalls,
-              guard,
+              signal: lifecycle.signal,
+              async guard() {
+                lifecycle.signal.throwIfAborted()
+                await guard()
+                lifecycle.signal.throwIfAborted()
+              },
               backend: {
                 async check(id) {
                   current = await snapshotRequest()
@@ -517,7 +523,7 @@ export async function openLinuxRuntime(session: EngineSession) {
                     source,
                     policy: { methods: ["GET", "HEAD"], paths: source.files.map((f) => "/" + f.path) },
                     guard,
-                    signal: new AbortController().signal,
+                    signal: lifecycle.signal,
                   })
                   web.register(current.identity, lease)
                   return { previewID: lease.previewID }
@@ -539,7 +545,7 @@ export async function openLinuxRuntime(session: EngineSession) {
                     readySelector: "body",
                     interactionScriptID: profile.preview.interaction,
                     timeoutMs: 30000,
-                    signal: new AbortController().signal,
+                    signal: lifecycle.signal,
                   })
                   return {
                     screenshotSha256: result.screenshotSha256,
@@ -555,7 +561,8 @@ export async function openLinuxRuntime(session: EngineSession) {
                 },
               },
             })
-            const pipe = await startPublicToolPipe({
+            const pipe = await startPublicToolLoopback({
+              lifecycle,
               host: {
                 ...tools,
                 async write(r) {
@@ -565,7 +572,8 @@ export async function openLinuxRuntime(session: EngineSession) {
               },
             })
             const connection: PublicMcpConnection = {
-              pipe: pipe.pipe,
+              host: pipe.host,
+              port: pipe.port,
               capability: pipe.capability,
               bun: await fileIdentity(artifact("controller-bun").path!),
               entry: await fileIdentity(artifact("public-mcp").path!),

@@ -35,6 +35,11 @@ test("Windows isolation refuses unrestricted network and overlapping grants befo
     { ...baseline(), readonly: ["D:\\OpenCode-Benchmark\\Task24\\tmp\\CASE\\WORK\\private"] },
     { ...baseline(), environment: { temp: "C:\\bad" } },
     { ...baseline(), environment: { Path: "C:\\bad" } },
+    { ...baseline(), environment: { TASK24_PUBLIC_TOOL_CAPABILITY: "not-a-capability" } },
+    { ...baseline(), mediated: ["C:\\not-allowed"] },
+    { ...baseline(), mediated: [baseline().cwd] },
+    { ...baseline(), writable: [], readonly: [baseline().cwd], mediated: [baseline().cwd] },
+    { ...baseline(), mediated: ["D:\\OpenCode-Audit"] },
   ])
     await expect(invoke(input)).rejects.toThrow("TASK24_ISOLATION_INPUT")
 })

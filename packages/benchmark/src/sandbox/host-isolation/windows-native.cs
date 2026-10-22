@@ -25,7 +25,7 @@ public static partial class Task24NativeIsolation {
   [StructLayout(LayoutKind.Sequential)] struct FileInfo { public uint Attributes,CLo,CHi,ALo,AHi,WLo,WHi,Volume,SizeHi,SizeLo,Links,IndexHi,IndexLo; }
   public sealed class FilePin { public string path,fileID,sha256; }
   public sealed class DirectoryPin { public string path,fileID; }
-  public sealed class PinPlan { public FilePin exe;public DirectoryPin[] directories;public string profile,policyJournal; }
+  public sealed class PinPlan { public FilePin exe;public DirectoryPin[] directories;public string profile,policyJournal;public string[] mediatedRoots; }
   [StructLayout(LayoutKind.Sequential)] struct Display { public IntPtr Name,Description; }
   [StructLayout(LayoutKind.Sequential)] struct Blob { public uint Size; public IntPtr Data; }
   [StructLayout(LayoutKind.Explicit,Size=16)] struct Value { [FieldOffset(0)] public uint Type; [FieldOffset(8)] public ulong Number; [FieldOffset(8)] public IntPtr Pointer; }
@@ -95,13 +95,19 @@ public static partial class Task24NativeIsolation {
     if(parts.Length!=3 || parts[0]!=info.Volume.ToString() || parts[1]!=index.ToString())
       throw new IOException("pin expected file ID="+expected+" actual="+info.Volume+":"+index);
   }
-  static SafeFileHandle Pin(string value,bool directory,string expected,bool grant,Dictionary<string,SafeFileHandle> pins,HashSet<string> grantPaths,bool mutable) {
+  static bool MediatedPath(string value,string[] roots) {
+    if(roots!=null)foreach(string root in roots)if(String.Equals(value,root,StringComparison.OrdinalIgnoreCase)||value.StartsWith(root+"\\",StringComparison.OrdinalIgnoreCase))return true;
+    return false;
+  }
+  static SafeFileHandle Pin(string value,bool directory,string expected,bool grant,Dictionary<string,SafeFileHandle> pins,HashSet<string> grantPaths,bool mutable,string[] mediatedRoots=null) {
     SafeFileHandle prior;
     if(pins.TryGetValue(value,out prior)){ExpectedID(prior,expected);return prior;}
     grant=grant||grantPaths.Contains(value);
     string parent=Path.GetDirectoryName(value);
-    if(parent!=null && parent!=value)Pin(parent,true,null,false,pins,grantPaths,false);
-    var handle=CreateFileW(value,grant?0x1e0080u:(directory?0x1000a0u:0x100081u),mutable&&!directory?3u:1u,IntPtr.Zero,3,directory?0x02200000u:0x00200000u,IntPtr.Zero);
+    if(parent!=null && parent!=value)Pin(parent,true,null,false,pins,grantPaths,false,mediatedRoots);
+    // A mediated directory permits trusted child-entry updates, but never shares
+    // DELETE: its ancestry cannot move. Its package ACL still grants read only.
+    var handle=CreateFileW(value,grant?0x1e0080u:(directory?0x1000a0u:0x100081u),(mutable&&!directory)||(directory&&MediatedPath(value,mediatedRoots))?3u:1u,IntPtr.Zero,3,directory?0x02200000u:0x00200000u,IntPtr.Zero);
     try {
       FileInfo info=new FileInfo();
       Require(!handle.IsInvalid && GetFileInformationByHandle(handle,out info),"pin identity");
@@ -112,15 +118,37 @@ public static partial class Task24NativeIsolation {
       pins.Add(value,handle);return handle;
     } catch {handle.Dispose();throw;}
   }
-  static void PinTree(string root,bool mutable,Dictionary<string,SafeFileHandle> pins,HashSet<string> grantPaths,int depth,ref int entries) {
+  static void PinTree(string root,bool mutable,Dictionary<string,SafeFileHandle> pins,HashSet<string> grantPaths,int depth,ref int entries,string[] mediatedRoots=null) {
     Require(depth<=128,"admitted tree depth");
     foreach(var entry in Directory.GetFileSystemEntries(root)) {
       Require(++entries<=25000,"admitted tree size");
       var attributes=File.GetAttributes(entry);
       Require((attributes&FileAttributes.ReparsePoint)==0,"no admitted descendant reparse points");
       bool directory=(attributes&FileAttributes.Directory)!=0;
-      Pin(entry,directory,null,false,pins,grantPaths,mutable);
-      if(directory)PinTree(entry,mutable,pins,grantPaths,depth+1,ref entries);
+      Pin(entry,directory,null,false,pins,grantPaths,mutable,mediatedRoots);
+      if(directory)PinTree(entry,mutable,pins,grantPaths,depth+1,ref entries,mediatedRoots);
+    }
+  }
+  // Only the trusted controller may mutate mediated roots. Their package SID
+  // remains ReadAndExecute. Seal admission with restrictive handles first. Once
+  // inheritance is settled, retire only these leaf pins: Windows cannot replace
+  // an open target even with delete sharing. Directory pins still seal ancestry;
+  // the read-only package ACL prevents the child creating/replacing leaf entries.
+  static void AdmitMediatedReplacement(string[] roots,string[] reads,string[] writes,Dictionary<string,SafeFileHandle> pins) {
+    foreach(string root in roots) {
+      bool admitted=false;foreach(string read in reads)if(String.Equals(read,root,StringComparison.OrdinalIgnoreCase))admitted=true;
+      Require(admitted,"mediated root must have read-only package authority");
+      foreach(string write in writes)Require(!String.Equals(write,root,StringComparison.OrdinalIgnoreCase) && !root.StartsWith(write+"\\",StringComparison.OrdinalIgnoreCase) && !write.StartsWith(root+"\\",StringComparison.OrdinalIgnoreCase),"no mediated writable overlap");
+    }
+    foreach(string file in new List<string>(pins.Keys)) {
+      bool mediated=false;foreach(string root in roots)if(file.StartsWith(root+"\\",StringComparison.OrdinalIgnoreCase))mediated=true;
+      if(!mediated)continue;
+      FileInfo before;Require(GetFileInformationByHandle(pins[file],out before),"mediated old identity");
+      if((before.Attributes&0x10)!=0)continue;
+      Require((before.Attributes&0x410)==0 && before.Links==1,"mediated unique file");
+      var text=new StringBuilder(32768);uint count=GetFinalPathNameByHandleW(pins[file],text,32768,0);
+      Require(count>0 && count<32768 && String.Equals(text.ToString(),@"\\?\"+file,StringComparison.OrdinalIgnoreCase),"mediated final path");
+      pins[file].Dispose();pins.Remove(file);
     }
   }
   static void Cleanup(Action action,List<Exception> failures) {try{action();}catch(Exception error){failures.Add(error);}}
@@ -240,7 +268,7 @@ public static partial class Task24NativeIsolation {
       try{lockHeld=exclusive.WaitOne(30000);}catch(AbandonedMutexException){lockHeld=true;}
       if(!lockHeld)throw new IOException("isolation grants busy");
       var grantPaths=new HashSet<string>(StringComparer.OrdinalIgnoreCase);foreach(var directory in plan.directories)grantPaths.Add(directory.path);
-      foreach(var directory in plan.directories)Pin(directory.path,true,directory.fileID,true,pins,grantPaths,false);
+      foreach(var directory in plan.directories)Pin(directory.path,true,directory.fileID,true,pins,grantPaths,false,plan.mediatedRoots);
       var exeHandle=Pin(exe,false,plan.exe.fileID,false,pins,grantPaths,false);
       Require(String.Equals(exe,plan.exe.path,StringComparison.OrdinalIgnoreCase),"pin executable path");
       using(var stream=new FileStream(new SafeFileHandle(exeHandle.DangerousGetHandle(),false),FileAccess.Read))using(var hash=SHA256.Create()) {
@@ -266,7 +294,7 @@ public static partial class Task24NativeIsolation {
       // Inherited DACL/MIC updates affect existing descendants. Seal every admitted tree
       // first so a pre-existing hardlink/junction cannot transfer a grant outside its root.
       int treeEntries=0;
-      foreach(var read in reads)PinTree(read,false,pins,grantPaths,0,ref treeEntries);
+      foreach(var read in reads)PinTree(read,false,pins,grantPaths,0,ref treeEntries,plan.mediatedRoots);
       foreach(var write in writes)PinTree(write,true,pins,grantPaths,0,ref treeEntries);
       PolicyCreate(exe,plan.policyJournal,plan.exe,plan.exe,plan.directories,pins,"sid",sidString,PolicySidBytes(sid),ref policy);
       var session=new Session{Key=Guid.NewGuid(),Flags=1,Display=Name("Task24 dynamic sandbox",memory)};
@@ -275,6 +303,7 @@ public static partial class Task24NativeIsolation {
       if(ports.Length>0){loopbackAdded=true;Loopback(sid,true);}
       foreach(string p in reads){var grant=new Grant(pins[p],identity,false);grants.Add(grant);grant.Apply();}
       foreach(string p in writes){var grant=new Grant(pins[p],identity,true);grants.Add(grant);grant.Apply();}
+      AdmitMediatedReplacement(plan.mediatedRoots??new string[0],reads,writes,pins);
       job=PolicyCreateJob(policy);
       var limits=new Limits{Basic=new Basic{Flags=0x2000|0x8|0x200,Active=64},JobMemory=(UIntPtr)(2ul*1024*1024*1024)};
       Require(SetInformationJobObject(job,9,ref limits,(uint)Marshal.SizeOf(limits)),"job limits");

@@ -11,12 +11,53 @@ import { prepareWorkflowArm } from "../arms/workflow"
 import { prepareDirectArm } from "../arms/direct"
 import { fileIdentity } from "./storage"
 import { sessionState, revalidateSession } from "./preflight"
-import type { FileIdentity, EngineSession, Gate, DockerRunner, DockerInvocation, DockerExecution } from "./contracts"
+import type {
+  FileIdentity,
+  EngineSession,
+  HostManifest,
+  Gate,
+  DockerRunner,
+  DockerInvocation,
+  DockerExecution,
+} from "./contracts"
 import { requireRealDockerRunner } from "./docker"
 import { Schema } from "effect"
 import { startFixtureCapabilityProvider, type FixtureReply } from "./fixture-provider"
 import { verifyBinaryBuildRecords } from "./binary-build"
-export type PublicMcpConnection = Readonly<{ pipe: string; capability: string; bun: FileIdentity; entry: FileIdentity }>
+export type PublicMcpConnection = Readonly<
+  {
+    capability: string
+    bun: FileIdentity
+    entry: FileIdentity
+  } & ({ pipe: string; host?: never; port?: never } | { host: "127.0.0.1"; port: number; pipe?: never })
+>
+
+export function publicMcpArguments(connection: PublicMcpConnection): readonly string[] {
+  if (!/^[a-f0-9]{64}$/.test(connection.capability)) throw new TypeError("TASK24_PUBLIC_MCP_CONFIG")
+  if (typeof connection.pipe === "string") {
+    if (
+      !/^\\\\\.\\pipe\\opencode-task24-[a-f0-9]{64}$/.test(connection.pipe) ||
+      connection.host !== undefined ||
+      connection.port !== undefined
+    )
+      throw new TypeError("TASK24_PUBLIC_MCP_CONFIG")
+    return ["--pipe", connection.pipe]
+  }
+  if (
+    connection.host !== "127.0.0.1" ||
+    !Number.isInteger(connection.port) ||
+    connection.port < 1 ||
+    connection.port > 65535
+  )
+    throw new TypeError("TASK24_PUBLIC_MCP_CONFIG")
+  return ["--loopback", String(connection.port)]
+}
+export function publicMcpCommand(connection: PublicMcpConnection): readonly string[] {
+  const endpoint = publicMcpArguments(connection)
+  return connection.entry.path.endsWith(".exe")
+    ? [connection.entry.path, ...endpoint]
+    : [connection.bun.path, "--no-env-file", "run", connection.entry.path, ...endpoint]
+}
 export async function configurePublicMcp(
   launch: DirectArmLaunch,
   connection: PublicMcpConnection,
@@ -37,11 +78,8 @@ export async function configurePublicMcp(
     )
       throw new TypeError("TASK24_PUBLIC_MCP_ARTIFACT")
   }
-  if (
-    !/^\\\\\.\\pipe\\opencode-task24-[a-f0-9]{64}$/.test(connection.pipe) ||
-    !/^[a-f0-9]{64}$/.test(connection.capability) ||
-    launch.configFile !== path.join(launch.snapshot.roots.config, "opencode.json")
-  )
+  const command = publicMcpCommand(connection)
+  if (launch.configFile !== path.join(launch.snapshot.roots.config, "opencode.json"))
     throw new TypeError("TASK24_PUBLIC_MCP_CONFIG")
   const config = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(
     JSON.parse(await fs.readFile(launch.configFile, "utf8")),
@@ -55,7 +93,7 @@ export async function configurePublicMcp(
       mcp: {
         task24: {
           type: "local",
-          command: [connection.bun.path, "--no-env-file", "run", connection.entry.path, "--pipe", connection.pipe],
+          command,
           environment: { TASK24_PUBLIC_TOOL_CAPABILITY: connection.capability },
           enabled: true,
         },
@@ -193,6 +231,37 @@ export type CapabilityReceipt = Readonly<{
   cases: readonly { kind: "visual" | "coding"; launchSha256: string; evidence: readonly EvidenceReference[] }[]
   receiptSha256: string
 }>
+export type HostIsolationContext = Readonly<{
+  schemaVersion: 2
+  session: EngineSession
+  manifest: HostManifest
+  artifact: FileIdentity
+  guard(): Promise<void>
+}>
+
+/** Trusted-controller context only, never a capability/engine receipt or child environment. */
+export async function createHostIsolationContext(input: {
+  session: EngineSession
+  file: FileIdentity
+}): Promise<HostIsolationContext> {
+  const file = freeze({ ...input.file })
+  const session = input.session
+  async function guard() {
+    const state = await revalidateSession(session)
+    const artifact = state.manifest.artifacts.find((a) => a.id === "host-isolation" && a.kind === "worker")
+    if (
+      !artifact ||
+      !("sha256" in artifact) ||
+      artifact.sha256 !== file.sha256 ||
+      artifact.path !== file.path ||
+      canonicalJson(await fileIdentity(file.path)) !== canonicalJson(file)
+    )
+      throw new TypeError("TASK24_ISOLATION_ARTIFACT")
+  }
+  await guard()
+  return Object.freeze({ schemaVersion: 2, session, manifest: sessionState(session).manifest, artifact: file, guard })
+}
+
 export async function loadHostIsolationAdapter(input: {
   session: EngineSession
   file: FileIdentity
@@ -208,7 +277,10 @@ export async function loadHostIsolationAdapter(input: {
     canonicalJson(await fileIdentity(input.file.path)) !== canonicalJson(input.file)
   )
     throw new TypeError("TASK24_ISOLATION_ARTIFACT")
-  const module: unknown = await import(pathToFileURL(input.file.path).href)
+  const context = await createHostIsolationContext(input)
+  const moduleURL = pathToFileURL(context.artifact.path)
+  moduleURL.searchParams.set("identity", sha256Text(canonicalJson(context.artifact)))
+  const module: unknown = await import(moduleURL.href)
   if (
     !module ||
     typeof module !== "object" ||
@@ -216,8 +288,15 @@ export async function loadHostIsolationAdapter(input: {
     typeof module.createIsolationAdapter !== "function"
   )
     throw new TypeError("TASK24_ISOLATION_ADAPTER")
-  const adapter: HostIsolationAdapter = await module.createIsolationAdapter()
-  if (typeof adapter.verify !== "function" || typeof adapter.launch !== "function")
+  await context.guard()
+  const adapter: HostIsolationAdapter = await module.createIsolationAdapter(context)
+  await context.guard()
+  if (
+    !adapter ||
+    typeof adapter !== "object" ||
+    typeof adapter.verify !== "function" ||
+    typeof adapter.launch !== "function"
+  )
     throw new TypeError("TASK24_ISOLATION_ADAPTER")
   adapters.add(adapter)
   return adapter

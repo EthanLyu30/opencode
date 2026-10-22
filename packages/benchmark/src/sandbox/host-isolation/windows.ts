@@ -13,6 +13,7 @@ const Request = Schema.Struct({
   argv: Schema.Array(Schema.String),
   cwd: Schema.String,
   readonly: Schema.Array(Schema.String),
+  mediated: Schema.optionalKey(Schema.Array(Schema.String)),
   writable: Schema.Array(Schema.String),
   ports: Schema.Array(Schema.Int),
   root: Schema.String,
@@ -110,6 +111,7 @@ const valueEnvironment = new Set([
   "OPENCODE_BENCHMARK_CAMPAIGN_ID",
   "OPENCODE_BENCHMARK_RUN_ID",
   "TASK24_BROKER_GRANT",
+  "TASK24_PUBLIC_TOOL_CAPABILITY",
   "MOONSHOT_API_KEY",
   "DEEPSEEK_API_KEY",
 ])
@@ -432,7 +434,8 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
   const parsed = Schema.decodeUnknownOption(Request)(filtered, { onExcessProperty: "error" })
   if (parsed._tag !== "Some") throw new TypeError("TASK24_ISOLATION_INPUT")
   const input = parsed.value
-  const dirs = [input.root, input.cwd, ...input.readonly, ...input.writable]
+  const mediated = input.mediated ?? []
+  const dirs = [input.root, input.cwd, ...input.readonly, ...mediated, ...input.writable]
   if (
     dirs.some((dir) => {
       try {
@@ -447,12 +450,12 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
     !workspacePath.test(input.root) ||
     !workspacePath.test(input.cwd) ||
     input.writable.some((dir) => !workspacePath.test(dir)) ||
-    input.readonly.length > 64 ||
+    input.readonly.length + mediated.length > 64 ||
     input.writable.length > 64 ||
-    new Set([...input.readonly, ...input.writable].map((dir) => dir.toLowerCase())).size !==
-      input.readonly.length + input.writable.length ||
-    [...input.readonly, ...input.writable].some((dir) => overlaps(input.root, dir)) ||
-    ![...input.readonly, ...input.writable].some((dir) => inside(input.cwd, dir)) ||
+    new Set([...input.readonly, ...mediated, ...input.writable].map((dir) => dir.toLowerCase())).size !==
+      input.readonly.length + mediated.length + input.writable.length ||
+    [...input.readonly, ...mediated, ...input.writable].some((dir) => overlaps(input.root, dir)) ||
+    ![...input.readonly, ...mediated, ...input.writable].some((dir) => inside(input.cwd, dir)) ||
     input.ports.length > 64 ||
     !input.ports.every((port) => port >= 1024 && port <= 65535) ||
     new Set(input.ports).size !== input.ports.length ||
@@ -470,10 +473,13 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
     !(stdin === undefined || stdin instanceof Uint8Array) ||
     (stdin?.length ?? 0) > 2097152 ||
     input.readonly.some((read) => input.writable.some((write) => overlaps(read, write))) ||
+    mediated.some((read) => [...input.readonly, ...input.writable].some((other) => overlaps(read, other))) ||
+    mediated.some((read, i) => mediated.some((other, j) => i !== j && overlaps(read, other))) ||
     Object.keys(input.environment ?? {}).length > 64 ||
     Object.entries(input.environment ?? {}).some(
       ([key, value]) =>
         (!pathEnvironment.has(key) && !valueEnvironment.has(key)) ||
+        (key === "TASK24_PUBLIC_TOOL_CAPABILITY" && !/^[a-f0-9]{64}$/.test(value)) ||
         value.includes("\0") ||
         value.length > 65536 ||
         (pathEnvironment.has(key) &&
@@ -495,7 +501,7 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
   const admittedDirectories = await Promise.all(
     [...new Set(dirs)].map(async (dir) => ({ path: dir, fileID: await exactDirectoryIdentity(dir) })),
   )
-  await assertWindowsGrantTrees([...input.readonly, ...input.writable])
+  await assertWindowsGrantTrees([...input.readonly, ...mediated, ...input.writable])
   if (canonicalJson(await fileIdentity(input.executable.path)) !== canonicalJson(input.executable))
     throw new TypeError("TASK24_ISOLATION_BINARY_CHANGED")
   if (signal.aborted) return cancelledBeforeStart()
@@ -635,7 +641,7 @@ try {
         argv: input.argv,
         workingDirectory: input.cwd,
         compiler,
-        readonly: [runtime, ...input.readonly],
+        readonly: [runtime, ...input.readonly, ...mediated],
         writable: [state, ...input.writable],
         ports: input.ports,
         environment: canonicalJson({ ...environment, ...input.environment }),
@@ -647,6 +653,7 @@ try {
           exe: nativeExeIdentity,
           directories,
           profile,
+          mediatedRoots: mediated,
           policyJournal: path.join(root, "network-policy.intent.json"),
         }),
       }) + "\n",
