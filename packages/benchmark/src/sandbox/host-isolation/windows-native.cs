@@ -25,7 +25,7 @@ public static partial class Task24NativeIsolation {
   [StructLayout(LayoutKind.Sequential)] struct FileInfo { public uint Attributes,CLo,CHi,ALo,AHi,WLo,WHi,Volume,SizeHi,SizeLo,Links,IndexHi,IndexLo; }
   public sealed class FilePin { public string path,fileID,sha256; }
   public sealed class DirectoryPin { public string path,fileID; }
-  public sealed class PinPlan { public FilePin exe;public DirectoryPin[] directories;public string profile,policyJournal;public string[] mediatedRoots; }
+  public sealed class PinPlan { public FilePin exe;public DirectoryPin[] directories;public string profile,policyJournal;public string[] mediatedRoots;public bool ancestorMetadata; }
   [StructLayout(LayoutKind.Sequential)] struct Display { public IntPtr Name,Description; }
   [StructLayout(LayoutKind.Sequential)] struct Blob { public uint Size; public IntPtr Data; }
   [StructLayout(LayoutKind.Explicit,Size=16)] struct Value { [FieldOffset(0)] public uint Type; [FieldOffset(8)] public ulong Number; [FieldOffset(8)] public IntPtr Pointer; }
@@ -99,15 +99,15 @@ public static partial class Task24NativeIsolation {
     if(roots!=null)foreach(string root in roots)if(String.Equals(value,root,StringComparison.OrdinalIgnoreCase)||value.StartsWith(root+"\\",StringComparison.OrdinalIgnoreCase))return true;
     return false;
   }
-  static SafeFileHandle Pin(string value,bool directory,string expected,bool grant,Dictionary<string,SafeFileHandle> pins,HashSet<string> grantPaths,bool mutable,string[] mediatedRoots=null) {
+  static SafeFileHandle Pin(string value,bool directory,string expected,bool grant,Dictionary<string,SafeFileHandle> pins,HashSet<string> grantPaths,bool mutable,string[] mediatedRoots=null,HashSet<string> metadataPaths=null) {
     SafeFileHandle prior;
     if(pins.TryGetValue(value,out prior)){ExpectedID(prior,expected);return prior;}
     grant=grant||grantPaths.Contains(value);
     string parent=Path.GetDirectoryName(value);
-    if(parent!=null && parent!=value)Pin(parent,true,null,false,pins,grantPaths,false,mediatedRoots);
+    if(parent!=null && parent!=value)Pin(parent,true,null,false,pins,grantPaths,false,mediatedRoots,metadataPaths);
     // A mediated directory permits trusted child-entry updates, but never shares
     // DELETE: its ancestry cannot move. Its package ACL still grants read only.
-    var handle=CreateFileW(value,grant?0x1e0080u:(directory?0x1000a0u:0x100081u),(mutable&&!directory)||(directory&&MediatedPath(value,mediatedRoots))?3u:1u,IntPtr.Zero,3,directory?0x02200000u:0x00200000u,IntPtr.Zero);
+    var handle=CreateFileW(value,metadataPaths!=null && metadataPaths.Contains(value)?0x00060080u:(grant?0x1e0080u:(directory?0x1000a0u:0x100081u)),(mutable&&!directory)||(directory&&MediatedPath(value,mediatedRoots))?3u:1u,IntPtr.Zero,3,directory?0x02200000u:0x00200000u,IntPtr.Zero);
     try {
       FileInfo info=new FileInfo();
       Require(!handle.IsInvalid && GetFileInformationByHandle(handle,out info),"pin identity");
@@ -245,6 +245,73 @@ public static partial class Task24NativeIsolation {
       if(failures.Count>0)throw new AggregateException("own directory cleanup failed",failures);
     }
   }
+  // Non-inheriting metadata only. Never restore an ancestor's whole old DACL:
+  // remove this unique SID's exact ACE from the current descriptor instead.
+  sealed class MetadataGrant : IDisposable {
+    readonly SafeFileHandle handle;readonly SecurityIdentifier sid;readonly string path;bool applied;
+    public bool Retired {get;private set;}
+    public MetadataGrant(SafeFileHandle handle,SecurityIdentifier sid,string path){this.handle=handle;this.sid=sid;this.path=path;}
+    [DllImport("ntdll.dll")]static extern int NtSetSecurityObject(SafeFileHandle handle,uint flags,IntPtr descriptor);
+    RawSecurityDescriptor ReadAcl() {
+      IntPtr owner,group,dacl,sacl,descriptor;
+      Status(GetSecurityInfo(handle,1,4,out owner,out group,out dacl,out sacl,out descriptor),"read ancestor metadata DACL");
+      try {var bytes=new byte[GetSecurityDescriptorLength(descriptor)];Marshal.Copy(descriptor,bytes,0,bytes.Length);var result=new RawSecurityDescriptor(bytes,0);Require(result.DiscretionaryAcl!=null,"ancestor DACL exists");return result;}finally{LocalFree(descriptor);}
+    }
+    void WriteAcl(RawSecurityDescriptor descriptor) {
+      var controls=descriptor.ControlFlags;
+      var expected=new byte[descriptor.DiscretionaryAcl.BinaryLength];descriptor.DiscretionaryAcl.GetBinaryForm(expected,0);
+      // The handle-based native operation changes only this object. Unlike
+      // SetSecurityInfo it does not walk existing children. AUTO_INHERITED
+      // requires AUTO_INHERIT_REQ in the incoming descriptor to survive the
+      // filesystem update; do not enable either bit on legacy/protected ACLs.
+      if((controls&ControlFlags.DiscretionaryAclAutoInherited)!=0)descriptor.SetFlags(controls|ControlFlags.DiscretionaryAclAutoInheritRequired);
+      var bytes=new byte[descriptor.BinaryLength];descriptor.GetBinaryForm(bytes,0);var pin=GCHandle.Alloc(bytes,GCHandleType.Pinned);
+      try {Status(unchecked((uint)NtSetSecurityObject(handle,4,pin.AddrOfPinnedObject())),"update own ancestor metadata ACE");}finally{pin.Free();}
+      var after=ReadAcl();var actual=new byte[after.DiscretionaryAcl.BinaryLength];after.DiscretionaryAcl.GetBinaryForm(actual,0);
+      if(after.ControlFlags!=controls||Convert.ToBase64String(actual)!=Convert.ToBase64String(expected))throw new IOException("ancestor metadata ACL/control verification: "+path);
+    }
+    public void Apply() {
+      var descriptor=ReadAcl();int index=descriptor.DiscretionaryAcl.Count;
+      for(int i=0;i<descriptor.DiscretionaryAcl.Count;i++) {
+        var ace=descriptor.DiscretionaryAcl[i] as KnownAce;
+        Require(ace==null || !ace.SecurityIdentifier.Equals(sid),"fresh ancestor metadata SID");
+        if(index==descriptor.DiscretionaryAcl.Count && (descriptor.DiscretionaryAcl[i].AceFlags&AceFlags.Inherited)!=0)index=i;
+      }
+      // 0x80 FILE_READ_ATTRIBUTES + 0x20 FILE_TRAVERSE. No LIST_DIRECTORY,
+      // READ_DATA, SYNCHRONIZE, inheritance, write, owner or ACL authority.
+      descriptor.DiscretionaryAcl.InsertAce(index,new CommonAce(AceFlags.None,AceQualifier.AccessAllowed,0xa0,sid,false,null));
+      applied=true;WriteAcl(descriptor);
+    }
+    public void Dispose() {
+      if(!applied){Retired=true;return;}
+      var descriptor=ReadAcl();int found=-1;
+      for(int i=0;i<descriptor.DiscretionaryAcl.Count;i++) {
+        var ace=descriptor.DiscretionaryAcl[i] as KnownAce;
+        if(ace==null || !ace.SecurityIdentifier.Equals(sid))continue;
+        var expected=ace as CommonAce;
+        Require(found<0 && expected!=null && expected.AceFlags==AceFlags.None && expected.AceQualifier==AceQualifier.AccessAllowed && expected.AccessMask==0xa0,"exact own ancestor metadata ACE");found=i;
+      }
+      Require(found>=0,"own ancestor metadata ACE still present");
+      descriptor.DiscretionaryAcl.RemoveAce(found);WriteAcl(descriptor);
+      var after=ReadAcl();foreach(GenericAce item in after.DiscretionaryAcl){var ace=item as KnownAce;Require(ace==null || !ace.SecurityIdentifier.Equals(sid),"ancestor metadata ACE retired");}
+      Retired=true;
+    }
+  }
+  static HashSet<string> MetadataPaths(bool enabled,string exe,string cwd,string[] reads,string[] writes) {
+    var result=new HashSet<string>(StringComparer.OrdinalIgnoreCase);if(!enabled)return result;
+    var values=new List<string>(reads);values.AddRange(writes);values.Add(cwd);values.Add(exe);
+    foreach(string value in values) {
+      string parent=Path.GetDirectoryName(value);
+      while(parent!=null) {
+        Require(parent.StartsWith(@"D:\",StringComparison.OrdinalIgnoreCase),"D-only metadata ancestor");
+        bool admitted=false;foreach(string root in reads)if(String.Equals(parent,root,StringComparison.OrdinalIgnoreCase)||parent.StartsWith(root+"\\",StringComparison.OrdinalIgnoreCase))admitted=true;
+        foreach(string root in writes)if(String.Equals(parent,root,StringComparison.OrdinalIgnoreCase)||parent.StartsWith(root+"\\",StringComparison.OrdinalIgnoreCase))admitted=true;
+        if(!admitted)result.Add(parent);
+        string next=Path.GetDirectoryName(parent);if(next==parent)break;parent=next;
+      }
+    }
+    Require(result.Count<=512,"bounded metadata ancestors");return result;
+  }
   static byte[] Read(IntPtr pipe,int limit,IntPtr job,Action truncate) {
     using(var stream=new FileStream(new SafeFileHandle(pipe,true),FileAccess.Read,8192,false))using(var output=new MemoryStream()) {
       var buffer=new byte[8192];int count;
@@ -255,10 +322,11 @@ public static partial class Task24NativeIsolation {
   public static string Run(string exe,string[] argv,string cwd,string[] reads,string[] writes,int[] ports,string environment,string input,int timeout,int outLimit,int errLimit,string pinsJSON) {
     IntPtr sid=IntPtr.Zero,registryRead=IntPtr.Zero,network=IntPtr.Zero,engine=IntPtr.Zero,job=IntPtr.Zero,attributes=IntPtr.Zero,env=IntPtr.Zero;
     IntPtr ri=IntPtr.Zero,wi=IntPtr.Zero,ro=IntPtr.Zero,wo=IntPtr.Zero,re=IntPtr.Zero,we=IntPtr.Zero;
-    var memory=new List<IntPtr>();var grants=new List<Grant>();var pi=new PI();PersistentPolicy policy=null;bool dynamicApplied=false;
+    var memory=new List<IntPtr>();var grants=new List<IDisposable>();var metadataGrants=new List<MetadataGrant>();var pi=new PI();PersistentPolicy policy=null;bool dynamicApplied=false;
     Thread outThread=null,errThread=null,inThread=null;byte[] stdout=new byte[0],stderr=new byte[0];int truncated=0;bool ended=false,started=false;uint exit=125;
     var pins=new Dictionary<string,SafeFileHandle>(StringComparer.OrdinalIgnoreCase);
     var serializer=new JavaScriptSerializer{MaxJsonLength=4194304};var plan=serializer.Deserialize<PinPlan>(pinsJSON);
+    var metadataPaths=MetadataPaths(plan.ancestorMetadata,exe,cwd,reads,writes);string metadataJournal=Path.Combine(Path.GetDirectoryName(plan.policyJournal),"ancestor-metadata.intent.json");bool metadataRetired=metadataPaths.Count==0;
     string sidString="",profile=plan.profile,profilePath="",defaultProfilePath="";bool profileCreated=false,loopbackAdded=false,lockHeld=false;
     var exclusive=new Mutex(false,"Global\\opencode-task24-native-isolation-grants");
     int cancelled=0;Exception failure=null;
@@ -268,7 +336,7 @@ public static partial class Task24NativeIsolation {
       try{lockHeld=exclusive.WaitOne(30000);}catch(AbandonedMutexException){lockHeld=true;}
       if(!lockHeld)throw new IOException("isolation grants busy");
       var grantPaths=new HashSet<string>(StringComparer.OrdinalIgnoreCase);foreach(var directory in plan.directories)grantPaths.Add(directory.path);
-      foreach(var directory in plan.directories)Pin(directory.path,true,directory.fileID,true,pins,grantPaths,false,plan.mediatedRoots);
+      foreach(var directory in plan.directories)Pin(directory.path,true,directory.fileID,true,pins,grantPaths,false,plan.mediatedRoots,metadataPaths);
       var exeHandle=Pin(exe,false,plan.exe.fileID,false,pins,grantPaths,false);
       Require(String.Equals(exe,plan.exe.path,StringComparison.OrdinalIgnoreCase),"pin executable path");
       using(var stream=new FileStream(new SafeFileHandle(exeHandle.DangerousGetHandle(),false),FileAccess.Read))using(var hash=SHA256.Create()) {
@@ -284,6 +352,12 @@ public static partial class Task24NativeIsolation {
       if(registered!=0)throw new IOException("new AppContainer registration failed="+registered.ToString("x"));
       profileCreated=true;
       var identity=new SecurityIdentifier(sid);sidString=identity.Value;
+      if(metadataPaths.Count>0) {
+        var records=new List<object>();foreach(string p in metadataPaths){FileInfo info=new FileInfo();Require(pins.ContainsKey(p)&&GetFileInformationByHandle(pins[p],out info),"pinned metadata ancestor");records.Add(new{path=p,volume=info.Volume.ToString(),fileID=(((ulong)info.IndexHi<<32)|info.IndexLo).ToString()});}
+        var bytes=Encoding.UTF8.GetBytes(serializer.Serialize(new{purpose="task24-ancestor-metadata",sid=sidString,mask=160,inherited=false,paths=records}));
+        using(var journal=new FileStream(metadataJournal,FileMode.CreateNew,FileAccess.Write,FileShare.Read)){journal.Write(bytes,0,bytes.Length);journal.Flush(true);}
+        foreach(string p in metadataPaths){var grant=new MetadataGrant(pins[p],identity,p);metadataGrants.Add(grant);grants.Add(grant);grant.Apply();}
+      }
       IntPtr folder;int located=GetAppContainerFolderPath(sidString,out folder);if(located<0)Marshal.ThrowExceptionForHR(located);
       try{defaultProfilePath=Marshal.PtrToStringUni(folder);}finally{Marshal.FreeCoTaskMem(folder);}
       var vars=serializer.Deserialize<Dictionary<string,string>>(environment);
@@ -301,8 +375,8 @@ public static partial class Task24NativeIsolation {
       Status(FwpmEngineOpen0(null,10,IntPtr.Zero,ref session,out engine),"WFP open");
       foreach(int port in ports)AddFilter(engine,PolicyGuid(policy.Intent.sublayer.key),policyV4,sid,port,true,memory);dynamicApplied=true;
       if(ports.Length>0){loopbackAdded=true;Loopback(sid,true);}
-      foreach(string p in reads){var grant=new Grant(pins[p],identity,false);grants.Add(grant);grant.Apply();}
-      foreach(string p in writes){var grant=new Grant(pins[p],identity,true);grants.Add(grant);grant.Apply();}
+      foreach(string p in reads){var grant=new Grant(pins[p],identity,false);grants.Add(grant);try{grant.Apply();}catch(Exception error){throw new IOException("readonly grant: "+p,error);}}
+      foreach(string p in writes){var grant=new Grant(pins[p],identity,true);grants.Add(grant);try{grant.Apply();}catch(Exception error){throw new IOException("writable grant: "+p,error);}}
       AdmitMediatedReplacement(plan.mediatedRoots??new string[0],reads,writes,pins);
       job=PolicyCreateJob(policy);
       var limits=new Limits{Basic=new Basic{Flags=0x2000|0x8|0x200,Active=64},JobMemory=(UIntPtr)(2ul*1024*1024*1024)};
@@ -377,6 +451,7 @@ public static partial class Task24NativeIsolation {
       if(attributes!=IntPtr.Zero)Cleanup(()=>{DeleteProcThreadAttributeList(attributes);Marshal.FreeHGlobal(attributes);},errors);
       if(env!=IntPtr.Zero)Marshal.FreeHGlobal(env);
       for(int i=grants.Count-1;i>=0;i--){var grant=grants[i];Cleanup(()=>grant.Dispose(),errors);}
+      if(metadataGrants.Count>0 && metadataGrants.TrueForAll(grant=>grant.Retired))Cleanup(()=>{File.Delete(metadataJournal);metadataRetired=true;},errors);
       if(loopbackAdded)Cleanup(()=>Loopback(sid,false),errors);
       bool permitsClosed=engine==IntPtr.Zero;
       if(engine!=IntPtr.Zero)Cleanup(()=>{Status(FwpmEngineClose0(engine),"close volatile permit WFP session");engine=IntPtr.Zero;permitsClosed=true;},errors);
@@ -397,6 +472,6 @@ public static partial class Task24NativeIsolation {
       if(errors.Count>0){if(failure!=null)errors.Insert(0,failure);failure=new AggregateException("isolation cleanup failed; policyJournal="+(policy==null?"":policy.JournalPath),errors);}
     }
     if(failure!=null)throw failure;
-    return serializer.Serialize(new {started=started,exitCode=(int)exit,stdout=Convert.ToBase64String(stdout),stderr=Convert.ToBase64String(stderr),truncated=truncated!=0,containment=new {appContainer=started,sid=sidString,processTreeEnded=ended||!started,dynamicNetworkPolicy=dynamicApplied,cleanupCompleted=true,profilePath=profilePath,persistentNetworkPolicy=policy!=null && policy.Committed,persistentPolicyRetired=policy==null || policy.Retired,policyJournal=policy==null?"":policy.JournalPath}});
+    return serializer.Serialize(new {started=started,exitCode=(int)exit,stdout=Convert.ToBase64String(stdout),stderr=Convert.ToBase64String(stderr),truncated=truncated!=0,containment=new {appContainer=started,sid=sidString,processTreeEnded=ended||!started,dynamicNetworkPolicy=dynamicApplied,cleanupCompleted=true,profilePath=profilePath,persistentNetworkPolicy=policy!=null && policy.Committed,persistentPolicyRetired=policy==null || policy.Retired,policyJournal=policy==null?"":policy.JournalPath,ancestorMetadataPaths=new List<string>(metadataPaths),ancestorMetadataRetired=metadataRetired}});
   }
 }

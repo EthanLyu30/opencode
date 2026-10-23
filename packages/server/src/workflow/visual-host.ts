@@ -19,6 +19,7 @@ import { HostRootPolicy } from "./host-root-policy"
 import { PlaywrightCapture } from "./playwright"
 import { ProcessOwnership } from "./process-ownership"
 import { ProductionHostRuntime } from "./production-host-runtime"
+import { BenchmarkHostRuntime } from "./benchmark-host-runtime"
 import { VisualHostClaim } from "./visual-host-claim"
 
 const MAX_PROCESS_LOG_BYTES = 1024 * 1024
@@ -150,6 +151,7 @@ export interface ProductionLayerOptions {
 export function productionLayer(input: ProductionLayerOptions) {
   try {
     const runtime = ProductionHostRuntime.load(input.environment, { probe: input.aclProbe })
+    const benchmark = BenchmarkHostRuntime.load(input.environment)
     const contract = runtime.contract
     const browserRuntimeFactory = input.browserRuntimeFactory ?? PlaywrightCapture.productionRuntime
     const configured = makeLayer({
@@ -157,6 +159,7 @@ export function productionLayer(input: ProductionLayerOptions) {
       evidenceRoot: contract.roots.dataRoot,
       browser:
         input.browser ??
+        benchmark?.browser ??
         browserRuntimeFactory({
           browserRoot: contract.roots.browserRuntimeRoot,
           tempRoot: contract.roots.browserCacheRoot,
@@ -175,7 +178,7 @@ export function productionLayer(input: ProductionLayerOptions) {
         await DockerConfig.admitWorkspace(validated, workspace)
       },
       processOwnership: DockerProcessOwnership.make({
-        engine: input.engine ?? Docker.production,
+        engine: input.engine ?? benchmark?.engine ?? Docker.production,
         config: runtime.dockerConfig,
         hostRoot: contract.roots.previewCapabilityRoot,
         relayIngress: true,

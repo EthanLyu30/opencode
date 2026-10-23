@@ -22,6 +22,7 @@ const Request = Schema.Struct({
   maxStdoutBytes: Schema.Int,
   maxStderrBytes: Schema.Int,
   environment: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  ancestorMetadata: Schema.optionalKey(Schema.Literal(true)),
 })
 const NativeResult = Schema.Struct({
   started: Schema.Boolean,
@@ -39,6 +40,8 @@ const NativeResult = Schema.Struct({
     persistentPolicyRetired: Schema.Literal(true),
     policyJournal: Schema.String,
     profilePath: Schema.String,
+    ancestorMetadataPaths: Schema.optionalKey(Schema.Array(Schema.String)),
+    ancestorMetadataRetired: Schema.optionalKey(Schema.Literal(true)),
   }),
 })
 const BrowserNativeResult = Schema.Struct({
@@ -105,6 +108,8 @@ const pathEnvironment = new Set([
   "XDG_STATE_HOME",
 ])
 const valueEnvironment = new Set([
+  "OPENCODE_DISABLE_PROJECT_CONFIG",
+  "OPENCODE_DISABLE_DEFAULT_PLUGINS",
   "OPENCODE_DISABLE_AUTOUPDATE",
   "OPENCODE_DISABLE_MODELS_FETCH",
   "OPENCODE_DISABLE_PRUNE",
@@ -190,6 +195,8 @@ export type WindowsSandboxResult = {
     persistentPolicyRetired: boolean
     policyJournal: string
     profilePath: string
+    ancestorMetadataPaths?: readonly string[]
+    ancestorMetadataRetired?: true
   }
 }
 
@@ -655,6 +662,7 @@ try {
           directories,
           profile,
           mediatedRoots: mediated,
+          ancestorMetadata: input.ancestorMetadata === true,
           policyJournal: path.join(root, "network-policy.intent.json"),
         }),
       }) + "\n",

@@ -55,8 +55,38 @@ export class Timeout extends Error {
   readonly _tag = "Docker.Timeout"
 }
 
-export const makeProduction = (spawn: Spawn): Engine =>
-  Object.freeze({ execute: (input: Invocation) => execute(input, spawn) })
+export const makeProduction = (
+  spawn: Spawn,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): Engine => {
+  if (environment.OPENCODE_BENCHMARK_HOST_FILE === undefined)
+    return Object.freeze({ execute: (input: Invocation) => execute(input, spawn) })
+  const frozen = Object.freeze(
+    Object.fromEntries(
+      [
+        "OPENCODE_BENCHMARK_HOST_FILE",
+        "OPENCODE_BENCHMARK_TRANSPORT_FILE",
+        "OPENCODE_BENCHMARK_RUN_DATA_ROOT",
+        "OPENCODE_BENCHMARK_CAMPAIGN_ID",
+        "OPENCODE_BENCHMARK_RUN_ID",
+        "OPENCODE_WORKFLOW_SANDBOX_ENGINE",
+      ].map((key) => [key, environment[key]]),
+    ),
+  )
+  let selected: Promise<Engine> | undefined
+  return Object.freeze({
+    execute: async (input: Invocation) => {
+      if (input.signal?.aborted) throw new Cancelled("Docker invocation was cancelled")
+      const engine = await (selected ??= (async () => {
+        const { BenchmarkHostRuntime } = await import("./benchmark-host-runtime")
+        const runtime = BenchmarkHostRuntime.load(frozen)
+        if (!runtime) throw new Unavailable("Benchmark host authority is missing")
+        return runtime.engine
+      })())
+      return engine.execute(input)
+    },
+  })
+}
 
 export const production: Engine = makeProduction((command, options) => Bun.spawn([...command], options))
 

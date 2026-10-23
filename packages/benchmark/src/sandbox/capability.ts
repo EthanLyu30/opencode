@@ -30,16 +30,22 @@ export type PublicMcpConnection = Readonly<
     capability: string
     bun: FileIdentity
     entry: FileIdentity
-  } & ({ pipe: string; host?: never; port?: never } | { host: "127.0.0.1"; port: number; pipe?: never })
+  } & (
+    | { pipe: string; host?: never; port?: never; transport?: "stdio" }
+    | { host: "127.0.0.1"; port: number; pipe?: never; transport?: "stdio" | "http" }
+  )
 >
 
 export function publicMcpArguments(connection: PublicMcpConnection): readonly string[] {
   if (!/^[a-f0-9]{64}$/.test(connection.capability)) throw new TypeError("TASK24_PUBLIC_MCP_CONFIG")
+  if (connection.transport !== undefined && connection.transport !== "stdio" && connection.transport !== "http")
+    throw new TypeError("TASK24_PUBLIC_MCP_CONFIG")
   if (typeof connection.pipe === "string") {
     if (
       !/^\\\\\.\\pipe\\opencode-task24-[a-f0-9]{64}$/.test(connection.pipe) ||
       connection.host !== undefined ||
-      connection.port !== undefined
+      connection.port !== undefined ||
+      (connection as PublicMcpConnection).transport === "http"
     )
       throw new TypeError("TASK24_PUBLIC_MCP_CONFIG")
     return ["--pipe", connection.pipe]
@@ -92,12 +98,21 @@ export async function configurePublicMcp(
       ...config,
       permission: { ...permission, "task24_*": "allow" },
       mcp: {
-        task24: {
-          type: "local",
-          command,
-          environment: { TASK24_PUBLIC_TOOL_CAPABILITY: connection.capability },
-          enabled: true,
-        },
+        task24:
+          connection.transport === "http"
+            ? {
+                type: "remote",
+                url: `http://127.0.0.1:${connection.port}/task24/mcp`,
+                headers: { Authorization: `Bearer ${connection.capability}` },
+                oauth: false,
+                enabled: true,
+              }
+            : {
+                type: "local",
+                command,
+                environment: { TASK24_PUBLIC_TOOL_CAPABILITY: connection.capability },
+                enabled: true,
+              },
       },
     }),
   )

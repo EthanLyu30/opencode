@@ -1,5 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { timingSafeEqual } from "node:crypto"
 import { canonicalJson } from "../campaign/canonical"
@@ -71,6 +72,7 @@ export async function startPublicToolLoopback(input: {
   host: Pick<PublicToolHost, "read" | "write" | "check" | "preview" | "capture">
   lifecycle?: AbortController
   cleanupTimeoutMs?: number
+  mcpHttp?: true
 }) {
   const cleanupTimeoutMs = input.cleanupTimeoutMs ?? 5000
   if (!Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1 || cleanupTimeoutMs > 5000)
@@ -82,24 +84,32 @@ export async function startPublicToolLoopback(input: {
   let active = 0
   const denied = () => new Response('{"ok":false}\n', { status: 403, headers: { "content-type": "application/json" } })
   // HTTP supplies bounded request framing without depending on Bun's TCP
-  // half-close semantics. This is a private bridge, not a public MCP endpoint.
+  // half-close semantics. The optional MCP endpoint shares its port/authority.
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     maxRequestBodySize: maxFrame,
     idleTimeout: 30,
     async fetch(request, server) {
+      const mcp = input.mcpHttp === true && request.url === `http://127.0.0.1:${server.port}/task24/mcp`
       if (
         closed ||
         lifecycle.signal.aborted ||
         active >= 16 ||
         server.requestIP(request)?.address !== "127.0.0.1" ||
-        request.method !== "POST" ||
-        request.url !== `http://127.0.0.1:${server.port}/task24/public-tools` ||
+        request.headers.get("host") !== `127.0.0.1:${server.port}` ||
+        (!mcp && request.url !== `http://127.0.0.1:${server.port}/task24/public-tools`) ||
         request.headers.has("origin") ||
-        request.headers.get("content-type") !== "application/json"
+        (request.method === "POST" && request.headers.get("content-type") !== "application/json")
       )
         return denied()
+      if (mcp) {
+        const token = request.headers.get("authorization")?.match(/^Bearer ([a-f0-9]{64})$/)?.[1]
+        if (!token || !timingSafeEqual(Buffer.from(token), Buffer.from(capability))) return denied()
+        // Stateless request/response transport has no standalone SSE stream.
+        if (request.method === "GET") return new Response(null, { status: 405, headers: { Allow: "POST" } })
+      }
+      if (request.method !== "POST") return denied()
       active++
       const settled = Promise.withResolvers<void>()
       pending.add(settled.promise)
@@ -109,6 +119,7 @@ export async function startPublicToolLoopback(input: {
         expired = true
         void reader?.cancel().catch(() => {})
       }, 30000)
+      let rpc: Server | undefined
       try {
         if (!reader) throw Error("body")
         const chunks: Buffer[] = []
@@ -122,6 +133,34 @@ export async function startPublicToolLoopback(input: {
         }
         if (closed || expired || lifecycle.signal.aborted || request.signal.aborted) throw Error("closed")
         clearTimeout(timer)
+        if (mcp) {
+          const body: unknown = JSON.parse(
+            new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, bytes)),
+          )
+          if (!body || typeof body !== "object" || Array.isArray(body)) throw Error("frame")
+          // Fresh stateless transport per request prevents cross-client ID collisions.
+          // Keep the fetch pending through the actual tool promise so close() cannot
+          // retire its workspace while a non-cooperative backend still owns it.
+          const host = Object.fromEntries(
+            ["read", "write", "check", "preview", "capture"].map((name) => [
+              name,
+              async (parameters: unknown) => {
+                if (closed || lifecycle.signal.aborted || request.signal.aborted) throw Error("closed")
+                const value = await input.host[name as keyof typeof input.host](parameters)
+                if (closed || lifecycle.signal.aborted || request.signal.aborted) throw Error("closed")
+                return value
+              },
+            ]),
+          ) as PublicMcpHost
+          rpc = createPublicMcp(host)
+          const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true })
+          await rpc.connect(transport)
+          const response = await transport.handleRequest(request, { parsedBody: body })
+          const out = await response.arrayBuffer()
+          if (closed || lifecycle.signal.aborted || request.signal.aborted || out.byteLength > maxFrame)
+            throw Error("closed")
+          return new Response(out.byteLength ? out : null, { status: response.status, headers: response.headers })
+        }
         const call = Schema.decodeUnknownSync(PipeCall)(decodeFrame(chunks, bytes), { onExcessProperty: "error" })
         if (
           !/^[a-f0-9]{64}$/.test(call.capability) ||
@@ -137,6 +176,7 @@ export async function startPublicToolLoopback(input: {
       } finally {
         clearTimeout(timer)
         await reader?.cancel().catch(() => {})
+        await rpc?.close()
         active--
         pending.delete(settled.promise)
         settled.resolve()
@@ -315,12 +355,11 @@ export async function callPublicToolPipe(input: {
   })
 }
 
-export async function servePublicMcp(input: {
-  host: Readonly<Record<"read" | "write" | "check" | "preview" | "capture", (input: unknown) => Promise<unknown>>>
-  capability: string
-  stdio?: { stdin: NodeJS.ReadableStream; stdout: NodeJS.WritableStream }
-}) {
-  if (!/^[a-f0-9]{64}$/.test(input.capability)) throw new TypeError("TASK24_MCP_CAPABILITY")
+type PublicMcpHost = Readonly<
+  Record<"read" | "write" | "check" | "preview" | "capture", (input: unknown) => Promise<unknown>>
+>
+
+function createPublicMcp(host: PublicMcpHost) {
   const server = new Server({ name: "task24-public-tools", version: "2" }, { capabilities: { tools: {} } })
   const specs = {
     read: { path: { type: "string" }, offset: { type: "integer" }, length: { type: "integer" } },
@@ -345,13 +384,23 @@ export async function servePublicMcp(input: {
       const parameters = request.params.arguments ?? {}
       if (!Object.hasOwn(specs, request.params.name)) throw Error("tool")
       const name = request.params.name as keyof typeof specs
-      const result = await input.host[name](parameters)
+      const result = await host[name](parameters)
       if (name === "capture") return { content: publicCaptureContent(result) }
       return { content: [{ type: "text" as const, text: canonicalJson(result) }] }
     } catch {
       return { isError: true, content: [{ type: "text" as const, text: "TASK24_PUBLIC_TOOL_DENIED" }] }
     }
   })
+  return server
+}
+
+export async function servePublicMcp(input: {
+  host: PublicMcpHost
+  capability: string
+  stdio?: { stdin: NodeJS.ReadableStream; stdout: NodeJS.WritableStream }
+}) {
+  if (!/^[a-f0-9]{64}$/.test(input.capability)) throw new TypeError("TASK24_MCP_CAPABILITY")
+  const server = createPublicMcp(input.host)
   await server.connect(
     input.stdio
       ? new StdioServerTransport(input.stdio.stdin as NodeJS.ReadStream, input.stdio.stdout as NodeJS.WriteStream)

@@ -18,6 +18,7 @@ import { sessionState, revalidateSession } from "./preflight"
 import { directoryIdentity, fileIdentity } from "./storage"
 import { mapWsl2Workspace } from "./wsl2-independent"
 import { ordinaryFiles } from "../corpus/evaluation-bundle"
+import type { ProductionCapture } from "./production-command-http"
 
 /** Controller-frozen public commands, never a request supplied by the agent. */
 export type ProductionCommand = Readonly<{
@@ -569,7 +570,10 @@ export async function makeProductionCommandEngine(input: {
   })
 }
 
-export async function startProductionCommandBridge(input: Parameters<typeof makeProductionCommandEngine>[0]) {
+export async function startProductionCommandBridge(
+  input: Parameters<typeof makeProductionCommandEngine>[0],
+  options: { capture?: ProductionCapture } = {},
+) {
   requireRealDockerRunner(input.runner)
   const runner = await makeProductionCommandDockerRunner(input)
   const state = sessionState(input.session)
@@ -603,7 +607,7 @@ export async function startProductionCommandBridge(input: Parameters<typeof make
   try {
     const engine = await makeProductionCommandEngine({ ...input, runner, record })
     const { startProductionCommandEndpoint } = await import("./production-command-http")
-    const bridge = await startProductionCommandEndpoint(engine)
+    const bridge = await startProductionCommandEndpoint(engine, options)
     return Object.freeze({ ...bridge, journalRoot: root })
   } catch (cause) {
     try {

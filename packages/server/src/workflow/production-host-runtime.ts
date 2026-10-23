@@ -8,6 +8,7 @@ import path from "node:path"
 import { DockerConfig } from "./docker-config"
 import { HostRootPolicy } from "./host-root-policy"
 import { ProductionHostRoots } from "./production-host-roots"
+import { BenchmarkAclProbe } from "./benchmark-acl-probe"
 
 const BENCHMARK_RUNS_ROOT = "D:\\OpenCode-Benchmark\\Task24\\runs"
 const BENCHMARK_WORKSPACES_ROOT = "D:\\OpenCode-Benchmark\\Task24\\workspaces"
@@ -31,10 +32,34 @@ export function load(
   const tempRoot = environment.OPENCODE_WORKFLOW_HOST_TEMP
   if (tempRoot === undefined || tempRoot.length === 0) throw new TypeError("OPENCODE_WORKFLOW_HOST_TEMP is required")
   const contract = ProductionHostRoots.fromEnvironment(environment, {
-    probe: options.probe ?? HostRootPolicy.productionProbe({ tempRoot }),
+    probe: options.probe ?? benchmarkProbe(environment, tempRoot) ?? HostRootPolicy.productionProbe({ tempRoot }),
     workspaceRoots: options.workspaceRoots,
   })
   return Object.freeze({ contract, dockerConfig: DockerConfig.fromProductionHostRoots(contract) })
+}
+
+function benchmarkProbe(
+  environment: Readonly<Record<string, string | undefined>>,
+  tempRoot: string,
+): HostRootPolicy.Probe | undefined {
+  if (environment.OPENCODE_BENCHMARK_HOST_FILE === undefined) return undefined
+  const binding = loadBenchmarkTransport(environment)
+  const runDataRoot = environment.OPENCODE_BENCHMARK_RUN_DATA_ROOT
+  if (
+    !binding ||
+    binding.evidenceMode !== "production" ||
+    !runDataRoot ||
+    environment.OPENCODE_BENCHMARK_HOST_FILE !== path.join(runDataRoot, "benchmark-host.json") ||
+    !strictDescendant(runDataRoot, tempRoot)
+  )
+    throw new TypeError("TASK24_BENCHMARK_ACL_AUTHORITY")
+  return BenchmarkAclProbe.make({
+    tempRoot,
+    guard() {
+      if (loadBenchmarkTransport(environment)?.bindingSha256 !== binding.bindingSha256)
+        throw new TypeError("TASK24_BENCHMARK_ACL_STALE")
+    },
+  })
 }
 
 export function unavailableDockerConfig(): DockerConfig.Config {

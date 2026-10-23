@@ -25,6 +25,61 @@ test("Windows isolation refuses a C-drive writable grant before spawning", async
   )
 })
 
+test("ancestor metadata permission is explicit; false and caller-selected metadata paths are rejected", async () => {
+  await expect(invoke({ ...baseline(), ancestorMetadata: false })).rejects.toThrow("TASK24_ISOLATION_INPUT")
+  await expect(invoke({ ...baseline(), ancestorMetadata: true, metadataPaths: ["C:\\"] })).rejects.toThrow(
+    "TASK24_ISOLATION_INPUT",
+  )
+})
+
+test.skipIf(process.platform !== "win32" || process.env.TASK24_WINDOWS_ISOLATION_LIVE !== "1")(
+  "explicit metadata admission can stat D ancestors but cannot enumerate or read ungranted files",
+  async () => {
+    const root = await fs.mkdtemp(path.join(process.env.TMPDIR!, "metadata-live-"))
+    const work = path.join(root, "work"),
+      control = path.join(root, "control")
+    await fs.mkdir(work)
+    await fs.mkdir(control)
+    const canary = path.join(root, "outside-canary.txt")
+    await fs.writeFile(canary, "OWN_METADATA_CANARY")
+    let safe = false
+    try {
+      const executable = await fileIdentity(process.execPath)
+      const source = `const fs=require('fs');const denied=op=>{try{op();return false}catch(e){return e.code==='EACCES'||e.code==='EPERM'}};console.log(JSON.stringify({root:fs.lstatSync('D:\\\\').isDirectory(),ancestor:fs.lstatSync(${JSON.stringify(path.dirname(root))}).isDirectory(),enumerationDenied:denied(()=>fs.readdirSync('D:\\\\')),readDenied:denied(()=>fs.readFileSync(${JSON.stringify(canary)})),writeDenied:denied(()=>fs.writeFileSync(${JSON.stringify(canary)},'forbidden'))}));`
+      const result = await invoke({
+        executable,
+        argv: ["--no-env-file", "-e", source],
+        cwd: work,
+        readonly: [],
+        writable: [work],
+        ports: [],
+        root: control,
+        ancestorMetadata: true,
+        timeoutMs: 15000,
+        maxStdoutBytes: 4096,
+        maxStderrBytes: 65536,
+        signal: new AbortController().signal,
+      })
+      safe = result.containment.cleanupCompleted && result.containment.processTreeEnded
+      expect(result.execution.exitCode).toBe(0)
+      expect(JSON.parse(Buffer.from(result.execution.stdout).toString("utf8"))).toEqual({
+        root: true,
+        ancestor: true,
+        enumerationDenied: true,
+        readDenied: true,
+        writeDenied: true,
+      })
+      expect(await fs.readFile(canary, "utf8")).toBe("OWN_METADATA_CANARY")
+      expect(result.containment.ancestorMetadataPaths).toContain("D:\\")
+      expect(result.containment.ancestorMetadataRetired).toBe(true)
+      expect(await fs.readdir(control)).toEqual([])
+    } finally {
+      if (safe) await fs.rm(root, { recursive: true })
+    }
+  },
+  60000,
+)
+
 test("Windows isolation refuses unrestricted network and overlapping grants before spawning", async () => {
   for (const input of [
     { ...baseline(), ports: [0] },

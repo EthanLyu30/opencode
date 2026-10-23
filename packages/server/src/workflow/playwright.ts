@@ -1,6 +1,5 @@
 export * as PlaywrightCapture from "./playwright"
 
-import { chromium } from "playwright"
 import fs from "node:fs"
 import path from "node:path"
 import { PlaywrightNodeRuntime } from "./playwright-node-runtime"
@@ -353,7 +352,7 @@ export function productionRuntime(input: ProductionRuntimeOptions): Runtime {
   input.browserCachePolicy(input.tempRoot)
   const browserRoot = requireProductionDirectory(configuredBrowserRoot)
   const tempRoot = requireProductionDirectory(input.tempRoot)
-  const executablePath = input.browserExecutablePath ?? chromium.executablePath()
+  const executablePath = input.browserExecutablePath ?? chromiumBinding().executablePath()
   const executableIdentity = requireProductionExecutable(browserRoot, executablePath)
   const helperRelease = input.browserType === undefined ? PlaywrightNodeRuntime.loadRelease(browserRoot) : undefined
   const verifyBoundary = () => {
@@ -407,7 +406,7 @@ export function productionRuntime(input: ProductionRuntimeOptions): Runtime {
       input.browserType ??
       ({
         launch: async (options) => {
-          const browser = await chromium.launch(options)
+          const browser = await chromiumBinding().launch(options)
           return {
             newContext: async (contextOptions) => {
               const context = await browser.newContext({
@@ -460,6 +459,13 @@ export function productionRuntime(input: ProductionRuntimeOptions): Runtime {
         },
       } satisfies BrowserType),
   })
+}
+
+// Keep the synchronous production factory contract, but do not initialize
+// Playwright's filesystem-dependent package metadata during ordinary CLI startup.
+function chromiumBinding() {
+  const { chromium } = require("playwright") as typeof import("playwright")
+  return chromium
 }
 
 const CHROMIUM_NETWORK_SUPPRESSION_ARGS = Object.freeze([

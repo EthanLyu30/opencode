@@ -479,6 +479,7 @@ describe("WorkflowVisualHostServer", () => {
   test("registers reference cleanup before an interruptible acquisition step can be cancelled", async () => {
     await using temp = await taskTemp()
     const reference = await fs.readFile(path.join(fixtureRoot, "reference", "index.html"), "utf8")
+    const created = Promise.withResolvers<void>()
     let createdDirectory = ""
 
     await Effect.runPromise(
@@ -496,12 +497,17 @@ describe("WorkflowVisualHostServer", () => {
               },
             })
             .pipe(Effect.forkChild)
-          const reached = yield* Effect.promise(() =>
-            waitUntil(() => createdDirectory !== "", 200).then(
-              () => true,
-              () => false,
-            ),
-          )
+          const reached = yield* process.platform === "win32"
+            ? Effect.promise(() => created.promise).pipe(
+                Effect.timeout("5 seconds"),
+                Effect.match({ onFailure: () => false, onSuccess: () => true }),
+              )
+            : Effect.promise(() =>
+                waitUntil(() => createdDirectory !== "", 200).then(
+                  () => true,
+                  () => false,
+                ),
+              )
           expect(reached).toBe(true)
           yield* Fiber.interrupt(acquisition).pipe(Effect.timeout("200 millis"))
         }),
@@ -512,6 +518,7 @@ describe("WorkflowVisualHostServer", () => {
             browser: browserRuntime().runtime,
             onRecordCreated: async (directory, signal) => {
               createdDirectory = directory
+              created.resolve()
               await new Promise<void>((_resolve, reject) => {
                 signal.addEventListener("abort", () => reject(signal.reason), { once: true })
               })

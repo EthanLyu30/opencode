@@ -581,8 +581,10 @@ export async function openLinuxRuntime(session: EngineSession) {
             const pipe = await startPublicToolLoopback({
               lifecycle,
               host: tools,
+              ...(c.armID === "A" ? {} : { mcpHttp: true }),
             })
             const connection: PublicMcpConnection = {
+              ...(c.armID === "A" ? {} : { transport: "http" }),
               host: pipe.host,
               port: pipe.port,
               capability: pipe.capability,
