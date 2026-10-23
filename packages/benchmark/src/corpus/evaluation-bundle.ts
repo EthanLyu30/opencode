@@ -12,6 +12,8 @@ import {
 } from "./evaluation-profile"
 import { decodeTaskManifest, type FileEntry } from "./manifest"
 import sharp from "sharp"
+import { directRoot } from "./direct-root"
+export { directRoot } from "./direct-root"
 
 export type ValidatedEvaluationBundle = Readonly<{
   root: string
@@ -29,23 +31,6 @@ export type PublicEvaluationTask = Readonly<{
 }>
 const publicBytes = new WeakMap<ValidatedEvaluationBundle, PublicEvaluationTask["files"]>()
 
-/** Refuse aliases on every ancestor, not merely the final leaf. */
-export async function directRoot(root: string): Promise<string> {
-  const absolute = path.resolve(root)
-  if (!/^d:\\/i.test(absolute) && process.platform === "win32") throw new TypeError("TASK24_ROOT_VOLUME")
-  let current = path.parse(absolute).root
-  for (const part of absolute.slice(current.length).split(path.sep).filter(Boolean)) {
-    current = path.join(current, part)
-    const stat = await fs.lstat(current)
-    if (
-      stat.isSymbolicLink() ||
-      !stat.isDirectory() ||
-      (await fs.realpath(current)).toLowerCase() !== current.toLowerCase()
-    )
-      throw new TypeError("TASK24_ROOT_LINK")
-  }
-  return absolute
-}
 export async function ordinaryFiles(root: string, maxFiles = 20000): Promise<readonly FileEntry[]> {
   await directRoot(root)
   const files: FileEntry[] = []

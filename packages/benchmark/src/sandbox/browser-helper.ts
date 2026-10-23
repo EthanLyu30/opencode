@@ -2,22 +2,25 @@ import axe from "axe-core"
 import { chromium, type Page, type BrowserContext } from "playwright"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
 import { Schema } from "effect"
 import { canonicalJson } from "../campaign/canonical"
 import { sha256Bytes } from "../hash"
 import { FIXED_VIEWPORTS, type BrowserCaptureRequest } from "../evaluator/browser-protocol"
-import { directRoot } from "../corpus/evaluation-bundle"
+import { directRoot } from "../corpus/direct-root"
 import {
   isAdmittedLinuxBrowserURL,
   validateBrowserProbe,
   validateBrowserAdmission,
   dataFrameWasBlocked,
-} from "./browser"
+  enforcedDataFrameViolation,
+} from "./browser-contracts"
 import type { ProbeRequest } from "../evaluator/independent/host"
-import { decodeRequirementPlans } from "./controller-facts"
 import { decodeEvaluationIdentity } from "../corpus/evaluation-profile"
 const abort = new AbortController()
+let phase = "input"
+export function browserHelperFailurePhase() {
+  return phase
+}
 class HelperFailure extends Error {
   constructor(
     readonly code: string,
@@ -39,10 +42,11 @@ const Request = Schema.Struct({
   plans: Schema.Array(Schema.Unknown),
   data: Schema.Unknown,
 })
-export function browserLaunchPolicy() {
+export function browserLaunchPolicy(browser?: string) {
   return {
     chromiumSandbox: true,
     args: [
+      ...(browser ? ["--browser-subprocess-path=" + browser] : []),
       "--disable-background-networking",
       "--disable-component-update",
       "--disable-sync",
@@ -66,6 +70,7 @@ export async function browserHelperMain() {
     onExcessProperty: "error",
   })
   const identity = decodeEvaluationIdentity(request.identity)
+  const admission = request.operation === "admission" ? validateBrowserAdmission(request.data) : undefined
   if (
     !/^[a-f0-9]{64}$/.test(request.previewID) ||
     (!request.base.includes("/" + request.previewID + "/") &&
@@ -76,8 +81,9 @@ export async function browserHelperMain() {
   await directRoot(request.evidence)
   const profile = path.join(request.temp, "browser-" + crypto.randomUUID())
   await fs.mkdir(profile)
+  phase = "launch"
   const context = await chromium.launchPersistentContext(profile, {
-    ...browserLaunchPolicy(),
+    ...browserLaunchPolicy(request.browser),
     executablePath: request.browser,
     headless: true,
     viewport:
@@ -98,10 +104,13 @@ export async function browserHelperMain() {
     void context.close()
   }, 29000)
   try {
+    phase = "route"
     let blocked = 0
+    let deniedCanaryAttempts = 0
     await context.route("**/*", async (route) => {
       if (!isAdmittedLinuxBrowserURL(route.request().url(), request.base, request.paths)) {
         blocked++
+        if (admission && route.request().url() === admission.canaryURL) deniedCanaryAttempts++
         await route.abort("blockedbyclient")
         return
       }
@@ -125,6 +134,7 @@ export async function browserHelperMain() {
     })
     await context.routeWebSocket("**/*", async (socket) => {
       blocked++
+      if (admission && socket.url() === admission.canaryURL.replace("http:", "ws:")) deniedCanaryAttempts++
       await socket.close({ code: 1008, reason: "WebSocket not admitted" })
     })
     const page = context.pages()[0] ?? (await context.newPage()),
@@ -147,7 +157,16 @@ export async function browserHelperMain() {
     page.on("framenavigated", (frame) => {
       if (frame.url() !== "about:blank" && !isAdmittedLinuxBrowserURL(frame.url(), request.base, request.paths)) {
         blocked++
-        void page.close()
+        if (frame === page.mainFrame()) {
+          void page.close()
+          return
+        }
+        // A rejected child navigation must not destroy the parent's independent
+        // admission observations (notably the browser-generated CSP event).
+        void frame
+          .frameElement()
+          .then((element) => element.evaluate((node) => node.parentNode?.removeChild(node)))
+          .catch(() => {})
       }
     })
     let result: unknown
@@ -157,6 +176,7 @@ export async function browserHelperMain() {
         ? captures.previewURL
         : request.base + request.paths.find((p) => p.endsWith(".html"))?.slice(1)
     if (!previewURL || !isAdmittedLinuxBrowserURL(previewURL, request.base, request.paths)) throw Error("url")
+    phase = "navigate"
     await page.goto(previewURL, { waitUntil: "load", timeout: 15000 })
     await page.waitForSelector("body", { state: "visible", timeout: 10000 })
     await page.evaluate(() => document.fonts.ready)
@@ -232,16 +252,40 @@ export async function browserHelperMain() {
       const dataObservation = await page
         .evaluate(
           () =>
-            new Promise<{ executed: boolean; closed: boolean; frameURL: string; cspDenied: boolean }>((resolve) => {
+            new Promise<{
+              executed: boolean
+              closed: boolean
+              frameURL: string
+              violations: Array<{
+                isTrusted: boolean
+                disposition: string
+                effectiveDirective: string
+                blockedURI: string
+                originalPolicy: string
+              }>
+            }>((resolve) => {
               const f = document.createElement("iframe"),
                 nonce = crypto.randomUUID()
-              let executed = false,
-                cspDenied = false
+              let executed = false
+              const violations: Array<{
+                isTrusted: boolean
+                disposition: string
+                effectiveDirective: string
+                blockedURI: string
+                originalPolicy: string
+              }> = []
               const message = (event: MessageEvent) => {
                 if (event.source === f.contentWindow && event.data === nonce) executed = true
               }
               const violation = (event: SecurityPolicyViolationEvent) => {
-                if (event.effectiveDirective === "frame-src" && event.blockedURI === "data") cspDenied = true
+                if (violations.length < 16)
+                  violations.push({
+                    isTrusted: event.isTrusted,
+                    disposition: event.disposition,
+                    effectiveDirective: event.effectiveDirective,
+                    blockedURI: event.blockedURI.slice(0, 4096),
+                    originalPolicy: event.originalPolicy.slice(0, 8192),
+                  })
               }
               window.addEventListener("message", message)
               document.addEventListener("securitypolicyviolation", violation)
@@ -257,12 +301,15 @@ export async function browserHelperMain() {
                 f.remove()
                 window.removeEventListener("message", message)
                 document.removeEventListener("securitypolicyviolation", violation)
-                resolve({ executed, closed: false, frameURL, cspDenied })
+                resolve({ executed, closed: false, frameURL, violations })
               }, 500)
             }),
         )
-        .catch(() => ({ executed: false, closed: page.isClosed(), frameURL: "", cspDenied: false }))
-      const dataBlocked = dataFrameWasBlocked(dataObservation)
+        .catch(() => ({ executed: false, closed: page.isClosed(), frameURL: "", violations: [] }))
+      const dataBlocked = dataFrameWasBlocked({
+        ...dataObservation,
+        cspDenied: dataObservation.violations.some(enforcedDataFrameViolation),
+      })
       result = {
         networkBlocked,
         websocketBlocked,
@@ -270,6 +317,7 @@ export async function browserHelperMain() {
         dataBlocked,
         crossCapabilityBlocked,
         blockedRequests: blocked,
+        deniedCanaryAttempts,
       }
     } else if (request.operation === "probe") {
       validateBrowserProbe(request.data)
@@ -329,16 +377,20 @@ export async function browserHelperMain() {
         { r, url: new URL(r.module, request.base).href },
       )
     } else {
+      phase = "interaction"
       await runInteraction(page, captures.interactionScriptID, 10000)
       await twoFrames(page, 10000)
+      phase = "capture"
       const [dom, accessibility, axeResult, png] = await Promise.all([
         collectDom(page, 10000),
         collectAccessibility(context, page, 10000),
         collectAxe(page, 10000),
         page.screenshot({ type: "png", fullPage: false, animations: "disabled", caret: "hide", scale: "css" }),
       ])
-      const keyboard = await probeKeyboard(page, 10000),
-        stateProbe = await probeState(page, 10000)
+      phase = "keyboard"
+      const keyboard = await probeKeyboard(page, 10000)
+      phase = "state"
+      const stateProbe = await probeState(page, 10000)
       const root = path.join(request.evidence, "browser-" + crypto.randomUUID())
       await fs.mkdir(root)
       const screenshot = path.join(root, "screenshot.png"),
@@ -359,6 +411,7 @@ export async function browserHelperMain() {
         pageErrors,
         blockedRequests: blocked,
       }
+      phase = "publish"
       const bytes = Buffer.from(canonicalJson(value))
       if (png.length > 8388608 || bytes.length > 1048576) throw Error("size")
       await fs.writeFile(screenshot, png, { flag: "wx" })
@@ -372,6 +425,7 @@ export async function browserHelperMain() {
         screenshotBytes: png.length,
       }
     }
+    phase = "observations"
     const dom = []
     for (const raw of request.operation === "admission" ? [] : request.plans) {
       const p = raw as { kind?: string; selector?: string }
@@ -620,12 +674,16 @@ async function collectAxe(page: Page, timeoutMs: number) {
       const result = await window.axe.run(document, {
         resultTypes: ["violations", "incomplete", "passes", "inapplicable"],
       })
-      return {
+      const value = {
         violations: result.violations,
         incomplete: result.incomplete,
         passes: result.passes,
         inapplicable: result.inapplicable,
       }
+      // axe includes optional own-properties with undefined values. Cross the
+      // page's JSON boundary before canonical publication; do not change checks.
+      const json: typeof value = JSON.parse(JSON.stringify(value))
+      return json
     }),
     timeoutMs,
     abort.signal,
@@ -681,11 +739,4 @@ async function closeBounded(close: () => Promise<unknown> | undefined) {
   } catch {
     // The parent owns final process-tree termination.
   }
-}
-
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  await browserHelperMain().catch(() => {
-    process.stderr.write("TASK24_BROWSER_V2_FAILURE")
-    process.exitCode = 1
-  })
 }

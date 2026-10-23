@@ -7,6 +7,7 @@ import { fileIdentity, directoryIdentity } from "../storage"
 import { canonicalJson } from "../../campaign/canonical"
 import { sha256Text } from "../../hash"
 import { desktopProbeBootstrap } from "../desktop/probe-worker"
+export { runWindowsBrowserProtocol } from "./windows-browser"
 
 const Request = Schema.Struct({
   executable: FileIdentity,

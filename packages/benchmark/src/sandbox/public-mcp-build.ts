@@ -29,9 +29,13 @@ export async function buildPublicMcpExecutable(input: { outputRoot: string }) {
   return buildExecutable(input.outputRoot, "public-mcp", "../../script/public-mcp.ts")
 }
 
+export async function buildBrowserProtocolHelper(input: { outputRoot: string }) {
+  return buildExecutable(input.outputRoot, "browser-protocol-v2", "../../script/linux-browser-helper.ts")
+}
+
 async function buildExecutable(
   root: string,
-  kind: "public-mcp" | "production-docker",
+  kind: "public-mcp" | "production-docker" | "browser-protocol-v2",
   relative: string,
   connection?: typeof ProductionBridgeConnection.Type,
 ) {
@@ -55,8 +59,14 @@ async function buildExecutable(
     autoloadPackageJson: false,
     autoloadTsconfig: false,
   })
-  const output = path.join(root, kind === "public-mcp" ? "public-mcp.exe" : "docker.exe")
-  const options = { entrypoints: [entry], target: "bun" as const, compile: { ...compile, outfile: output } }
+  const output = path.join(
+    root,
+    kind === "browser-protocol-v2" ? "browser-helper.cjs" : kind === "public-mcp" ? "public-mcp.exe" : "docker.exe",
+  )
+  const options =
+    kind === "browser-protocol-v2"
+      ? { entrypoints: [entry], target: "node", format: "cjs", outdir: root, naming: "browser-helper.cjs" }
+      : { entrypoints: [entry], target: "bun", compile: { ...compile, outfile: output } }
   // Bun 1.3.14 can reuse stale module descriptors when a long-lived controller
   // has already loaded the production graph. Both helpers get a fresh pinned
   // compiler; their entrypoints, output layout and autoload policy stay intact.
@@ -101,14 +111,29 @@ async function buildExecutable(
       Schema.Struct({ success: Schema.Boolean, outputs: Schema.Array(Schema.Struct({ path: Schema.String })) }),
     )(JSON.parse(Buffer.from(compiled.stdout).toString("utf8")), { onExcessProperty: "error" })
   }
+  const assets = result.outputs.filter((file) => file.path !== output)
   if (
     !result.success ||
-    result.outputs.length !== 1 ||
-    result.outputs[0]?.path !== output ||
+    result.outputs.filter((file) => file.path === output).length !== 1 ||
+    (kind !== "browser-protocol-v2" && assets.length !== 0) ||
+    assets.length > 1 ||
+    assets.some(
+      (file) => path.dirname(file.path) !== root || !/^appIcon-[a-z0-9]+\.png$/.test(path.basename(file.path)),
+    ) ||
     canonicalJson(await fileIdentity(process.execPath)) !== canonicalJson(compiler) ||
     canonicalJson(await fileIdentity(entry)) !== canonicalJson(source)
   )
     throw new TypeError("TASK24_PUBLIC_MCP_BUILD_FAILED")
+  const assetIdentities = await Promise.all(
+    assets.map(async (file) => {
+      const stat = await fs.lstat(file.path)
+      if (stat.size > 65536 || stat.size < 8) throw new TypeError("TASK24_PUBLIC_MCP_BUILD_FAILED")
+      const bytes = await fs.readFile(file.path)
+      if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+        throw new TypeError("TASK24_PUBLIC_MCP_BUILD_FAILED")
+      return fileIdentity(file.path)
+    }),
+  )
   const executable = await fileIdentity(output)
   if (connection)
     await fs.writeFile(path.join(root, "production-bridge.json"), canonicalJson(connection), { flag: "wx" })
@@ -121,6 +146,7 @@ async function buildExecutable(
     provenanceScope: "entrypoint-compiler-output",
     compile,
     executable,
+    ...(kind === "browser-protocol-v2" ? { assets: assetIdentities } : {}),
     ...(connection ? { connection: await fileIdentity(path.join(root, "production-bridge.json")) } : {}),
   })
   await fs.writeFile(path.join(root, "build-record.json"), canonicalJson(record), { flag: "wx" })

@@ -24,6 +24,7 @@ import { requireRealDockerRunner } from "./docker"
 import { Schema } from "effect"
 import { startFixtureCapabilityProvider, type FixtureReply } from "./fixture-provider"
 import { verifyBinaryBuildRecords } from "./binary-build"
+import { requirePublicToolObservation, type PublicToolObservation } from "./public-tools"
 export type PublicMcpConnection = Readonly<
   {
     capability: string
@@ -117,7 +118,13 @@ export type HostIsolationAdapter = Readonly<{
     denyNonPreviewNetwork: true
   }): Promise<{ execution: DockerExecution; observation: unknown }>
   verify(): Promise<Gate<{ evidence: readonly EvidenceReference[] }>>
-  launch(input: { launch: ArmLaunch; kind: "visual" | "coding"; readonly: boolean; signal: AbortSignal }): Promise<{
+  launch(input: {
+    launch: ArmLaunch
+    kind: "visual" | "coding"
+    readonly: boolean
+    signal: AbortSignal
+    tools?: { connection: PublicMcpConnection; observation(): PublicToolObservation }
+  }): Promise<{
     ended: boolean
     deniedCanaryReads: number
     canaryReads: number
@@ -130,6 +137,59 @@ export type HostIsolationAdapter = Readonly<{
     evidence: readonly EvidenceReference[]
   }>
 }>
+
+export function verifyPublicToolTransition(input: {
+  before: PublicToolObservation
+  after: PublicToolObservation
+  workspace: string
+  kind: "visual" | "coding"
+  readonly: boolean
+}) {
+  requirePublicToolObservation(input.before, input.workspace)
+  requirePublicToolObservation(input.after, input.workspace)
+  const { before, after } = input
+  if (
+    before.hostID !== after.hostID ||
+    before.readonly !== input.readonly ||
+    after.readonly !== input.readonly ||
+    after.toolCalls < before.toolCalls ||
+    after.deniedReads < before.deniedReads ||
+    after.deniedWrites < before.deniedWrites
+  )
+    return false
+  for (const key of ["writes", "checks", "previews", "captures"] as const) {
+    if (
+      after[key].length < before[key].length ||
+      canonicalJson(after[key].slice(0, before[key].length)) !== canonicalJson(before[key])
+    )
+      return false
+  }
+  if (input.readonly) return after.writes.length === before.writes.length && after.deniedWrites > before.deniedWrites
+  const writes = after.writes.slice(before.writes.length),
+    check = after.checks.slice(before.checks.length).at(-1)
+  if (
+    !writes.some((v) => v.beforeSha256 !== v.afterSha256) ||
+    !check ||
+    check.revision !== after.writes.length ||
+    check.status !== "ok" ||
+    !check.commands.length ||
+    !check.commands.some((c) => c.id === check.commandID) ||
+    check.commands.some((c) => c.exitCode !== 0)
+  )
+    return false
+  if (input.kind === "coding") return true
+  const previews = after.previews.slice(before.previews.length),
+    captures = after.captures.slice(before.captures.length)
+  return previews.some(
+    (p) =>
+      p.revision === check.revision &&
+      p.candidateSha256 === check.candidateSha256 &&
+      captures.some(
+        (c) =>
+          c.revision === check.revision && c.candidateSha256 === check.candidateSha256 && c.previewID === p.previewID,
+      ),
+  )
+}
 const browserRunners = new WeakSet<object>()
 export function requireBrowserIsolationRunner(runner: DockerRunner) {
   if (!browserRunners.has(runner)) throw new TypeError("TASK24_BROWSER_OS_ISOLATION_REQUIRED")
@@ -222,6 +282,22 @@ export async function makeBrowserIsolationRunner(input: {
 }
 const adapters = new WeakSet<object>(),
   issued = new WeakSet<object>()
+
+/** Compose controller-owned browser transport without changing or widening launch authority. */
+export function attachBrowserIsolationDispatch(input: {
+  adapter: HostIsolationAdapter
+  browser: NonNullable<HostIsolationAdapter["browser"]>
+}): HostIsolationAdapter {
+  if (!adapters.has(input.adapter) || typeof input.browser !== "function")
+    throw new TypeError("TASK24_BROWSER_OS_ISOLATION_REQUIRED")
+  const adapter = Object.freeze({
+    verify: input.adapter.verify.bind(input.adapter),
+    launch: input.adapter.launch.bind(input.adapter),
+    browser: input.browser,
+  })
+  adapters.add(adapter)
+  return adapter
+}
 export type CapabilityReceipt = Readonly<{
   schemaVersion: 2
   status: "passed"
@@ -315,9 +391,12 @@ export async function verifyBinaryCapabilities(input: {
   signal?: AbortSignal
   tools?: PublicMcpConnection
   publicTools?: {
-    open(
-      c: NonNullable<Parameters<typeof verifyBinaryCapabilities>[0]["cases"]>[number],
-    ): Promise<{ connection: PublicMcpConnection; setReadonly(): void; dispose(): Promise<void> }>
+    open(c: NonNullable<Parameters<typeof verifyBinaryCapabilities>[0]["cases"]>[number]): Promise<{
+      connection: PublicMcpConnection
+      observation?(): PublicToolObservation
+      setReadonly(): void | Promise<void>
+      dispose(): Promise<void>
+    }>
   }
 }): Promise<CapabilityReceipt | { status: "blocked"; code: "tool_capability_blocked"; missing: readonly string[] }> {
   const blocked = (reason: string) => ({
@@ -360,6 +439,7 @@ export async function verifyBinaryCapabilities(input: {
       if (input.armID !== "A") {
         const connection = publicTools?.connection ?? input.tools
         if (!connection || !("configFile" in launch)) return blocked("public_mcp_connection")
+        if (!publicTools?.observation) return blocked("controller_tool_observations")
         await configurePublicMcp(launch, connection, input.session)
       }
       const actual =
@@ -378,19 +458,59 @@ export async function verifyBinaryCapabilities(input: {
               ],
             }
           : launch
+      const tools = publicTools?.observation
+        ? { connection: publicTools.connection, observation: publicTools.observation.bind(publicTools) }
+        : undefined
+      const before = tools?.observation()
       const result = await input.isolation.launch({
         launch: actual,
         kind: c.kind,
         readonly: false,
         signal: input.signal ?? new AbortController().signal,
+        ...(tools ? { tools } : {}),
       })
-      publicTools?.setReadonly()
+      const after = tools?.observation()
+      await publicTools?.setReadonly()
+      const readonlyBefore = tools?.observation()
       const readonly = await input.isolation.launch({
         launch: actual,
         kind: c.kind,
         readonly: true,
         signal: input.signal ?? new AbortController().signal,
+        ...(tools ? { tools } : {}),
       })
+      const readonlyAfter = tools?.observation()
+      const toolEvidence = []
+      if (input.armID !== "A") {
+        if (!before || !after || !readonlyBefore || !readonlyAfter) return blocked("controller_tool_observations")
+        if (
+          !verifyPublicToolTransition({ before, after, workspace: actual.cwd, kind: c.kind, readonly: false }) ||
+          !verifyPublicToolTransition({
+            before: readonlyBefore,
+            after: readonlyAfter,
+            workspace: actual.cwd,
+            kind: c.kind,
+            readonly: true,
+          })
+        )
+          return blocked("controller_tool_microcheck_failed")
+        const body = {
+          manifestSha256: input.session.manifestSha256,
+          armID: input.armID,
+          kind: c.kind,
+          launchSha256: sha256Text(canonicalJson(actual.snapshot)),
+          before,
+          after,
+          readonlyBefore,
+          readonlyAfter,
+        }
+        const file = path.join(
+          state.manifest.roots.evidence,
+          "capability-tools-" + sha256Text(canonicalJson(body)) + ".json",
+        )
+        await publishImmutable(file, canonicalJson(body))
+        toolEvidence.push(bindEvidenceFile(state.manifest.roots.evidence, file, "capability-tools"))
+      }
       if (
         !provider.observation().complete ||
         !result.ended ||
@@ -416,7 +536,7 @@ export async function verifyBinaryCapabilities(input: {
       cases.push({
         kind: c.kind,
         launchSha256: sha256Text(canonicalJson(actual.snapshot)),
-        evidence: [...result.evidence, ...readonly.evidence, ...proof.value.evidence],
+        evidence: [...result.evidence, ...readonly.evidence, ...proof.value.evidence, ...toolEvidence],
       })
     } finally {
       await publicTools?.dispose()

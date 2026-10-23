@@ -43,6 +43,7 @@ import {
   type PublicMcpConnection,
   type HostIsolationAdapter,
   makeBrowserIsolationRunner,
+  attachBrowserIsolationDispatch,
 } from "./capability"
 import { makePublicToolHost } from "./public-tools"
 import { startPublicToolLoopback } from "./mcp-server"
@@ -239,10 +240,25 @@ export async function openLinuxRuntime(session: EngineSession) {
   const config = decodeLinuxRuntimeConfig(await readControllerJson(configArtifact.path!))
   let isolation: HostIsolationAdapter | undefined
   async function ensureIsolation() {
-    return (isolation ??= await loadHostIsolationAdapter({
+    if (isolation) return isolation
+    const loaded = await loadHostIsolationAdapter({
       session,
       file: await fileIdentity(artifact("host-isolation").path!),
-    }))
+    })
+    if (process.platform !== "win32") return (isolation = loaded)
+    const { createWindowsBrowserDispatch } = await import("./host-isolation/windows-browser-dispatch")
+    const browser = await createWindowsBrowserDispatch(
+      {
+        root: manifest.roots.temp,
+        evidenceRoot: manifest.roots.evidence,
+        releaseRoot: config.browser.root,
+        helper: config.browser.helper,
+        manifestSha256: session.manifestSha256,
+        allowedEvidenceRoots: [manifest.roots.evidence, manifest.roots.work, manifest.roots.temp],
+      },
+      identityGuard,
+    )
+    return (isolation = attachBrowserIsolationDispatch({ adapter: loaded, browser }))
   }
   const dependencies = artifact("dependencies"),
     original = (await readControllerJson(dependencies.path!)) as ResolvedImages
@@ -455,8 +471,7 @@ export async function openLinuxRuntime(session: EngineSession) {
               raw = backend([{ profile, outputs: entry.outputs }]),
               web = browser(manifest.roots.evidence, root)
             const lifecycle = new AbortController()
-            let readonly = false,
-              current: Awaited<ReturnType<typeof snapshotRequest>> | undefined,
+            let current: Awaited<ReturnType<typeof snapshotRequest>> | undefined,
               lease: Awaited<ReturnType<typeof startLinuxPreview>> | undefined
             async function snapshotRequest() {
               const snapshot = await captureCandidate({
@@ -486,17 +501,19 @@ export async function openLinuxRuntime(session: EngineSession) {
               },
               backend: {
                 async check(id) {
-                  current = await snapshotRequest()
+                  const snapshot = await snapshotRequest()
+                  current = snapshot
                   const dep = resolveTaskDependency({ profile, images })
                   if (dep.kind !== "ready") throw new TypeError("TASK24_PUBLIC_DEPENDENCY")
                   if (!profile.checks.some((c) => c.id === id)) throw new TypeError("TASK24_PUBLIC_COMMAND")
                   const build = await raw.build({
-                    ...current,
+                    ...snapshot,
                     timeoutMs: 300000,
                     commands: profile.checks,
                     dependency: dep.value,
                   })
                   return {
+                    candidateSha256: snapshot.identity.candidateSha256,
                     status: build.payload.kind,
                     commands: build.payload.kind === "ok" ? build.payload.commands : [],
                   }
@@ -526,7 +543,7 @@ export async function openLinuxRuntime(session: EngineSession) {
                     signal: lifecycle.signal,
                   })
                   web.register(current.identity, lease)
-                  return { previewID: lease.previewID }
+                  return { previewID: lease.previewID, candidateSha256: current.identity.candidateSha256 }
                 },
                 async capture(previewID, viewport) {
                   if (
@@ -563,13 +580,7 @@ export async function openLinuxRuntime(session: EngineSession) {
             })
             const pipe = await startPublicToolLoopback({
               lifecycle,
-              host: {
-                ...tools,
-                async write(r) {
-                  if (readonly) throw new TypeError("TASK24_PUBLIC_READONLY")
-                  return tools.write(r)
-                },
-              },
+              host: tools,
             })
             const connection: PublicMcpConnection = {
               host: pipe.host,
@@ -580,8 +591,9 @@ export async function openLinuxRuntime(session: EngineSession) {
             }
             return {
               connection,
+              observation: tools.observation,
               setReadonly() {
-                readonly = true
+                return tools.setReadonly()
               },
               async dispose() {
                 await pipe.close()
