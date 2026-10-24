@@ -125,6 +125,32 @@ describe("Coding admission-frozen check plan", () => {
     expect(() => CodingHostPlan.freeze({ authority: "admission", location, checks })).toThrow()
   })
 
+  test("rejects an ordinary leaf reached through a parent junction or directory alias", async () => {
+    await using tmp = await tmpdir()
+    const real = path.join(tmp.path, "real")
+    const project = path.join(real, "project")
+    const alias = path.join(tmp.path, "alias")
+    await fs.mkdir(project, { recursive: true })
+    await fs.symlink(real, alias, process.platform === "win32" ? "junction" : "dir")
+    const checks = { cwd: ".", test: "bun-test" } as const
+    const location = Location.Ref.make({ directory: AbsolutePath.make(project) })
+    expect(CodingHostPlan.freeze({ authority: "admission", location, checks }).cwd).toBe(".")
+    expect(() =>
+      CodingHostPlan.freeze({
+        authority: "admission",
+        location: Location.Ref.make({ directory: AbsolutePath.make(path.join(alias, "project")) }),
+        checks,
+      }),
+    ).toThrow()
+    expect(() =>
+      CodingHostPlan.freeze({
+        authority: "admission",
+        location: Location.Ref.make({ directory: AbsolutePath.make(tmp.path) }),
+        checks: { ...checks, cwd: "alias/project" },
+      }),
+    ).toThrow()
+  })
+
   test("rejects forged plan hashes, commands and serialized authority fields", async () => {
     await using tmp = await tmpdir()
     const location = Location.Ref.make({ directory: AbsolutePath.make(tmp.path) })

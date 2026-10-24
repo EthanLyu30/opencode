@@ -221,6 +221,7 @@ describe("PreviewPlan.freeze", () => {
     )
     await fs.writeFile(path.join(root.path, "post.ts"), 'console.log("post")')
     const childEnvironment: Record<string, string | undefined> = { ...process.env, NODE_ENV: "development" }
+    delete childEnvironment.BUN_OPTIONS
     delete childEnvironment[envName]
 
     const child = Bun.spawn([process.execPath, "run", "--no-env-file", "dev"], {
@@ -605,6 +606,7 @@ describe("PreviewPlan.freeze", () => {
     await fs.writeFile(path.join(root.path, ".env"), `${envName}=loaded-from-dotenv\n`)
     await fs.writeFile(path.join(root.path, ".env.local"), `${envLocalName}=loaded-from-dotenv-local\n`)
     const childEnvironment: Record<string, string | undefined> = { ...process.env, NODE_ENV: "development" }
+    delete childEnvironment.BUN_OPTIONS
     delete childEnvironment[envName]
     delete childEnvironment[envLocalName]
     const run = async (argv: readonly string[]) => {

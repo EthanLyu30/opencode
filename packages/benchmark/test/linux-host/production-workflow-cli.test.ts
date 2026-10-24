@@ -8,14 +8,19 @@ import { startFixtureCapabilityProvider } from "../../src/sandbox/fixture-provid
 import { BenchmarkAclProbe } from "../../../server/src/workflow/benchmark-acl-probe"
 import { WorkflowBenchmarkTransport } from "../../../core/src/workflow/benchmark-transport"
 import { ModelSelection } from "../../../core/src/workflow/model-selection"
+import { CodingModelSelection } from "../../../core/src/workflow/coding/model-selection"
 import { benchmarkModelPacket } from "../../../server/test/fixtures/workflow-benchmark-models"
 import { withAclAuthorityFixture } from "./acl-authority-fixture"
 
 // Exercise the existing production CLI, not a newly compiled module probe.
 // This is a first-provider admission regression, not a full workflow or scoring receipt.
-for (const withModels of [false, true])
+for (const { kind, withModels } of [
+  { kind: "visual", withModels: false },
+  { kind: "visual", withModels: true },
+  { kind: "coding", withModels: true },
+] as const)
   test.skipIf(process.platform !== "win32" || process.env.TASK24_WINDOWS_WORKFLOW_CLI_LIVE !== "1")(
-    `genuine CLI reaches its closed provider and retires native resources (models=${withModels})`,
+    `genuine ${kind} CLI reaches its closed provider and retires native resources (models=${withModels})`,
     async () => {
       const binary = process.env.TASK24_WINDOWS_ADAPTER_CLI_EXE
       const expected = process.env.TASK24_WINDOWS_ADAPTER_CLI_SHA256
@@ -158,7 +163,7 @@ for (const withModels of [false, true])
               "run",
               "Review the fixture page",
               "--kind",
-              "visual",
+              kind,
               "--format",
               "json",
               "--budget",
@@ -206,11 +211,15 @@ for (const withModels of [false, true])
               .query<{ input: string }, [string]>("SELECT input FROM workflow_run WHERE id = ?")
               .get(summary.workflow.id)
             const input: Record<string, unknown> = JSON.parse(row!.input)
-            expect(Object.hasOwn(input, ModelSelection.RESERVED_INPUT_KEY)).toBe(withModels)
-            if (withModels)
-              expect(ModelSelection.validate(input[ModelSelection.RESERVED_INPUT_KEY]).snapshot.sha256).toBe(
-                packet.snapshot.sha256,
-              )
+            const key = kind === "coding" ? CodingModelSelection.RESERVED_INPUT_KEY : ModelSelection.RESERVED_INPUT_KEY
+            expect(Object.hasOwn(input, key)).toBe(withModels)
+            if (withModels) {
+              const selection =
+                kind === "coding"
+                  ? CodingModelSelection.validate(input[key]).source
+                  : ModelSelection.validate(input[key])
+              expect(selection.snapshot.sha256).toBe(packet.snapshot.sha256)
+            }
           } finally {
             database.close()
           }

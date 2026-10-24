@@ -215,14 +215,10 @@ export function verifySealedConfiguration(
 
 function directory(input: string): string {
   const absolute = path.resolve(input)
+  if (comparisonKey(realpathSync.native(absolute)) !== comparisonKey(absolute)) throw invalid()
   for (let cursor = absolute; ; cursor = path.dirname(cursor)) {
     const stat = lstatSync(cursor)
-    if (
-      !stat.isDirectory() ||
-      stat.isSymbolicLink() ||
-      comparisonKey(realpathSync.native(cursor)) !== comparisonKey(cursor)
-    )
-      throw invalid()
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw invalid()
     if (path.dirname(cursor) === cursor) break
   }
   return absolute
