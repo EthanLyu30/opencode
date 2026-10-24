@@ -5,23 +5,25 @@ import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
 import { WorkflowSchema } from "@opencode-ai/core/workflow"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { Docker } from "../src/workflow/docker"
 import { DockerConfig } from "../src/workflow/docker-config"
 import { DockerProcessOwnership } from "../src/workflow/docker-process-ownership"
 import { ProcessOwnership } from "../src/workflow/process-ownership"
+import { stopOwnedProbe } from "./workflow-model-catalog-process"
 
-const root = "D:\\OpenCode-Local\\tmp\\workflow-preview-docker-tests"
+const ingressNonce = process.env.TASK24_DOCKER_INGRESS_CASE
+const root =
+  ingressNonce === undefined ? "D:\\OpenCode-Local\\tmp\\workflow-preview-docker-tests" : await ingressFixtureRoot()
 const image = `opencode/workflow-sandbox@sha256:${"a".repeat(64)}`
 
-afterAll(async () => {
-  if (path.resolve(root) !== root) throw new TypeError("Unexpected preview Docker test root")
-  await fs.rm(root, { recursive: true, force: true })
-})
-
-describe("DockerProcessOwnership", () => {
+registerDockerTests("DockerProcessOwnership", () => {
+  afterAll(async () => {
+    if (path.resolve(root) !== root) throw new TypeError("Unexpected preview Docker test root")
+    await fs.rm(root, { recursive: true, force: true })
+  })
   test("imports sealed script preview bytes without a mutable workspace bind", async () => {
     await using fixture = await setup()
     const captured = Buffer.from("setInterval(() => 'captured', 60_000)\n")
@@ -187,6 +189,7 @@ describe("DockerProcessOwnership", () => {
   })
 
   test("cleans both relay pairs when trusted-ingress creation settles after the caller deadline", async () => {
+    if (process.platform === "win32") expect(process.env.TASK24_DOCKER_INGRESS_CASE).toMatch(/^[a-f0-9]{32}$/)
     await using fixture = await setup({ relayIngress: true, engineTimeoutMs: 120, cleanupTimeoutMs: 20 })
     const ingressCreateStarted = deferred<void>()
     fixture.engine.onRelayContainerCreate = (index, signal) => {
@@ -954,7 +957,313 @@ describe("DockerProcessOwnership", () => {
     expect(fixture.engine.all("container", "rm")).toEqual([])
     expect(fixture.engine.all("network", "rm")).toEqual([])
   })
+  test.skipIf(process.platform !== "win32")(
+    "isolated ingress setup failure removes only its empty allocated scope",
+    async () => {
+      const names = async () =>
+        (await fs.readdir(process.env.TMPDIR!)).filter((name) => name.startsWith("docker-ingress-child-")).sort()
+      const before = await names()
+      await expect(
+        runIngressChild({
+          writeMarker: async () => {
+            throw Error("own marker failure")
+          },
+        }),
+      ).rejects.toThrow("own marker failure")
+      expect(await names()).toEqual(before)
+    },
+  )
+
+  test.skipIf(process.platform !== "win32")(
+    "isolated ingress spawn failure explicitly retains uncertain ownership",
+    async () => {
+      let scope: string | undefined
+      let id: Awaited<ReturnType<typeof fs.lstat>> | undefined
+      try {
+        await expect(
+          runIngressChild({
+            launch: (env) => {
+              scope = env.TASK24_DOCKER_INGRESS_SCOPE!
+              throw Error("own spawn failure")
+            },
+          }),
+        ).rejects.toMatchObject({ cleanupUncertain: true })
+        id = await fs.lstat(scope!)
+        expect(await fs.readdir(scope!)).toEqual(["owner.json"])
+      } finally {
+        // This injected launcher creates NO process; reclaim only that artificial scope.
+        if (scope && id) {
+          const current = await fs.lstat(scope)
+          if ((await fs.realpath(scope)) !== scope || current.dev !== id.dev || current.ino !== id.ino)
+            throw Error("fake child scope changed")
+          await fs.unlink(path.join(scope, "owner.json"))
+          await fs.rmdir(scope)
+        }
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== "win32")(
+    "isolated ingress stop failure releases the wait and preserves the unconfirmed scope",
+    async () => {
+      const exit = deferred<number>()
+      let out: ReadableStreamDefaultController<Uint8Array> | undefined
+      let scope: string | undefined
+      const fake = {
+        pid: process.pid,
+        exitCode: null as number | null,
+        exited: exit.promise,
+        stdout: new ReadableStream<Uint8Array>({
+          start(controller) {
+            out = controller
+          },
+        }),
+        stderr: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.close()
+          },
+        }),
+      }
+      const work = runIngressChild({
+        watchdogMs: 25,
+        launch(env) {
+          scope = env.TASK24_DOCKER_INGRESS_SCOPE!
+          return fake as unknown as Bun.Subprocess<"ignore", "pipe", "pipe">
+        },
+      })
+      const observed = work.then(
+        () => ({ kind: "resolved" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error }),
+      )
+      try {
+        const result = await Promise.race([observed, Bun.sleep(250).then(() => ({ kind: "pending" as const }))])
+        expect(result.kind).toBe("rejected")
+        if (result.kind !== "rejected") throw Error("wrapper did not report stop failure")
+        expect(result.error).toMatchObject({ cleanupUncertain: true, root: scope })
+        expect(await fs.readdir(scope!)).toEqual(["owner.json"])
+      } finally {
+        // The fake pid is this test process: stopOwnedProbe must refuse it before
+        // invoking taskkill. No OS process exists; release only the artificial streams.
+        fake.exitCode = 0
+        out?.enqueue(new TextEncoder().encode("\n 1 pass\n 5 expect() calls\n"))
+        out?.close()
+        exit.resolve(0)
+        await observed
+        if (scope) {
+          if ((await fs.realpath(scope)) !== scope) throw Error("fake child scope changed")
+          await fs.unlink(path.join(scope, "owner.json"))
+          await fs.rmdir(scope)
+        }
+      }
+    },
+    3000,
+  )
+
+  test.skipIf(process.platform !== "win32")(
+    "isolated ingress summary cannot substitute 157 tests and 1242 assertions",
+    async () => {
+      await expect(
+        runIngressChild({
+          launch() {
+            const output = new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode("\n 157 pass\n 1242 expect() calls\n"))
+                controller.close()
+              },
+            })
+            return {
+              pid: process.pid,
+              exitCode: 0,
+              exited: Promise.resolve(0),
+              stdout: output,
+              stderr: new ReadableStream({
+                start(controller) {
+                  controller.close()
+                },
+              }),
+            } as unknown as Bun.Subprocess<"ignore", "pipe", "pipe">
+          },
+        }),
+      ).rejects.toThrow()
+    },
+  )
 })
+
+function registerDockerTests(name: string, body: () => void) {
+  if (process.platform !== "win32" || ingressNonce !== undefined) {
+    describe(name, body)
+    return
+  }
+  // Only the file harness is new: every original child case keeps its deadline.
+  test(`${name} runs the complete file in an isolated OS process`, () => runIngressChild(), 70000)
+}
+
+async function ingressFixtureRoot() {
+  const scope = process.env.TASK24_DOCKER_INGRESS_SCOPE!
+  const parent = process.env.TMPDIR!
+  if (
+    process.platform !== "win32" ||
+    !/^[a-f0-9]{32}$/.test(ingressNonce!) ||
+    !/^D:\\OpenCode-Benchmark\\Task24\\tmp\\bprep1-[^\\]+$/.test(parent) ||
+    !scope ||
+    path.dirname(scope) !== parent ||
+    !/^docker-ingress-child-[A-Za-z0-9]{6}$/.test(path.basename(scope)) ||
+    (await fs.realpath(scope)) !== scope
+  )
+    throw Error("Own ingress child scope required")
+  const marker = path.join(scope, "owner.json")
+  const stat = await fs.lstat(marker, { bigint: true })
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > 4096n)
+    throw Error("Own ingress marker required")
+  const owner = JSON.parse(await fs.readFile(marker, "utf8"))
+  if (
+    owner.nonce !== ingressNonce ||
+    owner.parentPID !== process.ppid ||
+    (await fs.readdir(scope)).join(",") !== "owner.json"
+  )
+    throw Error("Own ingress child identity changed")
+  return path.join(scope, "fixture")
+}
+
+async function runIngressChild(
+  input: {
+    readonly writeMarker?: (file: string, text: string) => Promise<void>
+    readonly launch?: (environment: Record<string, string | undefined>) => Bun.Subprocess<"ignore", "pipe", "pipe">
+    readonly watchdogMs?: number
+  } = {},
+) {
+  const parent = process.env.TMPDIR!
+  if (!/^D:\\OpenCode-Benchmark\\Task24\\tmp\\bprep1-[^\\]+$/.test(parent) || (await fs.realpath(parent)) !== parent)
+    throw Error("Own ingress parent required")
+  const parentStat = await fs.lstat(parent, { bigint: true })
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) throw Error("Own ingress parent required")
+  const scope = await fs.mkdtemp(path.join(parent, "docker-ingress-child-"))
+  const nonce = randomBytes(16).toString("hex")
+  const marker = path.join(scope, "owner.json")
+  let identity: string | undefined
+  let markerIdentity: string | undefined
+  let child: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined
+  let stopped: Promise<void> | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let spawnAttempted = false
+  let ended = false
+  let failure: unknown
+  const bounded = async (stream: ReadableStream<Uint8Array>) => {
+    const reader = stream.getReader()
+    const chunks: Uint8Array[] = []
+    let size = 0
+    try {
+      for (;;) {
+        const next = await reader.read()
+        if (next.done) break
+        size += next.value.length
+        if (size > 65536) throw Error("Own ingress child output limit")
+        chunks.push(next.value)
+      }
+      return Buffer.concat(chunks).toString("utf8")
+    } finally {
+      reader.releaseLock()
+    }
+  }
+  try {
+    const stat = await fs.lstat(scope, { bigint: true })
+    identity = `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`
+    const text = JSON.stringify({ nonce, parentPID: process.pid })
+    if (input.writeMarker) await input.writeMarker(marker, text)
+    if (!input.writeMarker) await fs.writeFile(marker, text, { flag: "wx" })
+    const markerStat = await fs.lstat(marker, { bigint: true })
+    if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1n)
+      throw Error("Own marker identity")
+    markerIdentity = `${markerStat.dev}:${markerStat.ino}:${markerStat.birthtimeNs}`
+    const environment = { ...process.env, TASK24_DOCKER_INGRESS_CASE: nonce, TASK24_DOCKER_INGRESS_SCOPE: scope }
+    spawnAttempted = true
+    child = input.launch
+      ? input.launch(environment)
+      : Bun.spawn(
+          [
+            process.execPath,
+            "--no-env-file",
+            "--no-install",
+            "test",
+            import.meta.filename,
+            "--timeout",
+            "30000",
+            "--only-failures",
+          ],
+          {
+            cwd: import.meta.dirname,
+            env: environment,
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            windowsHide: true,
+          },
+        )
+    const launched = child
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        stopped = within(stopOwnedProbe(launched, launched.pid), 5000, "Own ingress termination unconfirmed")
+        // Termination failure must reject the race even if exit/stdio never settle.
+        void stopped.then(
+          () => reject(Error("Own ingress child deadline")),
+          (cause) => reject(new Error("Own ingress termination unconfirmed", { cause })),
+        )
+      }, input.watchdogMs ?? 60000)
+    })
+    const [exit, stdout, stderr] = await Promise.race([
+      Promise.all([child.exited, bounded(child.stdout), bounded(child.stderr)]),
+      timeout,
+    ])
+    ended = true
+    if (exit !== 0) throw Error("Isolated ingress test failed: " + stdout + stderr)
+    expect((stdout + stderr).match(/^\s*(\d+) pass\s*$/m)?.[1]).toBe("57")
+    expect((stdout + stderr).match(/^\s*(\d+) expect\(\) calls\s*$/m)?.[1]).toBe("242")
+    console.info("Isolated Docker file: 57 passed cases, 242 assertions")
+  } catch (error) {
+    failure = error
+    throw error
+  } finally {
+    clearTimeout(timer)
+    try {
+      if (child && !ended && !stopped)
+        stopped = within(stopOwnedProbe(child, child.pid), 5000, "Own ingress termination unconfirmed")
+      if (stopped) await stopped
+      if (spawnAttempted && !ended) throw Error("Own ingress process state unconfirmed")
+      const current = await fs.lstat(scope, { bigint: true })
+      const currentParent = await fs.lstat(parent, { bigint: true })
+      if (
+        !identity ||
+        path.dirname(scope) !== parent ||
+        (await fs.realpath(scope)) !== scope ||
+        `${current.dev}:${current.ino}:${current.birthtimeNs}` !== identity ||
+        currentParent.dev !== parentStat.dev ||
+        currentParent.ino !== parentStat.ino ||
+        currentParent.birthtimeNs !== parentStat.birthtimeNs
+      )
+        throw Error("Own ingress scope changed")
+      const names = await fs.readdir(scope)
+      if (markerIdentity) {
+        const stat = await fs.lstat(marker, { bigint: true })
+        if (
+          names.join(",") !== "owner.json" ||
+          stat.nlink !== 1n ||
+          `${stat.dev}:${stat.ino}:${stat.birthtimeNs}` !== markerIdentity
+        )
+          throw Error("Own ingress marker identity changed")
+        const owner = JSON.parse(await fs.readFile(marker, "utf8"))
+        if (owner.nonce !== nonce || owner.parentPID !== process.pid) throw Error("Own ingress marker changed")
+        await fs.unlink(marker)
+      }
+      if (!markerIdentity && names.length) throw Error("Own partial marker unconfirmed")
+      await fs.rmdir(scope)
+    } catch (cause) {
+      throw Object.assign(new Error("Own ingress child cleanup unconfirmed", { cause: failure ?? cause }), {
+        cleanupUncertain: true,
+        root: scope,
+      })
+    }
+  }
+}
 
 class FakeEngine implements Docker.Engine {
   readonly containerID = "c".repeat(64)

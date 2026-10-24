@@ -2,8 +2,8 @@ export * as BenchmarkAclProbe from "./benchmark-acl-probe"
 
 import fs from "node:fs"
 import path from "node:path"
-import { spawnSync } from "node:child_process"
 import { HostRootPolicy } from "./host-root-policy"
+import { BenchmarkAclNative } from "./benchmark-acl-native"
 
 interface Invocation extends HostRootPolicy.ProbeInvocation {
   readonly timeoutMs: 5000
@@ -11,7 +11,7 @@ interface Invocation extends HostRootPolicy.ProbeInvocation {
   readonly stderr: number
 }
 
-/** Only the transport changes; productionProbe retains the fixed query and decoder. */
+/** Benchmark acquisition changes; the original production decoder and policy remain authoritative. */
 export function make(input: {
   readonly tempRoot: string
   readonly guard: () => void
@@ -29,13 +29,11 @@ export function make(input: {
   const run =
     input.run ??
     ((invocation: Invocation) => {
-      const result = spawnSync(invocation.executable, [...invocation.argv], {
-        env: { ...invocation.env },
-        stdio: ["ignore", invocation.stdout, invocation.stderr],
-        windowsHide: true,
-        shell: false,
-        timeout: invocation.timeoutMs,
-      })
+      const result = BenchmarkAclNative.collect(invocation.env.OPENCODE_ACL_PROBE_TARGET!)
+      if (result.status !== null) {
+        fs.writeSync(invocation.stdout, result.stdout)
+        fs.writeSync(invocation.stderr, result.stderr)
+      }
       return { status: result.status, error: result.error }
     })
   return HostRootPolicy.productionProbe({

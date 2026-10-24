@@ -44,8 +44,14 @@ const WorkflowVisualHostServer = {
 }
 const fixtureRoot = path.join(import.meta.dir, "fixtures", "workflow-visual")
 const testRoot = "D:\\OpenCode-Local\\tmp\\workflow-host-tests"
+const pendingFinalizers = new Set<string>()
 
 afterAll(async () => {
+  if (pendingFinalizers.size)
+    throw Object.assign(new Error("Test host finalization is unconfirmed; fixture retained"), {
+      cleanupUncertain: true,
+      roots: [...pendingFinalizers],
+    })
   await fs.rm(testRoot, { recursive: true, force: true })
 })
 
@@ -3748,6 +3754,46 @@ describe("WorkflowVisualHostServer", () => {
   })
 
   test("bounds layer finalization when a runtime adapter does not finish closing", async () => {
+    if (process.platform === "win32") {
+      const temp = await taskTemp()
+      pendingFinalizers.add(temp.path)
+      const closing = Promise.withResolvers<void>()
+      const stalled: PlaywrightCapture.Runtime = {
+        capture: async () => {
+          throw new Error("unused")
+        },
+        close: () => {
+          closing.resolve()
+          return new Promise(() => undefined)
+        },
+      }
+      const closed = Effect.runPromise(
+        Effect.scoped(Effect.void).pipe(
+          Effect.provide(
+            WorkflowVisualHostServer.makeLayer({
+              hostRoot: temp.path,
+              browser: stalled,
+              finalizerTimeoutMs: 20,
+            }),
+          ),
+        ),
+      ).then(() => "closed")
+      try {
+        // Initialization is not part of the close deadline under test.
+        await Promise.race([
+          closing.promise,
+          closed.then(() => {
+            throw new Error("The browser close callback was not reached")
+          }),
+        ])
+        expect(await Promise.race([closed, Bun.sleep(200).then(() => "timeout")])).toBe("closed")
+      } finally {
+        await closed
+        pendingFinalizers.delete(temp.path)
+        await temp[Symbol.asyncDispose]()
+      }
+      return
+    }
     await using temp = await taskTemp()
     const stalled: PlaywrightCapture.Runtime = {
       capture: async () => {
