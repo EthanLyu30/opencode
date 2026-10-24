@@ -7,6 +7,7 @@ import { fileIdentity, directoryIdentity } from "../storage"
 import { canonicalJson } from "../../campaign/canonical"
 import { sha256Text } from "../../hash"
 import { desktopProbeBootstrap } from "../desktop/probe-worker"
+import { WindowsWorkflowEnvironment } from "./windows-workflow-environment"
 export { runWindowsBrowserProtocol } from "./windows-browser"
 
 const Request = Schema.Struct({
@@ -23,6 +24,15 @@ const Request = Schema.Struct({
   maxStderrBytes: Schema.Int,
   environment: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   ancestorMetadata: Schema.optionalKey(Schema.Literal(true)),
+  benchmarkAcl: Schema.optionalKey(
+    Schema.Struct({
+      campaignID: Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9._-]{0,127}$/)),
+      runID: Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9._-]{0,127}$/)),
+      bindingSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+      expiresAt: Schema.Int,
+    }),
+  ),
+  benchmarkHost: Schema.optionalKey(WindowsWorkflowEnvironment.Host),
 })
 const NativeResult = Schema.Struct({
   started: Schema.Boolean,
@@ -120,6 +130,10 @@ const valueEnvironment = new Set([
   "TASK24_PUBLIC_TOOL_CAPABILITY",
   "MOONSHOT_API_KEY",
   "DEEPSEEK_API_KEY",
+])
+const workflowEnvironment = new Set<string>([
+  ...WindowsWorkflowEnvironment.pathNames,
+  "OPENCODE_WORKFLOW_SANDBOX_IMAGE",
 ])
 const supervisorStdoutLimit = 3 * 1048576 + 131072
 const supervisorStderrLimit = 65536
@@ -479,6 +493,10 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
     input.maxStderrBytes > 65536 ||
     !(signal instanceof AbortSignal) ||
     !(stdin === undefined || stdin instanceof Uint8Array) ||
+    (input.benchmarkAcl !== undefined &&
+      (input.writable.length === 0 ||
+        input.benchmarkAcl.expiresAt <= Date.now() ||
+        input.benchmarkAcl.expiresAt > Date.now() + 3600000)) ||
     (stdin?.length ?? 0) > 2097152 ||
     input.readonly.some((read) => input.writable.some((write) => overlaps(read, write))) ||
     mediated.some((read) => [...input.readonly, ...input.writable].some((other) => overlaps(read, other))) ||
@@ -486,7 +504,9 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
     Object.keys(input.environment ?? {}).length > 64 ||
     Object.entries(input.environment ?? {}).some(
       ([key, value]) =>
-        (!pathEnvironment.has(key) && !valueEnvironment.has(key)) ||
+        (!pathEnvironment.has(key) &&
+          !valueEnvironment.has(key) &&
+          !(input.benchmarkHost && workflowEnvironment.has(key))) ||
         (key === "TASK24_PUBLIC_TOOL_CAPABILITY" && !/^[a-f0-9]{64}$/.test(value)) ||
         value.includes("\0") ||
         value.length > 65536 ||
@@ -506,6 +526,23 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
     throw new TypeError("TASK24_ISOLATION_INPUT")
   if (process.platform !== "win32" || process.arch !== "x64") throw new TypeError("TASK24_ISOLATION_PLATFORM")
   if (signal.aborted) return cancelledBeforeStart()
+  const benchmarkFiles =
+    input.benchmarkHost === undefined
+      ? []
+      : await WindowsWorkflowEnvironment.verify({
+          environment: input.environment ?? {},
+          readonly: input.readonly,
+          writable: input.writable,
+          ports: input.ports,
+          authority: input.benchmarkAcl,
+          host: input.benchmarkHost,
+        })
+  const pinnedBenchmarkFiles = await Promise.all(
+    benchmarkFiles.map(async (file) => {
+      const stat = await fs.lstat(file.path, { bigint: true })
+      return { ...file, fileID: `${stat.dev}:${stat.ino}:${stat.birthtimeNs}` }
+    }),
+  )
   const admittedDirectories = await Promise.all(
     [...new Set(dirs)].map(async (dir) => ({ path: dir, fileID: await exactDirectoryIdentity(dir) })),
   )
@@ -514,7 +551,25 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
     throw new TypeError("TASK24_ISOLATION_BINARY_CHANGED")
   if (signal.aborted) return cancelledBeforeStart()
   const nonce = randomBytes(16).toString("hex")
-  const profile = "opencode.task24." + nonce
+  const benchmarkAclRecord =
+    input.benchmarkAcl === undefined
+      ? undefined
+      : canonicalJson({
+          schemaVersion: 1,
+          nonce,
+          ...input.benchmarkAcl,
+          executableSha256: input.executable.sha256,
+          grants: input.writable.map((directory) => ({
+            path: directory,
+            fileID: admittedDirectories.find((entry) => entry.path === directory)!.fileID,
+            mask: 0x1301bf,
+            flags: 3,
+          })),
+        })
+  // The actual kernel package identity commits to these exact bytes. An agent
+  // cannot forge a different record by changing a file or environment string.
+  const profile =
+    "opencode.task24." + (benchmarkAclRecord === undefined ? nonce : sha256Text(benchmarkAclRecord).slice(0, 48))
   const owner = canonicalJson({ purpose: "task24-windows-native-isolation", nonce, profile })
   let root: string | undefined,
     rootIdentity: string | undefined,
@@ -661,6 +716,8 @@ try {
           exe: nativeExeIdentity,
           directories,
           profile,
+          ...(benchmarkAclRecord === undefined ? {} : { benchmarkAclRecord }),
+          ...(pinnedBenchmarkFiles.length === 0 ? {} : { benchmarkFiles: pinnedBenchmarkFiles }),
           mediatedRoots: mediated,
           ancestorMetadata: input.ancestorMetadata === true,
           policyJournal: path.join(root, "network-policy.intent.json"),

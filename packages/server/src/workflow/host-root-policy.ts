@@ -41,6 +41,9 @@ export interface AclSnapshot {
 
 export type Probe = (canonicalRoot: string) => AclSnapshot
 
+/** Internal benchmark-only verifier; never a SID allowlist or an environment setting. */
+export type BenchmarkWriteGrant = (root: string, snapshot: AclSnapshot, ace: Ace) => boolean
+
 export interface Roots {
   readonly hostRoot: string
   readonly evidenceRoot: string
@@ -136,7 +139,11 @@ export function make(input: Roots & { readonly workspaceRoots?: readonly string[
 }
 
 export function makeProduction(
-  input: ProductionRoots & { readonly workspaceRoots?: readonly string[]; readonly probe: Probe },
+  input: ProductionRoots & {
+    readonly workspaceRoots?: readonly string[]
+    readonly probe: Probe
+    readonly benchmarkWriteGrant?: BenchmarkWriteGrant
+  },
 ): ProductionPolicy {
   const roots = canonicalProductionRoots(input)
   const workspaces = (input.workspaceRoots ?? []).map(canonicalRoot)
@@ -148,7 +155,7 @@ export function makeProduction(
   const identities = new Map<keyof ProductionRoots, string>()
   for (const [name, root] of productionRootEntries(roots)) {
     const snapshot = input.probe(root)
-    verifyProductionAcl(root, snapshot)
+    verifyProductionAcl(root, snapshot, input.benchmarkWriteGrant)
     fingerprints.set(name, fingerprint(snapshot))
     identities.set(name, rootIdentity(root))
   }
@@ -160,7 +167,7 @@ export function makeProduction(
       throw new TypeError(`Workflow ${name} identity changed`)
     }
     const snapshot = input.probe(expected)
-    verifyProductionAcl(expected, snapshot)
+    verifyProductionAcl(expected, snapshot, input.benchmarkWriteGrant)
     if (fingerprint(snapshot) !== fingerprints.get(name)) {
       throw new TypeError(`Workflow ${name} ACL descriptor changed`)
     }
@@ -341,7 +348,7 @@ function requireCanonical(value: string) {
   return canonical
 }
 
-function verifyAcl(root: string, snapshot: AclSnapshot) {
+function verifyAcl(root: string, snapshot: AclSnapshot, benchmarkWriteGrant?: BenchmarkWriteGrant) {
   if (
     !isSid(snapshot.currentUserSid) ||
     !Array.isArray(snapshot.currentIdentitySids) ||
@@ -375,7 +382,7 @@ function verifyAcl(root: string, snapshot: AclSnapshot) {
     }
     if (ace.inherited) throw new TypeError("Workflow host ACL must use protected explicit inheritance")
     const write = dangerousAccess(ace.mask)
-    if (ace.allow && write !== 0 && !trusted.has(ace.sid)) {
+    if (ace.allow && write !== 0 && !trusted.has(ace.sid) && !benchmarkWriteGrant?.(root, snapshot, ace)) {
       throw new TypeError("Workflow host ACL grants write authority to an untrusted SID")
     }
     if (write === 0) continue
@@ -387,8 +394,8 @@ function verifyAcl(root: string, snapshot: AclSnapshot) {
   }
 }
 
-function verifyProductionAcl(root: string, snapshot: AclSnapshot) {
-  verifyAcl(root, snapshot)
+function verifyProductionAcl(root: string, snapshot: AclSnapshot, benchmarkWriteGrant?: BenchmarkWriteGrant) {
+  verifyAcl(root, snapshot, benchmarkWriteGrant)
   if (snapshot.reparsePoint !== false) {
     throw new TypeError(`Workflow production root is an unproven reparse point: ${root}`)
   }

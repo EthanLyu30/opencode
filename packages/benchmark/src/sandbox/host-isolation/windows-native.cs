@@ -25,7 +25,9 @@ public static partial class Task24NativeIsolation {
   [StructLayout(LayoutKind.Sequential)] struct FileInfo { public uint Attributes,CLo,CHi,ALo,AHi,WLo,WHi,Volume,SizeHi,SizeLo,Links,IndexHi,IndexLo; }
   public sealed class FilePin { public string path,fileID,sha256; }
   public sealed class DirectoryPin { public string path,fileID; }
-  public sealed class PinPlan { public FilePin exe;public DirectoryPin[] directories;public string profile,policyJournal;public string[] mediatedRoots;public bool ancestorMetadata; }
+  public sealed class PinPlan { public FilePin exe;public FilePin[] benchmarkFiles;public DirectoryPin[] directories;public string profile,policyJournal,benchmarkAclRecord;public string[] mediatedRoots;public bool ancestorMetadata; }
+  public sealed class BenchmarkAclGrant { public string path,fileID;public int mask,flags; }
+  public sealed class BenchmarkAclRecord { public int schemaVersion;public string nonce,campaignID,runID,bindingSha256,executableSha256;public long expiresAt;public BenchmarkAclGrant[] grants; }
   [StructLayout(LayoutKind.Sequential)] struct Display { public IntPtr Name,Description; }
   [StructLayout(LayoutKind.Sequential)] struct Blob { public uint Size; public IntPtr Data; }
   [StructLayout(LayoutKind.Explicit,Size=16)] struct Value { [FieldOffset(0)] public uint Type; [FieldOffset(8)] public ulong Number; [FieldOffset(8)] public IntPtr Pointer; }
@@ -332,7 +334,22 @@ public static partial class Task24NativeIsolation {
     int cancelled=0;Exception failure=null;
     var watcher=new Thread(()=>{try{Console.In.ReadLine();}finally{Interlocked.Exchange(ref cancelled,1);}});watcher.IsBackground=true;watcher.Start();
     try {
-      Require(profile!=null && System.Text.RegularExpressions.Regex.IsMatch(profile,@"^opencode\.task24\.[a-f0-9]{32}$"),"owned profile name");
+      if(plan.benchmarkAclRecord==null) {
+        Require(profile!=null && System.Text.RegularExpressions.Regex.IsMatch(profile,@"^opencode\.task24\.[a-f0-9]{32}$"),"owned profile name");
+      } else {
+        var bytes=Encoding.UTF8.GetBytes(plan.benchmarkAclRecord);
+        Require(bytes.Length>0 && bytes.Length<=65536,"bounded benchmark ACL record");
+        string commitment;using(var hash=SHA256.Create())commitment=BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-","").ToLowerInvariant().Substring(0,48);
+        Require(profile=="opencode.task24."+commitment,"benchmark ACL package commitment");
+        var record=serializer.Deserialize<BenchmarkAclRecord>(plan.benchmarkAclRecord);
+        long now=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
+        Require(record.schemaVersion==1 && record.expiresAt>now && record.expiresAt<=now+3600000 && record.executableSha256==plan.exe.sha256 && record.grants!=null && record.grants.Length==writes.Length-1,"benchmark ACL launch binding");
+        for(int index=0;index<record.grants.Length;index++) {
+          var grant=record.grants[index];bool matched=false;
+          foreach(var directory in plan.directories)if(directory.path==grant.path && directory.fileID==grant.fileID)matched=true;
+          Require(grant.path==writes[index+1] && grant.mask==0x1301bf && grant.flags==3 && matched,"exact benchmark ACL write grant");
+        }
+      }
       try{lockHeld=exclusive.WaitOne(30000);}catch(AbandonedMutexException){lockHeld=true;}
       if(!lockHeld)throw new IOException("isolation grants busy");
       var grantPaths=new HashSet<string>(StringComparer.OrdinalIgnoreCase);foreach(var directory in plan.directories)grantPaths.Add(directory.path);
@@ -341,6 +358,14 @@ public static partial class Task24NativeIsolation {
       Require(String.Equals(exe,plan.exe.path,StringComparison.OrdinalIgnoreCase),"pin executable path");
       using(var stream=new FileStream(new SafeFileHandle(exeHandle.DangerousGetHandle(),false),FileAccess.Read))using(var hash=SHA256.Create()) {
         Require(BitConverter.ToString(hash.ComputeHash(stream)).Replace("-","").ToLowerInvariant()==plan.exe.sha256,"pin executable hash");
+      }
+      if(plan.benchmarkFiles!=null) {
+        Require(plan.benchmarkAclRecord!=null && plan.benchmarkFiles.Length==3,"benchmark files require native authority");
+        foreach(var file in plan.benchmarkFiles) {
+          var handle=Pin(file.path,false,file.fileID,false,pins,grantPaths,false);
+          using(var stream=new FileStream(new SafeFileHandle(handle.DangerousGetHandle(),false),FileAccess.Read))using(var hash=SHA256.Create())
+            Require(BitConverter.ToString(hash.ComputeHash(stream)).Replace("-","").ToLowerInvariant()==file.sha256,"pinned benchmark host file hash");
+        }
       }
       if(Interlocked.CompareExchange(ref cancelled,0,0)!=0)throw new OperationCanceledException("controller disconnected before launch");
       // Register only the security identity. CreateAppContainerProfile also creates a default
@@ -365,6 +390,10 @@ public static partial class Task24NativeIsolation {
       profilePath=Path.Combine(vars["LOCALAPPDATA"],"Packages",profile,"AC");
       Require(profilePath.StartsWith(@"D:\",StringComparison.OrdinalIgnoreCase),"D-only AppContainer data");
       Directory.CreateDirectory(Path.Combine(profilePath,"Temp"));
+      if(plan.benchmarkAclRecord!=null) {
+        var bytes=Encoding.UTF8.GetBytes(plan.benchmarkAclRecord);
+        using(var record=new FileStream(Path.Combine(Path.GetDirectoryName(exe),"benchmark-acl-authority.json"),FileMode.CreateNew,FileAccess.Write,FileShare.Read)){record.Write(bytes,0,bytes.Length);record.Flush(true);}
+      }
       // Inherited DACL/MIC updates affect existing descendants. Seal every admitted tree
       // first so a pre-existing hardlink/junction cannot transfer a grant outside its root.
       int treeEntries=0;

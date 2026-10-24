@@ -7,9 +7,11 @@ const output = new Uint8Array(workerData.shared, 16)
 const libraries = []
 const handles = []
 const allocations = []
+const sidAllocations = []
 let result
 let status = 2
 let kernel
+let security
 
 function requireSuccess(value) {
   if (!value) throw Error("Native ACL query failed")
@@ -44,9 +46,10 @@ try {
     LocalFree: { args: ["ptr"], returns: "ptr" },
   })
   libraries.push(kernel)
-  const security = dlopen("C:\\Windows\\System32\\advapi32.dll", {
+  security = dlopen("C:\\Windows\\System32\\advapi32.dll", {
     OpenProcessToken: { args: ["u64", "u32", "ptr"], returns: "i32" },
     GetTokenInformation: { args: ["u64", "u32", "ptr", "u32", "ptr"], returns: "i32" },
+    FreeSid: { args: ["ptr"], returns: "ptr" },
     GetSecurityInfo: { args: ["u64", "u32", "u32", "ptr", "ptr", "ptr", "ptr", "ptr"], returns: "u32" },
     GetSecurityDescriptorLength: { args: ["ptr"], returns: "u32" },
     IsValidSecurityDescriptor: { args: ["ptr"], returns: "i32" },
@@ -90,6 +93,25 @@ try {
   }
   const user = tokenInfo(1)
   const currentUserSid = pointedSid(user, 0)
+  let benchmark
+  if (workerData.profile !== undefined) {
+    if (!/^opencode\.task24\.[a-f0-9]{48}$/.test(workerData.profile)) throw Error("Native ACL profile")
+    requireSuccess(tokenInfo(29).readUInt32LE(0) === 1)
+    const tokenSid = pointedSid(tokenInfo(31), 0)
+    const userenv = dlopen("C:\\Windows\\System32\\userenv.dll", {
+      DeriveAppContainerSidFromAppContainerName: { args: ["ptr", "ptr"], returns: "i32" },
+    })
+    libraries.push(userenv)
+    const derived = new BigUint64Array(1)
+    requireSuccess(
+      userenv.symbols.DeriveAppContainerSidFromAppContainerName(
+        Buffer.from(workerData.profile + "\0", "utf16le"),
+        derived,
+      ) === 0,
+    )
+    sidAllocations.push(pointer(derived[0]))
+    benchmark = { tokenSid, profileSid: pointedSid(Buffer.from(derived.buffer), 0), flags: [] }
+  }
   const groups = tokenInfo(2)
   const count = groups.readUInt32LE(0)
   if (count > 65536 || 8 + count * 16 > groups.length) throw Error("Native ACL token groups")
@@ -126,6 +148,7 @@ try {
       inherited: (bytes[offset + 1] & 0x10) !== 0,
       mask: bytes.readInt32LE(offset + 4),
     })
+    benchmark?.flags.push(bytes[offset + 1])
     offset = end
   }
   const sddl = new BigUint64Array(1)
@@ -148,6 +171,7 @@ try {
     reparsePoint: (info.readUInt32LE(0) & 0x400) !== 0,
     descriptorSddl: text.slice(0, terminator),
     aces,
+    ...(benchmark ? { benchmark } : {}),
   }
   status = 1
 } catch {
@@ -156,6 +180,7 @@ try {
   try {
     // Publish completion only AFTER releasing every native resource.
     for (const address of allocations.reverse()) requireSuccess(kernel.symbols.LocalFree(address) === null)
+    for (const address of sidAllocations.reverse()) requireSuccess(security.symbols.FreeSid(address) === null)
     for (const handle of handles.reverse()) requireSuccess(kernel.symbols.CloseHandle(handle))
     for (const library of libraries.reverse()) library.close()
   } catch {

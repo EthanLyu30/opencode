@@ -36,7 +36,11 @@ export interface Contract {
 
 export function fromEnvironment(
   environment: Readonly<Record<string, string | undefined>>,
-  options: { readonly probe: HostRootPolicy.Probe; readonly workspaceRoots?: readonly string[] },
+  options: {
+    readonly probe: HostRootPolicy.Probe
+    readonly workspaceRoots?: readonly string[]
+    readonly benchmarkWriteGrant?: HostRootPolicy.BenchmarkWriteGrant
+  },
 ): Contract {
   const values = {
     OPENCODE_WORKFLOW_HOST_ROOT: required(environment, "OPENCODE_WORKFLOW_HOST_ROOT"),
@@ -69,6 +73,7 @@ export function fromEnvironment(
     dockerTempRoot: values.OPENCODE_WORKFLOW_SANDBOX_TEMP,
     workspaceRoots: options.workspaceRoots,
     probe: options.probe,
+    benchmarkWriteGrant: options.benchmarkWriteGrant,
   })
   const roots = Object.freeze({ ...policy.roots, evidenceRoot: dataRoot, runtimeRoot })
   return Object.freeze({

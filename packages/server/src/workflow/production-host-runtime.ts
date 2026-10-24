@@ -3,12 +3,13 @@ export * as ProductionHostRuntime from "./production-host-runtime"
 import { WorkflowBenchmarkTransport } from "@opencode-ai/core/workflow/benchmark-transport"
 import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { Layer } from "effect"
-import { lstatSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs"
 import path from "node:path"
 import { DockerConfig } from "./docker-config"
 import { HostRootPolicy } from "./host-root-policy"
 import { ProductionHostRoots } from "./production-host-roots"
 import { BenchmarkAclProbe } from "./benchmark-acl-probe"
+import { BenchmarkAclAuthority } from "./benchmark-acl-authority"
 
 const BENCHMARK_RUNS_ROOT = "D:\\OpenCode-Benchmark\\Task24\\runs"
 const BENCHMARK_WORKSPACES_ROOT = "D:\\OpenCode-Benchmark\\Task24\\workspaces"
@@ -31,8 +32,10 @@ export function load(
 ): Runtime {
   const tempRoot = environment.OPENCODE_WORKFLOW_HOST_TEMP
   if (tempRoot === undefined || tempRoot.length === 0) throw new TypeError("OPENCODE_WORKFLOW_HOST_TEMP is required")
+  const benchmark = options.probe === undefined ? benchmarkProbe(environment, tempRoot) : undefined
   const contract = ProductionHostRoots.fromEnvironment(environment, {
-    probe: options.probe ?? benchmarkProbe(environment, tempRoot) ?? HostRootPolicy.productionProbe({ tempRoot }),
+    probe: options.probe ?? benchmark?.probe ?? HostRootPolicy.productionProbe({ tempRoot }),
+    benchmarkWriteGrant: benchmark?.writeGrant,
     workspaceRoots: options.workspaceRoots,
   })
   return Object.freeze({ contract, dockerConfig: DockerConfig.fromProductionHostRoots(contract) })
@@ -41,7 +44,7 @@ export function load(
 function benchmarkProbe(
   environment: Readonly<Record<string, string | undefined>>,
   tempRoot: string,
-): HostRootPolicy.Probe | undefined {
+): { readonly probe: HostRootPolicy.Probe; readonly writeGrant?: HostRootPolicy.BenchmarkWriteGrant } | undefined {
   if (environment.OPENCODE_BENCHMARK_HOST_FILE === undefined) return undefined
   const binding = loadBenchmarkTransport(environment)
   const runDataRoot = environment.OPENCODE_BENCHMARK_RUN_DATA_ROOT
@@ -53,13 +56,15 @@ function benchmarkProbe(
     !strictDescendant(runDataRoot, tempRoot)
   )
     throw new TypeError("TASK24_BENCHMARK_ACL_AUTHORITY")
-  return BenchmarkAclProbe.make({
-    tempRoot,
-    guard() {
-      if (loadBenchmarkTransport(environment)?.bindingSha256 !== binding.bindingSha256)
-        throw new TypeError("TASK24_BENCHMARK_ACL_STALE")
-    },
-  })
+  const guard = () => {
+    if (loadBenchmarkTransport(environment)?.bindingSha256 !== binding.bindingSha256)
+      throw new TypeError("TASK24_BENCHMARK_ACL_STALE")
+  }
+  // Missing proof never grants an exception: the original strict ACL policy
+  // remains authoritative. Only a token-authenticated native record enables it.
+  return existsSync(path.join(path.dirname(process.execPath), "benchmark-acl-authority.json"))
+    ? BenchmarkAclAuthority.make({ binding, tempRoot, guard })
+    : { probe: BenchmarkAclProbe.make({ tempRoot, guard }) }
 }
 
 export function unavailableDockerConfig(): DockerConfig.Config {
@@ -79,11 +84,20 @@ export function loadBenchmarkTransport(
   const rootInput = required(environment, "OPENCODE_BENCHMARK_RUN_DATA_ROOT")
   const campaignID = required(environment, "OPENCODE_BENCHMARK_CAMPAIGN_ID")
   const runID = required(environment, "OPENCODE_BENCHMARK_RUN_ID")
-  const runsRoot = canonicalDirectory(BENCHMARK_RUNS_ROOT, "Task24 benchmark runs root")
-  const workspacesRoot = canonicalDirectory(BENCHMARK_WORKSPACES_ROOT, "Task24 benchmark workspaces root")
   const runDataRoot = canonicalDirectory(rootInput, "Benchmark run data root")
-  if (![runsRoot, workspacesRoot].some((root) => strictDescendant(root, runDataRoot)))
+  const runtimeRoot = [BENCHMARK_RUNS_ROOT, BENCHMARK_WORKSPACES_ROOT].find((root) =>
+    strictDescendant(root, runDataRoot),
+  )
+  if (runtimeRoot === undefined)
     throw new TypeError("Benchmark run data root must be inside a Task24 controlled runtime root")
+  // Only the selected allowed root is an ancestor of this isolated run. A
+  // sibling namespace is irrelevant and must not require another OS grant.
+  const runtimeStat = lstatSync(runtimeRoot)
+  if (!runtimeStat.isDirectory() || runtimeStat.isSymbolicLink())
+    throw new TypeError("Task24 benchmark runtime root must not be a link or reparse point")
+  // runDataRoot was already resolved to its full native canonical path, so
+  // aliases in this ancestor chain are rejected there. Do not require list or
+  // read access to the shared namespace merely to resolve it a second time.
 
   const file = canonicalFile(fileInput, "Benchmark transport file")
   if (!strictDescendant(runDataRoot, file))

@@ -7,6 +7,7 @@ import source from "./benchmark-acl-native-worker.js" with { type: "text" }
 export function collect(
   target: string,
   launch?: (data: { readonly target: string; readonly shared: SharedArrayBuffer }) => Worker,
+  context?: { readonly profile: string },
 ) {
   const deadline = performance.now() + 5000
   const shared = new SharedArrayBuffer(16 + 1048576)
@@ -14,7 +15,7 @@ export function collect(
   // Bun's text loader embeds this asset in compiled executables as well.
   const workerSource: unknown = source
   if (typeof workerSource !== "string") throw new TypeError("TASK24_NATIVE_ACL_ASSET")
-  const data = { target, shared }
+  const data = { target, shared, ...(context ? { profile: context.profile } : {}) }
   const worker = launch ? launch(data) : new Worker(workerSource, { eval: true, workerData: data })
   // Errors before the worker's own guarded entry leave the header incomplete:
   // the same fixed deadline fails closed rather than accepting empty output.
