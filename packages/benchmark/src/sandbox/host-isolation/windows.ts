@@ -8,6 +8,7 @@ import { canonicalJson } from "../../campaign/canonical"
 import { sha256Text } from "../../hash"
 import { desktopProbeBootstrap } from "../desktop/probe-worker"
 import { WindowsWorkflowEnvironment } from "./windows-workflow-environment"
+import { WorkflowBenchmarkModels } from "../../../../schema/src/workflow-benchmark-models"
 export { runWindowsBrowserProtocol } from "./windows-browser"
 
 const Request = Schema.Struct({
@@ -33,6 +34,7 @@ const Request = Schema.Struct({
     }),
   ),
   benchmarkHost: Schema.optionalKey(WindowsWorkflowEnvironment.Host),
+  benchmarkModels: Schema.optionalKey(WorkflowBenchmarkModels.Packet),
 })
 const NativeResult = Schema.Struct({
   started: Schema.Boolean,
@@ -497,6 +499,7 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
       (input.writable.length === 0 ||
         input.benchmarkAcl.expiresAt <= Date.now() ||
         input.benchmarkAcl.expiresAt > Date.now() + 3600000)) ||
+    (input.benchmarkModels !== undefined && (!input.benchmarkHost || !input.benchmarkAcl)) ||
     (stdin?.length ?? 0) > 2097152 ||
     input.readonly.some((read) => input.writable.some((write) => overlaps(read, write))) ||
     mediated.some((read) => [...input.readonly, ...input.writable].some((other) => overlaps(read, other))) ||
@@ -559,6 +562,7 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
           nonce,
           ...input.benchmarkAcl,
           executableSha256: input.executable.sha256,
+          ...(input.benchmarkModels === undefined ? {} : { models: input.benchmarkModels }),
           grants: input.writable.map((directory) => ({
             path: directory,
             fileID: admittedDirectories.find((entry) => entry.path === directory)!.fileID,
@@ -566,6 +570,8 @@ export async function runWindowsSandbox(raw: unknown): Promise<WindowsSandboxRes
             flags: 3,
           })),
         })
+  if (input.benchmarkModels && Buffer.byteLength(benchmarkAclRecord!) > 65536)
+    throw new TypeError("TASK24_ISOLATION_INPUT")
   // The actual kernel package identity commits to these exact bytes. An agent
   // cannot forge a different record by changing a file or environment string.
   const profile =

@@ -4,13 +4,19 @@ import path from "node:path"
 import { createHash } from "node:crypto"
 import { BenchmarkAclAuthority } from "../src/workflow/benchmark-acl-authority"
 import { HostRootPolicy } from "../src/workflow/host-root-policy"
+import { benchmarkModelPacket } from "./fixtures/workflow-benchmark-models"
+import { BenchmarkModelCatalog } from "../src/workflow/benchmark-model-catalog"
+import { ModelSelection } from "@opencode-ai/core/workflow/model-selection"
+import { Location } from "@opencode-ai/core/location"
+import { AbsolutePath } from "@opencode-ai/core/schema"
+import { Effect } from "effect"
 
 const user = "S-1-5-21-100-200-300-1001"
 const packageSid = "S-1-15-2-1-2-3-4-5-6-7"
 const otherSid = "S-1-15-2-8-9-10-11-12-13-14"
 const hash = (text: string | Buffer) => createHash("sha256").update(text).digest("hex")
 
-function fixture() {
+function fixture(models?: ReturnType<typeof benchmarkModelPacket>) {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR!, "acl-authority-"))
   const id = fs.lstatSync(root, { bigint: true })
   const roots = {
@@ -44,6 +50,7 @@ function fixture() {
     grants: [
       { path: roots.dataRoot, fileID: `${target.dev}:${target.ino}:${target.birthtimeNs}`, mask: 0x1301bf, flags: 3 },
     ],
+    ...(models === undefined ? {} : { models }),
   }
   const text = JSON.stringify(record)
   const profile = "opencode.task24." + hash(text).slice(0, 48)
@@ -123,6 +130,71 @@ test("benchmark authority admits only the native token's exact launcher grant wi
   })
   expect(() => policy.verifyAll()).not.toThrow()
   expect(() => HostRootPolicy.makeProduction({ ...f.roots, probe: f.snapshot })).toThrow(/untrusted SID/)
+})
+
+test("native authority authenticates the committed optional zero-cost model packet and returns independent values", () => {
+  const packet = benchmarkModelPacket()
+  using f = fixture(packet)
+  let authority: ReturnType<typeof f.make>
+  expect(() => {
+    authority = f.make()
+  }).not.toThrow()
+  const models = authority!.modelSnapshot()!
+  expect(models).toEqual(packet)
+  Reflect.set(models.snapshot.routes.design, "modelID", "forbidden-mutation")
+  expect(authority!.modelSnapshot()).toEqual(packet)
+  f.mutate((value) => {
+    ;(value.benchmark as { tokenSid: string }).tokenSid = otherSid
+  })
+  expect(() => authority!.modelSnapshot()).toThrow()
+})
+
+test("a model packet tampered before admission cannot acquire the committed native token's authority", () => {
+  using f = fixture(benchmarkModelPacket())
+  fs.writeFileSync(
+    f.recordFile,
+    JSON.stringify({
+      ...f.record,
+      models: { ...f.record.models!, kind: "task24.zero-cost-models.v1" },
+      nonce: "e".repeat(32),
+    }),
+  )
+  expect(() => f.make().modelSnapshot()).toThrow()
+})
+
+test("the optional model packet is absent from old native launch records", () => {
+  using f = fixture()
+  expect(f.make().modelSnapshot()).toBeUndefined()
+})
+
+test("benchmark model source authenticates fresh admission and per-turn availability without discovery or credentials", async () => {
+  using f = fixture(benchmarkModelPacket())
+  expect(typeof Reflect.get(BenchmarkModelCatalog, "fromAuthority")).toBe("function")
+  const source = BenchmarkModelCatalog.fromAuthority(f.make())
+  const snapshot = await Effect.runPromise(source.snapshot())
+  const selection = ModelSelection.freeze(
+    snapshot,
+    Location.Ref.make({ directory: AbsolutePath.make(f.roots.dataRoot) }),
+  )
+  await expect(Effect.runPromise(source.check(selection))).resolves.toBeUndefined()
+  f.mutate((value) => {
+    ;(value.benchmark as { tokenSid: string }).tokenSid = otherSid
+  })
+  await expect(Effect.runPromise(source.snapshot())).rejects.toThrow()
+  await expect(Effect.runPromise(source.check(selection))).rejects.toThrow()
+})
+
+test("benchmark model source refuses a changed durable proof instead of retaining a stale available model", async () => {
+  using f = fixture(benchmarkModelPacket())
+  expect(typeof Reflect.get(BenchmarkModelCatalog, "fromAuthority")).toBe("function")
+  const source = BenchmarkModelCatalog.fromAuthority(f.make())
+  const selection = ModelSelection.freeze(
+    await Effect.runPromise(source.snapshot()),
+    Location.Ref.make({ directory: AbsolutePath.make(f.roots.dataRoot) }),
+  )
+  fs.appendFileSync(f.recordFile, " ")
+  await expect(Effect.runPromise(source.snapshot())).rejects.toThrow()
+  await expect(Effect.runPromise(source.check(selection))).rejects.toThrow()
 })
 
 test("benchmark authority rejects a string-claimed SID when the actual package token differs", () => {

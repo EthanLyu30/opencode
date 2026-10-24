@@ -13,10 +13,12 @@ import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { Effect, Layer } from "effect"
 import path from "node:path"
 import { ServerAuth } from "../auth"
+import { BenchmarkModelCatalog } from "./benchmark-model-catalog"
 export function authenticationLayer<E, R>(source: Effect.Effect<ServerAuth.Info, E, R>) {
   return Layer.effect(ServerAuth.Config, source)
 }
 const unavailable = () => new WorkflowModelCatalog.CatalogError({ code: "selection_required" })
+const nativeBenchmarkModels = Effect.try({ try: () => BenchmarkModelCatalog.load(process.env), catch: unavailable })
 const disabled = () =>
   process.env.OPENCODE_DISABLE_WORKFLOW_MODEL_DISCOVERY === "true" ||
   process.env.NODE_ENV === "test" ||
@@ -115,7 +117,15 @@ export const selectionNode = makeGlobalNode({
       const catalogue = yield* WorkflowModelCatalogService.Service
       return {
         snapshot: () =>
-          !rootFromEnvironment(process.env) || disabled() ? Effect.succeed(undefined) : catalogue.snapshot(),
+          nativeBenchmarkModels.pipe(
+            Effect.flatMap((source) =>
+              source
+                ? source.snapshot()
+                : !rootFromEnvironment(process.env) || disabled()
+                  ? Effect.succeed(undefined)
+                  : catalogue.snapshot(),
+            ),
+          ),
       }
     }),
   ),
@@ -127,7 +137,10 @@ export const availabilityLayer = Layer.effect(
     const catalogue = yield* WorkflowModelCatalogService.Service
     const scope = yield* WorkflowCredentialScope.Service
     return {
-      check: (selection: ModelSelection.FrozenSelection) => catalogue.checkPinned(selection),
+      check: (selection: ModelSelection.FrozenSelection) =>
+        nativeBenchmarkModels.pipe(
+          Effect.flatMap((source) => (source ? source.check(selection) : catalogue.checkPinned(selection))),
+        ),
       credential: (selection: ModelSelection.FrozenSelection, providerID: WorkflowModelCatalog.ProviderID) =>
         Effect.gen(function* () {
           const pinned = ModelSelection.validate(selection)

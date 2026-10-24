@@ -7,6 +7,7 @@ import { Schema } from "effect"
 import { BenchmarkAclNative } from "./benchmark-acl-native"
 import { BenchmarkAclProbe } from "./benchmark-acl-probe"
 import { HostRootPolicy } from "./host-root-policy"
+import { WorkflowBenchmarkModels } from "@opencode-ai/schema/workflow-benchmark-models"
 
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))
 const Record = Schema.Struct({
@@ -17,6 +18,7 @@ const Record = Schema.Struct({
   bindingSha256: digest,
   expiresAt: Schema.Int,
   executableSha256: digest,
+  models: Schema.optionalKey(WorkflowBenchmarkModels.Packet),
   grants: Schema.Array(
     Schema.Struct({
       path: Schema.String,
@@ -50,10 +52,11 @@ export function make(input: {
   const executable = input.executable ?? process.execPath
   const file = path.join(path.dirname(executable), "benchmark-acl-authority.json")
   const frozen = read(file, 65536)
-  const decoded = Schema.decodeUnknownOption(Record)(json(frozen.text), { onExcessProperty: "error" })
+  const text = frozen.bytes.toString("utf8")
+  const decoded = Schema.decodeUnknownOption(Record)(json(text), { onExcessProperty: "error" })
   if (decoded._tag !== "Some") throw new TypeError("TASK24_BENCHMARK_ACL_RECORD")
   const record = decoded.value
-  const profile = "opencode.task24." + createHash("sha256").update(frozen.text).digest("hex").slice(0, 48)
+  const profile = "opencode.task24." + createHash("sha256").update(text).digest("hex").slice(0, 48)
   if (
     input.binding.evidenceMode !== "production" ||
     record.campaignID !== input.binding.campaignID ||
@@ -113,13 +116,22 @@ export function make(input: {
       return { status: result.status, error: "error" in result ? result.error : undefined }
     },
   })
+  function authenticatedProbe(root: string) {
+    const snapshot = probe(root)
+    if (!observation || observation.flags.length !== snapshot.aces.length)
+      throw new TypeError("TASK24_BENCHMARK_ACL_TOKEN")
+    observations.set(snapshot, { root, value: observation })
+    return snapshot
+  }
   return Object.freeze({
-    probe(root: string) {
-      const snapshot = probe(root)
-      if (!observation || observation.flags.length !== snapshot.aces.length)
-        throw new TypeError("TASK24_BENCHMARK_ACL_TOKEN")
-      observations.set(snapshot, { root, value: observation })
-      return snapshot
+    probe: authenticatedProbe,
+    modelSnapshot() {
+      guard()
+      if (record.models === undefined) return undefined
+      // Full record bytes (including this packet) determine the actual package
+      // identity. A caller-controlled JSON file is not sufficient authority.
+      authenticatedProbe(record.grants[0]!.path)
+      return structuredClone(record.models)
     },
     writeGrant(root: string, snapshot: HostRootPolicy.AclSnapshot, ace: HostRootPolicy.Ace) {
       guard()
@@ -166,7 +178,6 @@ function read(file: string, limit: number) {
   if (id(fs.lstatSync(file, { bigint: true })) !== id(before) || BigInt(bytes.length) !== before.size)
     throw new TypeError("TASK24_BENCHMARK_ACL_RECORD_IDENTITY")
   return {
-    text: bytes.toString("utf8"),
     bytes,
     identity: id(before) + ":" + createHash("sha256").update(bytes).digest("hex"),
   }
