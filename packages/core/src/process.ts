@@ -140,6 +140,8 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner
+    const benchmarkGit = process.env.OPENCODE_BENCHMARK_HOST_FILE !== undefined
+    let gitClient: Promise<ReturnType<typeof import("./workflow/benchmark-git").load>> | undefined
 
     const runCommand = (command: ChildProcess.Command, options?: RunOptions) => {
       const description = describeCommand(command)
@@ -197,6 +199,65 @@ const layer = Layer.effect(
     }
 
     const run = Effect.fn("AppProcess.run")(function* (command: ChildProcess.Command, options?: RunOptions) {
+      if (benchmarkGit && command._tag === "StandardCommand" && command.command === "git") {
+        const description = describeCommand(command)
+        const execution = Effect.tryPromise({
+          async try(signal) {
+            if (
+              !command.options.cwd ||
+              options?.combineOutput === true ||
+              (command.options.env && Object.keys(command.options.env).length) ||
+              (options?.stdin !== undefined &&
+                typeof options.stdin !== "string" &&
+                !(options.stdin instanceof Uint8Array))
+            )
+              throw Error("TASK24_BENCHMARK_GIT_INVOCATION")
+            gitClient ??= import("./workflow/benchmark-git").then(({ WorkflowBenchmarkGit }) =>
+              WorkflowBenchmarkGit.load(process.env),
+            )
+            const client = await gitClient
+            if (!client) throw Error("TASK24_BENCHMARK_GIT_AUTHORITY")
+            const result = await client.execute(
+              {
+                cwd: String(command.options.cwd),
+                argv: command.args,
+                ...(options?.stdin === undefined ? {} : { stdin: options.stdin as string | Uint8Array }),
+              },
+              AbortSignal.any([signal, ...(options?.signal ? [options.signal] : [])]),
+            )
+            const stdout = result.stdout.subarray(0, options?.maxOutputBytes)
+            const stderr = result.stderr.subarray(0, options?.maxErrorBytes)
+            return {
+              command: description,
+              exitCode: result.exit,
+              stdout,
+              stderr,
+              stdoutTruncated: result.truncated || stdout.length !== result.stdout.length,
+              stderrTruncated: result.truncated || stderr.length !== result.stderr.length,
+            } satisfies RunResult
+          },
+          catch: (cause) => wrapError(description, cause),
+        })
+        const bounded = options?.timeout
+          ? Effect.timeoutOrElse(execution, {
+              duration: options.timeout,
+              orElse: () => Effect.fail(new AppProcessError({ command: description, cause: new Error("Timed out") })),
+            })
+          : execution
+        return yield* bounded.pipe(
+          Effect.tapError((failure) => {
+            const cause = failure.cause
+            const code = cause instanceof Error ? Reflect.get(cause, "code") : undefined
+            const reason =
+              cause instanceof Error && /^TASK24_[A-Z0-9_]{1,96}$/.test(cause.message)
+                ? cause.message
+                : typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code)
+                  ? code
+                  : "unexpected"
+            return Effect.logDebug("benchmark Git transport rejected", { reason })
+          }),
+        )
+      }
       if (options?.stdin === undefined) return yield* runCommand(command, options)
       if (command._tag !== "StandardCommand") {
         return yield* new AppProcessError({
@@ -216,6 +277,10 @@ const layer = Layer.effect(
       options?: RunStreamOptions,
     ): Stream.Stream<string, AppProcessError> => {
       const description = describeCommand(command)
+      if (benchmarkGit && command._tag === "StandardCommand" && command.command === "git")
+        return Stream.fail(
+          new AppProcessError({ command: description, cause: new Error("TASK24_BENCHMARK_GIT_INVOCATION") }),
+        )
       const okExitCodes = options?.okExitCodes
       const built: Stream.Stream<string, AppProcessError | PlatformError> = Stream.unwrap(
         Effect.gen(function* () {
