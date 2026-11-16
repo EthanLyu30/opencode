@@ -74,6 +74,7 @@ test("calibration authority records its omitted checks and stays out of the read
     expect(statement.readinessEligible).toBe(false)
     expect(statement.kind).toBe("calibration-only")
     expect(statement.omitted).toEqual(["engine-acceptance", "capability-micro-tests"])
+    expect(statement.skippedRuntimeChecks).toEqual(["binary-build-records"])
     await fs.writeFile(file, canonicalJson({ ...statement, readinessEligible: true }))
     expect(() => requireLinuxAuthority(authority)).toThrow("TASK24_CALIBRATION_AUTHORITY_STATEMENT")
   } finally {

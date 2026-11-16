@@ -24,6 +24,7 @@ import {
 } from "../corpus/evaluation-profile"
 import { captureCandidate } from "../evaluator/independent/snapshot"
 import { makeLinuxEvaluationHost, authorizeLinuxHost, type LinuxAuthority } from "./evaluation-host"
+import { issueCalibrationAuthority } from "./calibration-authority"
 import { makeControllerFactsObserver, type RequirementProbePlan, type InteractionAssertion } from "./controller-facts"
 import { evaluateLinux } from "./linux-evaluator"
 import { resolveTaskDependency, type ResolvedImages } from "./dependencies"
@@ -229,7 +230,7 @@ export function decodeLinuxRuntimeConfig(input: unknown) {
     },
   }
 }
-export async function openLinuxRuntime(session: EngineSession) {
+export async function openLinuxRuntime(session: EngineSession, options: { calibrationOnly?: boolean } = {}) {
   const state = await revalidateSession(session)
   if (state.manifest.phase !== "accept") throw new TypeError("TASK24_RUNTIME_ACCEPT_PHASE")
   const manifest = state.manifest
@@ -322,11 +323,6 @@ export async function openLinuxRuntime(session: EngineSession) {
     await verifyControllerIdentity(manifest)
     await verifyRuntimeFiles()
   }
-  const guard = async () => {
-    await identityGuard()
-    if (!auditors) throw new TypeError("TASK24_DEPENDENCY_AUDITORS_REQUIRED")
-    await auditDependencySet({ session, runner, guard: identityGuard, images, set: auditors })
-  }
   const runner = makeDockerRunner({
     request: state.inspection.request,
     session,
@@ -334,8 +330,17 @@ export async function openLinuxRuntime(session: EngineSession) {
       await revalidateSession(session)
     },
   })
+  // A calibration-only run retains the same dependency keepers an acceptance would create.
+  if (!auditors && options.calibrationOnly)
+    auditors = await createDependencyAuditors({ session, runner, guard: identityGuard, images })
+  const guard = async () => {
+    await identityGuard()
+    if (!auditors) throw new TypeError("TASK24_DEPENDENCY_AUDITORS_REQUIRED")
+    await auditDependencySet({ session, runner, guard: identityGuard, images, set: auditors })
+  }
   async function verifyRuntimeFiles() {
-    await verifyBinaryBuildRecords({ manifest })
+    // Calibration-only evidence binds the evaluator, images and browser, not the two CLI binaries.
+    if (!options.calibrationOnly) await verifyBinaryBuildRecords({ manifest })
     loadLinuxBrowserRelease(config.browser.root, manifest.artifacts.find((a) => a.id === "browser")!.sha256)
     if ((await fileIdentity(configArtifact.path!)).sha256 !== configArtifact.sha256)
       throw new TypeError("TASK24_RUNTIME_CONFIG_STALE")
@@ -740,6 +745,54 @@ export async function openLinuxRuntime(session: EngineSession) {
     }
     return results
   }
+  async function runCorpus(authority: LinuxAuthority) {
+    const corpus = await finalizeLinuxCorpus({
+      ...config.corpus,
+      manifest,
+      authority,
+      images: original,
+      referenceCapturer: {
+        async capture(v) {
+          const ref = config.corpus.references[v.taskID],
+            plan = config.corpus.executionPlans[v.taskID]
+          if (!ref || !plan) throw new TypeError("TASK24_RUNTIME_REFERENCE_MAPPING")
+          return captureReference(v.profile, ref.sourceRoot, ref.identity, plan.outputs)
+        },
+      },
+    })
+    const report = await calibrateLinuxCorpus({
+      corpus,
+      authority,
+      images,
+      evaluator: {
+        async create(v) {
+          const bundle = await loadEvaluationBundle(v.bundleRoot),
+            raw = backend(
+              [{ profile: bundle.profile, outputs: v.executionPlan.outputs, probeModes: v.executionPlan.probeModes }],
+              v.evidenceRoot,
+            ),
+            web = browser(v.evidenceRoot, path.join(v.bundleRoot, "private")),
+            host = makeLinuxEvaluationHost({ backend: raw, authority, browser: web }),
+            observer = makeControllerFactsObserver({
+              requirementPlans: config.corpus.requirementPlans,
+              interactionAssertions: config.corpus.interactionAssertions,
+              authority,
+              evidenceRoot: v.evidenceRoot,
+              browser: web,
+              policyObserver: makeCalibrationPolicyObserver(authority, v.evidenceRoot),
+            })
+          return {
+            evaluate(input) {
+              return evaluateLinux(input, { host, browser: web, controllerFactsObserver: observer })
+            },
+            dispose: host.dispose,
+          }
+        },
+      },
+      signal: new AbortController().signal,
+    })
+    return { corpus, report }
+  }
   return {
     config,
     images,
@@ -800,58 +853,28 @@ export async function openLinuxRuntime(session: EngineSession) {
           )) as EngineReceipt,
         }),
         authority = authorizeLinuxHost({ manifest, engineReceipt: receipt, evidenceRoot: manifest.roots.evidence })
-      const corpus = await finalizeLinuxCorpus({
-        ...config.corpus,
-        manifest,
-        authority,
-        images: original,
-        referenceCapturer: {
-          async capture(v) {
-            const ref = config.corpus.references[v.taskID],
-              plan = config.corpus.executionPlans[v.taskID]
-            if (!ref || !plan) throw new TypeError("TASK24_RUNTIME_REFERENCE_MAPPING")
-            return captureReference(v.profile, ref.sourceRoot, ref.identity, plan.outputs)
-          },
-        },
-      })
-      const report = await calibrateLinuxCorpus({
-        corpus,
-        authority,
-        images,
-        evaluator: {
-          async create(v) {
-            const bundle = await loadEvaluationBundle(v.bundleRoot),
-              raw = backend(
-                [{ profile: bundle.profile, outputs: v.executionPlan.outputs, probeModes: v.executionPlan.probeModes }],
-                v.evidenceRoot,
-              ),
-              web = browser(v.evidenceRoot, path.join(v.bundleRoot, "private")),
-              host = makeLinuxEvaluationHost({ backend: raw, authority, browser: web }),
-              observer = makeControllerFactsObserver({
-                requirementPlans: config.corpus.requirementPlans,
-                interactionAssertions: config.corpus.interactionAssertions,
-                authority,
-                evidenceRoot: v.evidenceRoot,
-                browser: web,
-                policyObserver: makeCalibrationPolicyObserver(authority, v.evidenceRoot),
-              })
-            return {
-              evaluate(input) {
-                return evaluateLinux(input, { host, browser: web, controllerFactsObserver: observer })
-              },
-              dispose: host.dispose,
-            }
-          },
-        },
-        signal: new AbortController().signal,
-      })
+      const result = await runCorpus(authority),
+        report = result.report
       const index: ReadinessIndex = {
         ...anchor,
-        corpusSha256: corpus.corpusSha256,
+        corpusSha256: result.corpus.corpusSha256,
         calibrationSha256: report.reportSha256,
       }
       await publishImmutable(path.join(manifest.roots.evidence, "linux-readiness-input.json"), canonicalJson(index))
       return report
+    },
+    async calibrateOnly() {
+      await ensureIsolation()
+      const authority = await issueCalibrationAuthority({
+        manifest,
+        evidenceRoot: manifest.roots.evidence,
+      })
+      const result = await runCorpus(authority)
+      return {
+        ...result.report,
+        readinessEligible: false as const,
+        calibrationAuthoritySha256: authority.engineReceiptSha256,
+      }
     },
   }
 }

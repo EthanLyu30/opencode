@@ -17,7 +17,7 @@ import { readControllerJson, publishLinuxReadiness, verifyLinuxReadiness } from 
 import { verifyControllerIdentity } from "./controller-identity"
 import { publishImmutable } from "../offline/atomic"
 export { verifyLinuxReadiness } from "./readiness"
-const modes = ["inspect", "plan-preparation", "prepare", "accept", "calibrate", "verify"] as const
+const modes = ["inspect", "plan-preparation", "prepare", "accept", "calibrate", "calibrate-only", "verify"] as const
 const flags = ["root", "request", "manifest", "approval", "storage-source", "artifacts", "plan"] as const
 const initial = {
   software_verified: true,
@@ -143,7 +143,7 @@ export async function runLinuxHostCommand(argv: readonly string[]): Promise<{ ex
     }
     if (manifest.phase !== "accept") return response(2, "accept_manifest_required")
     const { openLinuxRuntime } = await import("./runtime"),
-      runtime = await openLinuxRuntime(session)
+      runtime = await openLinuxRuntime(session, { calibrationOnly: mode === "calibrate-only" })
     if (mode === "accept") {
       const result = await runtime.accept()
       return result.status === "passed"
@@ -153,6 +153,19 @@ export async function runLinuxHostCommand(argv: readonly string[]): Promise<{ ex
           })
         : response(result.status === "failed" ? 1 : 2, "acceptance_" + result.status, {
             checks: result.checks.map((c) => ({ id: c.id, status: c.status, code: c.code })),
+          })
+    }
+    if (mode === "calibrate-only") {
+      const report = await runtime.calibrateOnly()
+      return report.corpusEngineReady
+        ? response(0, "calibration_complete_readiness_eligible_false", {
+            realEvaluations: report.realEvaluations,
+            calibrationSha256: report.reportSha256,
+            calibrationAuthoritySha256: report.calibrationAuthoritySha256,
+          })
+        : response(1, "calibration_incomplete", {
+            realEvaluations: report.realEvaluations,
+            unobservedCount: report.unobservedRequiredChecks.length,
           })
     }
     const report = await runtime.calibrate()

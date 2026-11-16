@@ -18,6 +18,8 @@ export async function authorPrepareManifest(input: {
   evidenceRoot: string
   artifacts: readonly HostManifest["artifacts"][number][]
   pending: readonly HostManifest["artifacts"][number][]
+  /** Binds prepare approval fields to the preparation plan instead of the pending artifact list. */
+  artifactManifestSha256?: string
 }) {
   const request = decodeHostRequest(input.request)
   if (!input.inventory.engine || !input.inventory.storage || input.inventory.missing.length)
@@ -66,7 +68,7 @@ export async function authorPrepareManifest(input: {
     storage: input.inventory.storage,
     phase: "prepare",
     artifacts,
-    artifactManifestSha256: sha256Text(canonicalJson(artifacts)),
+    artifactManifestSha256: input.artifactManifestSha256 ?? sha256Text(canonicalJson(artifacts)),
   })
   await verifyControllerIdentity(manifest)
   return manifest

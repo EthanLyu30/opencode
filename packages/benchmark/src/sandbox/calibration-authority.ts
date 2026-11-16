@@ -25,6 +25,7 @@ const Statement = Schema.Struct({
   planSha256: Sha256,
   engineID: Schema.String,
   omitted: Schema.Array(Schema.Literals(["engine-acceptance", "capability-micro-tests"])),
+  skippedRuntimeChecks: Schema.Array(Schema.Literals(["binary-build-records"])),
   issuedAt: Schema.Int,
 })
 export type CalibrationStatement = typeof Statement.Type & Readonly<{ statementSha256: string }>
@@ -56,6 +57,7 @@ export async function issueCalibrationAuthority(input: {
       planSha256: input.manifest.planSha256,
       engineID: input.manifest.engine.serverID,
       omitted: ["engine-acceptance", "capability-micro-tests"] as const,
+      skippedRuntimeChecks: ["binary-build-records"] as const,
       issuedAt: input.issuedAt ?? Date.now(),
     },
     statement = Object.freeze({
