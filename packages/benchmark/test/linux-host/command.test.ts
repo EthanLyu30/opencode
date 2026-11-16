@@ -8,6 +8,94 @@ import { decodeLinuxRuntimeConfig } from "../../src/sandbox/runtime"
 import { decodeReadinessIndex, readControllerJson } from "../../src/sandbox/readiness"
 import fs from "node:fs/promises"
 import { publishImmutable } from "../../src/offline/atomic"
+import { independentFixture, identity } from "../independent/fixture"
+
+test("runtime accepts only fixed installed Git and frozen A composition data, never executable code or expected scores", async () => {
+  const f = await sessionFixture(),
+    task = await independentFixture("runtime-composition")
+  try {
+    const roots = Object.fromEntries(
+      ["runRoot", "repo", "data", "config", "cache", "temp", "output"].map((name) => [
+        name,
+        path.join(f.root, "run", name),
+      ]),
+    )
+    const image = "own/runtime@sha256:" + "a".repeat(64)
+    const production = {
+      schemaVersion: 1,
+      identity: identity(),
+      image,
+      publicImage: image,
+      readonlyToolCallID: "ro-write",
+      commands: [{ argv: ["bun", "test"], workdir: "/workspace" }],
+      previews: [],
+      gitStates: [[{ path: "src/math.js", contentBase64: Buffer.from(task.source).toString("base64") }]],
+    }
+    const config = {
+      schemaVersion: 2,
+      git: { path: "C:\\Program Files\\Git\\mingw64\\bin\\git.exe", sha256: "a".repeat(64) },
+      browser: { root: f.root, helper: f.cli, fonts: [f.cli], fontRegistrySha256: "a".repeat(64) },
+      profiles: [],
+      projects: [],
+      capabilities: [
+        {
+          armID: "A",
+          binary: f.cli,
+          cases: [
+            {
+              kind: "coding",
+              input: {
+                armID: "A",
+                campaignID: "fixture",
+                runID: "run-1",
+                binary: { runtime: "modified", executable: f.cli.path, sha256: f.cli.sha256, version: "fixture" },
+                roots,
+                prompt: "public fixture",
+                referenceFiles: [],
+                brokerOrigin: "http://127.0.0.1:12345",
+                brokerGrant: "g".repeat(64),
+                grantExpiresAt: Date.now() + 60000,
+                budget: {
+                  aggregateInputTokens: 100,
+                  aggregateOutputTokens: 100,
+                  maxToolCalls: 10,
+                  maxRetries: 1,
+                  maxDurationMs: 30000,
+                },
+              },
+              scripts: {
+                main: [{ protocol: "chat_completions", model: "kimi-k3", events: [] }],
+                readonly: [{ protocol: "chat_completions", model: "kimi-k3", events: [] }],
+              },
+              profile: task.profile,
+              outputs: [],
+              production,
+            },
+          ],
+        },
+      ],
+      corpus: {
+        authoredRoot: f.root,
+        outputRoot: f.root,
+        executionPlans: {},
+        requirementPlans: {},
+        interactionAssertions: {},
+        referencePlans: {},
+        references: {},
+      },
+    }
+    expect(decodeLinuxRuntimeConfig(config).capabilities[0]!.cases[0]!.production?.gitStates).toEqual(
+      production.gitStates,
+    )
+    expect(() => decodeLinuxRuntimeConfig({ ...config, git: { ...config.git, path: "D:\\arbitrary.exe" } })).toThrow()
+    expect(() =>
+      decodeLinuxRuntimeConfig({ ...config, git: { ...config.git, environment: { PRIVATE: "forbidden" } } }),
+    ).toThrow()
+  } finally {
+    await task.dispose()
+    await f.dispose()
+  }
+})
 test("actual command subprocess rejects unknown modes/flags and blocks absent authority without Docker", async () => {
   const f = await sessionFixture()
   try {

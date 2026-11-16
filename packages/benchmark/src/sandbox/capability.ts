@@ -25,6 +25,7 @@ import { Schema } from "effect"
 import { startFixtureCapabilityProvider, type FixtureReply } from "./fixture-provider"
 import { verifyBinaryBuildRecords } from "./binary-build"
 import { requirePublicToolObservation, type PublicToolObservation } from "./public-tools"
+import type { ProductionWorkflowHost } from "./host-isolation/production"
 export type PublicMcpConnection = Readonly<
   {
     capability: string
@@ -139,6 +140,8 @@ export type HostIsolationAdapter = Readonly<{
     readonly: boolean
     signal: AbortSignal
     tools?: { connection: PublicMcpConnection; observation(): PublicToolObservation }
+    /** Controller-owned closed fixture, never serialized into the agent process. */
+    fixture?: ReturnType<typeof startFixtureCapabilityProvider>
   }): Promise<{
     ended: boolean
     deniedCanaryReads: number
@@ -328,12 +331,15 @@ export type HostIsolationContext = Readonly<{
   manifest: HostManifest
   artifact: FileIdentity
   guard(): Promise<void>
+  /** Trusted controller composition only; never decoded from agent JSON. */
+  workflow?(input: Parameters<HostIsolationAdapter["launch"]>[0]): Promise<ProductionWorkflowHost>
 }>
 
 /** Trusted-controller context only, never a capability/engine receipt or child environment. */
 export async function createHostIsolationContext(input: {
   session: EngineSession
   file: FileIdentity
+  workflow?: HostIsolationContext["workflow"]
 }): Promise<HostIsolationContext> {
   const file = freeze({ ...input.file })
   const session = input.session
@@ -350,12 +356,20 @@ export async function createHostIsolationContext(input: {
       throw new TypeError("TASK24_ISOLATION_ARTIFACT")
   }
   await guard()
-  return Object.freeze({ schemaVersion: 2, session, manifest: sessionState(session).manifest, artifact: file, guard })
+  return Object.freeze({
+    schemaVersion: 2,
+    session,
+    manifest: sessionState(session).manifest,
+    artifact: file,
+    guard,
+    ...(input.workflow ? { workflow: input.workflow } : {}),
+  })
 }
 
 export async function loadHostIsolationAdapter(input: {
   session: EngineSession
   file: FileIdentity
+  workflow?: HostIsolationContext["workflow"]
 }): Promise<HostIsolationAdapter> {
   const state = await revalidateSession(input.session),
     artifact = state.manifest.artifacts.find((a) => a.id === "host-isolation" && a.kind === "worker")
@@ -392,6 +406,12 @@ export async function loadHostIsolationAdapter(input: {
   adapters.add(adapter)
   return adapter
 }
+/** A owns its original production tools; only direct arms open the public MCP listener. */
+export async function openCapabilityTools<T>(armID: ArmID, open: () => Promise<T> | undefined) {
+  if (armID === "A") return undefined
+  return await open()
+}
+
 export async function verifyBinaryCapabilities(input: {
   binary: FileIdentity
   armID: ArmID
@@ -442,7 +462,7 @@ export async function verifyBinaryCapabilities(input: {
     )
       return blocked("exact_production_binary")
     const provider = startFixtureCapabilityProvider([...c.scripts.main, ...c.scripts.readonly])
-    const publicTools = input.publicTools ? await input.publicTools.open(c) : undefined
+    const publicTools = await openCapabilityTools(input.armID, () => input.publicTools?.open(c))
     try {
       const armInput = {
         ...c.input,
@@ -483,6 +503,7 @@ export async function verifyBinaryCapabilities(input: {
         readonly: false,
         signal: input.signal ?? new AbortController().signal,
         ...(tools ? { tools } : {}),
+        ...(input.armID === "A" ? { fixture: provider } : {}),
       })
       const after = tools?.observation()
       await publicTools?.setReadonly()
@@ -493,6 +514,7 @@ export async function verifyBinaryCapabilities(input: {
         readonly: true,
         signal: input.signal ?? new AbortController().signal,
         ...(tools ? { tools } : {}),
+        ...(input.armID === "A" ? { fixture: provider } : {}),
       })
       const readonlyAfter = tools?.observation()
       const toolEvidence = []

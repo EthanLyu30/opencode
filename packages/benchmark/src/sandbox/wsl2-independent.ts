@@ -303,6 +303,19 @@ if hashlib.sha256(json.dumps(body,sort_keys=True,ensure_ascii=False,separators=(
   }
 }
 
+/** Only the three already-bound registration fields; no shell or key enumeration. */
+export function decodeWsl2RegistryValue(raw: string, key: string, name: "DistributionName" | "Version" | "BasePath") {
+  if (raw.length > 65536 || /[^\x09\x0a\x0d\x20-\x7e]/.test(raw)) throw new TypeError("TASK24_WSL2_OBSERVATION")
+  const lines = raw.split(/\r?\n/).filter((line) => line.trim())
+  const type = name === "Version" ? "REG_DWORD" : "REG_SZ"
+  const match = new RegExp("^[ \\t]+" + name + "[ \\t]+" + type + "[ \\t]+(.+)$").exec(lines[1] ?? "")
+  if (lines.length !== 2 || lines[0]!.trim().toLowerCase() !== key.toLowerCase() || !match)
+    throw new TypeError("TASK24_WSL2_OBSERVATION")
+  if (name !== "Version") return match[1]!
+  if (!/^0x[0-9a-f]{1,8}$/i.test(match[1]!)) throw new TypeError("TASK24_WSL2_OBSERVATION")
+  return Number.parseInt(match[1]!.slice(2), 16)
+}
+
 function nativeProcesses(request: HostRequest) {
   requireWsl2GuestAccess(request)
   const env = {
@@ -321,6 +334,12 @@ function nativeProcesses(request: HostRequest) {
   const powershell = makeProcessRunner({
     executable: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     argvPrefix: ["-NoProfile", "-NonInteractive"],
+    cwd: request.roots.temp,
+    env,
+  })
+  const registry = makeProcessRunner({
+    executable: "C:\\Windows\\System32\\reg.exe",
+    argvPrefix: [],
     cwd: request.roots.temp,
     env,
   })
@@ -343,7 +362,30 @@ function nativeProcesses(request: HostRequest) {
   const observeRegistration = async () => {
     const host = requireWsl2GuestAccess(request)
     const script = `$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$r=Get-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{${host.registrationID}}';[pscustomobject]@{registrationID='${host.registrationID}';distribution=[string]$r.DistributionName;version=[int]$r.Version;basePath=[string]$r.BasePath}|ConvertTo-Json -Compress`
-    const raw = await invoke(powershell, ["-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")])
+    // reg.exe is the existing Windows read-only API frontend. For ASCII-bound
+    // registrations its output is locale-independent; retain UTF-8 PowerShell
+    // for non-ASCII bindings rather than guessing an ANSI codepage. Both paths
+    // query the SAME exact key and retain the before/after registration checks.
+    const values = /^[\x20-\x7e]+$/.test(host.distribution + host.installRoot)
+      ? await (async () => {
+          const key = `HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{${host.registrationID}}`
+          const names = ["DistributionName", "Version", "BasePath"] as const
+          const raw = await Promise.all(
+            names.map(async (name) =>
+              decodeWsl2RegistryValue(
+                Buffer.from(await invoke(registry, ["query", key, "/v", name, "/reg:64"])).toString("utf8"),
+                key,
+                name,
+              ),
+            ),
+          )
+          return { distribution: raw[0], version: raw[1], basePath: raw[2] }
+        })()
+      : JSON.parse(
+          Buffer.from(await invoke(powershell, ["-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")]))
+            .toString("utf8")
+            .replace(/^\uFEFF/, ""),
+        )
     const runningBytes = Buffer.from(await invoke(process, ["--list", "--running", "--quiet"]))
     const running = runningBytes
       .toString(runningBytes.includes(0) ? "utf16le" : "utf8")
@@ -351,11 +393,8 @@ function nativeProcesses(request: HostRequest) {
       .split(/\r?\n/)
       .map((s) => s.trim())
     const registration = {
-      ...JSON.parse(
-        Buffer.from(raw)
-          .toString("utf8")
-          .replace(/^\uFEFF/, ""),
-      ),
+      ...values,
+      registrationID: host.registrationID,
       running: running.includes(host.distribution),
     }
     bindWsl2Registration(request, registration)

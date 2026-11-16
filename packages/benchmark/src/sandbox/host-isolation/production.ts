@@ -6,13 +6,151 @@ import { sha256Bytes, sha256Text } from "../../hash"
 import { assertRunRoots } from "../../arms/environment"
 import type { ArmLaunch } from "../../arms/types"
 import { directRoot } from "../../corpus/direct-root"
-import { bindEvidenceFile } from "../../evaluator/evidence"
+import { bindEvidenceFile, verifyEvidenceFile, type EvidenceReference } from "../../evaluator/evidence"
 import { publishImmutable } from "../../offline/atomic"
 import type { FileIdentity } from "../contracts"
 import type { HostIsolationAdapter, HostIsolationContext, PublicMcpConnection } from "../capability"
 import { requirePublicToolObservation, type PublicToolObservation } from "../public-tools"
 import { fileIdentity } from "../storage"
 import { runWindowsSandbox, type WindowsSandboxResult } from "./windows"
+import { WindowsWorkflowEnvironment } from "./windows-workflow-environment"
+import type { WorkflowBenchmarkModels } from "../../../../schema/src/workflow-benchmark-models"
+import { ordinaryFiles } from "../../corpus/evaluation-bundle"
+
+type WorkflowAuthority = Readonly<{ campaignID: string; runID: string; bindingSha256: string; expiresAt: number }>
+
+export type ProductionWorkflowHost = Readonly<{
+  environment: Readonly<Record<string, string>>
+  authority: WorkflowAuthority
+  host: typeof WindowsWorkflowEnvironment.Host.Type
+  port: number
+  models: WorkflowBenchmarkModels.Packet
+  /** External command/browser observations, not agent stdout or writable database rows. */
+  observe(
+    execution: Readonly<
+      Pick<WindowsSandboxResult["execution"], "started" | "exitCode" | "stdout" | "stderr" | "truncated">
+    >,
+  ): Promise<
+    Readonly<{
+      workflowSucceeded: boolean
+      checkExit: number
+      preview: boolean
+      capture: boolean
+      readonlyDenied: boolean
+      evidence: readonly EvidenceReference[]
+    }>
+  >
+  close(): Promise<void>
+}>
+
+/** Same production CLI and host contract; no MCP replacement for arm A. */
+export async function planWindowsWorkflowLaunch(input: {
+  launch: ArmLaunch
+  binary: FileIdentity
+  root: string
+  readonly: boolean
+  authority: WorkflowAuthority
+  host: typeof WindowsWorkflowEnvironment.Host.Type
+  port: number
+}) {
+  const { launch, binary, host, authority } = input
+  if (launch.snapshot.armID !== "A" || launch.snapshot.mode !== "workflow")
+    throw new TypeError("TASK24_PRODUCTION_WORKFLOW_BRIDGE_REQUIRED")
+  if (
+    launch.executable !== binary.path ||
+    launch.snapshot.executable !== binary.path ||
+    launch.snapshot.executableSha256 !== binary.sha256 ||
+    canonicalJson(await fileIdentity(binary.path)) !== canonicalJson(binary)
+  )
+    throw new TypeError("TASK24_PRODUCTION_ADAPTER_BINARY")
+  const roots = assertRunRoots(launch.snapshot.roots)
+  if (launch.cwd !== roots.repo || overlap(input.root, roots.runRoot))
+    throw new TypeError("TASK24_PRODUCTION_ADAPTER_ROOTS")
+  await directRoot(input.root)
+  for (const directory of Object.values(roots)) await directRoot(directory)
+  const state = [roots.data, roots.config, roots.cache, roots.temp, roots.output]
+  const env = launch.environment
+  const deployment = env.OPENCODE_WORKFLOW_HOST_ROOT
+  if (!deployment || deployment === roots.data || !contains(roots.data, deployment))
+    throw new TypeError("TASK24_PRODUCTION_ADAPTER_ROOTS")
+  const hostRoots = [
+    ...new Set(
+      WindowsWorkflowEnvironment.pathNames
+        .filter((name) => name !== "OPENCODE_WORKFLOW_SANDBOX_ENGINE" && name !== "OPENCODE_BENCHMARK_HOST_FILE")
+        .map((name) => env[name]!),
+    ),
+  ]
+  if (hostRoots.some((directory) => !directory || !contains(deployment, directory)))
+    throw new TypeError("TASK24_PRODUCTION_ADAPTER_ROOTS")
+  const writable = [...(input.readonly ? [] : [roots.repo]), ...state, ...hostRoots]
+  const readonly = [path.dirname(host.engine.path), ...(input.readonly ? [roots.repo] : [])]
+  if (readonly.some((directory) => state.some((root) => overlap(root, directory)) || overlap(input.root, directory)))
+    throw new TypeError("TASK24_PRODUCTION_ADAPTER_ROOTS")
+  const environment: Record<string, string> = {}
+  const hostKeys = new Set<string>([...WindowsWorkflowEnvironment.pathNames, "OPENCODE_WORKFLOW_SANDBOX_IMAGE"])
+  const workflowPaths = new Set(["OPENCODE_BENCHMARK_TRANSPORT_FILE", "OPENCODE_BENCHMARK_RUN_DATA_ROOT"])
+  const workflowValues = new Set([
+    "OPENCODE_BENCHMARK_CAMPAIGN_ID",
+    "OPENCODE_BENCHMARK_RUN_ID",
+    "MOONSHOT_API_KEY",
+    "DEEPSEEK_API_KEY",
+  ])
+  for (const [key, value] of Object.entries(env)) {
+    if (ignoredKeys.has(key)) continue
+    if (key === "OPENCODE_DISABLE_PROJECT_CONFIG" || key === "OPENCODE_DISABLE_DEFAULT_PLUGINS") {
+      if (value !== "1") throw new TypeError("TASK24_PRODUCTION_ADAPTER_ENVIRONMENT")
+      environment[key] = value
+      continue
+    }
+    if (
+      !pathKeys.has(key) &&
+      !valueKeys.has(key) &&
+      !workflowPaths.has(key) &&
+      !workflowValues.has(key) &&
+      !hostKeys.has(key)
+    )
+      throw new TypeError("TASK24_PRODUCTION_ADAPTER_ENVIRONMENT")
+    if ((pathKeys.has(key) || workflowPaths.has(key)) && !state.some((root) => contains(root, value)))
+      throw new TypeError("TASK24_PRODUCTION_ADAPTER_ENVIRONMENT")
+    environment[key] = value
+  }
+  if (
+    !environment.MOONSHOT_API_KEY ||
+    environment.MOONSHOT_API_KEY !== environment.DEEPSEEK_API_KEY ||
+    sha256Text(environment.MOONSHOT_API_KEY) !== launch.snapshot.brokerGrantSha256 ||
+    environment.OPENCODE_BENCHMARK_RUN_DATA_ROOT !== roots.data ||
+    Object.hasOwn(environment, "TASK24_BROKER_GRANT")
+  )
+    throw new TypeError("TASK24_PRODUCTION_ADAPTER_ENVIRONMENT")
+  const origin = new URL(launch.snapshot.brokerOrigin)
+  if (
+    origin.protocol !== "http:" ||
+    origin.hostname !== "127.0.0.1" ||
+    origin.origin !== launch.snapshot.brokerOrigin ||
+    Number(origin.port) < 1024
+  )
+    throw new TypeError("TASK24_PRODUCTION_ADAPTER_BROKER")
+  const ports = [...new Set([Number(origin.port), input.port])]
+  await WindowsWorkflowEnvironment.verify({ environment, readonly, writable, ports, authority, host })
+  environment.OPENCODE_DISABLE_PROJECT_CONFIG = "1"
+  environment.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1"
+  return {
+    executable: binary,
+    argv: [...launch.args],
+    cwd: roots.repo,
+    root: input.root,
+    readonly,
+    writable,
+    ports,
+    environment,
+    ancestorMetadata: true as const,
+    benchmarkAcl: authority,
+    benchmarkHost: host,
+    timeoutMs: Math.min(600000, launch.snapshot.budget.maxDurationMs),
+    maxStdoutBytes: 2097152,
+    maxStderrBytes: 65536,
+  }
+}
 
 const contains = (root: string, value: string) =>
   value.toLowerCase() === root.toLowerCase() || value.toLowerCase().startsWith(root.toLowerCase() + path.sep)
@@ -375,7 +513,86 @@ export async function createIsolationAdapter(context: HostIsolationContext): Pro
       return scoped(async (scope) => {
         await guard()
         input.signal.throwIfAborted()
-        if (input.launch.snapshot.armID === "A") throw new TypeError("TASK24_PRODUCTION_WORKFLOW_BRIDGE_REQUIRED")
+        if (input.launch.snapshot.armID === "A") {
+          if (!context.workflow) throw new TypeError("TASK24_PRODUCTION_WORKFLOW_BRIDGE_REQUIRED")
+          const entry = artifact("modified")
+          const binary = await fileIdentity(entry.path!)
+          if (
+            binary.sha256 !== entry.sha256 ||
+            input.launch.executable !== binary.path ||
+            input.launch.snapshot.executableSha256 !== binary.sha256
+          )
+            throw new TypeError("TASK24_PRODUCTION_ADAPTER_BINARY")
+          const host = await context.workflow(input)
+          try {
+            const modelArtifact = artifact("benchmark-models")
+            if (
+              (await fileIdentity(modelArtifact.path!)).sha256 !== modelArtifact.sha256 ||
+              sha256Text(canonicalJson(host.models)) !== modelArtifact.sha256
+            )
+              throw new TypeError("TASK24_PRODUCTION_ADAPTER_MODELS")
+            const engineArtifact = artifact("production-engine")
+            if (
+              engineArtifact.path !== host.host.engine.path ||
+              engineArtifact.sha256 !== host.host.engine.sha256 ||
+              canonicalJson(await fileIdentity(host.host.engine.path)) !== canonicalJson(host.host.engine)
+            )
+              throw new TypeError("TASK24_PRODUCTION_ADAPTER_ENGINE")
+            const plan = await planWindowsWorkflowLaunch({
+              launch: { ...input.launch, environment: host.environment },
+              binary,
+              root: path.join(scope.root, "control"),
+              readonly: input.readonly,
+              authority: host.authority,
+              host: host.host,
+              port: host.port,
+            })
+            const before = await ordinaryFiles(input.launch.cwd)
+            const proof = await admission(scope, plan, input.signal)
+            await guard()
+            const result = await runWindowsSandbox({ ...plan, benchmarkModels: host.models, signal: input.signal })
+            requireEnded(result)
+            const after = await ordinaryFiles(input.launch.cwd)
+            const observation = await host.observe(result.execution)
+            if (!observation.evidence.length) throw new TypeError("TASK24_PRODUCTION_ADAPTER_OBSERVATIONS")
+            for (const ref of observation.evidence) verifyEvidenceFile(context.manifest.roots.evidence, ref)
+            const evidence = await publish("workflow-launch", {
+              binary,
+              launchSha256: sha256Text(canonicalJson(input.launch.snapshot)),
+              readonly: input.readonly,
+              exitCode: result.execution.exitCode,
+              containment: result.containment,
+              stdoutSha256: sha256Bytes(result.execution.stdout),
+              stderrSha256: sha256Bytes(result.execution.stderr),
+              before,
+              after,
+              observation,
+            })
+            return {
+              ended: input.readonly
+                ? observation.readonlyDenied
+                : result.execution.exitCode === 0 && observation.workflowSucceeded,
+              changed: canonicalJson(before) !== canonicalJson(after),
+              checkExit: observation.checkExit,
+              preview: observation.preview,
+              capture: observation.capture,
+              readonlyDenied: observation.readonlyDenied,
+              deniedCanaryReads: proof.deniedCanaryReads,
+              canaryReads: proof.canaryReads,
+              externalNetworkHits: proof.externalNetworkHits,
+              evidence: [proof.evidence, evidence, ...observation.evidence],
+            }
+          } finally {
+            try {
+              await host.close()
+            } catch (cause) {
+              throw Object.assign(new Error("TASK24_PRODUCTION_WORKFLOW_CLEANUP_UNCERTAIN", { cause }), {
+                cleanupUncertain: true,
+                root: scope.root,
+              })
+            }
+          }
+        }
         if (!input.tools) throw new TypeError("TASK24_PRODUCTION_ADAPTER_MCP")
         const entry = artifact(["D", "E"].includes(input.launch.snapshot.armID) ? "upstream" : "modified")
         const binary = await fileIdentity(entry.path!)

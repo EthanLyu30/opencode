@@ -1,7 +1,11 @@
 import { expect, test, spyOn } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { makeProductionCommandEngine, startProductionCommandBridge } from "../../src/sandbox/production-command-bridge"
+import {
+  makeProductionCommandEngine,
+  startProductionCommandBridge,
+  requireProductionCommandObservation,
+} from "../../src/sandbox/production-command-bridge"
 import { sessionFixture } from "./fixture"
 import type { DockerInvocation } from "../../src/sandbox/contracts"
 
@@ -179,12 +183,48 @@ test("a dispatched uncertain start is consumed once but exact owned cleanup rema
     await expect(f.invoke(["container", "start", "--attach", "--interactive", id], "node --test\n")).rejects.toThrow(
       "UNSETTLED",
     )
+    expect(f.engine.observation().executions).toEqual([])
     await expect(f.invoke(["container", "start", "--attach", "--interactive", id], "node --test\n")).rejects.toThrow(
       "START",
     )
     expect(f.invocations.filter((call) => call.argv.includes("start"))).toHaveLength(1)
     await f.invoke(["container", "rm", "--force", id])
     expect(f.engine.outstanding().containers).toEqual([])
+  } finally {
+    await f.f.dispose()
+  }
+})
+
+test("only completed engine starts become external command observations, never create or caller-supplied stdout", async () => {
+  const f = await fixture()
+  try {
+    const before = f.engine.observation()
+    expect(before.executions).toEqual([])
+    await f.invoke(create(f.workspace))
+    expect(f.engine.observation().executions).toEqual([])
+    await f.invoke(["container", "start", "--attach", "--interactive", id], "node --test\n")
+    const after = f.engine.observation()
+    expect(after.executions).toHaveLength(1)
+    expect(after.executions[0]).toMatchObject({
+      containerID: id,
+      exitCode: 0,
+      truncated: false,
+      argv: ["/bin/bash", "-se"],
+      workdir: "/workspace",
+      image,
+    })
+    expect(after.executions[0]).not.toHaveProperty("stdout")
+    expect(after.executions[0]).not.toHaveProperty("stdin")
+    expect(before.executions).toEqual([])
+    expect(Object.isFrozen(after.executions)).toBe(true)
+    // A fixture transport and a JSON clone can never certify an actual Linux operation.
+    expect(() => requireProductionCommandObservation(after, f.f.session)).toThrow(
+      "TASK24_PRODUCTION_COMMAND_OBSERVATION",
+    )
+    expect(() => requireProductionCommandObservation({ ...after }, f.f.session)).toThrow(
+      "TASK24_PRODUCTION_COMMAND_OBSERVATION",
+    )
+    await f.invoke(["container", "rm", "--force", id])
   } finally {
     await f.f.dispose()
   }
@@ -481,6 +521,31 @@ test("production HTTP admission rejects fixture transport before opening an endp
         commands: [{ image, argv: ["node", "--test"], workdir: "/" }],
       }),
     ).rejects.toThrow("FIXTURE_TRANSPORT")
+  } finally {
+    await f.dispose()
+  }
+})
+
+test("production static preview lifetime cannot outlive its current engine or guest authorization", async () => {
+  const f = await sessionFixture(true)
+  try {
+    await expect(
+      startProductionCommandBridge(
+        {
+          session: f.session,
+          runner: f.runner,
+          guard: async () => {},
+          commands: [{ image, argv: ["node", "--test"], workdir: "/" }],
+        },
+        {
+          previews: [
+            { entrypoint: "index.html", root: "", files: [{ path: "index.html", bytes: Buffer.from("own") }] },
+          ],
+          previewExpiresAt: Date.now() + 120000,
+        },
+      ),
+    ).rejects.toThrow("TASK24_PRODUCTION_PREVIEW_APPROVAL")
+    expect(await fs.readdir(f.request.roots.evidence)).toEqual([])
   } finally {
     await f.dispose()
   }

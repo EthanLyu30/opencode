@@ -60,6 +60,7 @@ import {
 } from "./dependency-auditors"
 import { verifyBinaryBuildRecords } from "./binary-build"
 import { observeBrowserFonts } from "./fonts"
+import { ProductionWorkflowCaseData, openProductionWorkflowHost } from "./production-workflow-host"
 
 type Profiles = Parameters<typeof makeLinuxBackend>[0]["profiles"]
 export async function dispatchAcceptanceProbe<T>(input: {
@@ -119,6 +120,9 @@ const Arm = Schema.Struct({
 // This is preparation data, not executable adapters or a source of expected scores.
 const Config = Schema.Struct({
   schemaVersion: Schema.Literal(2),
+  git: Schema.optionalKey(
+    Schema.Struct({ path: Schema.Literal("C:\\Program Files\\Git\\mingw64\\bin\\git.exe"), sha256: Sha256 }),
+  ),
   browser: Schema.Struct({
     root: Schema.String,
     helper: FileIdentity,
@@ -156,6 +160,7 @@ const Config = Schema.Struct({
             readonly: Schema.NonEmptyArray(FixtureReply),
           }),
           profile: Schema.Unknown,
+          production: Schema.optionalKey(ProductionWorkflowCaseData),
           outputs: Strings,
         }),
       ),
@@ -244,10 +249,42 @@ export async function openLinuxRuntime(session: EngineSession) {
     const loaded = await loadHostIsolationAdapter({
       session,
       file: await fileIdentity(artifact("host-isolation").path!),
+      async workflow(request) {
+        const candidates = config.capabilities.flatMap((group) =>
+          group.armID !== "A" ||
+          group.binary.path !== request.launch.executable ||
+          group.binary.sha256 !== request.launch.snapshot.executableSha256
+            ? []
+            : group.cases.filter(
+                (item) =>
+                  item.kind === request.kind &&
+                  item.input.campaignID === request.launch.environment.OPENCODE_BENCHMARK_CAMPAIGN_ID &&
+                  item.input.runID === request.launch.environment.OPENCODE_BENCHMARK_RUN_ID &&
+                  canonicalJson(item.input.roots) === canonicalJson(request.launch.snapshot.roots),
+              ),
+        )
+        if (candidates.length !== 1 || !candidates[0]!.production || !config.git)
+          throw Error("TASK24_RUNTIME_PRODUCTION_CASE_REQUIRED")
+        const item = candidates[0]!
+        await guard()
+        return openProductionWorkflowHost({
+          request,
+          session,
+          runner,
+          guard,
+          data: item.production,
+          profileSha256: sha256Text(canonicalJson(item.profile)),
+          models: await readControllerJson(artifact("benchmark-models").path!),
+          engine: await fileIdentity(artifact("production-engine").path!),
+          browser: browser(manifest.roots.evidence, manifest.roots.temp),
+          expectedFixtureCalls: request.readonly ? item.scripts.readonly.length : item.scripts.main.length,
+          git: config.git,
+        })
+      },
     })
     if (process.platform !== "win32") return (isolation = loaded)
     const { createWindowsBrowserDispatch } = await import("./host-isolation/windows-browser-dispatch")
-    const browser = await createWindowsBrowserDispatch(
+    const browserDispatch = await createWindowsBrowserDispatch(
       {
         root: manifest.roots.temp,
         evidenceRoot: manifest.roots.evidence,
@@ -258,7 +295,7 @@ export async function openLinuxRuntime(session: EngineSession) {
       },
       identityGuard,
     )
-    return (isolation = attachBrowserIsolationDispatch({ adapter: loaded, browser }))
+    return (isolation = attachBrowserIsolationDispatch({ adapter: loaded, browser: browserDispatch }))
   }
   const dependencies = artifact("dependencies"),
     original = (await readControllerJson(dependencies.path!)) as ResolvedImages

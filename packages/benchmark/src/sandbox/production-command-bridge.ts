@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 import { Schema } from "effect"
 import { canonicalJson } from "../campaign/canonical"
 import { freeze, safePath } from "../corpus/evaluation-profile"
-import { sha256Bytes } from "../hash"
+import { sha256Bytes, sha256Text } from "../hash"
 import type { AuthorityGuard, DockerRunner, EngineSession } from "./contracts"
 import {
   requireOperation,
@@ -18,7 +18,32 @@ import { sessionState, revalidateSession } from "./preflight"
 import { directoryIdentity, fileIdentity } from "./storage"
 import { mapWsl2Workspace } from "./wsl2-independent"
 import { ordinaryFiles } from "../corpus/evaluation-bundle"
-import type { ProductionCapture } from "./production-command-http"
+import type { ProductionCapture, ProductionStaticSnapshot } from "./production-command-http"
+import type { ProductionGit } from "./production-git"
+import { publishImmutable } from "../offline/atomic"
+import { bindEvidenceFile, type EvidenceReference } from "../evaluator/evidence"
+
+type ExecutionObservation = Readonly<{
+  containerID: string
+  image: string
+  argv: readonly string[]
+  workdir: string
+  archiveSha256: string | null
+  stdinSha256: string | null
+  exitCode: number
+  truncated: boolean
+  stdoutSha256: string
+  stderrSha256: string
+}>
+export type ProductionCommandObservation = Readonly<{
+  manifestSha256: string
+  executions: readonly ExecutionObservation[]
+  evidence: readonly EvidenceReference[]
+}>
+const commandObservations = new WeakMap<object, EngineSession>()
+export function requireProductionCommandObservation(value: ProductionCommandObservation, session: EngineSession) {
+  if (commandObservations.get(value) !== session) throw new TypeError("TASK24_PRODUCTION_COMMAND_OBSERVATION")
+}
 
 /** Controller-frozen public commands, never a request supplied by the agent. */
 export type ProductionCommand = Readonly<{
@@ -75,8 +100,11 @@ export async function makeProductionCommandEngine(input: {
   guard: AuthorityGuard
   commands: readonly ProductionCommand[]
   record?: (event: OwnershipEvent) => Promise<void>
+  recordExecution?: (event: ExecutionObservation) => Promise<EvidenceReference>
 }) {
   const state = sessionState(input.session)
+  const executions: ExecutionObservation[] = []
+  const executionEvidence: EvidenceReference[] = []
   if (!state.manifest.wsl2 || state.manifest.phase !== "accept" || !input.commands.length || input.commands.length > 32)
     throw new TypeError("TASK24_PRODUCTION_COMMAND_PLAN")
   // Copy binary input too: Object.freeze cannot make typed-array elements immutable.
@@ -523,6 +551,24 @@ export async function makeProductionCommandEngine(input: {
     // acknowledgement, NOT a fabricated Docker execution or container identity.
     const result =
       operation === "cp" ? { exit: 0, stdout: "", stderr: "", truncated: false } : await call(args, invocation)
+    if (operation === "start") {
+      const command = record.commands.find((value) => value.stdin === stdin)!
+      const observation = freeze({
+        containerID: record.id,
+        image: command.image,
+        argv: [...command.argv],
+        workdir: command.workdir,
+        archiveSha256: command.archiveSha256 ?? null,
+        stdinSha256: invocation.stdin === undefined ? null : sha256Bytes(Buffer.from(invocation.stdin)),
+        exitCode: result.exit,
+        truncated: result.truncated,
+        stdoutSha256: sha256Text(result.stdout),
+        stderrSha256: sha256Text(result.stderr),
+      })
+      const evidence = await input.recordExecution?.(observation)
+      if (evidence) executionEvidence.push(evidence)
+      executions.push(observation)
+    }
     if (operation === "cp" && result.exit === 0) record.imported = true
     if (operation === "rm" && result.exit === 0) {
       await input.record?.({ kind: "removed", id: record.id, name: record.name, labels: record.labels })
@@ -532,6 +578,16 @@ export async function makeProductionCommandEngine(input: {
     return result
   }
   return Object.freeze({
+    observation(): ProductionCommandObservation {
+      const value = freeze({
+        manifestSha256: input.session.manifestSha256,
+        executions: [...executions],
+        evidence: [...executionEvidence],
+      })
+      if (isRealDockerRunner(input.runner) && executions.length === executionEvidence.length)
+        commandObservations.set(value, input.session)
+      return value
+    },
     async execute(invocation: ProductionInvocation) {
       if (queued >= 16) throw new TypeError("TASK24_PRODUCTION_COMMAND_BUSY")
       // Snapshot caller-owned buffers/arrays before yielding to the serialized queue.
@@ -572,11 +628,27 @@ export async function makeProductionCommandEngine(input: {
 
 export async function startProductionCommandBridge(
   input: Parameters<typeof makeProductionCommandEngine>[0],
-  options: { capture?: ProductionCapture } = {},
+  options: {
+    capture?: ProductionCapture
+    previews?: readonly ProductionStaticSnapshot[]
+    previewExpiresAt?: number
+    git?: ProductionGit
+  } = {},
 ) {
+  const state = sessionState(input.session)
+  const previewExpiresAt = Math.min(
+    state.approval.expiresAt,
+    state.manifest.wsl2?.guestExecution.expiresAt ?? state.approval.expiresAt,
+  )
+  if (
+    options.previewExpiresAt !== undefined &&
+    (!Number.isSafeInteger(options.previewExpiresAt) ||
+      options.previewExpiresAt <= Date.now() ||
+      options.previewExpiresAt > previewExpiresAt)
+  )
+    throw new TypeError("TASK24_PRODUCTION_PREVIEW_APPROVAL")
   requireRealDockerRunner(input.runner)
   const runner = await makeProductionCommandDockerRunner(input)
-  const state = sessionState(input.session)
   const root = await fs.mkdtemp(path.join(state.manifest.roots.evidence, "production-command-"))
   const rootIdentity = await directoryIdentity(root).catch((cause: unknown) => {
     throw Object.assign(new Error("TASK24_PRODUCTION_INITIALIZATION_RESIDUAL", { cause }), {
@@ -605,10 +677,33 @@ export async function startProductionCommandBridge(
     await input.record?.(event)
   }
   try {
-    const engine = await makeProductionCommandEngine({ ...input, runner, record })
+    const engine = await makeProductionCommandEngine({
+      ...input,
+      runner,
+      record,
+      async recordExecution(execution) {
+        await input.guard()
+        const body = {
+          schemaVersion: 2,
+          manifestSha256: input.session.manifestSha256,
+          daemonFingerprint: state.inventory.contextFingerprint,
+          nonce,
+          execution,
+        }
+        const file = path.join(
+          state.manifest.roots.evidence,
+          "production-execution-" + sha256Text(canonicalJson(body)) + ".json",
+        )
+        await publishImmutable(file, canonicalJson(body))
+        return bindEvidenceFile(state.manifest.roots.evidence, file, "production-execution")
+      },
+    })
     const { startProductionCommandEndpoint } = await import("./production-command-http")
-    const bridge = await startProductionCommandEndpoint(engine, options)
-    return Object.freeze({ ...bridge, journalRoot: root })
+    const bridge = await startProductionCommandEndpoint(engine, {
+      ...options,
+      previewExpiresAt: options.previewExpiresAt ?? previewExpiresAt,
+    })
+    return Object.freeze({ ...bridge, journalRoot: root, observation: engine.observation })
   } catch (cause) {
     try {
       if ((await directoryIdentity(root)) !== rootIdentity || (await fs.readdir(root)).length)

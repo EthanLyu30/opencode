@@ -10,6 +10,8 @@ import { createWindowsBrowserDispatch } from "../../src/sandbox/host-isolation/w
 import { fileIdentity } from "../../src/sandbox/storage"
 import { verifyEvidenceFile } from "../../src/evaluator/evidence"
 import { identity } from "../independent/fixture"
+import { startProductionCommandEndpoint } from "../../src/sandbox/production-command-http"
+import { sha256Text, sha256Bytes } from "../../src/hash"
 
 const live = process.platform === "win32" && process.env.TASK24_WINDOWS_BROWSER_LIVE === "1"
 test.skipIf(!live)(
@@ -27,7 +29,6 @@ test.skipIf(!live)(
     const previewID = "b".repeat(64),
       canaryID = "c".repeat(64)
     let canaryHits = 0,
-      previewHits = 0,
       safe = true
     const canary = Bun.serve({
       hostname: "127.0.0.1",
@@ -37,25 +38,32 @@ test.skipIf(!live)(
         return new Response("owned canary")
       },
     })
-    const preview = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch(request) {
-        if (new URL(request.url).pathname !== "/" + previewID + "/index.html")
-          return new Response(null, { status: 404 })
-        previewHits++
-        return new Response(
-          `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Production browser</title></head><body><h1>Real protocol</h1><button data-task24-interaction="primary" onclick="document.querySelector('output').textContent=String(++window.count)">Run</button><output>0</output><script>window.count=0</script></body></html>`,
-          {
-            headers: {
-              "content-type": "text/html",
-              "content-security-policy":
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-src 'none'; object-src 'none'",
-            },
-          },
-        )
+    const publicPage = Buffer.from(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Production browser</title></head><body><h1>Real protocol</h1><button data-task24-interaction="primary" onclick="document.querySelector('output').textContent=String(++window.count)">Run</button><output>0</output><script>window.count=0</script></body></html>`,
+    )
+    const preview = await startProductionCommandEndpoint(
+      {
+        execute: async () => {
+          throw Error("No command is authorized by this browser test")
+        },
+        outstanding: () => ({ containers: [], uncertainNames: [] }),
       },
+      { previews: [{ entrypoint: "index.html", root: "", files: [{ path: "index.html", bytes: publicPage }] }] },
+    )
+    const snapshotSha256 = sha256Text(JSON.stringify(["index.html", "", [["index.html", sha256Bytes(publicPage)]]]))
+    const opened = await fetch(`http://127.0.0.1:${preview.port}/task24/production-preview`, {
+      method: "POST",
+      proxy: "",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        capability: preview.capability,
+        operation: "open",
+        hostID: previewID,
+        sha256: snapshotSha256,
+      }),
     })
+    expect(opened.status).toBe(200)
+    await opened.body?.cancel()
     const base = `http://127.0.0.1:${preview.port}/${previewID}/`
     const canaryURL = `http://127.0.0.1:${canary.port}/${canaryID}`
     const file = path.join(root, "private-canary.txt")
@@ -172,7 +180,9 @@ test.skipIf(!live)(
         crossCapabilityBlocked: true,
       })
       expect(canaryHits).toBe(0)
-      expect(previewHits).toBeGreaterThanOrEqual(4)
+      expect(preview.previewObservation()).toHaveLength(1)
+      expect(preview.previewObservation()[0]!.requests).toBeGreaterThanOrEqual(4)
+      expect(() => preview.admitStaticPreview(base)).not.toThrow()
       expect(await fs.readFile(file, "utf8")).toBe("OWN_PRIVATE_CANARY")
       let guards = 0
       const dispatch = await createWindowsBrowserDispatch(
@@ -241,7 +251,8 @@ test.skipIf(!live)(
         { flag: "wx" },
       )
     } finally {
-      await preview.stop(false)
+      await preview.close()
+      expect(() => preview.admitStaticPreview(base)).toThrow()
       await canary.stop(false)
       if (safe) await fs.rm(root, { recursive: true })
     }

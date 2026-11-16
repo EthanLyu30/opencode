@@ -3,6 +3,7 @@ import { Schema } from "effect"
 import { canonicalJson } from "../campaign/canonical"
 import type { makeProductionCommandEngine } from "./production-command-bridge"
 import { sha256Bytes } from "../hash"
+import { ProductionGitRequest, type ProductionGit } from "./production-git"
 
 export const ProductionBridgeConnection = Schema.Struct({
   host: Schema.Literal("127.0.0.1"),
@@ -38,12 +39,30 @@ export type ProductionCapture = Readonly<{
   capture(input: ProductionCaptureInput, signal: AbortSignal): Promise<Uint8Array>
   close(): Promise<void>
 }>
+export type ProductionStaticSnapshot = Readonly<{
+  entrypoint: string
+  root: string
+  files: readonly Readonly<{ path: string; bytes: Uint8Array }>[]
+}>
+const Preview = Schema.Struct({
+  capability: Schema.String,
+  operation: Schema.Literals(["open", "close"]),
+  hostID: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+})
+const GitRequest = Schema.Struct({ capability: Schema.String, ...ProductionGitRequest.fields })
 
 /** Framing only; production admission is startProductionCommandBridge's real-runner gate. */
 type CommandEngine = Awaited<ReturnType<typeof makeProductionCommandEngine>>
 export async function startProductionCommandEndpoint(
   engine: Pick<CommandEngine, "execute" | "outstanding"> & Partial<Pick<CommandEngine, "retire">>,
-  options: { cleanupTimeoutMs?: number; capture?: ProductionCapture } = {},
+  options: {
+    cleanupTimeoutMs?: number
+    capture?: ProductionCapture
+    previews?: readonly ProductionStaticSnapshot[]
+    previewExpiresAt?: number
+    git?: ProductionGit
+  } = {},
 ) {
   const cleanupTimeoutMs = options.cleanupTimeoutMs ?? 5000
   if (!Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1 || cleanupTimeoutMs > 5000)
@@ -51,7 +70,27 @@ export async function startProductionCommandEndpoint(
   const capability = randomBytes(32).toString("hex")
   const lifecycle = new AbortController()
   const pending = new Set<Promise<void>>()
+  const previews = freezePreviews(options.previews ?? [])
+  const previewExpiresAt = options.previewExpiresAt ?? Date.now() + 600000
+  if (
+    !Number.isSafeInteger(previewExpiresAt) ||
+    previewExpiresAt <= Date.now() ||
+    previewExpiresAt > Date.now() + 3600000
+  )
+    throw new TypeError("TASK24_PRODUCTION_PREVIEW_EXPIRY")
+  const leases = new Map<string, { sha256: string; active: boolean; requests: number }>()
   let closed = false
+  function admitStaticPreview(url: string) {
+    const match = /^http:\/\/127\.0\.0\.1:\d+\/([a-f0-9]{64})\/$/.exec(url)
+    if (
+      closed ||
+      Date.now() >= previewExpiresAt ||
+      !match ||
+      url !== `http://127.0.0.1:${server.port}/${match[1]}/` ||
+      !leases.get(match[1]!)?.active
+    )
+      throw Error("TASK24_PRODUCTION_PREVIEW_NOT_OWNED")
+  }
   const deny = (cause?: unknown) =>
     Response.json(
       {
@@ -70,14 +109,50 @@ export async function startProductionCommandEndpoint(
       idleTimeout: 0,
       maxRequestBodySize: maxFrame,
       async fetch(request, server) {
+        if (
+          closed ||
+          server.requestIP(request)?.address !== "127.0.0.1" ||
+          request.headers.get("host") !== `127.0.0.1:${server.port}` ||
+          request.headers.has("origin")
+        )
+          return deny()
+        if (request.method === "GET") {
+          if (Date.now() >= previewExpiresAt || request.headers.has("upgrade")) return deny()
+          const match = /^http:\/\/127\.0\.0\.1:\d+\/([a-f0-9]{64})\/([^?#%\\]*)$/.exec(request.url)
+          if (!match) return deny()
+          const lease = leases.get(match[1]!)
+          const snapshot = lease?.active ? previews.get(lease.sha256) : undefined
+          if (!snapshot) return deny()
+          const relative = match[2]!
+          if (relative && !staticPath(relative)) return deny()
+          const file = snapshot.files.get(
+            relative === "" ? snapshot.entrypoint : snapshot.root ? `${snapshot.root}/${relative}` : relative,
+          )
+          if (!file) return deny()
+          lease!.requests++
+          return new Response(Uint8Array.from(file.bytes).buffer, {
+            headers: {
+              "content-type": file.type,
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+              "referrer-policy": "no-referrer",
+              "cross-origin-resource-policy": "same-origin",
+              "content-security-policy":
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-src 'none'; object-src 'none'; base-uri 'none'",
+            },
+          })
+        }
+        const previewing =
+          previews.size > 0 && request.url === `http://127.0.0.1:${server.port}/task24/production-preview`
         const capturing =
           options.capture !== undefined && request.url === `http://127.0.0.1:${server.port}/task24/production-capture`
+        const git = options.git !== undefined && request.url === `http://127.0.0.1:${server.port}/task24/production-git`
         if (
           closed ||
           pending.size >= 4 ||
           server.requestIP(request)?.address !== "127.0.0.1" ||
           request.method !== "POST" ||
-          (!capturing && request.url !== `http://127.0.0.1:${server.port}${endpoint}`) ||
+          (!git && !previewing && !capturing && request.url !== `http://127.0.0.1:${server.port}${endpoint}`) ||
           request.headers.get("host") !== `127.0.0.1:${server.port}` ||
           request.headers.has("origin") ||
           request.headers.get("content-type") !== "application/json"
@@ -88,14 +163,41 @@ export async function startProductionCommandEndpoint(
         const readAbort = AbortSignal.timeout(10000)
         try {
           const raw = await bounded(request, readAbort)
-          const value = capturing
-            ? Schema.decodeUnknownSync(Capture)(JSON.parse(raw), { onExcessProperty: "error" })
-            : Schema.decodeUnknownSync(Request)(JSON.parse(raw), { onExcessProperty: "error" })
+          if (closed || lifecycle.signal.aborted) return deny()
+          const value = git
+            ? Schema.decodeUnknownSync(GitRequest)(JSON.parse(raw), { onExcessProperty: "error" })
+            : previewing
+              ? Schema.decodeUnknownSync(Preview)(JSON.parse(raw), { onExcessProperty: "error" })
+              : capturing
+                ? Schema.decodeUnknownSync(Capture)(JSON.parse(raw), { onExcessProperty: "error" })
+                : Schema.decodeUnknownSync(Request)(JSON.parse(raw), { onExcessProperty: "error" })
           if (
             !/^[a-f0-9]{64}$/.test(value.capability) ||
             !timingSafeEqual(Buffer.from(value.capability), Buffer.from(capability))
           )
             return deny()
+          if ("cwd" in value) {
+            if (Date.now() >= previewExpiresAt) return deny()
+            const input = Schema.decodeUnknownSync(ProductionGitRequest)(value)
+            const result = await options.git!.execute(
+              input,
+              AbortSignal.any([lifecycle.signal, request.signal, AbortSignal.timeout(15000)]),
+            )
+            if (closed || Date.now() >= previewExpiresAt) return deny()
+            return Response.json(Schema.decodeUnknownSync(Result)(result, { onExcessProperty: "error" }))
+          }
+          if ("operation" in value) {
+            if (Date.now() >= previewExpiresAt || !previews.has(value.sha256)) return deny()
+            const lease = leases.get(value.hostID)
+            if (value.operation === "open") {
+              if (lease ? !lease.active || lease.sha256 !== value.sha256 : leases.size >= 128) return deny()
+              if (!lease) leases.set(value.hostID, { sha256: value.sha256, active: true, requests: 0 })
+            } else {
+              if (!lease || lease.sha256 !== value.sha256) return deny()
+              lease.active = false
+            }
+            return Response.json({ port: server.port, hostID: value.hostID, sha256: value.sha256 })
+          }
           if ("url" in value) {
             const url = new URL(value.url)
             if (
@@ -126,11 +228,13 @@ export async function startProductionCommandEndpoint(
             })
             const signal = AbortSignal.any([lifecycle.signal, request.signal, AbortSignal.timeout(120000)])
             signal.throwIfAborted()
+            if (previews.size) admitStaticPreview(input.url)
             await options.capture!.admit(input)
             signal.throwIfAborted()
             const bytes = await options.capture!.capture(input, signal)
             signal.throwIfAborted()
             await options.capture!.admit(input)
+            if (previews.size) admitStaticPreview(input.url)
             signal.throwIfAborted()
             if (
               closed ||
@@ -175,6 +279,9 @@ export async function startProductionCommandEndpoint(
         cleanupIndependently(
           [
             async () => {
+              await options.git?.close()
+            },
+            async () => {
               await options.capture?.close()
             },
             async () => {
@@ -215,9 +322,14 @@ export async function startProductionCommandEndpoint(
     host: "127.0.0.1" as const,
     port: server.port!,
     capability,
+    admitStaticPreview,
+    previewObservation() {
+      return Object.freeze([...leases].map(([hostID, lease]) => Object.freeze({ hostID, ...lease })))
+    },
     close() {
       return (closing ??= (async () => {
         closed = true
+        for (const lease of leases.values()) lease.active = false
         lifecycle.abort()
         const stopped = server.stop(false)
         const cleanup = new AbortController()
@@ -230,6 +342,9 @@ export async function startProductionCommandEndpoint(
               cleanup.signal.throwIfAborted()
               await cleanupIndependently(
                 [
+                  async () => {
+                    await options.git?.close()
+                  },
                   async () => {
                     await options.capture?.close()
                   },
@@ -280,6 +395,80 @@ export async function startProductionCommandEndpoint(
       })())
     },
   })
+}
+
+function staticPath(value: string) {
+  return (
+    value.length <= 1024 &&
+    value
+      .split("/")
+      .every(
+        (part) =>
+          /^[A-Za-z0-9_][A-Za-z0-9._@+()[\]-]*$/.test(part) &&
+          part !== "." &&
+          part !== ".." &&
+          !/[. ]$/.test(part) &&
+          !/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part),
+      )
+  )
+}
+
+export function productionStaticSnapshotSha256(input: ProductionStaticSnapshot) {
+  return sha256Bytes(
+    Buffer.from(
+      JSON.stringify([
+        input.entrypoint,
+        input.root,
+        [...input.files]
+          .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+          .map((file) => [file.path, sha256Bytes(file.bytes)]),
+      ]),
+    ),
+  )
+}
+
+function freezePreviews(inputs: readonly ProductionStaticSnapshot[]) {
+  if (inputs.length > 32) throw new TypeError("TASK24_PRODUCTION_PREVIEW_LIMIT")
+  const snapshots = new Map<
+    string,
+    { entrypoint: string; root: string; files: Map<string, { bytes: Uint8Array; type: string }> }
+  >()
+  let total = 0
+  for (const input of inputs) {
+    if (
+      !staticPath(input.entrypoint) ||
+      (input.root !== "" && !staticPath(input.root)) ||
+      (input.root && !input.entrypoint.startsWith(input.root + "/")) ||
+      !input.files.length ||
+      input.files.length > 512
+    )
+      throw new TypeError("TASK24_PRODUCTION_PREVIEW_SNAPSHOT")
+    const files = new Map<string, { bytes: Uint8Array; type: string }>()
+    const keys = new Set<string>()
+    for (const file of input.files) {
+      total += file.bytes.byteLength
+      if (
+        !staticPath(file.path) ||
+        keys.has(file.path.toLowerCase()) ||
+        file.bytes.byteLength > 33554432 ||
+        total > 67108864
+      )
+        throw new TypeError("TASK24_PRODUCTION_PREVIEW_SNAPSHOT")
+      keys.add(file.path.toLowerCase())
+      files.set(file.path, {
+        bytes: Uint8Array.from(file.bytes),
+        type: Bun.file(file.path).type || "application/octet-stream",
+      })
+    }
+    if (!files.has(input.entrypoint)) throw new TypeError("TASK24_PRODUCTION_PREVIEW_SNAPSHOT")
+    const sha256 = productionStaticSnapshotSha256({
+      ...input,
+      files: [...files].map(([path, file]) => ({ path, bytes: file.bytes })),
+    })
+    if (snapshots.has(sha256)) throw new TypeError("TASK24_PRODUCTION_PREVIEW_DUPLICATE")
+    snapshots.set(sha256, { entrypoint: input.entrypoint, root: input.root, files })
+  }
+  return snapshots
 }
 
 async function cleanupIndependently(operations: readonly (() => Promise<void>)[], failures: unknown[]) {

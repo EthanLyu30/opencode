@@ -60,6 +60,80 @@ test("failed scope initialization reports its exact residual and permanently blo
   }
 })
 
+test("A dispatches to its trusted production host composition, never to the public MCP host", async () => {
+  const f = await sessionFixture()
+  let observed: unknown
+  try {
+    const context = {
+      schemaVersion: 2 as const,
+      session: f.session,
+      manifest: f.manifest,
+      artifact: f.cli,
+      guard: async () => {},
+      workflow: async (input: unknown) => {
+        observed = input
+        throw new Error("OWN_PRODUCTION_NOT_READY")
+      },
+    }
+    if (process.platform !== "win32" || process.arch !== "x64") return
+    const adapter = await createIsolationAdapter(context)
+    const input = {
+      launch: { executable: f.cli.path, snapshot: { armID: "A", executableSha256: f.cli.sha256 } },
+      kind: "coding",
+      readonly: true,
+      signal: new AbortController().signal,
+    } as never
+    await expect(adapter.launch(input)).rejects.toThrow("OWN_PRODUCTION_NOT_READY")
+    expect(observed).toBe(input)
+  } finally {
+    await f.dispose()
+  }
+})
+
+test("A rejects a host engine not frozen by its manifest and closes the host before any native launch", async () => {
+  const f = await sessionFixture()
+  let closed = 0
+  try {
+    // This malformed packet is used only to reach the byte-binding guard; never a native model fixture.
+    const models = { own: "must not reach native" }
+    const file = path.join(f.root, "own-models.json")
+    await fs.writeFile(file, canonicalJson(models), { flag: "wx" })
+    const context = {
+      schemaVersion: 2 as const,
+      session: f.session,
+      artifact: f.cli,
+      guard: async () => {},
+      manifest: {
+        ...f.manifest,
+        artifacts: [
+          ...f.manifest.artifacts,
+          { id: "benchmark-models", kind: "worker" as const, path: file, sha256: sha256Text(canonicalJson(models)) },
+          { id: "production-engine", kind: "worker" as const, path: f.cli.path, sha256: "f".repeat(64) },
+        ],
+      },
+      workflow: async () =>
+        ({
+          models,
+          host: { engine: f.cli },
+          close: async () => {
+            closed++
+          },
+        }) as never,
+    }
+    if (process.platform !== "win32" || process.arch !== "x64") return
+    const adapter = await createIsolationAdapter(context)
+    await expect(
+      adapter.launch({
+        launch: { executable: f.cli.path, snapshot: { armID: "A", executableSha256: f.cli.sha256 } },
+        signal: new AbortController().signal,
+      } as never),
+    ).rejects.toThrow("TASK24_PRODUCTION_ADAPTER_ENGINE")
+    expect(closed).toBe(1)
+  } finally {
+    await f.dispose()
+  }
+})
+
 async function fixture() {
   const root = await fs.mkdtemp(path.join(process.env.TMPDIR!, "production-adapter-"))
   const runRoot = path.join(root, "run")

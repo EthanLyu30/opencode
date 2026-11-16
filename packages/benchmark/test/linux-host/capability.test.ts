@@ -1,7 +1,30 @@
 import { test, expect } from "bun:test"
-import { verifyBinaryCapabilities } from "../../src/sandbox/capability"
+import { verifyBinaryCapabilities, openCapabilityTools } from "../../src/sandbox/capability"
 import { sessionFixture } from "./fixture"
-import { startFixtureCapabilityProvider } from "../../src/sandbox/fixture-provider"
+import { startFixtureCapabilityProvider, requireFixtureCapabilityProvider } from "../../src/sandbox/fixture-provider"
+import { sha256Text } from "../../src/hash"
+
+test("A never starts an unused MCP listener; direct arms retain their real loopback tool endpoint", async () => {
+  const opened: ReturnType<typeof Bun.serve>[] = []
+  const open = async () => {
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ tool: "public-only" }) })
+    opened.push(server)
+    return server
+  }
+  try {
+    expect(await openCapabilityTools("A", open)).toBeUndefined()
+    expect(opened).toHaveLength(0)
+    for (const armID of ["B", "C", "D", "E"] as const) {
+      const server = await openCapabilityTools(armID, open)
+      expect(server).toBeDefined()
+      const response = await fetch(`http://127.0.0.1:${server!.port}/`, { proxy: "" })
+      expect(await response.json()).toEqual({ tool: "public-only" })
+    }
+    expect(opened).toHaveLength(4)
+  } finally {
+    await Promise.all(opened.map((server) => server.stop(true)))
+  }
+})
 test("no verified OS isolation means zero binary launches and no capability receipt", async () => {
   const f = await sessionFixture()
   let launches = 0
@@ -91,4 +114,77 @@ test("R7 actual finite Responses fixture binds a returned preview ID without any
   } finally {
     await provider.stop()
   }
+})
+
+test("closed provider records only actually returned known tool replies, with bounded immutable controller observations", async () => {
+  const provider = startFixtureCapabilityProvider([
+    {
+      protocol: "chat_completions",
+      model: "kimi-k3",
+      events: [
+        {
+          data: {
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "ro-write",
+                      type: "function",
+                      function: { name: "write", arguments: '{"path":"sum.ts","content":"forbidden"}' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+    {
+      protocol: "chat_completions",
+      model: "kimi-k3",
+      events: [{ data: { choices: [{ index: 0, delta: { content: "{}" }, finish_reason: "stop" }] } }],
+    },
+  ])
+  const send = async (messages: unknown[]) => {
+    const response = await fetch(provider.origin + "/v1/kimi/chat/completions", {
+      method: "POST",
+      proxy: "",
+      headers: { authorization: "Bearer " + provider.grant, "content-type": "application/json" },
+      body: JSON.stringify({ model: "kimi-k3", stream: true, messages }),
+    })
+    expect(response.status).toBe(200)
+    await response.text()
+  }
+  try {
+    requireFixtureCapabilityProvider(provider)
+    expect(() => requireFixtureCapabilityProvider({ ...provider })).toThrow("TASK24_FIXTURE_PROVIDER_AUTHORITY")
+    expect(provider.toolResults()).toEqual([])
+    await send([{ role: "user", content: "read-only fixture" }])
+    const before = provider.toolResults()
+    const content = '{"error":"Tool write is not available"}'
+    await send([
+      { role: "tool", tool_call_id: "ro-write", content },
+      { role: "tool", tool_call_id: "not-issued", content: "do not record unissued outputs" },
+    ])
+    expect(provider.toolResults()).toEqual([
+      {
+        callID: "ro-write",
+        name: "write",
+        bytes: Buffer.byteLength(content),
+        sha256: sha256Text(content),
+        text: content,
+      },
+    ])
+    expect(before).toEqual([])
+    expect(Object.isFrozen(provider.toolResults())).toBe(true)
+    expect(Object.isFrozen(provider.toolResults()[0])).toBe(true)
+    expect(provider.observation()).toEqual({ calls: 2, rejected: 0, complete: true })
+  } finally {
+    await provider.stop()
+  }
+  expect(() => requireFixtureCapabilityProvider(provider)).toThrow("TASK24_FIXTURE_PROVIDER_AUTHORITY")
 })

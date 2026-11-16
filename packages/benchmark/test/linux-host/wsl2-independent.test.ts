@@ -9,6 +9,29 @@ import { makeStorageProbe } from "../../src/sandbox/storage-source"
 import { inspectLinuxHost } from "../../src/sandbox/preflight"
 import { inspectStorage } from "../../src/sandbox/storage"
 import { createOwnedContainer, inspectOwnedContainer, cleanupOwnedContainer } from "../../src/sandbox/ownership"
+import { decodeWsl2RegistryValue } from "../../src/sandbox/wsl2-independent"
+
+test("fixed WSL registry reads preserve exact key, value names and types without PowerShell startup", () => {
+  const key =
+    "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{11111111-2222-4333-8444-555555555555}"
+  const value = (name: string, type: string, data: string) => `\r\n${key}\r\n    ${name}    ${type}    ${data}\r\n\r\n`
+  expect(
+    decodeWsl2RegistryValue(value("DistributionName", "REG_SZ", "opencode-task24-isolated"), key, "DistributionName"),
+  ).toBe("opencode-task24-isolated")
+  expect(decodeWsl2RegistryValue(value("BasePath", "REG_SZ", "D:\\Own workspace\\fresh"), key, "BasePath")).toBe(
+    "D:\\Own workspace\\fresh",
+  )
+  expect(decodeWsl2RegistryValue(value("Version", "REG_DWORD", "0x2"), key, "Version")).toBe(2)
+  for (const raw of [
+    value("Version", "REG_SZ", "2"),
+    value("Version", "REG_DWORD", "0x200000000"),
+    value("Other", "REG_DWORD", "0x2"),
+    value("Version", "REG_DWORD", "0x2").replace(key, key + "\\other"),
+    value("Version", "REG_DWORD", "0x2") + "    Version    REG_DWORD    0x2\r\n",
+    value("Version", "REG_DWORD", "0x2") + "unexpected",
+  ])
+    expect(() => decodeWsl2RegistryValue(raw, key, "Version")).toThrow("TASK24_WSL2_OBSERVATION")
+})
 
 async function fixture() {
   const f = await hostFixture()

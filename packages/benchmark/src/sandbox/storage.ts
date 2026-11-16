@@ -35,7 +35,9 @@ async function readFileIdentity(file: string): Promise<FileIdentity> {
   const stat = await fs.lstat(file)
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new TypeError("TASK24_LINUX_FILE_IDENTITY")
   const hasher = createHash("sha256")
-  for await (const chunk of createReadStream(file)) hasher.update(chunk)
+  // Keep memory bounded while avoiding thousands of tiny async filesystem
+  // callbacks when the native sandbox and controller share this event loop.
+  for await (const chunk of createReadStream(file, { highWaterMark: 1048576 })) hasher.update(chunk)
   const after = await fs.lstat(file)
   if (
     `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.size}:${stat.mtimeMs}` !==
