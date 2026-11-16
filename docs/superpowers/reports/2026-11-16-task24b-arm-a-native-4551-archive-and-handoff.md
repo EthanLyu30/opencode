@@ -79,9 +79,13 @@ A 臂的 Windows 原生端到端链路在 `CreateProcessW` 处以 Win32 `4551` �
 
 ## 7. 120 校准的当前外部条件
 
-Linux 真实 120 仍为 0/120，且不是代码问题：当前机器 Docker 后端未运行（无 `dockerDesktopLinuxEngine` 管道、无 docker/vmmem/wsl 进程），`wsl --status`/`wsl -l -v` 在该受限会话返回 `Wsl/E_ACCESS_DENIED`。校准还要求：
+Linux 真实 120 仍为 0/120。除宿主条件外，本次核查还发现**生产接线缺口**，不能把 120 归因于环境一项：
 
-- 先走 `inspect → plan-preparation → prepare → accept` 生成 `phase: "accept"` manifest 与 approval（当前 `reports`/`runs` 下没有 accept manifest）；
-- evidence/root 位于 `D:\OpenCode-Benchmark\Task24` 下，当前 DSH workspace-write 沙箱拒绝写入该树，且 full-access 审批在本会话超时未获应答。
+- `packages/benchmark/src/sandbox/dependencies.ts:420` 的 `finalizeHostManifest` 在整个仓库中没有任何调用点；唯一使用者是它自己。
+- 没有任何生产代码写出 `phase: "prepare"` 或 `phase: "accept"` 的 `HostManifest`。`command.ts` 的 `prepare` 分支只发布 `dependencies-<sha>.json` 后退出；进程内 `issuedImages` WeakSet 随进程消失，因此后续独立进程无法合法 `finalize`。
+- `inspect` 只返回 inventory，`plan-preparation` 只返回 plan；两者都不签发 prepare manifest。当前 `D:\OpenCode-Benchmark\Task24\reports`/`runs` 下也没有任何 accept manifest。
+- 因此 `accept`/`calibrate` 按现有 CLI 不可达；手工编造 manifest/approval 会绕过 `issuedImages` 与 `finalizeHostManifest` 的保证，不能用来宣称 120 或 readiness。
 
-因此 120 需要用户侧解除宿主/沙箱限制（启动 Docker Desktop 或让 Docker 服务可用，并允许校准命令写入 D 证据根），或由用户在其桌面会话直接运行校准命令。解除后按 `packages/benchmark/script/linux-host.ts` 的 `calibrate` 子命令执行，不修改生产默认行为。
+宿主条件仍然存在：Docker 后端未运行（无 `dockerDesktopLinuxEngine` 管道、无 docker/vmmem/wsl 进程），`wsl --status`/`wsl -l -v` 在该受限会话返回 `Wsl/E_ACCESS_DENIED`；evidence/root 位于 `D:\OpenCode-Benchmark\Task24` 下，当前 DSH workspace-write 沙箱拒绝写入该树，full-access 审批在本会话两次超时未获应答。
+
+要跑 120，必须先补齐“prepare manifest 签发 → 准备产物在同一可信进程内 finalize → accept manifest/approval 发布”的生产路径并测试，再解除宿主/沙箱限制；两者缺一不可。历史 `linux-real-acceptance-20261021-a83e/live-preflight.json` 只提供旧 request/inventory 形状参考，其 source/plan hash 已过期，不能直接复用。
