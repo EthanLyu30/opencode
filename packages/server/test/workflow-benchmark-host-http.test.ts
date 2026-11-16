@@ -9,6 +9,11 @@ import { WorkflowVisualHostServer } from "../src/workflow/visual-host"
 import { WorkflowVisualHost } from "@opencode-ai/core/workflow/visual-host"
 import { WorkflowSchema } from "@opencode-ai/core/workflow"
 import { Effect } from "effect"
+import { Location } from "@opencode-ai/core/location"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
+import { Snapshot } from "@opencode-ai/core/snapshot"
+import { PreviewPlan } from "@opencode-ai/core/workflow/preview-plan"
+import { WorkflowWorkspaceMaterialization } from "@opencode-ai/core/workflow/workspace-materialization"
 
 async function fixture(port: number) {
   const parent = "D:\\OpenCode-Benchmark\\Task24\\runs"
@@ -23,7 +28,7 @@ async function fixture(port: number) {
     OPENCODE_BENCHMARK_CAMPAIGN_ID: "own-host-test",
     OPENCODE_BENCHMARK_RUN_ID: runID,
     OPENCODE_BENCHMARK_HOST_FILE: path.join(root, "benchmark-host.json"),
-    OPENCODE_WORKFLOW_SANDBOX_ENGINE: path.join(root, "engine.exe"),
+    OPENCODE_WORKFLOW_SANDBOX_ENGINE: path.join(root, "docker.exe"),
   }
   await fs.writeFile(environment.OPENCODE_WORKFLOW_SANDBOX_ENGINE, "non-executable fixture")
   await fs.writeFile(
@@ -210,6 +215,55 @@ test.skipIf(process.platform !== "win32")(
 )
 
 test.skipIf(process.platform !== "win32")(
+  "static transport sends only an exact descriptor, rejects foreign replies and stale files, and releases once",
+  async () => {
+    const hostID = "b".repeat(64)
+    const sha256 = createHash("sha256")
+      .update(JSON.stringify(["index.html", "", [["index.html", createHash("sha256").update("own").digest("hex")]]]))
+      .digest("hex")
+    const calls: unknown[] = []
+    let wrongPort = false
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request, bound) {
+        calls.push({ path: new URL(request.url).pathname, body: await request.json() })
+        return Response.json({ port: bound.port! + (wrongPort ? 1 : 0), hostID, sha256 })
+      },
+    })
+    const f = await fixture(server.port!)
+    const input = {
+      hostID,
+      entrypoint: "index.html",
+      root: "",
+      files: [{ path: "index.html", bytes: Buffer.from("own") }],
+    }
+    try {
+      const runtime = BenchmarkHostRuntime.load(f.environment)!
+      const preview = await runtime.staticPreview(input)
+      expect(preview.port).toBe(server.port!)
+      await Promise.all([preview.stop(true), preview.stop(true)])
+      expect(calls).toEqual(
+        ["open", "close"].map((operation) => ({
+          path: "/task24/production-preview",
+          body: { capability: "a".repeat(64), operation, hostID, sha256 },
+        })),
+      )
+      wrongPort = true
+      await expect(runtime.staticPreview(input)).rejects.toThrow("TASK24_BENCHMARK_HOST_PREVIEW")
+      await expect(runtime.staticPreview({ ...input, hostID: "../elsewhere" })).rejects.toThrow()
+      expect(calls).toHaveLength(3)
+      await fs.writeFile(f.environment.OPENCODE_BENCHMARK_HOST_FILE, JSON.stringify({ ...f.config, runID: "other" }))
+      await expect(runtime.staticPreview(input)).rejects.toThrow("TASK24_BENCHMARK_HOST_STALE")
+      expect(calls).toHaveLength(3)
+    } finally {
+      await server.stop(true)
+      await f.dispose()
+    }
+  },
+)
+
+test.skipIf(process.platform !== "win32")(
   "the original production Docker entry selects finite HTTP only with explicit benchmark authority",
   async () => {
     const server = Bun.serve({
@@ -328,22 +382,76 @@ test.skipIf(process.platform !== "win32")(
     const viewport = { name: "mobile", width: 390, height: 844 } as const
     const png = Buffer.from(WorkflowVisualHost.deterministicPng(viewport))
     let captures = 0
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch(request) {
-        if (new URL(request.url).pathname !== "/task24/production-capture") return new Response(null, { status: 403 })
-        captures++
-        return Response.json({
-          mimeType: "image/png",
-          data: png.toString("base64"),
-          bytes: png.length,
-          sha256: createHash("sha256").update(png).digest("hex"),
-        })
+    const peer: unknown = await import(
+      new URL("../../benchmark/src/sandbox/production-command-http.ts", import.meta.url).href
+    )
+    if (
+      !peer ||
+      typeof peer !== "object" ||
+      !("startProductionCommandEndpoint" in peer) ||
+      typeof peer.startProductionCommandEndpoint !== "function"
+    )
+      throw Error("real endpoint export missing")
+    const start = peer.startProductionCommandEndpoint as (
+      engine: { execute(): Promise<Docker.Result>; outstanding(): { containers: string[]; uncertainNames: string[] } },
+      options: {
+        previews: { entrypoint: string; root: string; files: { path: string; bytes: Uint8Array }[] }[]
+        capture: {
+          admit(input: { url: string }): Promise<void>
+          capture(input: { url: string }): Promise<Uint8Array>
+          close(): Promise<void>
+        }
       },
-    })
+    ) => Promise<{
+      port: number
+      capability: string
+      admitStaticPreview(url: string): void
+      previewObservation(): readonly { active: boolean }[]
+      close(): Promise<void>
+    }>
+    const server = await start(
+      {
+        execute: async () => ({ exit: 0, stdout: "", stderr: "", truncated: false }),
+        outstanding: () => ({ containers: [], uncertainNames: [] }),
+      },
+      {
+        previews: [
+          {
+            entrypoint: "index.html",
+            root: "",
+            files: [{ path: "index.html", bytes: Buffer.from('<div id="ready">own</div>') }],
+          },
+          {
+            entrypoint: "web/index.html",
+            root: "web",
+            files: [
+              { path: "web/index.html", bytes: Buffer.from('<div id="ready">own</div>') },
+              { path: "web/asset.js", bytes: Buffer.from("export const sealed = true\n") },
+            ],
+          },
+        ],
+        capture: {
+          async admit(input) {
+            server.admitStaticPreview(input.url)
+          },
+          async capture(input) {
+            expect(new URL(input.url).port).toBe(String(server.port))
+            const response = await fetch(input.url, { proxy: "" })
+            expect(response.status).toBe(200)
+            expect(await response.text()).toBe('<div id="ready">own</div>')
+            captures++
+            return png
+          },
+          async close() {},
+        },
+      },
+    )
     const f = await fixture(server.port!)
     try {
+      await fs.writeFile(
+        f.environment.OPENCODE_BENCHMARK_HOST_FILE,
+        JSON.stringify({ ...f.config, capability: server.capability }),
+      )
       const deployment = path.join(f.root, "deployment")
       const dirs = {
         data: path.join(deployment, "data"),
@@ -384,6 +492,45 @@ test.skipIf(process.platform !== "win32")(
       })
       const workflowID = WorkflowSchema.ID.make("wfl_host_http")
       const stageID = WorkflowSchema.StageID.make("wfs_host_http")
+      const workspace = path.join(f.root, "workspace")
+      await fs.mkdir(path.join(workspace, "web"), { recursive: true })
+      const sources = [
+        { path: "web/index.html", text: '<div id="ready">own</div>' },
+        { path: "web/asset.js", text: "export const sealed = true\n" },
+      ]
+      for (const file of sources) await fs.writeFile(path.join(workspace, file.path), file.text)
+      const location = Location.Ref.make({ directory: AbsolutePath.make(workspace) })
+      const plan = PreviewPlan.freeze({
+        authority: "admission",
+        location,
+        preview: { kind: "static", cwd: "web", entrypoint: "index.html" },
+      })
+      const entries = sources.map((file) => ({
+        path: RelativePath.make(file.path),
+        type: "file" as const,
+        size: Buffer.byteLength(file.text),
+        sha256: createHash("sha256").update(file.text).digest("hex"),
+      }))
+      const archive = await WorkflowWorkspaceMaterialization.seal(entries, async (file) =>
+        Buffer.from(sources.find((s) => s.path === file)!.text),
+      )
+      const sealedSnapshot = WorkflowWorkspaceMaterialization.bind({
+        workflowID,
+        stageID,
+        revision: 0,
+        location,
+        snapshotRef: Snapshot.ID.make("own-host-http-snapshot"),
+        manifestSha256: "c".repeat(64),
+        workspaceSha256: Snapshot.workspaceSha256(entries),
+        archive,
+      })
+      const lease = {
+        workflowID,
+        stageID,
+        attempt: 1,
+        leaseOwner: "own-http-fixture",
+        leaseExpiresAt: Date.now() + 60000,
+      }
       const image = await Effect.runPromise(
         Effect.scoped(
           Effect.gen(function* () {
@@ -397,7 +544,20 @@ test.skipIf(process.platform !== "win32")(
                 files: [{ path: "index.html", content: '<div id="ready">own</div>' }],
               },
             })
-            return yield* host.capture({ preview, stageID, viewport })
+            const reference = yield* host.capture({ preview, stageID, viewport })
+            const implementation = yield* host.prepareImplementation({ workflowID, revision: 0, plan })
+            yield* Effect.promise(async () => {
+              expect(new URL(implementation.url).port).toBe(String(server.port))
+              expect(await (await fetch(implementation.url + "asset.js", { proxy: "" })).text()).toBe(
+                "export const sealed = true\n",
+              )
+              expect(await fs.readFile(path.join(workspace, "web", "index.html"), "utf8")).toBe(
+                "live source changed after sealing",
+              )
+            })
+            const captured = yield* host.capture({ preview: implementation, stageID, viewport })
+            expect(captured.sha256).toBe(reference.sha256)
+            return captured
           }),
         ).pipe(
           Effect.provide(
@@ -407,22 +567,26 @@ test.skipIf(process.platform !== "win32")(
               browserRuntimeFactory: () => {
                 throw Error("local browser must not be selected")
               },
-              resolvePreviewLease: async () => ({
-                workflowID,
-                stageID,
-                attempt: 1,
-                leaseOwner: "own-http-fixture",
-                leaseExpiresAt: Date.now() + 60000,
-              }),
+              resolvePreviewLease: async () => lease,
+              resolveImplementationContract: async () => {
+                await fs.writeFile(path.join(workspace, "web", "index.html"), "live source changed after sealing")
+                return {
+                  implementationSha256: "c".repeat(64),
+                  readySelector: "#ready",
+                  previewLease: lease,
+                  sealedSnapshot,
+                }
+              },
               isPreviewLeaseLive: async () => true,
             }),
           ),
         ),
       )
       expect(image.sha256).toBe(createHash("sha256").update(png).digest("hex"))
-      expect(captures).toBe(1)
+      expect(captures).toBe(2)
+      expect(server.previewObservation().map((lease) => lease.active)).toEqual([false, false])
     } finally {
-      await server.stop(true)
+      await server.close()
       await f.dispose()
     }
   },

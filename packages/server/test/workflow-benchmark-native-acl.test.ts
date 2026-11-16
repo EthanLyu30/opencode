@@ -5,6 +5,55 @@ import { Worker } from "node:worker_threads"
 import { BenchmarkAclProbe } from "../src/workflow/benchmark-acl-probe"
 import { BenchmarkAclNative } from "../src/workflow/benchmark-acl-native"
 
+test("completed native ACL reads reuse only zeroed scratch memory while executing every fresh query", async () => {
+  const buffers: SharedArrayBuffer[] = []
+  const workers: Worker[] = []
+  const replies = []
+  for (let call = 0; call < 3; call++) {
+    replies.push(
+      BenchmarkAclNative.collect("fresh-query-" + call, (data) => {
+        buffers.push(data.shared)
+        const worker = new Worker(
+          `const {workerData}=require('node:worker_threads');const h=new Int32Array(workerData.shared,0,4),out=new Uint8Array(workerData.shared,16);if(h.some(x=>x!==0)||out.some(x=>x!==0))throw Error('scratch not reset');const b=new TextEncoder().encode(JSON.stringify({target:workerData.target}));out.set(b);Atomics.store(h,1,b.length);Atomics.store(h,0,1);Atomics.notify(h,0)`,
+          { eval: true, workerData: data },
+        )
+        workers.push(worker)
+        return worker
+      }),
+    )
+  }
+  const ended = Promise.all(
+    workers.map((worker) => new Promise<void>((resolve) => worker.once("exit", () => resolve()))),
+  )
+  expect(buffers[1]).toBe(buffers[0])
+  expect(buffers[2]).toBe(buffers[0])
+  expect(replies.map((reply) => ({ status: reply.status, stdout: reply.stdout }))).toEqual(
+    [0, 1, 2].map((call) => ({ status: 0, stdout: JSON.stringify({ target: "fresh-query-" + call }) })),
+  )
+  await ended
+})
+
+test("unproven native retirement discards scratch memory instead of sharing it with another query", async () => {
+  const buffers: SharedArrayBuffer[] = [],
+    workers: Worker[] = []
+  for (const status of [3, 1]) {
+    BenchmarkAclNative.collect("own-only", (data) => {
+      buffers.push(data.shared)
+      const worker = new Worker(
+        `const{workerData}=require('node:worker_threads');const h=new Int32Array(workerData.shared,0,4);new Uint8Array(workerData.shared,16).set(new TextEncoder().encode('ok'));Atomics.store(h,1,2);Atomics.store(h,0,${status});Atomics.notify(h,0)`,
+        { eval: true, workerData: data },
+      )
+      workers.push(worker)
+      return worker
+    })
+  }
+  const ended = Promise.all(
+    workers.map((worker) => new Promise<void>((resolve) => worker.once("exit", () => resolve()))),
+  )
+  expect(buffers[1]).not.toBe(buffers[0])
+  await ended
+})
+
 async function nativeFixture(run: (root: string) => Promise<void>) {
   const parent = process.env.TMPDIR!
   const root = fs.mkdtempSync(path.join(parent, "native-acl-"))

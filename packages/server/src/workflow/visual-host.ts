@@ -47,7 +47,7 @@ interface HostRecord {
   process?: ProcessOwnership.OwnedProcess
   logDrains?: readonly Promise<void>[]
   preview?: WorkflowVisualHost.PreparedPreview
-  server?: ReturnType<typeof Bun.serve>
+  server?: Pick<ReturnType<typeof Bun.serve>, "port" | "stop">
   released: boolean
   releaseTask?: Promise<boolean>
 }
@@ -56,6 +56,8 @@ export interface Options {
   readonly hostRoot: string
   readonly evidenceRoot?: string
   readonly browser: PlaywrightCapture.Runtime
+  /** Authenticated benchmark-only same-port static transport; absent in normal production. */
+  readonly staticPreview?: BenchmarkHostRuntime.StaticPreview
   readonly evidenceLedger?: EvidenceLedger.Service
   readonly evidenceRootPolicy?: EvidenceLedger.OpenOptions["rootPolicy"]
   readonly hostRootPolicy?: (canonicalHostRoot: string) => void
@@ -167,6 +169,7 @@ export function productionLayer(input: ProductionLayerOptions) {
           browserCachePolicy: contract.policy.verifyBrowserCacheRoot,
         }),
       evidenceRootPolicy: contract.policy.verifyDataRoot,
+      staticPreview: benchmark?.staticPreview,
       hostRootPolicy: contract.policy.verifyPreviewCapabilityRoot,
       cleanupPolicy: contract.policy,
       workspacePolicy: async (workspace) => {
@@ -204,6 +207,7 @@ interface State {
   readonly cleanupPolicy?: Options["cleanupPolicy"]
   readonly workspacePolicy?: (canonicalWorkspace: string) => Promise<void>
   readonly browser: PlaywrightCapture.Runtime
+  readonly staticPreview?: BenchmarkHostRuntime.StaticPreview
   readonly processOwnership: ProcessOwnership.Service
   readonly probeOwnedOrigin: NonNullable<Options["probeOwnedOrigin"]>
   readonly resolvePreviewLease?: Options["resolvePreviewLease"]
@@ -270,6 +274,7 @@ async function makeState(options: Options): Promise<State> {
     cleanupPolicy: options.cleanupPolicy,
     workspacePolicy: options.workspacePolicy,
     browser: options.browser,
+    staticPreview: options.staticPreview,
     processOwnership: options.processOwnership ?? ProcessOwnership.unavailable,
     probeOwnedOrigin: options.probeOwnedOrigin ?? probeOwnedOrigin,
     resolvePreviewLease: options.resolvePreviewLease,
@@ -364,13 +369,16 @@ function materializeReference(
           }
           await guardHostRoot(state, record.directory)
           await assertRecordLeaseLive(state, record)
-          startStaticServer(
+          await startStaticServer(
             record,
             record.directory,
             reference.entrypoint,
             record.directory,
             state.onStaticFileOpened,
             state.onStaticFileRead,
+            undefined,
+            state.staticPreview,
+            reference.files,
           )
           await assertRecordLeaseLive(state, record)
           await guardHostRoot(state, record.directory)
@@ -547,7 +555,7 @@ function prepareImplementation(
         yield* Effect.tryPromise({
           try: async () => {
             await assertRecordLeaseLive(state, record)
-            startStaticServer(
+            await startStaticServer(
               record,
               path.dirname(frozenEntrypoint),
               frozenEntrypoint,
@@ -555,6 +563,7 @@ function prepareImplementation(
               state.onStaticFileOpened,
               state.onStaticFileRead,
               sealedSnapshot?.archive,
+              state.staticPreview,
             )
             await assertRecordLeaseLive(state, record)
           },
@@ -1290,7 +1299,7 @@ async function createRecord(
   throw new TypeError("Visual Stage purpose claim could not be reconciled")
 }
 
-function startStaticServer(
+async function startStaticServer(
   record: HostRecord,
   root: string,
   entrypoint: string,
@@ -1298,10 +1307,25 @@ function startStaticServer(
   onStaticFileOpened?: (file: string) => Promise<void>,
   onStaticFileRead?: (file: string) => Promise<void>,
   archive?: WorkflowWorkspaceMaterialization.Archive,
-): void {
+  delegation?: BenchmarkHostRuntime.StaticPreview,
+  referenceFiles?: readonly { readonly path: string; readonly content: string }[],
+): Promise<void> {
   const frozen = archive === undefined ? undefined : WorkflowWorkspaceMaterialization.bytes(archive)
   const frozenEntrypoint = path.relative(containmentRoot, entrypoint).replaceAll("\\", "/")
   const frozenRoot = path.relative(containmentRoot, root).replaceAll("\\", "/")
+  if (delegation !== undefined) {
+    if (frozen === undefined && referenceFiles === undefined) throw new TypeError("Frozen public preview is required")
+    record.server = await delegation({
+      hostID: record.hostID,
+      entrypoint: frozen === undefined ? entrypoint : frozenEntrypoint,
+      root: frozen === undefined ? "" : frozenRoot,
+      files:
+        frozen === undefined
+          ? referenceFiles!.map((file) => ({ path: file.path, bytes: new TextEncoder().encode(file.content) }))
+          : [...frozen].map(([path, bytes]) => ({ path, bytes })),
+    })
+    return
+  }
   record.server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,

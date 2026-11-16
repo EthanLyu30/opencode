@@ -32,11 +32,22 @@ const Image = Schema.Struct({
   sha256: Schema.String,
 })
 const maxFrame = 12 * 1024 * 1024
+const Preview = Schema.Struct({ port: Schema.Int, hostID: Schema.String, sha256: Schema.String })
+export type StaticPreview = (input: {
+  readonly hostID: string
+  readonly entrypoint: string
+  readonly root: string
+  readonly files: readonly { readonly path: string; readonly bytes: Uint8Array }[]
+}) => Promise<{ readonly port: number; stop(closeActiveConnections?: boolean): Promise<void> }>
 
 /** No flag means no reads, endpoint selection, or changes to the production host. */
-export function load(
-  environment: Readonly<Record<string, string | undefined>>,
-): { readonly engine: Docker.Engine; readonly browser: PlaywrightCapture.Runtime } | undefined {
+export function load(environment: Readonly<Record<string, string | undefined>>):
+  | {
+      readonly engine: Docker.Engine
+      readonly browser: PlaywrightCapture.Runtime
+      readonly staticPreview: StaticPreview
+    }
+  | undefined {
   if (environment.OPENCODE_BENCHMARK_HOST_FILE === undefined) return undefined
   const binding = ProductionHostRuntime.loadBenchmarkTransport(environment)
   if (!binding || binding.evidenceMode !== "production") throw new TypeError("TASK24_BENCHMARK_HOST_AUTHORITY")
@@ -68,7 +79,11 @@ export function load(
     )
       throw new TypeError("TASK24_BENCHMARK_HOST_STALE")
   }
-  async function request(endpoint: "production-command" | "production-capture", body: unknown, signal: AbortSignal) {
+  async function request(
+    endpoint: "production-command" | "production-capture" | "production-preview",
+    body: unknown,
+    signal: AbortSignal,
+  ) {
     guard()
     const bytes = JSON.stringify(body)
     if (Buffer.byteLength(bytes) > maxFrame) throw new TypeError("TASK24_BENCHMARK_HOST_LIMIT")
@@ -207,7 +222,51 @@ export function load(
       lifecycle.abort()
     },
   })
-  return Object.freeze({ engine, browser })
+  const staticPreview: StaticPreview = async (input) => {
+    guard()
+    if (!/^[a-f0-9]{64}$/.test(input.hostID) || !input.files.length || input.files.length > 512)
+      throw new TypeError("TASK24_BENCHMARK_HOST_PREVIEW")
+    // Only a descriptor crosses the boundary: the controller must already own
+    // the exact public bytes. This endpoint cannot upload or read host paths.
+    const descriptor = [
+      input.entrypoint,
+      input.root,
+      [...input.files]
+        .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+        .map((file) => [file.path, createHash("sha256").update(file.bytes).digest("hex")]),
+    ]
+    const sha256 = createHash("sha256").update(JSON.stringify(descriptor)).digest("hex")
+    async function control(operation: "open" | "close") {
+      const signal = AbortSignal.any([
+        lifecycle.signal,
+        AbortSignal.timeout(Math.max(1, Math.min(5000, connection.expiresAt - Date.now()))),
+      ])
+      const parsed = Schema.decodeUnknownOption(Preview)(
+        await request(
+          "production-preview",
+          {
+            capability: connection.capability,
+            operation,
+            hostID: input.hostID,
+            sha256,
+          },
+          signal,
+        ),
+        { onExcessProperty: "error" },
+      )
+      if (
+        parsed._tag !== "Some" ||
+        parsed.value.port !== connection.port ||
+        parsed.value.hostID !== input.hostID ||
+        parsed.value.sha256 !== sha256
+      )
+        throw new TypeError("TASK24_BENCHMARK_HOST_PREVIEW")
+    }
+    await control("open")
+    let stopping: Promise<void> | undefined
+    return Object.freeze({ port: connection.port, stop: () => (stopping ??= control("close")) })
+  }
+  return Object.freeze({ engine, browser, staticPreview })
 }
 
 function decodeJson(text: string): unknown {
