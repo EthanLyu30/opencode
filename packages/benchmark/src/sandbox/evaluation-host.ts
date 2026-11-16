@@ -21,10 +21,16 @@ import { readFileSync } from "node:fs"
 import path from "node:path"
 
 export type LinuxAuthority = Readonly<{ manifestSha256: string; engineReceiptSha256: string }>
-const authorities = new WeakMap<
-  LinuxAuthority,
-  { manifest: HostManifest; engineReceipt: EngineReceipt; evidenceRoot: string }
->()
+type AuthorityState =
+  | Readonly<{ kind: "readiness"; manifest: HostManifest; engineReceipt: EngineReceipt; evidenceRoot: string }>
+  | Readonly<{
+      kind: "calibration"
+      manifest: HostManifest
+      evidenceRoot: string
+      statementSha256: string
+      verify: () => void
+    }>
+const authorities = new WeakMap<LinuxAuthority, AuthorityState>()
 export function authorizeLinuxHost(input: {
   manifest: HostManifest
   engineReceipt: EngineReceipt
@@ -37,12 +43,36 @@ export function authorizeLinuxHost(input: {
     manifestSha256: sha256Text(canonicalJson(input.manifest)),
     engineReceiptSha256: input.engineReceipt.receiptSha256,
   })
-  authorities.set(authority, input)
+  authorities.set(authority, { kind: "readiness", ...input })
   return authority
+}
+/** Calibration-only authority never carries an engine receipt and is never readiness-eligible. */
+export function registerCalibrationAuthority(input: {
+  manifest: HostManifest
+  evidenceRoot: string
+  statementSha256: string
+  verify: () => void
+}): LinuxAuthority {
+  if (input.manifest.phase !== "accept") throw new TypeError("TASK24_LINUX_AUTHORITY_PHASE")
+  const authority = freeze({
+    manifestSha256: sha256Text(canonicalJson(input.manifest)),
+    engineReceiptSha256: input.statementSha256,
+  })
+  authorities.set(authority, { kind: "calibration", ...input })
+  return authority
+}
+export function linuxAuthorityScope(authority: LinuxAuthority) {
+  const state = authorities.get(authority)
+  if (!state) throw new TypeError("TASK24_LINUX_AUTHORITY")
+  return state.kind
 }
 export function requireLinuxAuthority(authority: LinuxAuthority) {
   const state = authorities.get(authority)
   if (!state) throw new TypeError("TASK24_LINUX_AUTHORITY")
+  if (state.kind === "calibration") {
+    state.verify()
+    return state
+  }
   requireEngineReceipt(state.engineReceipt, state.manifest)
   for (const c of state.engineReceipt.checks)
     verifyOperationReceipt({ receipt: c.receipt, manifest: state.manifest, evidenceRoot: state.evidenceRoot })
