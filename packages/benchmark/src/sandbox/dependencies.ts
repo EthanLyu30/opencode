@@ -417,6 +417,25 @@ export function resolveTaskDependency(input: {
     ),
   }
 }
+/** Accept keeps every already-frozen prepared artifact (controller inventory, runtime config, expectations) while pending declarations are replaced by their verified identities. */
+export function composeAcceptArtifacts(input: {
+  prepared: readonly HostManifest["artifacts"][number][]
+  binaries: readonly HostManifest["artifacts"][number][]
+  browser: readonly HostManifest["artifacts"][number][]
+  images: readonly HostManifest["artifacts"][number][]
+}): HostManifest["artifacts"][number][] {
+  const supplied = [...input.binaries, ...input.browser, ...input.images],
+    suppliedIDs = new Set(supplied.map((a) => a.id))
+  if (suppliedIDs.size !== supplied.length) throw new TypeError("TASK24_LINUX_ARTIFACT_DUPLICATE")
+  if (supplied.some((a) => a.kind === "pending")) throw new TypeError("TASK24_LINUX_ARTIFACT_PENDING")
+  const preserved = input.prepared.flatMap((a) => {
+    if (!suppliedIDs.has(a.id)) return [a]
+    if (a.kind !== "pending") throw new TypeError("TASK24_LINUX_ARTIFACT_DUPLICATE")
+    return []
+  })
+  if (preserved.some((a) => a.kind === "pending")) throw new TypeError("TASK24_LINUX_ARTIFACT_PENDING")
+  return [...preserved, ...supplied]
+}
 export function finalizeHostManifest(input: {
   preparedManifest: HostManifest
   images: ResolvedImages
@@ -431,16 +450,17 @@ export function finalizeHostManifest(input: {
     input.images.tasks.some((t) => t.assurance !== "linux-attested")
   )
     throw new TypeError("TASK24_LINUX_ARTIFACT_UNVERIFIED")
-  const artifacts = [
-    ...input.binaries,
-    ...input.browser,
-    ...input.images.tasks.map((t) => ({
+  const artifacts = composeAcceptArtifacts({
+    prepared: input.preparedManifest.artifacts,
+    binaries: input.binaries,
+    browser: input.browser,
+    images: input.images.tasks.map((t) => ({
       id: t.artifactID,
       kind: "image" as const,
       sha256: t.image.slice(t.image.lastIndexOf(":") + 1),
       image: t.image,
     })),
-  ]
+  })
   return decodeHostManifest({
     ...input.preparedManifest,
     phase: "accept",
