@@ -24,6 +24,12 @@ import { recordOperationReceipt } from "./receipt"
 import { fileIdentity } from "./storage"
 import type { FileIdentity } from "./contracts"
 
+const dependencyAuditWorkspace = {
+  name: "task24-dep-4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  target: "/workspace/node_modules",
+  treeSha256: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+} as const
+
 export type DependencyVolume = Readonly<{
   name: string
   target: string
@@ -188,7 +194,7 @@ export async function prepareLinuxArtifacts(input: {
       argv,
       ...(stdin ? (stdin instanceof Uint8Array ? { stdin } : { stdinFile: stdin }) : {}),
       signal,
-      timeoutMs: operation === "image-build" ? 300000 : 15000,
+      timeoutMs: operation === "image-build" ? 300000 : operation === "container-exec" ? 180000 : 15000,
       maxStdoutBytes: 1048576,
       maxStderrBytes: 65536,
     })
@@ -243,7 +249,12 @@ export async function prepareLinuxArtifacts(input: {
       image.Size > artifact.unpackedBytes
     )
       throw new TypeError("TASK24_LINUX_IMAGE_DRIFT")
-    for (const volume of artifact.volumes) {
+    // The audit worker resolves /workspace before it walks dependency volumes. Images without a
+    // dependency volume still need a mount target so that path exists; the extra mount is never
+    // part of the artifact's audited or resolved dependency set.
+    const mounts =
+      artifact.volumes.length > 0 ? artifact.volumes : [dependencyAuditWorkspace]
+    for (const volume of mounts) {
       const queried = await execute(["volume", "inspect", volume.name, "--format", "{{json .}}"], "volume-prepare")
       if (queried.exitCode !== 0) {
         const created = await execute(
@@ -276,7 +287,7 @@ export async function prepareLinuxArtifacts(input: {
       spec: {
         image: recipe.image,
         argv: ["/usr/local/bin/node", "-e", "setInterval(()=>{},1000)"],
-        dependencies: artifact.volumes.map((v) => ({ name: v.name, target: v.target })),
+        dependencies: mounts.map((v) => ({ name: v.name, target: v.target })),
         preparingDependencies: true,
       },
     })

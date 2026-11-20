@@ -1,5 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { spawnSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import { Schema } from "effect"
 import { canonicalJson } from "../campaign/canonical"
@@ -26,7 +27,7 @@ import { createOwnedContainer, cleanupOwnedContainer, inspectOwnedContainer, typ
 import { recordOperationReceipt, type OperationReceipt } from "./receipt"
 import { resolveTaskDependency, type ResolvedImages, type ResolvedTask } from "./dependencies"
 import type { DependencyResolution } from "../corpus/evaluation-profile"
-import type { EngineSession, DockerRunner, AuthorityGuard } from "./contracts"
+import type { EngineSession, DockerRunner, AuthorityGuard, HostManifest } from "./contracts"
 import { relayWorkerSource } from "./relay-worker"
 import {
   encodeRelayFrame,
@@ -38,6 +39,7 @@ import {
 } from "./relay-protocol"
 import type { PreviewSource } from "./preview"
 import { safePath } from "../corpus/evaluation-profile"
+import { mapWsl2Workspace, wsl2GuestInvocation } from "./wsl2-independent"
 
 export type BackendImage = Pick<ResolvedTask, "taskID" | "image" | "volumes" | "receiptSha256"> & Partial<ResolvedTask>
 export function validateTaskResolution(
@@ -173,6 +175,7 @@ export function makeLinuxBackend(input: {
         image: p.image.image,
         argv: ["/usr/local/bin/node", "-e", "setInterval(()=>{},1000)"],
         workspace: { source: workspace, readonly: operation !== "build" },
+        ...(operation === "build" ? { pidsLimit: 512 as const, memoryBytes: 2147483648 as const } : {}),
         dependencies: p.image.volumes,
         protectedFiles:
           operation === "build"
@@ -260,6 +263,7 @@ export function makeLinuxBackend(input: {
       const files = await readCandidateArchive(request.candidate, p.profile)
       const workspace = path.join(state.manifest.roots.work, `candidate-${randomBytes(16).toString("hex")}`)
       await materializeCandidate(files, workspace, p.outputs)
+      await makeWorkspaceWritable(state.manifest, workspace)
       allocated.add(workspace)
       const before = await ordinaryFiles(workspace)
       const protectedBefore = before.filter(
@@ -271,7 +275,7 @@ export function makeLinuxBackend(input: {
           request,
           "build",
           linuxPolicyAuditSource(),
-          { files: before.filter((f) => f.size <= 1048576 && /\.[cm]?[jt]sx?$/.test(f.path)).map((f) => f.path) },
+          { files: before.filter((f) => f.size <= 1048576 && /\.(?:[cm]?[jt]sx?|html?)$/.test(f.path)).map((f) => f.path) },
           workspace,
         )
         if (audited.execution.exitCode !== 0) throw new TypeError("TASK24_POLICY_AUDIT_FAILED")
@@ -291,6 +295,7 @@ export function makeLinuxBackend(input: {
               : c.argv,
       }))
       const { execution, receipt } = await execute(request, "build", buildWorkerSource(), { commands }, workspace)
+      await stripBuildNodeModules(workspace)
       await readCandidateArchive(request.candidate, p.profile)
       const after = await ordinaryFiles(workspace)
       assertSourceUnchanged(before, after)
@@ -489,4 +494,33 @@ export function makeLinuxBackend(input: {
     },
   }
 }
+
+/**
+ * Babel register writes its cache to `<package>/node_modules/.cache`, and a few package builds create
+ * their own node_modules. Those paths are build residue, not candidate output, and would otherwise fail
+ * the private-path guard when the built workspace is captured. The dependency volume covers the root
+ * node_modules, but package-local ones live in the bind-mounted workspace.
+ */
+async function stripBuildNodeModules(workspace: string) {
+  const packages = path.join(workspace, "packages"),
+    entries = await fs.readdir(packages, { withFileTypes: true }).catch(() => [])
+  await Promise.all([
+    fs.rm(path.join(workspace, "node_modules"), { recursive: true, force: true }),
+    ...entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => fs.rm(path.join(packages, entry.name, "node_modules"), { recursive: true, force: true })),
+  ])
+}
+
+/** The container runs as 65532, while DrvFs metadata keeps host-created workspaces at 0755. */
+async function makeWorkspaceWritable(manifest: HostManifest, workspace: string) {
+  if (process.platform !== "win32" || !manifest.wsl2) return
+  const result = spawnSync(
+    manifest.cli.path,
+    wsl2GuestInvocation(manifest, ["/bin/chmod", "-R", "a+rwX", mapWsl2Workspace(manifest, workspace)]),
+    { encoding: "utf8", windowsHide: true },
+  )
+  if (result.status !== 0) throw new TypeError("TASK24_LINUX_WORKSPACE_PERMISSION")
+}
+
 export type LinuxBackend = ReturnType<typeof makeLinuxBackend>

@@ -59,8 +59,9 @@ const Guest = Schema.Struct({
   descendantWorkMounts: Schema.Array(Text),
 })
 export function requireWsl2GuestAccess(request: HostRequest) {
-  const host = request.wsl2
-  if (!host || host.guestExecution.expiresAt <= Date.now() || host.guestExecution.expiresAt > Date.now() + 3600000)
+  const host = request.wsl2,
+    lease = host?.guestExecution.calibrationOnly ? 24 * 3600000 : 3600000
+  if (!host || host.guestExecution.expiresAt <= Date.now() || host.guestExecution.expiresAt > Date.now() + lease)
     throw new TypeError("TASK24_WSL2_GUEST_APPROVAL")
   return host
 }

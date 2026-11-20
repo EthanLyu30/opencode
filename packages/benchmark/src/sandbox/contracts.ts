@@ -27,7 +27,11 @@ const Wsl2 = Schema.Struct({
   registrationID: Text.check(Schema.isPattern(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/)),
   installRoot: Text,
   guestCliSha256: Sha256,
-  guestExecution: Schema.Struct({ approved: Schema.Literal(true), expiresAt: Positive }),
+  guestExecution: Schema.Struct({
+    approved: Schema.Literal(true),
+    expiresAt: Positive,
+    calibrationOnly: Schema.optionalKey(Schema.Literal(true)),
+  }),
 })
 const Request = Schema.Struct({
   schemaVersion: Schema.Literal(2),

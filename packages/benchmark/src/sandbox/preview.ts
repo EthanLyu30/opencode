@@ -119,7 +119,20 @@ export async function startLinuxPreview(input: {
   await directRoot(input.source.root)
   if (input.signal.aborted || !/^[a-f0-9]{64}$/.test(input.source.buildSha256))
     throw new TypeError("TASK24_PREVIEW_BINDING")
-  for (const p of input.policy.paths) safeRelayPath(p)
+  // Build outputs can contain fixture names that cannot be addressed by the relay allowlist,
+  // for example test specs with spaces. Drop those unservable entries instead of rejecting
+  // the whole preview; the page entry and its shipped assets remain available.
+  const paths = input.policy.paths.filter((p) => {
+    try {
+      safeRelayPath(p)
+      return true
+    } catch {
+      return false
+    }
+  })
+  if (!paths.length) throw new TypeError("TASK24_PREVIEW_BINDING")
+  const allowed = new Set(paths),
+    assets = input.source.files.filter((f) => allowed.has("/" + f.path))
   const controller = new AbortController(),
     capability = randomBytes(32).toString("hex"),
     previewID = randomBytes(32).toString("hex")
@@ -128,6 +141,7 @@ export async function startLinuxPreview(input: {
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
+    idleTimeout: 120,
     maxRequestBodySize: relayLimits.requestBytes,
     async fetch(r) {
       const url = new URL(r.url)
@@ -176,7 +190,7 @@ export async function startLinuxPreview(input: {
     previewID,
     url: `http://127.0.0.1:${server.port}/${capability}/`,
     buildSha256: input.source.buildSha256,
-    assets: structuredClone(input.source.files),
+    assets: structuredClone(assets),
     async stop() {
       input.signal.removeEventListener("abort", abort)
       await stop()
@@ -184,7 +198,7 @@ export async function startLinuxPreview(input: {
   })
   leases.set(lease, {
     source: input.source,
-    policy: freeze(structuredClone(input.policy)),
+    policy: freeze(structuredClone({ ...input.policy, paths })),
     guard: input.guard,
     controller,
   })

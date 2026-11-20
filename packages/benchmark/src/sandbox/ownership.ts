@@ -1,3 +1,5 @@
+import fs from "node:fs/promises"
+import path from "node:path"
 import { Schema } from "effect"
 import { canonicalJson } from "../campaign/canonical"
 import { sha256Text } from "../hash"
@@ -34,6 +36,12 @@ export type ContainerSpec = Readonly<{
   interactive?: boolean
   preparingDependencies?: true
   protectedFiles?: readonly { source: string; target: string }[]
+  // Rollup's terser stage fans out to one Node worker per host CPU. The default 64 PID ceiling is enough for
+  // evaluation but starves that build graph, so build containers opt into a bounded higher ceiling.
+  pidsLimit?: 64 | 256 | 512
+  // Lerna builds the whole react-pdf workspace in one process tree. The default 1 GiB envelope is enough for
+  // a single package build but not for that graph, so build containers opt into a bounded higher envelope.
+  memoryBytes?: 1073741824 | 2147483648
 }>
 export function assertRequestedMounts(
   mounts: readonly { Type: string; Source: string; Destination: string; RW: boolean; Name?: string }[],
@@ -117,6 +125,7 @@ export function decodeOwnedInspection(input: unknown, owner: Owner, session: Eng
   const value = Schema.decodeUnknownSync(Inspection)(input)
   const state = sessionState(session)
   const labels = ownerLabels(owner)
+  const spec = requestedSpecs.get(canonicalJson(owner))
   if (
     !/^[a-f0-9]{64}$/.test(owner.containerID) ||
     value.Id !== owner.containerID ||
@@ -134,8 +143,8 @@ export function decodeOwnedInspection(input: unknown, owner: Owner, session: Eng
     config.Privileged ||
     canonicalJson(config.CapDrop) !== canonicalJson(["ALL"]) ||
     !config.SecurityOpt.includes("no-new-privileges=true") ||
-    config.PidsLimit !== 64 ||
-    config.Memory !== 1073741824 ||
+    config.PidsLimit !== (spec?.pidsLimit ?? 64) ||
+    config.Memory !== (spec?.memoryBytes ?? 1073741824) ||
     config.NanoCpus !== 1500000000 ||
     (config.CapAdd?.length ?? 0) ||
     (config.Devices?.length ?? 0) ||
@@ -167,7 +176,6 @@ export function decodeOwnedInspection(input: unknown, owner: Owner, session: Eng
     )
       throw new TypeError("TASK24_LINUX_MOUNT_POLICY")
   }
-  const spec = requestedSpecs.get(canonicalJson(owner))
   if (spec) assertRequestedMounts(value.Mounts, spec, (source) => mapWsl2Workspace(state.manifest, source))
   return freeze(value)
 }
@@ -224,6 +232,10 @@ export async function createOwnedContainer(input: {
     await directoryIdentity(source)
     if (!source.toLowerCase().startsWith(state.manifest.roots.work.toLowerCase() + "\\") || source.includes(","))
       throw new TypeError("TASK24_LINUX_WORKSPACE")
+    // A read-only rootfs cannot create a mountpoint for the dependency volume. Materialize the
+    // directory here so both build and probe containers can mount /workspace/node_modules.
+    if (spec.dependencies?.some((dependency) => dependency.target === "/workspace/node_modules"))
+      await fs.mkdir(path.join(source, "node_modules"), { recursive: true })
     mounts.push(
       "--mount",
       `type=bind,src=${mapWsl2Workspace(state.manifest, source)},dst=/workspace${spec.workspace.readonly ? ",readonly" : ""}`,
@@ -274,9 +286,9 @@ export async function createOwnedContainer(input: {
     "--user",
     "65532:65532",
     "--pids-limit",
-    "64",
+    String(spec.pidsLimit ?? 64),
     "--memory",
-    "1073741824",
+    String(spec.memoryBytes ?? 1073741824),
     "--cpus",
     "1.5",
     "--stop-timeout",
@@ -345,7 +357,7 @@ export async function createOwnedContainer(input: {
     await inspectOwnedContainer({ ...input, owner })
     if (input.start === false) return owner
     await requireOperation(input.session, "container-start", input.guard)
-    const started = await input.runner.execute(invocation(["container", "start", containerID], input.signal))
+    const started = await input.runner.execute(invocation(["container", "start", containerID], input.signal, 60000))
     if (!started.started || started.exitCode !== 0 || started.truncated)
       throw new TypeError("TASK24_LINUX_START_FAILED")
     await inspectOwnedContainer({ ...input, owner })
