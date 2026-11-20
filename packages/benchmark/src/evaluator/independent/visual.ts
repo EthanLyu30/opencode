@@ -77,9 +77,11 @@ export async function evaluateVisual(input: {
   await directRoot(browser.evidenceRoot)
   const referenceFiles = await ordinaryFiles(browser.referenceRoot)
   async function readReference(file: FileEntry) {
-    if (!referenceFiles.some((f) => f.path === file.path && f.sha256 === file.sha256 && f.size === file.size))
+    // Oracle paths are bundle-relative, but the browser root is the bundle's private directory.
+    const relative = file.path.startsWith("private/") ? file.path.slice("private/".length) : file.path
+    if (!referenceFiles.some((f) => f.path === relative && f.sha256 === file.sha256 && f.size === file.size))
       throw new TypeError("TASK24_VISUAL_REFERENCE_INVALID")
-    const bytes = await fs.readFile(path.join(browser.referenceRoot, file.path))
+    const bytes = await fs.readFile(path.join(browser.referenceRoot, relative))
     if (sha256Bytes(bytes) !== file.sha256) throw new TypeError("TASK24_VISUAL_REFERENCE_DRIFT")
     return bytes
   }
@@ -93,7 +95,7 @@ export async function evaluateVisual(input: {
     clippingPassed = true
   for (const id of ["mobile", "tablet", "desktop"] as const) {
     const viewport = { id, ...FIXED_VIEWPORTS[id] }
-    const captured = await browser.runtime.capture({
+    const request = {
       runID: identity.runID,
       previewID,
       previewURL: preview.handle,
@@ -102,6 +104,10 @@ export async function evaluateVisual(input: {
       interactionScriptID: profile.preview.interaction,
       timeoutMs: profile.preview.timeoutMs,
       signal: new AbortController().signal,
+    }
+    const captured = await browser.runtime.capture(request).catch((cause) => {
+      if (!(cause instanceof TypeError) || cause.message !== "TASK24_BROWSER_V2_TRANSPORT") throw cause
+      return browser.runtime.capture({ ...request, signal: new AbortController().signal })
     })
     await directRoot(captured.root)
     const pngRef = bindEvidenceFile(browser.evidenceRoot, captured.screenshot, "screenshot"),

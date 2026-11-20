@@ -33,7 +33,7 @@ export async function createWindowsBrowserDispatch(raw: unknown, guard: () => Pr
     throw new TypeError("TASK24_BROWSER_DISPATCH_INPUT")
   for (const root of [config.root, config.evidenceRoot, ...config.allowedEvidenceRoots]) {
     requireDPath(root)
-    if (!/^D:\\OpenCode-Benchmark\\Task24\\(?:tmp|workspaces)\\[^\\]+(?:\\.*)?$/.test(root))
+    if (!/^D:\\OpenCode-Benchmark\\Task24\\(?:tmp|workspaces|toolchain\\linux-fresh-host\\evidence)\\[^\\]+(?:\\.*)?$/.test(root))
       throw new TypeError("TASK24_BROWSER_DISPATCH_INPUT")
     await directRoot(root)
   }

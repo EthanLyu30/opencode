@@ -55,7 +55,10 @@ export type ReferencePlan = Readonly<{
   candidateSha256: string
   visualPolicy: { masks: NonNullable<ReturnType<typeof decodeEvaluationOracle>["visual"]>["masks"]; tolerance: number }
 }>
-export function publicBuildDriverSource(commands: readonly (readonly string[])[]) {
+export function publicBuildDriverSource(
+  commands: readonly (readonly string[])[],
+  links: readonly { path: string; target: string }[] = [],
+) {
   if (
     !commands.length ||
     commands.length > 16 ||
@@ -65,10 +68,54 @@ export function publicBuildDriverSource(commands: readonly (readonly string[])[]
         argv.length > 128 ||
         !["/usr/local/bin/bun", "/usr/bin/pdftotext", "/usr/bin/pdftoppm", process.execPath].includes(argv[0]!) ||
         argv.some((a) => a.includes("\0") || a.length > 32768),
+    ) ||
+    links.length > 64 ||
+    links.some(
+      (link) =>
+        !/^packages\/[a-z0-9-]+\/node_modules\/@react-pdf\/[a-z0-9-]+$/.test(link.path) ||
+        !/^\.\.\/\.\.\/\.\.\/[a-z0-9-]+$/.test(link.target),
     )
   )
     throw new TypeError("TASK24_PUBLIC_BUILD_COMMAND")
-  return `import {spawnSync} from 'node:child_process';for(const argv of ${JSON.stringify(commands)}){const p=spawnSync(argv[0],argv.slice(1),{cwd:process.cwd(),stdio:'ignore',env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:process.env.HOME,BUN_OPTIONS:'--no-env-file'},timeout:300000});if(p.error||p.status!==0)process.exit(p.status??1)}`
+  return `import {mkdirSync,rmdirSync,rmSync,symlinkSync} from 'node:fs';import path from 'node:path';import {spawnSync} from 'node:child_process';const links=${JSON.stringify(links)};for(const link of links){const at=path.resolve(link.path);mkdirSync(path.dirname(at),{recursive:true});rmSync(at,{force:true});symlinkSync(link.target,at,'dir')}let failed=0;for(const argv of ${JSON.stringify(commands)}){const p=spawnSync(argv[0],argv.slice(1),{cwd:process.cwd(),stdio:'ignore',env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:process.env.HOME,BUN_OPTIONS:'--no-env-file'},timeout:300000});if(p.error||p.status!==0){failed=p.status??1;break}}for(const link of links)rmSync(path.resolve(link.path),{force:true});for(const directory of new Set(links.map((link)=>path.dirname(path.resolve(link.path))))){try{rmdirSync(directory)}catch{};try{rmdirSync(path.dirname(directory))}catch{}}process.exit(failed)`
+}
+const reactPdfBuildCommands = [
+  ["/usr/local/bin/bun", "--no-env-file", "run", "build"],
+  ["/usr/local/bin/bun", "--no-env-file", "run", ".task24/render.jsx"],
+  ["/usr/bin/pdftotext", ".task24/document.pdf", ".task24/document.txt"],
+  ["/usr/bin/pdftoppm", "-png", "-singlefile", ".task24/document.pdf", ".task24/document"],
+] as const
+/**
+ * The public workspace installs published @react-pdf siblings. Resolve them to the candidate's
+ * local packages so the PDF probe renders the evaluated source, not registry copies.
+ */
+export async function reactPdfBuildOverlay(publicRoot: string) {
+  const packages = path.join(publicRoot, "packages"),
+    siblings = (await fs.readdir(packages, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name),
+    links = (
+      await Promise.all(
+        siblings.map(async (name) => {
+          const manifest = JSON.parse(
+            await fs.readFile(path.join(packages, name, "package.json"), "utf8"),
+          ) as { dependencies?: Record<string, string>; peerDependencies?: Record<string, string> }
+          const declared = new Set([
+            ...Object.keys(manifest.dependencies ?? {}),
+            ...Object.keys(manifest.peerDependencies ?? {}),
+          ])
+          return siblings.flatMap((sibling) =>
+            declared.has(`@react-pdf/${sibling}`)
+              ? [{ path: `packages/${name}/node_modules/@react-pdf/${sibling}`, target: `../../../${sibling}` }]
+              : [],
+          )
+        }),
+      )
+    ).flat()
+  return {
+    path: ".task24/linux-pdf-build.mjs",
+    bytes: Buffer.from(publicBuildDriverSource(reactPdfBuildCommands, links)),
+  }
 }
 export async function finalizeLinuxCorpus(input: {
   authoredRoot: string
@@ -134,17 +181,13 @@ export async function finalizeLinuxCorpus(input: {
     }
     const publicOverlays = []
     if (task.publicFixtureTemplate === "react-pdf") {
-      const relative = ".task24/linux-pdf-build.mjs",
-        bytes = Buffer.from(
-          publicBuildDriverSource([
-            ["/usr/local/bin/bun", "--no-env-file", "run", "build"],
-            ["/usr/local/bin/bun", "--no-env-file", "run", ".task24/render.jsx"],
-            ["/usr/bin/pdftotext", ".task24/document.pdf", ".task24/document.txt"],
-            ["/usr/bin/pdftoppm", "-png", "-singlefile", ".task24/document.pdf", ".task24/document"],
-          ]),
-        )
-      await fs.writeFile(path.join(destination, "public", relative), bytes, { flag: "wx" })
-      publicOverlays.push({ path: relative, sha256: sha256Bytes(bytes), size: bytes.length })
+      const overlay = await reactPdfBuildOverlay(path.join(destination, "public"))
+      await fs.writeFile(path.join(destination, "public", overlay.path), overlay.bytes, { flag: "wx" })
+      publicOverlays.push({
+        path: overlay.path,
+        sha256: sha256Bytes(overlay.bytes),
+        size: overlay.bytes.length,
+      })
     }
     const publicInputs = (await ordinaryFiles(path.join(destination, "public"))).map((f) => ({
       ...f,
@@ -161,7 +204,15 @@ export async function finalizeLinuxCorpus(input: {
         "utf8",
       ),
     ) as { checks: TaskExecutionProfile["checks"]; protectedPaths: readonly string[] }
-    const protectedPaths = [...draft.protectedPaths, ...publicOverlays.map((o) => o.path)],
+    // Preparation profiles for design2code declare package.json, but the authored fixture never supplies it.
+    // Requiring a protected path that the correct control does not contain makes every candidate unsatisfiable.
+    const authoredPaths = new Set(author.controls.find((c) => c.kind === "correct")?.entries.map((e) => e.path) ?? []),
+      protectedPaths = [
+        ...new Set([
+          ...draft.protectedPaths.filter((p) => authoredPaths.has(p)),
+          ...publicOverlays.map((o) => o.path),
+        ]),
+      ],
       checks = publicOverlays.length
         ? [
             {
@@ -205,7 +256,10 @@ export async function finalizeLinuxCorpus(input: {
       sourceEntry: task.sourceEntry,
       probeModules: [...new Set(authored.cases.map((c) => c.module))],
       protectedPaths,
-      mutablePaths: publicInputs.map((f) => f.path.slice(7)).filter((p) => !protectedPaths.includes(p)),
+      // A tracked fixture can also be a declared build product (marked.min.js); it is generated, not a mutation input.
+      mutablePaths: publicInputs
+        .map((f) => f.path.slice(7))
+        .filter((p) => !protectedPaths.includes(p) && !plan.outputs.some((o) => p === o || p.startsWith(o + "/"))),
       checks,
       dependency,
       preview:

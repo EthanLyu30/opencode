@@ -111,7 +111,7 @@ export async function prepareTaskMaterials(input: {
         ...pkg,
         scripts: {
           ...scripts,
-          "task24:smoke": "bun --no-env-file test .task24/smoke.test.ts",
+          "task24:smoke": "bun --no-env-file test ./.task24/smoke.test.ts",
           ...(task.kind === "primary" ? { "task24:build": "bun --no-env-file run .task24/build.ts" } : {}),
         },
       }),
@@ -166,7 +166,7 @@ export async function prepareTaskMaterials(input: {
               argv: [
                 "bun",
                 "--no-env-file",
-                ...(task.kind === "guardrail" ? ["test", ".task24/smoke.test.ts"] : ["run", ".task24/build.ts"]),
+                ...(task.kind === "guardrail" ? ["test", "./.task24/smoke.test.ts"] : ["run", ".task24/build.ts"]),
               ],
               timeoutMs: 30000,
               required: true,

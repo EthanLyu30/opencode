@@ -163,6 +163,17 @@ public static partial class Task24NativeIsolation {
     }),errors);
   }
   static string[] BrowserCommandLine(IntPtr process,BrowserQueryProcess query) {
+    // Command-line inspection can race a child that is still initializing or already
+    // terminating. Retry while the owned handle proves the process is alive; once it
+    // exits the outer observation catch treats the failed query as teardown.
+    for(int attempt=0;;attempt++) {
+      try {return BrowserCommandLineOnce(process,query);}
+      catch(IOException) {
+        if(attempt>=100 || WaitForSingleObject(process,20)==0)throw;
+      }
+    }
+  }
+  static string[] BrowserCommandLineOnce(IntPtr process,BrowserQueryProcess query) {
     uint required;int status=query(process,60,IntPtr.Zero,0,out required);
     if(status>=0 || (status!=unchecked((int)0xc0000004) && status!=unchecked((int)0xc0000023)))throw new IOException("browser command-line size status="+status.ToString("x"));
     Require(required>=Marshal.SizeOf(typeof(BrowserUnicodeString)) && required<=1048576,"bounded browser command line");
@@ -214,8 +225,17 @@ public static partial class Task24NativeIsolation {
   static void BrowserObserve(IntPtr job,string browser,BrowserQueryProcess query,Dictionary<uint,BrowserRenderer> renderers) {
     int bytes=8+64*IntPtr.Size;var list=Marshal.AllocHGlobal(bytes);
     try {
-      Require(QueryInformationJobObject(job,3,list,(uint)bytes,IntPtr.Zero),"owned browser job process list");
-      int assigned=Marshal.ReadInt32(list),count=Marshal.ReadInt32(list,4);
+      bool listed=false;int assigned=0,count=0;
+      // The job process list can change between the two counts written by one query.
+      // Retry until a single snapshot is internally consistent instead of treating
+      // a transient assigned/count mismatch as an isolation failure.
+      for(int attempt=0;attempt<20;attempt++) {
+        listed=QueryInformationJobObject(job,3,list,(uint)bytes,IntPtr.Zero);
+        assigned=Marshal.ReadInt32(list);count=Marshal.ReadInt32(list,4);
+        if(listed && assigned==count && count<=64)break;
+        Thread.Sleep(1);
+      }
+      Require(listed,"owned browser job process list");
       Require(assigned>=0 && count>=0 && assigned==count && count<=64,"complete owned browser job process list");
       for(int i=0;i<count;i++) {
         ulong raw=unchecked((ulong)Marshal.ReadIntPtr(list,8+i*IntPtr.Size).ToInt64());Require(raw>0 && raw<=UInt32.MaxValue,"owned browser PID");uint pid=(uint)raw;
@@ -255,7 +275,7 @@ public static partial class Task24NativeIsolation {
             // Teardown can race introspection before the process becomes signaled.
             // A failed query is never a renderer observation: skip only after the
             // same already-owned process handle proves completed termination.
-            uint exited=WaitForSingleObject(process,1000);
+            uint exited=WaitForSingleObject(process,30000);
             if(exited!=0)throw new IOException("owned browser process introspection failed pid="+pid+" exitWait="+exited.ToString("x"),error);
           }
         } finally {Require(CloseHandle(process),"close owned browser process");}

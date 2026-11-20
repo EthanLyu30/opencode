@@ -108,7 +108,7 @@ test("three actual fixture PNG/DOM captures use fixed viewport sizes and detect 
     const browser = {
       browserSha256,
       fontSha256,
-      referenceRoot: f.bundleRoot,
+      referenceRoot: path.join(f.bundleRoot, "private"),
       evidenceRoot: f.resultRoot,
       runtime: {
         capture: async (input: { viewportID: keyof typeof FIXED_VIEWPORTS }) => {
