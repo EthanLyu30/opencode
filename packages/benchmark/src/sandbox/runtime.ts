@@ -326,6 +326,9 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
     await verifyControllerIdentity(manifest)
     await verifyRuntimeFiles()
   }
+  // Font observation hashes every installed font (~630 MB on this host). Calibration-only binds the observed set once at open;
+  // re-observing it on each ownership guard costs minutes per operation and cannot change during the run.
+  let fontObservation: ReturnType<typeof observeBrowserFonts> | undefined
   const runner = makeDockerRunner({
     request: state.inspection.request,
     session,
@@ -353,7 +356,7 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
       throw new TypeError("TASK24_RUNTIME_CONFIG_STALE")
     if ((await fileIdentity(dependencies.path!)).sha256 !== dependencies.sha256)
       throw new TypeError("TASK24_RUNTIME_DEPENDENCIES_STALE")
-    const fonts = await observeBrowserFonts(manifest)
+    const fonts = await (options.calibrationOnly ? (fontObservation ??= observeBrowserFonts(manifest)) : observeBrowserFonts(manifest))
     if (
       canonicalJson(fonts.files) !== canonicalJson(config.browser.fonts) ||
       fonts.registrySha256 !== config.browser.fontRegistrySha256
