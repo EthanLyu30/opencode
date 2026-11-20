@@ -318,7 +318,9 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
   let auditors: DependencyAuditSet | undefined = (await fs.lstat(auditorFile).catch(() => null))
     ? ((await readControllerJson(auditorFile)) as DependencyAuditSet)
     : undefined
-  const browserVerifyIntervalMs = options.calibrationOnly ? 300_000 : undefined
+  // Calibration-only runs re-hash the 806 MB browser release once at runtime open, then reuse the verified identities for the run.
+  // Re-verifying per capture costs minutes per entry and dominates throughput; production accept still verifies every guard.
+  const browserVerifyIntervalMs = options.calibrationOnly ? 86_400_000 : undefined
   const identityGuard = async () => {
     await revalidateSession(session)
     await verifyControllerIdentity(manifest)
