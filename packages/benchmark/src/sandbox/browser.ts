@@ -33,8 +33,12 @@ export type BrowserTrace = Readonly<{
   evidence: EvidenceReference
 }>
 const traces = new WeakMap<object, BrowserTrace>()
-export function loadLinuxBrowserRelease(root: string, expectedSha256: string) {
-  const release = loadBrowserRelease(root, { readOnly: true })
+export function loadLinuxBrowserRelease(
+  root: string,
+  expectedSha256: string,
+  options: { verifyIntervalMs?: number } = {},
+) {
+  const release = loadBrowserRelease(root, { readOnly: true, verifyIntervalMs: options.verifyIntervalMs })
   if (release.buildSha256 !== expectedSha256) throw new TypeError("TASK24_RUNTIME_BROWSER")
   return release
 }

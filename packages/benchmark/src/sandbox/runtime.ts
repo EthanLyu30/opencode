@@ -29,7 +29,7 @@ import { makeControllerFactsObserver, type RequirementProbePlan, type Interactio
 import { evaluateLinux } from "./linux-evaluator"
 import { resolveTaskDependency, type ResolvedImages } from "./dependencies"
 import { loadEvaluationBundle, directRoot } from "../corpus/evaluation-bundle"
-import { finalizeLinuxCorpus, type ExecutionPlan, type ReferencePlan } from "../corpus/evaluation-finalize"
+import { finalizeLinuxCorpus, type ExecutionPlan, type FinalizedCorpus, type ReferencePlan } from "../corpus/evaluation-finalize"
 import { calibrateLinuxCorpus } from "./calibration"
 import {
   acceptLinuxEngine,
@@ -318,6 +318,7 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
   let auditors: DependencyAuditSet | undefined = (await fs.lstat(auditorFile).catch(() => null))
     ? ((await readControllerJson(auditorFile)) as DependencyAuditSet)
     : undefined
+  const browserVerifyIntervalMs = options.calibrationOnly ? 300_000 : undefined
   const identityGuard = async () => {
     await revalidateSession(session)
     await verifyControllerIdentity(manifest)
@@ -341,7 +342,11 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
   async function verifyRuntimeFiles() {
     // Calibration-only evidence binds the evaluator, images and browser, not the two CLI binaries.
     if (!options.calibrationOnly) await verifyBinaryBuildRecords({ manifest })
-    loadLinuxBrowserRelease(config.browser.root, manifest.artifacts.find((a) => a.id === "browser")!.sha256)
+    loadLinuxBrowserRelease(
+      config.browser.root,
+      manifest.artifacts.find((a) => a.id === "browser")!.sha256,
+      { verifyIntervalMs: browserVerifyIntervalMs },
+    )
     if ((await fileIdentity(configArtifact.path!)).sha256 !== configArtifact.sha256)
       throw new TypeError("TASK24_RUNTIME_CONFIG_STALE")
     if ((await fileIdentity(dependencies.path!)).sha256 !== dependencies.sha256)
@@ -365,6 +370,7 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
     const base = loadLinuxBrowserRelease(
       config.browser.root,
       manifest.artifacts.find((a) => a.id === "browser")!.sha256,
+      { verifyIntervalMs: browserVerifyIntervalMs },
     )
     return makeLinuxBrowser({
       release: {
@@ -413,6 +419,29 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
       },
     })
   }
+  const taskAuditCache = new Map<string, Readonly<{ at: number; promise: Promise<void> }>>()
+  async function auditTaskDependencies(taskID: string) {
+    if (!auditors) throw new TypeError("TASK24_DEPENDENCY_AUDITORS_REQUIRED")
+    // Calibration repeats the same retained, read-only dependency volume across controls. One audit per task per
+    // window keeps the proof fresh without paying a full content re-hash for every build and probe. Concurrent
+    // controls of one task share the in-flight audit instead of re-hashing the same volume in parallel.
+    if (!options.calibrationOnly) {
+      await auditDependencySet({ session, runner, guard: identityGuard, images, set: auditors, taskID })
+      return
+    }
+    const cached = taskAuditCache.get(taskID)
+    if (cached && Date.now() - cached.at < 15 * 60 * 1000) return cached.promise
+    const promise = auditDependencySet({ session, runner, guard: identityGuard, images, set: auditors, taskID })
+      .then(() => {
+        taskAuditCache.set(taskID, { at: Date.now(), promise: Promise.resolve() })
+      })
+      .catch((cause) => {
+        taskAuditCache.delete(taskID)
+        throw cause
+      })
+    taskAuditCache.set(taskID, { at: Date.now(), promise })
+    return promise
+  }
   function backend(profiles: Profiles, evidenceRoot = manifest.roots.evidence) {
     return makeLinuxBackend({
       session,
@@ -421,10 +450,7 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
       images,
       profiles,
       evidenceRoot,
-      async taskGuard(taskID) {
-        if (!auditors) throw new TypeError("TASK24_DEPENDENCY_AUDITORS_REQUIRED")
-        await auditDependencySet({ session, runner, guard: identityGuard, images, set: auditors, taskID })
-      },
+      taskGuard: auditTaskDependencies,
     })
   }
   async function captureReference(
@@ -433,7 +459,11 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
     rawIdentity: EvaluationIdentityV2,
     outputs: readonly string[],
   ) {
-    await guard()
+    if (options.calibrationOnly) {
+      await identityGuard()
+      const image = images.tasks.find((task) => task.taskID === profile.taskID)
+      if (image?.volumes.length) await auditTaskDependencies(image.taskID)
+    } else await guard()
     const work = await fs.mkdtemp(path.join(manifest.roots.temp, "reference-"))
     const raw = backend([{ profile, outputs }]),
       web = browser(manifest.roots.evidence, sourceRoot)
@@ -450,30 +480,57 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
       const common = { identity, candidate: snapshot, profileSha256: identity.profileSha256, timeoutMs: 30000 }
       const built = await raw.build({ ...common, timeoutMs: 300000, commands: profile.checks, dependency: dep.value })
       if (built.payload.kind !== "ok" || !profile.preview) throw new TypeError("TASK24_RUNTIME_REFERENCE_BUILD")
-      const source = await raw.previewSource({ ...common, build: built.payload.build, preview: profile.preview })
+      const preview = profile.preview
+      const source = await raw.previewSource({ ...common, build: built.payload.build, preview })
+      // The preview relay asks its guard before every asset request. A reference capture issues several
+      // requests back to back, while the guard re-inspects the WSL host and dependency auditors each time;
+      // one slow inspection used to exceed Playwright's route timeout. Keep one recent result for the
+      // lifetime of this short-lived preview instead of repeating the same expensive check per asset.
+      // captureReference already validated the host just before building. The preview relay
+      // re-checks on every asset request; keep that check for the whole short-lived preview
+      // instead of repeating it after 60s while viewport captures are still running.
+      let guardAt = Date.now(),
+        guardPending: Promise<void> | undefined
+      const previewGuard = async () => {
+        if (Date.now() - guardAt < 15 * 60_000) return
+        guardPending ??= (options.calibrationOnly ? identityGuard() : guard())
+          .then(() => {
+            guardAt = Date.now()
+          })
+          .finally(() => {
+            guardPending = undefined
+          })
+        await guardPending
+      }
       const lease = await startLinuxPreview({
         source,
         policy: { methods: ["GET", "HEAD"], paths: source.files.map((f) => "/" + f.path) },
-        guard,
+        guard: previewGuard,
         signal: new AbortController().signal,
       })
       try {
         web.register(identity, lease)
+        const captureViewport = async (viewportID: "mobile" | "tablet" | "desktop") => {
+          const request = {
+            runID: identity.runID,
+            previewID: lease.previewID,
+            previewURL: lease.url + preview.entry,
+            viewportID,
+            readySelector: "body",
+            interactionScriptID: preview.interaction,
+            timeoutMs: 30000,
+            signal: new AbortController().signal,
+          }
+          try {
+            return await web.runtime.capture(request)
+          } catch (cause) {
+            if (!(cause instanceof TypeError) || cause.message !== "TASK24_BROWSER_V2_TRANSPORT") throw cause
+            return web.runtime.capture({ ...request, signal: new AbortController().signal })
+          }
+        }
         const captures = []
         for (const viewportID of ["mobile", "tablet", "desktop"] as const)
-          captures.push({
-            identity,
-            capture: await web.runtime.capture({
-              runID: identity.runID,
-              previewID: lease.previewID,
-              previewURL: lease.url + profile.preview.entry,
-              viewportID,
-              readySelector: "body",
-              interactionScriptID: profile.preview.interaction,
-              timeoutMs: 30000,
-              signal: new AbortController().signal,
-            }),
-          })
+          captures.push({ identity, capture: await captureViewport(viewportID) })
         return captures
       } finally {
         await lease.stop()
@@ -745,21 +802,43 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
     }
     return results
   }
-  async function runCorpus(authority: LinuxAuthority) {
-    const corpus = await finalizeLinuxCorpus({
-      ...config.corpus,
-      manifest,
-      authority,
-      images: original,
-      referenceCapturer: {
-        async capture(v) {
-          const ref = config.corpus.references[v.taskID],
-            plan = config.corpus.executionPlans[v.taskID]
-          if (!ref || !plan) throw new TypeError("TASK24_RUNTIME_REFERENCE_MAPPING")
-          return captureReference(v.profile, ref.sourceRoot, ref.identity, plan.outputs)
+  async function runCorpus(
+    authority: LinuxAuthority,
+    concurrency?: number,
+    corpusOverride?: FinalizedCorpus,
+    only?:
+      | Readonly<{ taskID: string; kind: string; repeat: 0 | 1 }>
+      | readonly Readonly<{ taskID: string; kind: string; repeat: 0 | 1 }>[],
+  ) {
+    const corpus =
+      corpusOverride ??
+      (await finalizeLinuxCorpus({
+        ...config.corpus,
+        manifest,
+        authority,
+        images: original,
+        referenceCapturer: {
+          async capture(v) {
+            const ref = config.corpus.references[v.taskID],
+              plan = config.corpus.executionPlans[v.taskID]
+            if (!ref || !plan) throw new TypeError("TASK24_RUNTIME_REFERENCE_MAPPING")
+            try {
+              return await captureReference(v.profile, ref.sourceRoot, ref.identity, plan.outputs)
+            } catch (cause) {
+              if (
+                !(cause instanceof Error) ||
+                !/^TASK24_BROWSER_(?:NATIVE|CLEANUP_UNCERTAIN|DISPATCH_CLEANUP_UNCERTAIN)(?::|$)/.test(
+                  cause.message,
+                )
+              )
+                throw cause
+              // A Chromium child can remain briefly unqueryable while the native helper tears down its job.
+              // The reference source is immutable, so a fresh browser scope is safe to capture again.
+              return captureReference(v.profile, ref.sourceRoot, ref.identity, plan.outputs)
+            }
+          },
         },
-      },
-    })
+      }))
     const report = await calibrateLinuxCorpus({
       corpus,
       authority,
@@ -790,6 +869,8 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
         },
       },
       signal: new AbortController().signal,
+      concurrency,
+      only,
     })
     return { corpus, report }
   }
@@ -863,17 +944,34 @@ export async function openLinuxRuntime(session: EngineSession, options: { calibr
       await publishImmutable(path.join(manifest.roots.evidence, "linux-readiness-input.json"), canonicalJson(index))
       return report
     },
-    async calibrateOnly() {
+    async calibrateOnly(
+      input: Readonly<{
+        concurrency?: number
+        corpusPath?: string
+        only?:
+          | Readonly<{ taskID: string; kind: string; repeat: 0 | 1 }>
+          | readonly Readonly<{ taskID: string; kind: string; repeat: 0 | 1 }>[]
+        authority?: LinuxAuthority
+      }> = {},
+    ) {
       await ensureIsolation()
-      const authority = await issueCalibrationAuthority({
-        manifest,
-        evidenceRoot: manifest.roots.evidence,
-      })
-      const result = await runCorpus(authority)
+      const concurrency = Math.max(1, Math.min(32, Math.floor(input.concurrency ?? 6))),
+        authority =
+          input.authority ??
+          (await issueCalibrationAuthority({
+            manifest,
+            evidenceRoot: manifest.roots.evidence,
+          })),
+        corpus = input.corpusPath
+          ? (JSON.parse(await fs.readFile(input.corpusPath, "utf8")) as FinalizedCorpus)
+          : undefined
+      const result = await runCorpus(authority, concurrency, corpus, input.only)
       return {
         ...result.report,
         readinessEligible: false as const,
         calibrationAuthoritySha256: authority.engineReceiptSha256,
+        dependencyAuditPolicy: "per-task-cache-15-minutes" as const,
+        evaluationConcurrency: concurrency,
       }
     },
   }

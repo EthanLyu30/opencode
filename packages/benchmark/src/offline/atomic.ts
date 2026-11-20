@@ -21,15 +21,10 @@ export async function publishImmutable(file: string, body: string | Uint8Array):
   if (path.basename(file) === "evaluation.json") await task24CrashCheckpoint("during_evaluation_publication")
   if (path.basename(file) === "report.json") await task24CrashCheckpoint("during_report_write")
   try {
-    await fs.link(staging, file)
-    await fs.rm(staging, { force: true })
-  } catch (cause) {
-    if (await exists(file)) {
-      await verifyExisting(file, bytes)
-      await fs.rm(staging, { force: true })
-      return
-    }
-    throw cause
+    await linkWithRetry(staging, file)
+    await verifyExisting(file, bytes)
+  } finally {
+    await discardStaging(staging)
   }
 }
 
@@ -46,30 +41,25 @@ export async function recoverAtomicDirectory(root: string): Promise<Readonly<{ p
     const staging = path.join(resolvedRoot, entry.name)
     const target = path.join(resolvedRoot, match.groups.target!)
     if (path.dirname(target) !== resolvedRoot) throw new TypeError("TASK24_ATOMIC_STAGING_UNSAFE")
-    const bytes = await fs.readFile(staging)
+    const bytes = await readPublished(staging)
     if (sha256Bytes(bytes) !== match.groups.sha) {
       await fs.rm(staging, { force: true })
       discarded++
       continue
     }
     if (await exists(target)) {
-      const targetBytes = await fs.readFile(target)
+      const targetBytes = await readPublished(target)
       if (!targetBytes.equals(bytes)) throw new TypeError("TASK24_ATOMIC_TARGET_CONFLICT")
-      await fs.rm(staging, { force: true })
+      await discardStaging(staging)
       discarded++
       continue
     }
-    try {
-      await fs.link(staging, target)
-      await fs.rm(staging, { force: true })
-      promoted++
-    } catch (cause) {
-      if (!(await exists(target))) throw cause
-      const targetBytes = await fs.readFile(target)
-      if (!targetBytes.equals(bytes)) throw new TypeError("TASK24_ATOMIC_TARGET_CONFLICT", { cause })
-      await fs.rm(staging, { force: true })
-      discarded++
-    }
+    const created = await linkWithRetry(staging, target)
+    const targetBytes = await readPublished(target)
+    if (!targetBytes.equals(bytes)) throw new TypeError("TASK24_ATOMIC_TARGET_CONFLICT")
+    await discardStaging(staging)
+    if (created) promoted++
+    else discarded++
   }
   return Object.freeze({ promoted, discarded })
 }
@@ -91,16 +81,72 @@ export async function recoverAtomicTree(root: string): Promise<Readonly<{ promot
 }
 
 async function verifyExisting(file: string, expected: Buffer): Promise<void> {
-  const actual = await fs.readFile(file)
+  const actual = await readPublished(file)
   if (!actual.equals(expected)) throw new TypeError("TASK24_ATOMIC_TARGET_CONFLICT")
 }
 
 async function exists(file: string): Promise<boolean> {
-  try {
-    await fs.access(file)
-    return true
-  } catch (cause) {
-    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return false
-    throw cause
+  const deadline = Date.now() + retryWindowMs
+  for (;;) {
+    try {
+      await fs.access(file)
+      return true
+    } catch (cause) {
+      if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return false
+      if (!retryableLink(cause) || Date.now() >= deadline) throw cause
+      await pauseForRetry()
+    }
   }
+}
+
+const retryableLinkCodes = new Set(["EBUSY", "EPERM", "EACCES", "EEXIST"])
+const retryWindowMs = 10_000
+const linkRetryWindowMs = 120_000
+
+async function linkWithRetry(source: string, target: string): Promise<boolean> {
+  const deadline = Date.now() + linkRetryWindowMs
+  for (;;) {
+    try {
+      await fs.link(source, target)
+      return true
+    } catch (cause) {
+      if (await exists(target)) return false
+      if (!retryableLink(cause) || Date.now() >= deadline) throw cause
+      await pauseForRetry()
+    }
+  }
+}
+
+async function readPublished(file: string): Promise<Buffer> {
+  const deadline = Date.now() + retryWindowMs
+  for (;;) {
+    try {
+      return await fs.readFile(file)
+    } catch (cause) {
+      if (!retryableLink(cause) || Date.now() >= deadline) throw cause
+      await pauseForRetry()
+    }
+  }
+}
+
+async function discardStaging(file: string): Promise<void> {
+  const deadline = Date.now() + 2_000
+  for (;;) {
+    try {
+      await fs.rm(file, { force: true })
+      return
+    } catch (cause) {
+      if (!retryableLink(cause) || Date.now() >= deadline) return
+      await pauseForRetry()
+    }
+  }
+}
+
+function retryableLink(cause: unknown): boolean {
+  if (!(cause instanceof Error) || !("code" in cause)) return false
+  return typeof cause.code === "string" && retryableLinkCodes.has(cause.code)
+}
+
+async function pauseForRetry(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 25 + Math.floor(Math.random() * 75)))
 }

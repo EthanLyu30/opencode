@@ -115,11 +115,18 @@ export function browserBuildSha256(input: Omit<BrowserReleaseManifest, "buildSha
   return createHash("sha256").update(canonicalJson(input)).digest("hex")
 }
 
-export function loadBrowserRelease(releaseRoot: string, options: { readOnly?: true } = {}): BrowserRelease {
+const releaseCache = new Map<string, { release: BrowserRelease; verifiedAt: { at: number } }>()
+export function loadBrowserRelease(
+  releaseRoot: string,
+  options: { readOnly?: true; verifyIntervalMs?: number } = {},
+): BrowserRelease {
+  const verifyIntervalMs = options.verifyIntervalMs ?? 0
   const layout = options.readOnly ? Task24Root.make(Task24Root.fixed) : Task24Root.ensure()
   const browserRoot = path.join(layout.toolchain, "browser")
   const root = exactDirectory(browserRoot, releaseRoot, "TASK24_BROWSER_RELEASE_ROOT_INVALID")
   if (!/^[a-f0-9]{64}$/.test(path.basename(root))) throw new TypeError("TASK24_BROWSER_RELEASE_ROOT_INVALID")
+  const cached = verifyIntervalMs > 0 ? releaseCache.get(root) : undefined
+  if (cached) return cached.release
   const manifestPath = path.join(root, manifestName)
   const manifestBytes = readBoundedFile(manifestPath, maxManifestBytes, "TASK24_BROWSER_MANIFEST_INVALID")
   const raw = parseManifest(manifestBytes)
@@ -144,12 +151,14 @@ export function loadBrowserRelease(releaseRoot: string, options: { readOnly?: tr
   const identities = new Map(
     [manifestName, ...actual.map((entry) => entry.path)].map((relative) => [relative, fileIdentity(root, relative)]),
   )
+  const verifiedAt = { at: Date.now() }
   const verify = () => {
+    if (verifyIntervalMs > 0 && Date.now() - verifiedAt.at < verifyIntervalMs) return
     for (const [relative, identity] of identities) {
       if (fileIdentity(root, relative) !== identity) throw new TypeError("TASK24_BROWSER_RELEASE_IDENTITY_CHANGED")
     }
+    verifiedAt.at = Date.now()
   }
-  verify()
   const release: BrowserRelease = {
     root,
     nodeExecutable: path.join(root, ...raw.nodeFile.split("/")),
@@ -158,7 +167,9 @@ export function loadBrowserRelease(releaseRoot: string, options: { readOnly?: tr
     buildSha256,
     verify,
   }
-  return Object.freeze(release)
+  const frozen = Object.freeze(release)
+  if (verifyIntervalMs > 0) releaseCache.set(root, { release: frozen, verifiedAt })
+  return frozen
 }
 
 export function makeBrowserRuntime(input: {

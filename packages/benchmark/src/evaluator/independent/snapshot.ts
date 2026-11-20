@@ -102,30 +102,36 @@ export async function captureCandidate(input: {
 export async function verifyCandidate(snapshot: CandidateSnapshot): Promise<void> {
   const profile = snapshots.get(snapshot)
   if (!profile) throw new TypeError("TASK24_UNVALIDATED_SNAPSHOT")
-  try {
-    const entries = await ordinaryFiles(snapshot.sourceRoot)
-    validateCandidateEntries(entries)
-    if (
-      sha256Text(canonicalJson(entries)) !== snapshot.candidateSha256 ||
-      configHash(profile, entries) !== snapshot.configSha256
-    )
-      throw Error("drift")
-    await directRoot(snapshot.workRoot)
-    if (canonicalJson((await fs.readdir(snapshot.workRoot)).sort()) !== canonicalJson(["candidate.json", "source"]))
-      throw Error("drift")
-    const copied = await ordinaryFiles(path.join(snapshot.workRoot, "source"))
-    if (canonicalJson(copied) !== canonicalJson(entries)) throw Error("drift")
-    const stat = await fs.lstat(snapshot.archiveFile)
-    if (
-      !stat.isFile() ||
-      stat.isSymbolicLink() ||
-      stat.nlink !== 1 ||
-      stat.size > 96 * 1024 * 1024 ||
-      (await fs.realpath(snapshot.archiveFile)).toLowerCase() !== snapshot.archiveFile.toLowerCase()
-    )
-      throw Error("drift")
-    if (sha256Bytes(await fs.readFile(snapshot.archiveFile)) !== snapshot.archiveSha256) throw Error("drift")
-  } catch {
-    throw new TypeError("TASK24_CANDIDATE_DRIFT")
+  // Antivirus and indexers can briefly lock a freshly written artifact on Windows; a locked read
+  // looks identical to real drift, so retry before discarding an otherwise valid evaluation.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const entries = await ordinaryFiles(snapshot.sourceRoot)
+      validateCandidateEntries(entries)
+      if (
+        sha256Text(canonicalJson(entries)) !== snapshot.candidateSha256 ||
+        configHash(profile, entries) !== snapshot.configSha256
+      )
+        throw Error("drift")
+      await directRoot(snapshot.workRoot)
+      if (canonicalJson((await fs.readdir(snapshot.workRoot)).sort()) !== canonicalJson(["candidate.json", "source"]))
+        throw Error("drift")
+      const copied = await ordinaryFiles(path.join(snapshot.workRoot, "source"))
+      if (canonicalJson(copied) !== canonicalJson(entries)) throw Error("drift")
+      const stat = await fs.lstat(snapshot.archiveFile)
+      if (
+        !stat.isFile() ||
+        stat.isSymbolicLink() ||
+        stat.nlink !== 1 ||
+        stat.size > 96 * 1024 * 1024 ||
+        (await fs.realpath(snapshot.archiveFile)).toLowerCase() !== snapshot.archiveFile.toLowerCase()
+      )
+        throw Error("drift")
+      if (sha256Bytes(await fs.readFile(snapshot.archiveFile)) !== snapshot.archiveSha256) throw Error("drift")
+      return
+    } catch {
+      if (attempt === 9) throw new TypeError("TASK24_CANDIDATE_DRIFT")
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
   }
 }

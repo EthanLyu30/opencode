@@ -150,9 +150,12 @@ export function sessionState(session: EngineSession) {
   return state
 }
 export async function revalidateSession(session: EngineSession) {
-  const state = sessionState(session),
-    current = await inspectLinuxHost(state.inspection)
-  if (current.missing.length || current.contextFingerprint !== state.inventory.contextFingerprint)
-    throw new TypeError("TASK24_LINUX_SESSION_STALE")
-  return state
+  const state = sessionState(session)
+  for (let attempt = 0; ; attempt++) {
+    const current = await inspectLinuxHost(state.inspection).catch(() => null)
+    if (current && !current.missing.length && current.contextFingerprint === state.inventory.contextFingerprint)
+      return state
+    if (attempt >= 4) throw new TypeError("TASK24_LINUX_SESSION_STALE")
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
 }

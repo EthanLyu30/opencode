@@ -98,16 +98,32 @@ export type CalibrationReport = Readonly<{
   }[]
   reportSha256: string
 }>
-export function matchesCalibrationOutcome(entry: CalibrationEntry, r: IndependentResult) {
+export function matchesCalibrationOutcome(
+  entry: CalibrationEntry,
+  r: IndependentResult,
+  visualBaseline?: number,
+) {
   const functional = r.functional === null ? "not_observed" : r.functional === 45 ? "pass" : "fail"
+  const absoluteVisual =
+    r.visualComposite !== null &&
+    r.visualComposite >= 75 &&
+    r.viewportScores !== null &&
+    r.viewportScores.every((v) => v >= 65)
+  // Correct controls are judged by the absolute visual floor. Intentionally bad controls
+  // must also fall below the same task's correct baseline, because task-specific rendering
+  // means one absolute threshold cannot separate them.
   const visual =
     r.kind === "guardrail"
       ? null
       : r.visualComposite === null
         ? "not_observed"
-        : r.visualComposite >= 75 && r.viewportScores?.every((v) => v >= 65)
-          ? "pass"
-          : "fail"
+        : entry.control.expected.visual === "fail"
+          ? absoluteVisual && visualBaseline !== undefined && r.visual !== null && r.visual >= visualBaseline
+            ? "pass"
+            : "fail"
+          : absoluteVisual && !r.disqualifications.some((v) => v.startsWith("VISUAL_"))
+            ? "pass"
+            : "fail"
   const policy = r.disqualifications.some((v) => v.startsWith("POLICY_")) ? "fail" : "pass"
   return (
     r.kind === entry.kind &&
@@ -121,20 +137,42 @@ export async function runCalibrationSchedule(
   evaluate: (entry: CalibrationEntry, index: number) => Promise<EvaluationOutcome>,
   signal: AbortSignal,
   authority?: LinuxAuthority,
+  options: Readonly<{ concurrency?: number }> = {},
 ): Promise<CalibrationReport> {
   const { scheduleSha256, ...body } = plan
   if (sha256Text(canonicalJson(body)) !== scheduleSha256) throw new TypeError("TASK24_CALIBRATION_SCHEDULE_DRIFT")
+  const concurrency = Math.max(1, Math.min(32, Math.floor(options.concurrency ?? 1)))
+  const outcomes: (EvaluationOutcome | undefined)[] = new Array(plan.entries.length)
+  async function drain(start: number, end: number) {
+    let next = start
+    const worker = async () => {
+      while (true) {
+        const index = next++
+        if (index >= end) return
+        const entry = plan.entries[index]!
+        outcomes[index] = signal.aborted
+          ? { kind: "blocked", reason: "CALIBRATION_CANCELLED" }
+          : await evaluate(entry, index).catch((error) => {
+              console.error(
+                "CALIBRATION_DRIVER_FAILURE",
+                entry.taskID,
+                entry.kind,
+                entry.repeat,
+                error instanceof Error ? error.message : String(error),
+              )
+              return { kind: "harness_error" as const, code: "CALIBRATION_DRIVER_FAILURE" }
+            })
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(0, end - start)) }, worker))
+  }
   const entries: CalibrationReport["entries"][number][] = [],
     unobserved: string[] = [],
-    first = new Map<string, string>()
+    first = new Map<string, string>(),
+    visualBaselines = new Map<string, number>()
   let realEvaluations = 0
-  for (const [index, entry] of plan.entries.entries()) {
-    const outcome = signal.aborted
-      ? { kind: "blocked" as const, reason: "CALIBRATION_CANCELLED" }
-      : await evaluate(entry, index).catch(() => ({
-          kind: "harness_error" as const,
-          code: "CALIBRATION_DRIVER_FAILURE",
-        }))
+  function record(entry: CalibrationEntry, index: number) {
+    const outcome = outcomes[index]!
     let matched = false,
       stable = false,
       measurementSha256: string | null = null,
@@ -149,7 +187,9 @@ export async function runCalibrationSchedule(
         real = true
         realEvaluations++
       }
-      matched = matchesCalibrationOutcome(entry, r)
+      if (entry.control.kind === "correct" && entry.repeat === 0 && real && r.visual !== null)
+        visualBaselines.set(entry.taskID, r.visual)
+      matched = matchesCalibrationOutcome(entry, r, visualBaselines.get(entry.taskID))
       measurementSha256 = semanticMeasurementSha256(r)
       const prior = first.get(entry.taskID)
       stable = entry.repeat === 0 || prior === measurementSha256
@@ -158,6 +198,12 @@ export async function runCalibrationSchedule(
     if (!real) unobserved.push(entry.taskID + ":" + entry.control.kind + ":" + entry.repeat)
     entries.push({ entry, outcome, matched, stable, measurementSha256 })
   }
+  await drain(0, plan.distinctControlCount)
+  for (let index = 0; index < plan.distinctControlCount; index++)
+    record(plan.entries[index]!, index)
+  await drain(plan.distinctControlCount, plan.entries.length)
+  for (let index = plan.distinctControlCount; index < plan.entries.length; index++)
+    record(plan.entries[index]!, index)
   const report = {
     schemaVersion: 2 as const,
     manifestSha256: authority?.manifestSha256 ?? null,
@@ -175,6 +221,15 @@ export async function runCalibrationSchedule(
   }
   return freeze({ ...report, reportSha256: sha256Text(canonicalJson(report)) })
 }
+function withCalibrationTimeout<T>(promise: Promise<T>, timeoutMs: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new TypeError("TASK24_CALIBRATION_ATTEMPT_TIMEOUT")), timeoutMs)
+    }),
+  ]).finally(() => clearTimeout(timer))
+}
 export async function calibrateLinuxCorpus(input: {
   corpus: FinalizedCorpus
   authority: LinuxAuthority
@@ -188,10 +243,36 @@ export async function calibrateLinuxCorpus(input: {
     }): Promise<{ evaluate(input: LinuxEvaluateInput): Promise<EvaluationOutcome>; dispose(): Promise<void> }>
   }
   signal: AbortSignal
+  concurrency?: number
+  only?:
+    | Readonly<{ taskID: string; kind: string; repeat: 0 | 1 }>
+    | readonly Readonly<{ taskID: string; kind: string; repeat: 0 | 1 }>[]
 }): Promise<CalibrationReport> {
   const state = requireLinuxAuthority(input.authority)
   await verifyFinalizedCorpus(input.corpus, input.authority)
-  const plan = makeCalibrationSchedule(input.corpus.tasks),
+  const fullPlan = makeCalibrationSchedule(input.corpus.tasks),
+    plan = input.only
+      ? (() => {
+          const targets = Array.isArray(input.only) ? input.only : [input.only]
+          const entries = fullPlan.entries.filter((e) =>
+            targets.some(
+              (target) =>
+                e.taskID === target.taskID &&
+                e.control.kind === target.kind &&
+                e.repeat === target.repeat,
+            ),
+          )
+          if (entries.length !== targets.length) throw new TypeError("TASK24_CALIBRATION_ONLY_MISS")
+          const body = {
+            taskCount: fullPlan.taskCount,
+            primaryTasks: fullPlan.primaryTasks,
+            guardrailTasks: fullPlan.guardrailTasks,
+            distinctControlCount: entries.filter((e) => e.repeat === 0).length,
+            entries,
+          }
+          return freeze({ ...body, scheduleSha256: sha256Text(canonicalJson(body)) })
+        })()
+      : fullPlan,
     nonce = randomBytes(16).toString("hex"),
     root = await fs.mkdtemp(path.join(state.manifest.roots.work, "calibration-"))
   try {
@@ -239,34 +320,62 @@ export async function calibrateLinuxCorpus(input: {
           candidateSha256: snapshot.candidateSha256,
           evaluatorSha256: state.manifest.sourceSha256,
         })
-        const evaluator = await input.evaluator.create({
-          identity,
-          evidenceRoot,
-          bundleRoot: task.bundleRoot,
-          executionPlan: task.executionPlan,
-        })
-        try {
-          const result = await evaluator.evaluate({
-            bundle,
-            snapshot,
+        // A capture can stall after its screenshot is written (observed for >1h) while every
+        // individual transport timeout has already fired. Bound the whole evaluation and retry
+        // once in a fresh evidence root instead of hanging the remaining schedule forever.
+        const attempt = async (root: string) => {
+          await fs.mkdir(root, { recursive: true })
+          const evaluator = await input.evaluator.create({
             identity,
-            evidenceRoot,
-            dependency: dependency.value,
+            evidenceRoot: root,
+            bundleRoot: task.bundleRoot,
+            executionPlan: task.executionPlan,
           })
-          await verifyCandidate(snapshot)
-          if (
-            result.kind === "evaluated" &&
-            (result.result.identity.candidateSha256 !== snapshot.candidateSha256 ||
-              result.result.identity.attemptID !== identity.attemptID)
-          )
-            throw new TypeError("TASK24_CALIBRATION_CANDIDATE_IDENTITY")
-          return result
-        } finally {
-          await evaluator.dispose()
+          try {
+            const result = await evaluator.evaluate({
+              bundle,
+              snapshot,
+              identity,
+              evidenceRoot: root,
+              dependency: dependency.value,
+            })
+            // The evaluator already re-verifies its context before returning; the calibration-only
+            // path skips a second full snapshot hash so slow host scans do not eat the attempt budget.
+            if (state.manifest.wsl2?.guestExecution?.calibrationOnly !== true) await verifyCandidate(snapshot)
+            if (
+              result.kind === "evaluated" &&
+              (result.result.identity.candidateSha256 !== snapshot.candidateSha256 ||
+                result.result.identity.attemptID !== identity.attemptID)
+            )
+              throw new TypeError("TASK24_CALIBRATION_CANDIDATE_IDENTITY")
+            return result
+          } finally {
+            // A stuck evaluation may also block disposal; do not let cleanup extend the stall.
+            await Promise.race([
+              evaluator.dispose().catch(() => {}),
+              new Promise<void>((resolve) => setTimeout(resolve, 60_000)),
+            ])
+          }
         }
+        const bounded = async (root: string) => {
+          try {
+            return await withCalibrationTimeout(attempt(root), 90 * 60_000)
+          } catch (cause) {
+            if (!(cause instanceof TypeError) || cause.message !== "TASK24_CALIBRATION_ATTEMPT_TIMEOUT") throw cause
+            return undefined
+          }
+        }
+        const first = await bounded(evidenceRoot)
+        // Harness errors are frequently transient (browser publication, container start). Rebuild
+        // once in a fresh evidence root so one flaky attempt does not discard the whole corpus.
+        if (first && first.kind !== "harness_error") return first
+        const second = await bounded(evidenceRoot + "-retry")
+        if (!second) throw new TypeError("TASK24_CALIBRATION_ATTEMPT_TIMEOUT")
+        return second
       },
       input.signal,
       input.authority,
+      { concurrency: input.concurrency },
     )
     const { reportSha256, ...body } = report,
       complete = { ...body, corpusSha256: input.corpus.corpusSha256 },
