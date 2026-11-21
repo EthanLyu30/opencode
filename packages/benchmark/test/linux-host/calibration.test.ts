@@ -2,6 +2,7 @@ import { test, expect } from "bun:test"
 import {
   makeCalibrationSchedule,
   runCalibrationSchedule,
+  sameCalibrationMeasurement,
   semanticMeasurementSha256,
   matchesCalibrationOutcome,
 } from "../../src/sandbox/calibration"
@@ -21,6 +22,11 @@ test("a measured functional failure preserves its measurement and leaves visual 
   expect(() => unmeasuredLinuxFunctional({ points: 45, mandatoryPassed: true })).toThrow()
 })
 import { linuxPolicyAuditSource } from "../../src/sandbox/worker"
+test("repeat measurements tolerate rasterization jitter but not score changes", () => {
+  const result = scoreIndependentEvaluation(evaluationFactsFixture())
+  expect(sameCalibrationMeasurement(result, { ...result, visual: result.visual! + 0.000001 })).toBe(true)
+  expect(sameCalibrationMeasurement(result, { ...result, functional: result.functional! - 1 })).toBe(false)
+})
 test("calibration checks measured values against original labels instead of trusting matched flags", () => {
   const result = scoreIndependentEvaluation(evaluationFactsFixture()),
     entry = { ...makeCalibrationSchedule(tasks).entries[0]!, kind: "primary" as const }

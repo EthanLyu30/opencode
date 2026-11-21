@@ -66,16 +66,35 @@ export function makeCalibrationSchedule(
   const body = { taskCount: 16, primaryTasks: 12, guardrailTasks: 4, distinctControlCount, entries }
   return freeze({ ...body, scheduleSha256: sha256Text(canonicalJson(body)) })
 }
-export function semanticMeasurementSha256(result: IndependentResult) {
-  return sha256Text(
-    canonicalJson(
-      Object.fromEntries(
-        Object.entries(result).filter(
-          ([k]) => !["identity", "semanticSha256", "evidence", "evidenceHashes", "linuxProof"].includes(k),
-        ),
-      ),
+function semanticMeasurementBody(result: IndependentResult) {
+  return Object.fromEntries(
+    Object.entries(result).filter(
+      ([k]) => !["identity", "semanticSha256", "evidence", "evidenceHashes", "linuxProof"].includes(k),
     ),
   )
+}
+export function semanticMeasurementSha256(result: IndependentResult) {
+  return sha256Text(canonicalJson(semanticMeasurementBody(result)))
+}
+/**
+ * Browser rasterization can move a score by a few millionths between runs (26.999999 vs 27). Compare
+ * repeat measurements at 1e-4 resolution so that jitter does not count as nondeterminism, while a
+ * meaningful score change still fails the repeat check.
+ */
+export function sameCalibrationMeasurement(a: IndependentResult, b: IndependentResult) {
+  return (
+    canonicalJson(stableMeasurementNumbers(semanticMeasurementBody(a))) ===
+    canonicalJson(stableMeasurementNumbers(semanticMeasurementBody(b)))
+  )
+}
+function stableMeasurementNumbers(value: unknown): unknown {
+  if (typeof value === "number") return Math.round(value * 10_000) / 10_000
+  if (Array.isArray(value)) return value.map(stableMeasurementNumbers)
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, stableMeasurementNumbers(v)]),
+    )
+  return value
 }
 export type CalibrationReport = Readonly<{
   schemaVersion: 2
@@ -168,7 +187,7 @@ export async function runCalibrationSchedule(
   }
   const entries: CalibrationReport["entries"][number][] = [],
     unobserved: string[] = [],
-    first = new Map<string, string>(),
+    first = new Map<string, IndependentResult>(),
     visualBaselines = new Map<string, number>()
   let realEvaluations = 0
   function record(entry: CalibrationEntry, index: number) {
@@ -192,8 +211,8 @@ export async function runCalibrationSchedule(
       matched = matchesCalibrationOutcome(entry, r, visualBaselines.get(entry.taskID))
       measurementSha256 = semanticMeasurementSha256(r)
       const prior = first.get(entry.taskID)
-      stable = entry.repeat === 0 || prior === measurementSha256
-      if (entry.control.kind === "correct" && entry.repeat === 0) first.set(entry.taskID, measurementSha256)
+      stable = entry.repeat === 0 || (prior !== undefined && sameCalibrationMeasurement(prior, r))
+      if (entry.control.kind === "correct" && entry.repeat === 0) first.set(entry.taskID, r)
     }
     if (!real) unobserved.push(entry.taskID + ":" + entry.control.kind + ":" + entry.repeat)
     entries.push({ entry, outcome, matched, stable, measurementSha256 })

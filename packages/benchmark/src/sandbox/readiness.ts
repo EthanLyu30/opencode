@@ -3,11 +3,13 @@ import path from "node:path"
 import { Schema } from "effect"
 import { canonicalJson } from "../campaign/canonical"
 import { sha256Text } from "../hash"
+import type { IndependentResult } from "../evaluator/independent/result"
 import { Sha256 } from "../schema"
 import { directRoot } from "../corpus/evaluation-bundle"
 import { verifyFinalizedCorpus, type FinalizedCorpus } from "../corpus/evaluation-finalize"
 import {
   makeCalibrationSchedule,
+  sameCalibrationMeasurement,
   semanticMeasurementSha256,
   matchesCalibrationOutcome,
   type CalibrationReport,
@@ -130,7 +132,16 @@ export async function verifyLinuxReadiness(input: {
       report.entries.length !== 120
     )
       throw new TypeError("TASK24_READINESS_CALIBRATION_INCOMPLETE")
-    const first = new Map<string, string>()
+    const first = new Map<string, IndependentResult>(),
+      visualBaselines = new Map<string, number>()
+    for (const e of report.entries)
+      if (
+        e.entry.control.kind === "correct" &&
+        e.entry.repeat === 0 &&
+        e.outcome.kind === "evaluated" &&
+        e.outcome.result.visual !== null
+      )
+        visualBaselines.set(e.entry.taskID, e.outcome.result.visual)
     const evidence: EvidenceReference[] = []
     for (const [i, e] of report.entries.entries()) {
       if (
@@ -142,16 +153,18 @@ export async function verifyLinuxReadiness(input: {
       )
         throw new TypeError("TASK24_READINESS_CALIBRATION_ROW")
       const r = e.outcome.result
-      if (!matchesCalibrationOutcome(e.entry, r)) throw new TypeError("TASK24_READINESS_CALIBRATION_MISMATCH")
+      if (!matchesCalibrationOutcome(e.entry, r, visualBaselines.get(e.entry.taskID)))
+        throw new TypeError("TASK24_READINESS_CALIBRATION_MISMATCH")
       verifyLinuxResultProof(r.linuxProof, authority, r.identity)
-      const measurement = semanticMeasurementSha256(r)
+      const measurement = semanticMeasurementSha256(r),
+        prior = first.get(e.entry.taskID)
       if (
         r.identity.taskID !== e.entry.taskID ||
         measurement !== e.measurementSha256 ||
-        (e.entry.repeat === 1 && first.get(e.entry.taskID) !== measurement)
+        (e.entry.repeat === 1 && (prior === undefined || !sameCalibrationMeasurement(prior, r)))
       )
         throw new TypeError("TASK24_READINESS_CALIBRATION_BINDING")
-      if (e.entry.control.kind === "correct" && e.entry.repeat === 0) first.set(e.entry.taskID, measurement)
+      if (e.entry.control.kind === "correct" && e.entry.repeat === 0) first.set(e.entry.taskID, r)
       for (const ref of r.evidence) {
         verifyEvidenceFile(r.linuxProof.evidenceRoot, ref)
         evidence.push({
