@@ -3,6 +3,8 @@
 日期：2026-11-16（Asia/Shanghai）
 范围：仅归档 A 臂 Windows 原生端到端阻塞与交接条件；不改变生产默认行为，不重试原生启动，不发布 readiness。
 
+> **更新（2026-11-21）**：Linux 16 题/120 次校准已在 calibration-only authority 下完成，120/120 real、120/120 matched、120/120 stable，`corpusEngineReady: true`，但 `readinessEligible: false`。证据见 `2026-11-21-task24b-linux-120-calibration.md` 和 `D:\OpenCode-Benchmark\Task24\reports\task24b-linux-calibration-20261121\`。A 臂仍为 `component-verified, native-blocked`；下面第 7 节记录的 4551 条件、禁止项和重开步骤不变。
+
 ## 1. 结论
 
 A 臂的 Windows 原生端到端链路在 `CreateProcessW` 处以 Win32 `4551` 被宿主应用控制策略拒绝，发生在任何模型 fixture 调用之前。组件级证据（隔离原语、生产命令桥、浏览器协议、静态预览、Git 有限传输、原生 ACL 有界读取）已分别验证，但不能替代完整 A 运行、16/120 校准或 Task 10 readiness。
@@ -79,13 +81,13 @@ A 臂的 Windows 原生端到端链路在 `CreateProcessW` 处以 Win32 `4551` �
 
 ## 7. 120 校准的当前外部条件
 
-Linux 真实 120 仍为 0/120。除宿主条件外，本次核查还发现**生产接线缺口**，不能把 120 归因于环境一项：
+Linux 真实 120 在本文写作时为 0/120（2026-11-21 更新：calibration-only 已补齐 120/120，见上）。除宿主条件外，本次核查还发现**生产接线缺口**，不能把 120 归因于环境一项；该缺口本身仍然存在：
 
 - `packages/benchmark/src/sandbox/dependencies.ts:420` 的 `finalizeHostManifest` 在整个仓库中没有任何调用点；唯一使用者是它自己。
 - 没有任何生产代码写出 `phase: "prepare"` 或 `phase: "accept"` 的 `HostManifest`。`command.ts` 的 `prepare` 分支只发布 `dependencies-<sha>.json` 后退出；进程内 `issuedImages` WeakSet 随进程消失，因此后续独立进程无法合法 `finalize`。
 - `inspect` 只返回 inventory，`plan-preparation` 只返回 plan；两者都不签发 prepare manifest。当前 `D:\OpenCode-Benchmark\Task24\reports`/`runs` 下也没有任何 accept manifest。
 - 因此 `accept`/`calibrate` 按现有 CLI 不可达；手工编造 manifest/approval 会绕过 `issuedImages` 与 `finalizeHostManifest` 的保证，不能用来宣称 120 或 readiness。
 
-宿主条件仍然存在：Docker 后端未运行（无 `dockerDesktopLinuxEngine` 管道、无 docker/vmmem/wsl 进程），`wsl --status`/`wsl -l -v` 在该受限会话返回 `Wsl/E_ACCESS_DENIED`；evidence/root 位于 `D:\OpenCode-Benchmark\Task24` 下，当前 DSH workspace-write 沙箱拒绝写入该树，full-access 审批在本会话两次超时未获应答。
+本文写作时的宿主条件（历史）：Docker 后端未运行（无 `dockerDesktopLinuxEngine` 管道、无 docker/vmmem/wsl 进程），`wsl --status`/`wsl -l -v` 在该受限会话返回 `Wsl/E_ACCESS_DENIED`；evidence/root 位于 `D:\OpenCode-Benchmark\Task24` 下，当前 DSH workspace-write 沙箱拒绝写入该树，full-access 审批在本会话两次超时未获应答。2026-11-21 更新：后续会话获得 full-access，Docker/WSL2 Linux guest 可用，上述宿主限制已不适用于该次 calibration-only 运行；但它们仍适用于本报告描述的受限原生 A 会话。
 
 要跑 120，必须先补齐“prepare manifest 签发 → 准备产物在同一可信进程内 finalize → accept manifest/approval 发布”的生产路径并测试，再解除宿主/沙箱限制；两者缺一不可。历史 `linux-real-acceptance-20261021-a83e/live-preflight.json` 只提供旧 request/inventory 形状参考，其 source/plan hash 已过期，不能直接复用。

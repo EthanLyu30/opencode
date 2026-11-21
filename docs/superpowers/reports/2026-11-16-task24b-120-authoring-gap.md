@@ -2,7 +2,9 @@
 
 Date: 2026-11-16
 Base: `7a97299c7` (fork/dev)
-Status: B-Prep2 **not complete**; real Linux calibration remains **0/120**; readiness is **false**; no receipt exists.
+Status at writing: B-Prep2 **not complete**; real Linux calibration was **0/120**; readiness is **false**; no receipt exists.
+
+> **Update 2026-11-21:** a calibration-only campaign has since evaluated all 120 required rows on Linux: 120/120 real, 120/120 matched, 120/120 stable, `corpusEngineReady: true` (see `2026-11-21-task24b-linux-120-calibration.md`). That campaign used an explicitly issued `calibration-only` authority with `readinessEligible: false`; it does **not** close the production authoring gap described below. The `prepare` → `finalizeHostManifest` producer chain is still missing, and no production `accept`/`calibrate` path or readiness receipt exists.
 
 ## What is already fixed
 
@@ -46,7 +48,7 @@ These are the smallest additions that make the existing acceptance code reachabl
 2. **Prepare manifest author** — `authorPrepareManifest({request, inventory, controllerInventory, artifacts, pending})` reuses `decodeHostManifest` and `requestOf`; `artifacts` are concrete files/JSON already observed on disk; `pending` entries are image recipes from the preparation plan. It refuses to emit when any concrete artifact is stale or any pending recipe is absent.
 3. **Prepare-mode seal** — after `prepareLinuxArtifacts` succeeds, the same process builds the binary and browser artifacts from the build records and browser release, calls `finalizeHostManifest`, re-reads the accept manifest, and publishes it immutably. This preserves the in-process `issuedImages` proof.
 4. **Runtime config author** — `authorRuntimeConfig` must bind the 16 catalog tasks to the five arm cases, profiles, corpus plans and references. This is the largest piece and needs the actual per-arm launch data; do not synthesize it from test fixtures.
-5. **Tests** — RED/GREEN at module level plus a full `prepare`-to-`accept` fixture path that uses only synthetic files and no Docker. Real 120 still requires the host conditions below.
+5. **Tests** — RED/GREEN at module level plus a full `prepare`-to-`accept` fixture path that uses only synthetic files and no Docker. Real 120 still requires the host conditions below. (2026-11-21: real 120 has been run under calibration-only; this does not remove the need for the production fixture path.)
 
 ## Host blockers (unchanged)
 
