@@ -108,6 +108,8 @@ raw report hash.
 - The run produced 120 evaluation directories, each with a controller, and zero
   `CALIBRATION_DRIVER_FAILURE`, `CALIBRATION_HARNESS_ERROR_RETRY`,
   `CALIBRATION_ATTEMPT_TIMEOUT`, `TASK24_BROWSER_*` or policy-retry entries.
+- All 704 evidence files referenced by the report resolve inside the archived
+  `evaluations/` tree and match their recorded SHA-256.
 
 ## 6. Evidence
 
@@ -116,7 +118,12 @@ Archived at:
 `D:\OpenCode-Benchmark\Task24\reports\task24b-linux-calibration-20261121\`
 
 - `README.md` — scope, result, derivation and boundary.
-- `evidence-index.json` — identity, counts, tolerance, artifact hashes.
+- `evidence-index.json` — identity, counts, tolerance, artifact hashes and
+  evaluation tree hash.
+- `evaluations/` — 120 per-evaluation directories (1,108 files) with controller,
+  policy, operation and browser evidence. All 704 evidence references in the
+  report resolve and match their recorded SHA-256.
+- `evaluations.sha256` — sorted relative-path/SHA-256 manifest for that tree.
 - `calibration-summary.json`, `calibration-report.json` — derived evidence.
 - `raw/calibration-report.json`, `raw/calibration-summary.json` — raw originals.
 - `calibration-authority.json`, `accept-manifest.json`, `accept-approval.json`,
